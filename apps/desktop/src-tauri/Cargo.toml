@@ -33,3 +33,13 @@ tauri-plugin-log = "2.10"
 tauri-plugin-shell = "2.5"
 # Local wall-clock time for default recording titles (already in the tree via tauri).
 time = { version = "0.3", features = ["local-offset", "formatting", "macros"] }
+# A second launch focuses the running app (registered first).
+tauri-plugin-single-instance = "2.5"
+# "Start with Windows" (HKCU Run key; the uninstaller removes it).
+tauri-plugin-autostart = "2.7"
+# Window size and position, stored under the data root.
+tauri-plugin-window-state = "2.5"
+# "Check for updates" against GitHub releases, signed with the updater key.
+tauri-plugin-updater = "2.14"
+# "Press again to stop" while the window is hidden.
+tauri-plugin-notification = "2.7"

@@ -1,5 +1,7 @@
 //! Notification-area icon: a red dot while recording, Record/Stop, Open
-//! and Quit. Left click opens the window.
+//! and Quit. Left click opens the window. Stop asks for a confirmation
+//! (`live::toggle`): the in-app dialog when the window is on screen, else
+//! a second Stop within 3 s.
 
 use std::sync::Mutex;
 
@@ -98,6 +100,23 @@ pub(crate) fn build(app: &App) -> tauri::Result<()> {
         shown: Mutex::new(None),
     });
     Ok(())
+}
+
+/// While a stop is armed (first press with the window hidden), the menu
+/// item says so; disarmed, it reads "Stop recording" again.
+pub(crate) fn set_stop_armed(app: &AppHandle, armed: bool) {
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
+    let recording = *tray.shown.lock().unwrap_or_else(|e| e.into_inner()) == Some(Phase::Recording);
+    if !recording {
+        return;
+    }
+    let _ = tray.toggle.set_text(if armed {
+        "Stop recording: choose again to confirm"
+    } else {
+        "Stop recording"
+    });
 }
 
 /// Reflects the recording state (any thread).

@@ -7,21 +7,24 @@
   import { api, errorText } from "./lib/api";
   import { plural } from "./lib/format";
   import { live } from "./lib/live.svelte";
-  import { AUDIO_EXTENSIONS, app, isTyping } from "./lib/state.svelte";
+  import { AUDIO_EXTENSIONS, app, isTyping, startupFlags } from "./lib/state.svelte";
   import Library from "./components/Library.svelte";
   import MeetingView from "./components/MeetingView.svelte";
   import Overlays from "./components/Overlays.svelte";
   import RecordSheet from "./components/RecordSheet.svelte";
 
-  // Settings and Diagnostics are split into their own chunks.
+  // Settings, Diagnostics and the first-run screen are split into their own chunks.
   let settingsPage = $state.raw<Component | null>(null);
   let diagnosticsPage = $state.raw<Component | null>(null);
+  let setupPage = $state.raw<Component | null>(null);
 
   $effect(() => {
     if (app.route === "settings" && !settingsPage) {
       void import("./components/Settings.svelte").then((m) => (settingsPage = m.default));
     } else if (app.route === "diagnostics" && !diagnosticsPage) {
       void import("./components/Diagnostics.svelte").then((m) => (diagnosticsPage = m.default));
+    } else if (app.route === "setup" && !setupPage) {
+      void import("./components/Setup.svelte").then((m) => (setupPage = m.default));
     }
   });
 
@@ -49,8 +52,14 @@
    * at most 600 ms for data so a slow store cannot keep the window hidden.
    */
   async function reveal() {
+    const flags = startupFlags();
+    // Started with Windows: stay in the tray until the user opens the window.
+    if (flags.autostart) {
+      void api.log("info", "startup: started with Windows; the window stays in the tray");
+      return;
+    }
     await Promise.race([app.ready, new Promise((r) => setTimeout(r, 600))]);
-    await fitWindow();
+    if (!flags.windowStateSaved) await fitWindow();
     await tick();
     const tShow = performance.now();
     try {
@@ -203,6 +212,12 @@
         <p>
           {plural(app.meetings.length, "meeting")} on this computer. Everything runs locally; nothing leaves the machine.
         </p>
+        {#if app.setupNeeded}
+          <p class="setup-callout">
+            The speech engine and models are not installed yet.
+            <button type="button" class="btn btn-primary" onclick={() => (app.route = "setup")}>Set up</button>
+          </p>
+        {/if}
         <ul class="keys">
           <li><kbd>R</kbd> record a meeting (<kbd>Ctrl Alt R</kbd> from any app)</li>
           <li><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Enter</kbd> open a meeting</li>
@@ -219,6 +234,10 @@
     {:else if app.route === "diagnostics"}
       <div class="pane">
         {#if diagnosticsPage}{@const Page = diagnosticsPage}<Page />{/if}
+      </div>
+    {:else if app.route === "setup"}
+      <div class="pane">
+        {#if setupPage}{@const Page = setupPage}<Page />{/if}
       </div>
     {/if}
   </main>
@@ -260,6 +279,17 @@
   .welcome p {
     margin: 0 0 16px;
     color: var(--fg-muted);
+  }
+  .setup-callout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 12px;
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius);
+    background: var(--warning-bg);
+    color: var(--warning-fg);
   }
   .keys {
     display: grid;

@@ -8,26 +8,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meet_core::audio::{self, ChainDecoder};
+use meet_core::diagnostics::{self, DiagnosticsInput};
 use meet_core::export::{self, ExportDoc, ExportFormat};
-use meet_core::models::{self, DataPaths, Manifest};
+use meet_core::gpu;
+use meet_core::models::{self, relocate, DataPaths, Manifest};
 use meet_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
+use meet_core::retention::{self, RetentionPlan, RetentionReport};
 use meet_core::settings;
-use meet_core::store::RunStore;
+use meet_core::store::{RunStore, Store};
 use meet_core::types::{
     AudioTrack, JobId, MeetingId, ModelFile, ModelFileId, ModelRole, SegmentId, SpeakerId,
     TrackChannel, Word, WordId,
 };
 use meet_core::views::{
-    DownloadItem, DownloadKind, DownloadProgress, EngineStatus, JobEvent, MeetingDetail,
-    MeetingSummary, SearchHit, SegmentView, Settings, Waveform,
+    DataRootInfo, DownloadItem, DownloadKind, DownloadProgress, EngineStatus, JobEvent,
+    MeetingDetail, MeetingSummary, MoveProgress, MoveResult, SearchHit, SegmentView, Settings,
+    StartupReport, UpdateCheck, Waveform,
 };
 use meet_core::CoreError;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::asset::asset_url;
 use crate::events::{emit_download, emit_job};
-use crate::{demo, AppPaths, AppStore, GpuCache, Jobs};
+use crate::{demo, AppPaths, AppStore, GpuCache, Jobs, Startup};
 
 /// Where imports run.
 const DEVICE: &str = "cuda:0";
@@ -158,14 +162,16 @@ fn run_import(
         Ok(s) => s,
         Err(e) => return fail(e.to_string()),
     };
-    let built = match models::select_engine(paths, store, DEVICE) {
+    let low_vram = settings::get_bool(&settings, settings::ENGINE_LOW_VRAM);
+    let (built, switched) = match models::select_import_engine(paths, store, DEVICE, low_vram) {
         Ok(b) => b,
         Err(e) => return fail(e.to_string()),
     };
     log::info!(
-        "import {job_id}: engine {} | asr {} | diarizer {}{}",
+        "import {job_id}: engine {} | asr {}{} | diarizer {}{}",
         built.selection.engine_version.as_deref().unwrap_or("?"),
         built.selection.asr_file.display_name,
+        if switched { " (low-VRAM mode)" } else { "" },
         built.selection.diarizer_file.display_name,
         if built.experimental {
             " (experimental cascade)"
@@ -611,7 +617,10 @@ pub async fn install_engine(
                 log::info!("installed engine {}", dir.display());
                 progress(entry.size_bytes, size, true, None);
             }
-            Err(e) => progress(0, size, true, Some(e.to_string())),
+            Err(e) => {
+                log::error!("engine install {} failed: {e}", entry.name);
+                progress(0, size, true, Some(e.to_string()))
+            }
         }
         result.map(|d| d.display().to_string())
     })
@@ -657,10 +666,17 @@ pub async fn pull_model(
             )
         };
         progress(0, false, None);
-        let result = models::pull(
+        let mut last_done = u64::MAX;
+        let result = models::pull_with_progress(
             &data_paths.absolute(&engine.path),
             &data_paths.models(),
             &entry,
+            &mut |done| {
+                if done != last_done {
+                    last_done = done;
+                    progress(done, false, None);
+                }
+            },
         )
         .and_then(|p| {
             models::scan(&data_paths, s, &manifest)?;
@@ -671,7 +687,10 @@ pub async fn pull_model(
                 log::info!("pulled {} to {}", entry.name, p.path.display());
                 progress(entry.size_bytes, true, None);
             }
-            Err(e) => progress(0, true, Some(e.to_string())),
+            Err(e) => {
+                log::error!("pull {} failed: {e}", entry.name);
+                progress(0, true, Some(e.to_string()))
+            }
         }
         result.map(|p| p.path.display().to_string())
     })
@@ -725,10 +744,10 @@ pub async fn open_data_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
 
 // ---- Diagnostics ----------------------------------------------------------------
 
-/// The last `max_lines` lines of the newest app log file.
+/// The last `max_lines` lines of the newest app log file (`<data root>ogs`).
 #[tauri::command(rename_all = "snake_case")]
-pub async fn read_log_tail(app: AppHandle, max_lines: u32) -> CmdResult<String> {
-    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+pub async fn read_log_tail(paths: State<'_, AppPaths>, max_lines: u32) -> CmdResult<String> {
+    let dir = paths.paths.logs();
     blocking(move || {
         let newest = std::fs::read_dir(&dir)
             .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -770,4 +789,355 @@ pub async fn ui_log(level: String, message: String) -> CmdResult<()> {
         _ => log::info!(target: "ui", "{message}"),
     }
     Ok(())
+}
+
+// ---- First run ---------------------------------------------------------------------
+
+/// The first-run state: scans `models\` and `engine\`, then reports what is
+/// present, what the recommended downloads are (with URLs and hashes), the
+/// GPU (NVML) and the free disk space.
+#[tauri::command]
+pub async fn setup_status(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    gpu: State<'_, GpuCache>,
+) -> CmdResult<models::SetupStatus> {
+    let data_paths = paths.paths.clone();
+    let demo = paths.demo;
+    if !demo {
+        *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    with_store(&store, move |s| -> meet_core::Result<models::SetupStatus> {
+        let manifest = Manifest::load(&data_paths.root)?;
+        let files = if demo {
+            s.list_model_files()?
+        } else {
+            let report = models::scan(&data_paths, s, &manifest)?;
+            for e in &report.errors {
+                log::warn!("model scan: {e}");
+            }
+            report.files
+        };
+        Ok(models::setup_status(
+            &data_paths,
+            &manifest,
+            &files,
+            gpu::gpu_info(0),
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn open_engine_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
+    open_folder(&paths.paths.engine())
+}
+
+#[tauri::command]
+pub async fn open_log_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
+    open_folder(&paths.paths.logs())
+}
+
+// ---- Data folder ---------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn data_root_info(paths: State<'_, AppPaths>) -> CmdResult<DataRootInfo> {
+    let mut info = paths.paths.info();
+    if paths.demo {
+        info.move_blocked = Some("Not available in the demo.".into());
+    }
+    Ok(info)
+}
+
+/// "Move data folder": copies the database (backup API), audio, engine and
+/// models to `to`, verifies them, points the registry at it and returns;
+/// the UI then restarts the app, and the next launch deletes the old copy
+/// (`meet_core::models::relocate`). Progress arrives as `data:move_progress`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn move_data_root(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    jobs: State<'_, Jobs>,
+    to: String,
+) -> CmdResult<MoveResult> {
+    if paths.demo {
+        return Err("Not available in the demo.".into());
+    }
+    if let Some(why) = paths.paths.info().move_blocked {
+        return Err(why);
+    }
+    if crate::live::handle(&app).is_recording() {
+        return Err("Stop the recording first.".into());
+    }
+    if jobs.0.running().is_some() || !jobs.0.queued().is_empty() {
+        return Err("Wait until the queued transcriptions have finished.".into());
+    }
+    let to = PathBuf::from(to.trim());
+    let from = paths.paths.root.clone();
+    let store = Arc::clone(&store.0);
+    blocking(move || {
+        let plan = relocate::plan_move(&from, &to).map_err(|e| e.to_string())?;
+        log::info!(
+            "moving the data folder {} -> {}: {} files, {} MB",
+            from.display(),
+            to.display(),
+            plan.files,
+            plan.bytes >> 20
+        );
+        // Nothing may hold engine files or the GPU while copying.
+        crate::live::handle(&app).stop_server();
+        let backup = |dest: &Path| -> meet_core::Result<()> {
+            store.backup(dest)?;
+            let copy = meet_core::store::SqliteStore::open(dest)?;
+            let (a, b) = (store.list_meetings()?.len(), copy.list_meetings()?.len());
+            if a != b {
+                return Err(CoreError::Models(format!(
+                    "the database copy has {b} meetings, the original {a}"
+                )));
+            }
+            Ok(())
+        };
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let report = relocate::copy_data(&plan, &backup, &mut |done, total| {
+            if last.elapsed() >= Duration::from_millis(200) || done == total {
+                last = Instant::now();
+                let _ = app.emit(
+                    MoveProgress::EVENT,
+                    MoveProgress {
+                        done_bytes: done,
+                        total_bytes: total,
+                    },
+                );
+            }
+        })
+        .map_err(|e| {
+            log::error!("moving the data folder failed: {e}");
+            e.to_string()
+        })?;
+        // Back to the default folder: clear the key instead of naming it.
+        let is_default = DataPaths::default_root().is_ok_and(|d| {
+            d.to_string_lossy()
+                .eq_ignore_ascii_case(&to.to_string_lossy())
+        });
+        models::paths::set_registry_root(if is_default { None } else { Some(&to) })
+            .map_err(|e| e.to_string())?;
+        log::info!(
+            "data folder copied to {} ({} files, {} MB, {} links); restart to use it",
+            to.display(),
+            report.files,
+            report.bytes >> 20,
+            report.links
+        );
+        Ok(MoveResult {
+            to: to.display().to_string(),
+            files: report.files,
+            bytes: report.bytes,
+        })
+    })
+    .await
+}
+
+/// Restarts the app (after a data-folder move or an update).
+#[tauri::command]
+pub async fn restart_app(app: AppHandle) -> CmdResult<()> {
+    log::info!("restarting");
+    // The new process must not find this one's single-instance lock.
+    tauri_plugin_single_instance::destroy(&app);
+    app.request_restart();
+    Ok(())
+}
+
+// ---- Retention ------------------------------------------------------------------------
+
+/// What retention would delete now (Settings: reclaimable space).
+#[tauri::command]
+pub async fn retention_preview(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<RetentionPlan> {
+    if paths.demo {
+        return Ok(RetentionPlan::default());
+    }
+    let root = paths.paths.root.clone();
+    with_store(&store, move |s| {
+        retention::plan_from_settings(s, &root, now_ms())
+    })
+    .await
+}
+
+/// Runs retention now (it also runs at launch and daily).
+#[tauri::command]
+pub async fn apply_retention(app: AppHandle) -> CmdResult<RetentionReport> {
+    blocking(move || crate::maintenance::run_retention(&app)).await
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// ---- Autostart and updates -------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_autostart(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Starts meet-assist with Windows (in the tray) or stops doing so.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())?;
+    log::info!("start with Windows: {enabled}");
+    al.is_enabled().map_err(|e| e.to_string())
+}
+
+/// The update endpoint in `tauri.conf.json` is a real URL, not the
+/// placeholder a fork has to fill in.
+fn updater_configured(app: &AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .is_some_and(|eps| {
+            !eps.is_empty()
+                && eps
+                    .iter()
+                    .all(|e| e.as_str().is_some_and(|s| !s.contains("REPLACE_WITH")))
+        })
+}
+
+/// "Check for updates" (manual only; the app never checks by itself).
+#[tauri::command]
+pub async fn check_for_update(app: AppHandle) -> CmdResult<UpdateCheck> {
+    use tauri_plugin_updater::UpdaterExt;
+    let current = app.package_info().version.to_string();
+    if !updater_configured(&app) {
+        return Ok(UpdateCheck {
+            configured: false,
+            current,
+            available: None,
+            notes: None,
+        });
+    }
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| format!("Update check failed: {e}"))?;
+    log::info!(
+        "update check: {}",
+        update.as_ref().map_or("up to date".to_owned(), |u| format!(
+            "{} available",
+            u.version
+        ))
+    );
+    Ok(UpdateCheck {
+        configured: true,
+        current,
+        available: update.as_ref().map(|u| u.version.clone()),
+        notes: update.and_then(|u| u.body),
+    })
+}
+
+/// Downloads and installs the available update (signature-checked by the
+/// updater), then restarts.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    if crate::live::handle(&app).is_recording() {
+        return Err("Stop the recording before updating.".into());
+    }
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update is available.".to_owned())?;
+    log::info!("installing update {}", update.version);
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("Update failed: {e}"))?;
+    tauri_plugin_single_instance::destroy(&app);
+    app.request_restart();
+    Ok(())
+}
+
+// ---- Diagnostics: copy and startup report -----------------------------------------------
+
+/// "Copy diagnostics": versions, OS, GPU and driver, data root, the selected
+/// engine and models with hashes, the live server, and the tail of the last
+/// engine stderr. No transcript text, titles or audio.
+#[tauri::command]
+pub async fn diagnostics_report(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let data_paths = paths.paths.clone();
+    let live = crate::live::status(&app);
+    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+    let server = match &live.server {
+        Some(s) => format!(
+            "{:?}, {} restarts{}",
+            s.server.status,
+            s.server.restarts,
+            s.resident_vram_mb
+                .map_or(String::new(), |m| format!(", holds {m} MB"))
+        ),
+        None => "not started".into(),
+    };
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let stored = settings::effective(s)?;
+        let engine_stderr = pipeline::last_engine_log(&data_paths.audio(), ENGINE_LOG_TAIL)
+            .map(|(p, tail)| format!("{}\n{tail}", p.display()))
+            .or_else(|| {
+                let p = data_paths.logs().join("serve.log");
+                let bytes = std::fs::read(&p).ok()?;
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                Some(format!("{}\n{text}", p.display()))
+            });
+        let input = DiagnosticsInput {
+            app: format!("meet-assist {}", meet_core::VERSION),
+            os: diagnostics::os_version(),
+            gpu: gpu::gpu_info(0),
+            extra: vec![
+                ("live server".into(), server),
+                (
+                    "settings".into(),
+                    format!(
+                        "preload {}, idle stop {} min, low-VRAM {}, retention {} days",
+                        settings::get(&stored, settings::ENGINE_PRELOAD),
+                        settings::get(&stored, settings::ENGINE_IDLE_MINUTES),
+                        settings::get(&stored, settings::ENGINE_LOW_VRAM),
+                        settings::get(&stored, settings::AUDIO_RETENTION_DAYS),
+                    ),
+                ),
+                ("start with Windows".into(), autostart.to_string()),
+                ("app log".into(), data_paths.logs().display().to_string()),
+                ("meetings".into(), s.list_meetings()?.len().to_string()),
+            ],
+            engine_stderr,
+            stderr_lines: 40,
+        };
+        Ok(diagnostics::report(&data_paths, s, &input))
+    })
+    .await
+}
+
+/// What launch recovered (and whether a data-folder move finished).
+#[tauri::command]
+pub async fn startup_report(startup: State<'_, Startup>) -> CmdResult<StartupReport> {
+    Ok(startup.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }

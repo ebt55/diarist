@@ -1,11 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { api, errorText, onEvent } from "../lib/api";
+  import { downloads, sizeMb } from "../lib/downloads.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
+  import type { DataRootInfo } from "../lib/generated/DataRootInfo";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
-  import type { DownloadProgress } from "../lib/generated/DownloadProgress";
   import type { EngineStatus } from "../lib/generated/EngineStatus";
+  import type { MoveProgress } from "../lib/generated/MoveProgress";
+  import type { RetentionPlan } from "../lib/generated/RetentionPlan";
+  import type { UpdateCheck } from "../lib/generated/UpdateCheck";
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
@@ -49,16 +55,25 @@
     },
   ];
 
-  type DownloadRow = DownloadProgress & { state: "waiting" | "running" | "done" | "failed" };
-
   const pinned = $derived(app.meetings.filter((m) => m.audio_keep));
   const unknown = $derived(status?.models_by_role.unknown ?? []);
 
   let devices = $state.raw<AudioDevice[]>([]);
   let devicesError = $state<string | null>(null);
-  let downloads = $state.raw<DownloadItem[] | null>(null);
-  let progress = $state.raw<Record<string, DownloadRow>>({});
-  let downloading = $state(false);
+  let items = $state.raw<DownloadItem[] | null>(null);
+  let root = $state.raw<DataRootInfo | null>(null);
+  let moving = $state<MoveProgress | null>(null);
+  let reclaim = $state.raw<RetentionPlan | null>(null);
+  let freeing = $state(false);
+  let autostart = $state<boolean | null>(null);
+  let update = $state.raw<UpdateCheck | null>(null);
+  let checkingUpdate = $state(false);
+  let installingUpdate = $state(false);
+  let version = $state("");
+
+  const required = $derived(items?.filter((d) => d.required) ?? []);
+  const optional = $derived(items?.filter((d) => !d.required) ?? []);
+  const missingRequired = $derived(required.filter((d) => !d.installed));
 
   const mics = $derived(devices.filter((d) => d.flow === "capture"));
   const outputs = $derived(devices.filter((d) => d.flow === "render"));
@@ -76,18 +91,136 @@
 
   onMount(() => {
     void loadDevices();
-    const offProgress = onEvent<DownloadProgress>("models:progress", (p) => {
-      if (!progress[p.name]) return;
-      progress = { ...progress, [p.name]: { ...p, state: p.finished ? (p.error ? "failed" : "done") : "running" } };
-    });
     void loadStatus();
+    void loadItems();
+    void loadReclaim();
+    api.dataRootInfo().then((r) => (root = r)).catch(() => {});
+    getVersion().then((v) => (version = v)).catch(() => {});
+    api.getAutostart().then((v) => (autostart = v)).catch(() => (autostart = null));
+    const offMove = onEvent<MoveProgress>("data:move_progress", (p) => {
+      if (moving) moving = p;
+    });
     const onRefresh = () => void rescan();
     window.addEventListener("app:refresh", onRefresh);
     return () => {
       window.removeEventListener("app:refresh", onRefresh);
-      void offProgress.then((off) => off());
+      void offMove.then((off) => off());
     };
   });
+
+  async function loadItems() {
+    try {
+      items = await api.recommendedDownloads();
+    } catch (e) {
+      app.error(`Could not read the download list: ${errorText(e)}`);
+    }
+  }
+
+  async function loadReclaim() {
+    try {
+      reclaim = await api.retentionPreview();
+    } catch {
+      reclaim = null;
+    }
+  }
+
+  /** "Move…": pick an empty folder, confirm, copy and verify, restart. */
+  async function moveData() {
+    if (!root || root.move_blocked) return;
+    let picked: string | null;
+    try {
+      picked = (await openDialog({ title: "Move the data folder to…", directory: true, multiple: false })) as
+        | string
+        | null;
+    } catch (e) {
+      app.error(`Could not open the folder dialog: ${errorText(e)}`);
+      return;
+    }
+    if (!picked) return;
+    const ok = await app.confirm({
+      title: "Move the data folder?",
+      message:
+        `Everything in ${root.root} (database, recordings, engine and models) is copied to ${picked} and checked. ` +
+        "meet-assist then restarts from the new folder and deletes the old copy. Choose an empty folder.",
+      confirmLabel: "Move and restart",
+      danger: false,
+    });
+    if (!ok) return;
+    moving = { done_bytes: 0, total_bytes: 0 };
+    try {
+      const r = await api.moveDataRoot(picked);
+      app.toast("success", `Copied ${plural(Number(r.files), "file")} (${formatBytes(Number(r.bytes))}). Restarting…`);
+      setTimeout(() => void api.restartApp(), 900);
+    } catch (e) {
+      moving = null;
+      app.error(`The data folder was not moved: ${errorText(e)}`);
+    }
+  }
+
+  async function freeUp() {
+    if (!reclaim || reclaim.files === 0) return;
+    const ok = await app.confirm({
+      title: "Delete old audio now?",
+      message:
+        `The audio of ${plural(reclaim.meetings.length, "meeting")} older than ${plural(reclaim.days, "day")} ` +
+        `(${formatBytes(reclaim.bytes)}) is deleted. Their transcripts stay; they can no longer be played or re-run.`,
+      confirmLabel: "Delete audio",
+      danger: true,
+    });
+    if (!ok) return;
+    freeing = true;
+    try {
+      const r = await api.applyRetention();
+      app.toast("info", `Freed ${formatBytes(r.bytes)} (${plural(r.files, "file")})`);
+      await loadReclaim();
+    } catch (e) {
+      app.error(`Could not delete old audio: ${errorText(e)}`);
+    } finally {
+      freeing = false;
+    }
+  }
+
+  async function toggleAutostart(e: Event) {
+    const el = e.currentTarget as HTMLInputElement;
+    try {
+      autostart = await api.setAutostart(el.checked);
+    } catch (err) {
+      el.checked = !el.checked;
+      app.error(`Could not change start with Windows: ${errorText(err)}`);
+    }
+  }
+
+  async function saveIdle(e: Event) {
+    const el = e.currentTarget as HTMLInputElement;
+    const mins = Math.max(0, Math.min(1440, Math.round(Number(el.value) || 0)));
+    el.value = String(mins);
+    if (await app.setSetting("engine.idle_minutes", String(mins))) {
+      app.toast("info", mins === 0 ? "The engine stays loaded" : `The engine unloads after ${plural(mins, "minute")} without recording`);
+    }
+  }
+
+  async function checkUpdate() {
+    checkingUpdate = true;
+    try {
+      update = await api.checkForUpdate();
+      if (!update.configured) app.toast("info", "This build has no update address; see the project page for new versions.");
+      else if (!update.available) app.toast("info", `meet-assist ${update.current} is the newest version`);
+    } catch (e) {
+      app.error(errorText(e));
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
+  async function installUpdate() {
+    installingUpdate = true;
+    try {
+      await api.installUpdate();
+    } catch (e) {
+      installingUpdate = false;
+      app.error(errorText(e));
+    }
+  }
 
   async function loadStatus() {
     try {
@@ -155,6 +288,7 @@
     el.value = String(days);
     if (await app.setSetting("audio_retention_days", String(days))) {
       app.toast("info", days === 0 ? "Audio is kept forever" : `Audio is kept for ${plural(days, "day")}`);
+      void loadReclaim();
     }
   }
 
@@ -167,49 +301,44 @@
     }
   }
 
-  function setRow(name: string, patch: Partial<DownloadRow>) {
-    const cur = progress[name];
-    if (cur) progress = { ...progress, [name]: { ...cur, ...patch } };
+  /** Downloads `list` (engine first), then refreshes the lists. */
+  async function download(list: DownloadItem[], what: string) {
+    const engineMissing = items?.find((d) => d.kind === "engine" && !d.installed);
+    const todo = list.some((d) => d.kind === "model") && engineMissing ? [engineMissing, ...list] : list;
+    if (todo.every((d) => d.installed)) {
+      app.toast("info", `${what} already installed.`);
+      return;
+    }
+    const failed = await downloads.install(todo);
+    await loadItems();
+    await loadStatus();
+    if (failed > 0) app.error(`${plural(failed, "download")} failed; see Models in Settings`);
+    else app.toast("success", `${what} installed`);
   }
 
-  /** Installs the default engine, then pulls the required models, one at a time. */
-  async function downloadRecommended() {
-    try {
-      downloads = await api.recommendedDownloads();
-    } catch (e) {
-      app.error(`Could not read the recommended list: ${errorText(e)}`);
-      return;
+  function downloadRecommended() {
+    if (items) void download(required, "Recommended engine and models");
+  }
+
+  async function downloadOptional(d: DownloadItem) {
+    if (d.experimental) {
+      const ok = await app.confirm({
+        title: `Download ${d.name}?`,
+        message:
+          "Experimental: Parakeet punctuates well but silently skipped whole spans of speech in our tests. " +
+          "Use it only for short clips you check yourself.",
+        confirmLabel: "Download",
+        danger: false,
+      });
+      if (!ok) return;
     }
-    const missing = downloads.filter((d) => !d.installed);
-    if (missing.length === 0) {
-      app.toast("info", "Everything recommended is already installed.");
-      return;
-    }
-    downloading = true;
-    progress = Object.fromEntries(
-      missing.map((d): [string, DownloadRow] => [
-        d.name,
-        { kind: d.kind, name: d.name, done_bytes: 0, total_bytes: d.size_bytes, finished: false, error: null, state: "waiting" },
-      ]),
-    );
-    // The engine first: `pull_model` uses the installed runtime's own downloader.
-    for (const d of missing) {
-      setRow(d.name, { state: "running" });
-      try {
-        if (d.kind === "engine") await api.installEngine(d.name);
-        else await api.pullModel(d.name);
-        setRow(d.name, { state: "done", finished: true });
-      } catch (e) {
-        setRow(d.name, { state: "failed", finished: true, error: errorText(e) });
-        if (d.kind === "engine") break;
-      }
-    }
-    downloading = false;
-    downloads = await api.recommendedDownloads().catch(() => downloads);
-    await loadStatus();
-    const failed = Object.values(progress).filter((p) => p.state === "failed").length;
-    if (failed > 0) app.error(`${plural(failed, "download")} failed; see the list in Settings`);
-    else app.toast("success", "Recommended engine and models installed");
+    await download([d], d.label.split(":")[0] ?? d.name);
+  }
+
+  function dlPct(d: DownloadItem): number {
+    const p = downloads.of(d.name);
+    const total = p?.total ?? d.size_bytes;
+    return p && total ? Math.min(100, Math.floor((p.done / total) * 100)) : 0;
   }
 </script>
 
@@ -224,12 +353,31 @@
     <div class="field">
       <span class="label">Data directory</span>
       <div class="row">
-        <code class="path" title={status?.data_root}>{status?.data_root ?? "…"}</code>
+        <code class="path" title={root?.root ?? status?.data_root}>{root?.root ?? status?.data_root ?? "…"}</code>
         <button type="button" class="btn" onclick={() => api.openDataFolder().catch((e) => app.error(errorText(e)))}>
           <Icon name="folder" /> Open folder
         </button>
+        <button
+          type="button"
+          class="btn"
+          onclick={moveData}
+          disabled={!root || root.move_blocked !== null || moving !== null}
+          title={root?.move_blocked ?? "Copy everything to another folder or drive"}
+        >
+          Move…
+        </button>
       </div>
-      <p class="help">Database, recordings, engine and models live here. Transcripts are never deleted by retention.</p>
+      {#if moving}
+        {@const pct = moving.total_bytes ? Math.floor((moving.done_bytes / moving.total_bytes) * 100) : 0}
+        <p class="help">
+          <span class="dl-bar"><span class="dl-fill" style="width: {pct}%"></span></span>
+          Copying and checking: {formatBytes(moving.done_bytes)} of {formatBytes(moving.total_bytes)}. Keep meet-assist open.
+        </p>
+      {/if}
+      <p class="help">
+        Database, recordings, engine and models live here{root?.source === "relocated" ? " (moved from the default)" : ""}.
+        {#if root?.move_blocked}{root.move_blocked}{:else}Move copies everything, checks it, restarts, then deletes the old copy.{/if}
+      </p>
     </div>
     <div class="field">
       <label class="label" for="retention">Keep audio for</label>
@@ -246,9 +394,21 @@
         <span>days</span>
       </div>
       <p class="help">
-        After this, a meeting's audio is deleted and re-transcription is no longer possible. 0 keeps audio forever.
-        Pinned meetings keep their audio regardless.
+        After this, a meeting's recording (FLAC and WAV files) is deleted; its transcript stays. Re-running the
+        post-pass or the speaker detection needs the audio, so it only works while the audio exists. 0 keeps audio
+        forever. Pinned meetings keep their audio regardless. Old audio is deleted at launch and once a day.
       </p>
+      {#if reclaim && reclaim.files > 0}
+        <p class="help row">
+          <span>
+            {formatBytes(reclaim.bytes)} reclaimable now: audio of {plural(reclaim.meetings.length, "meeting")} older than
+            {plural(reclaim.days, "day")}{reclaim.pinned_skipped > 0 ? ` (${reclaim.pinned_skipped} pinned kept)` : ""}.
+          </span>
+          <button type="button" class="link" onclick={freeUp} disabled={freeing}>{freeing ? "Deleting…" : "Free up now"}</button>
+        </p>
+      {:else if reclaim && reclaim.days > 0}
+        <p class="help">Nothing to reclaim: no unpinned audio is older than {plural(reclaim.days, "day")}.</p>
+      {/if}
       <details class="pins">
         <summary>{plural(pinned.length, "pinned meeting")}</summary>
         {#if pinned.length === 0}
@@ -297,7 +457,61 @@
       </select>
       <p class="help">Used for new recordings and imports. Automatic detection loses about a second of the first utterance.</p>
     </div>
+  </section>
 
+  <section>
+    <h2>Startup and engine</h2>
+    <label class="radio block">
+      <input type="checkbox" checked={autostart === true} disabled={autostart === null} onchange={toggleAutostart} />
+      <span><strong>Start with Windows</strong>, in the notification area (the window opens from the tray icon or Ctrl+Alt+R)</span>
+    </label>
+    <label class="radio block">
+      <input
+        type="checkbox"
+        checked={boolSetting("engine.preload")}
+        onchange={(e) => app.setSetting("engine.preload", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
+      />
+      <span>
+        <strong>Load the live engine at launch</strong>. Off (default): it loads when you open the record sheet or
+        press Ctrl+Alt+R, which takes a few seconds and uses about 1 GB of VRAM only while needed.
+      </span>
+    </label>
+    <div class="field">
+      <label class="label" for="idle">Unload the live engine after</label>
+      <div class="row">
+        <input
+          id="idle"
+          type="number"
+          min="0"
+          max="1440"
+          class="num-input"
+          value={app.setting("engine.idle_minutes")}
+          onchange={saveIdle}
+        />
+        <span>minutes without recording (0 keeps it loaded; applies the next time it starts)</span>
+      </div>
+    </div>
+    <label class="radio block">
+      <input
+        type="checkbox"
+        checked={boolSetting("engine.low_vram")}
+        onchange={(e) => app.setSetting("engine.low_vram", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
+      />
+      <span>
+        <strong>Low-VRAM mode</strong>: imports use Nemotron 3.5 when it is installed (peaks at about 1.8 GB instead of
+        2.6 GB for the English model). For cards with 4 to 6 GB.
+      </span>
+    </label>
+    <details class="howto">
+      <summary>Out-of-memory errors or a very slow transcription?</summary>
+      <p class="help">
+        When GPU memory runs out, the NVIDIA driver may quietly move work to system memory, which makes transcription
+        many times slower instead of failing. To get a clear error instead: NVIDIA Control Panel → Manage 3D settings →
+        Program Settings → Add → choose <code>nemo-speech.exe</code> in the engine folder's <code>bin</code> →
+        CUDA - Sysmem Fallback Policy → <strong>Prefer No Sysmem Fallback</strong> → Apply. Then close other GPU-heavy
+        apps, or turn on low-VRAM mode.
+      </p>
+    </details>
   </section>
 
   <section>
@@ -394,40 +608,60 @@
         <button type="button" class="btn" onclick={() => api.openModelsFolder().catch((e) => app.error(errorText(e)))}>
           <Icon name="folder" /> Open models folder
         </button>
-        <button type="button" class="btn" onclick={downloadRecommended} disabled={downloading}>
-          <Icon name="download" />{downloading ? "Downloading…" : "Download recommended"}
+        <button
+          type="button"
+          class="btn"
+          onclick={downloadRecommended}
+          disabled={downloads.busy || missingRequired.length === 0}
+          title={missingRequired.length === 0 ? "The engine and the recommended models are installed" : ""}
+        >
+          <Icon name="download" />{downloads.busy ? "Downloading…" : "Download recommended"}
         </button>
       </div>
     </div>
-    {#if downloads}
-      <ul class="downloads" aria-label="Recommended downloads">
-        {#each downloads as d (d.name)}
-          {@const p = progress[d.name]}
-          {@const pct = p && p.total_bytes ? Math.min(100, Math.round((p.done_bytes / p.total_bytes) * 100)) : null}
-          <li>
-            <span class="dl-name">{d.label}</span>
-            <span class="mono dl-size">{formatBytes(d.size_bytes)}</span>
+    {#if items}
+      <ul class="downloads" aria-label="Downloads">
+        {#each [...required, ...optional] as d (d.name)}
+          {@const p = downloads.of(d.name)}
+          <li class:failed={p?.state === "failed"}>
+            <span class="dl-name">
+              {d.label}
+              <span class="help inline">
+                {d.required ? "recommended" : d.experimental ? "experimental, optional" : "optional"} · {d.licence}
+              </span>
+            </span>
+            <span class="mono dl-size">{sizeMb(d.size_bytes)}</span>
             <span class="dl-state">
               {#if p?.state === "running"}
-                {#if d.kind === "engine" && pct !== null}
-                  <span class="dl-bar"><span class="dl-fill" style="width: {pct}%"></span></span>
-                  <span class="mono">{pct}%</span>
-                {:else}
-                  Downloading and verifying…
-                {/if}
+                <span class="dl-bar"><span class="dl-fill" style="width: {dlPct(d)}%"></span></span>
+                <span class="mono">{dlPct(d)}%{dlPct(d) === 100 ? " verifying" : ""}</span>
               {:else if p?.state === "waiting"}
                 Waiting
               {:else if p?.state === "failed"}
                 <span class="error" title={p.error ?? ""}>Failed: {p.error}</span>
               {:else if p?.state === "done" || d.installed}
                 <span class="ok-text">Installed</span>
-              {:else}
+              {:else if d.required}
                 Not installed
+              {:else}
+                <button type="button" class="link" onclick={() => downloadOptional(d)} disabled={downloads.busy}>
+                  Download
+                </button>
               {/if}
             </span>
+            {#if p?.state === "failed"}
+              <span class="dl-fetch help">
+                Fetch by hand: <code class="sel">{d.url}</code> (SHA-256 <code class="sel">{d.sha256}</code>) into
+                <code class="sel">{d.dest}</code>, then Refresh.
+              </span>
+            {/if}
           </li>
         {/each}
       </ul>
+      <p class="help">
+        English meetings: the EN model (default). Other or mixed languages: Nemotron 3.5 (40+ languages, less VRAM),
+        then select it below. The first-run screen is <button type="button" class="link" onclick={() => (app.route = "setup")}>here</button>.
+      </p>
     {/if}
     {#if statusError}
       <p class="help error">Could not read the engine status: {statusError}</p>
@@ -538,6 +772,27 @@
     {:else}
       <p class="help">Reading models…</p>
     {/if}
+  </section>
+
+  <section>
+    <h2>About</h2>
+    <p class="help">
+      meet-assist {version} · MIT licence. The speech engine (Apache-2.0) and the models (OpenMDW-1.1,
+      NVIDIA Open Model License, CC-BY-4.0) are downloaded separately under their own licences. Nothing leaves this
+      computer except those downloads and an update check you start yourself.
+    </p>
+    <div class="row">
+      <button type="button" class="btn" onclick={checkUpdate} disabled={checkingUpdate || installingUpdate}>
+        <Icon name="refresh" />{checkingUpdate ? "Checking…" : "Check for updates"}
+      </button>
+      {#if update?.available}
+        <span>Version {update.available} is available.</span>
+        <button type="button" class="btn btn-primary" onclick={installUpdate} disabled={installingUpdate}>
+          <Icon name="download" />{installingUpdate ? "Installing…" : "Install and restart"}
+        </button>
+      {/if}
+    </div>
+    {#if update?.notes}<pre class="notes">{update.notes}</pre>{/if}
   </section>
 </div>
 
@@ -800,6 +1055,28 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     list-style: none;
+  }
+  .downloads li.failed {
+    background: var(--danger-bg);
+  }
+  .dl-fetch {
+    grid-column: 1 / -1;
+    overflow-wrap: anywhere;
+  }
+  .sel {
+    user-select: all;
+  }
+  .howto {
+    margin-top: 8px;
+  }
+  .howto summary {
+    cursor: default;
+  }
+  .notes {
+    max-height: 160px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 12px;
   }
   .downloads li {
     display: grid;

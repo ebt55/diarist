@@ -68,6 +68,16 @@
     }
   }
 
+  async function copyDiagnostics() {
+    try {
+      const text = await api.diagnosticsReport();
+      await navigator.clipboard.writeText(text);
+      app.toast("info", "Diagnostics copied: versions, GPU, data folder, models and the last engine errors (no transcripts)");
+    } catch (e) {
+      app.error(`Could not copy diagnostics: ${errorText(e)}`);
+    }
+  }
+
   async function copy() {
     try {
       await navigator.clipboard.writeText(`${path}\n${text}`);
@@ -83,6 +93,36 @@
     <h1>Diagnostics</h1>
     <span class="hint">Esc closes · Ctrl+R refreshes · Ctrl+Shift+C copies</span>
   </header>
+
+  <section class="actions">
+    <button type="button" class="btn btn-primary" onclick={copyDiagnostics}><Icon name="copy" /> Copy diagnostics</button>
+    <button type="button" class="btn" onclick={() => api.openLogFolder().catch((e) => app.error(errorText(e)))}>
+      <Icon name="folder" /> Open log folder
+    </button>
+    <span class="hint">For a bug report: versions, GPU and driver, data folder, selected models with hashes and the last engine errors. No transcripts.</span>
+  </section>
+
+  {#if app.startup && (app.startup.recovered.length > 0 || app.startup.moved_from || app.startup.recovery_error)}
+    {@const st = app.startup}
+    <section class="recovered">
+      <h2>At launch</h2>
+      <ul>
+        {#each st.recovered as r (r.meeting_id)}
+          <li>
+            <button type="button" class="link" onclick={() => app.open(r.meeting_id)}>{r.title || "Untitled meeting"}</button>
+            (interrupted {r.was}): {r.action}
+          </li>
+        {/each}
+        {#if st.recovery_error}<li class="error">Crash recovery could not run: {st.recovery_error}</li>{/if}
+        {#if st.moved_from}
+          <li>
+            The data folder was moved; the old copy in <code>{st.moved_from}</code>
+            {st.move_kept.length === 0 ? "was removed." : `was partly kept: ${st.move_kept.join("; ")}`}
+          </li>
+        {/if}
+      </ul>
+    </section>
+  {/if}
 
   <section class="engine">
     <h2>Live engine</h2>
@@ -104,7 +144,7 @@
             {#if srv.status.state === "restarting"}<br /><span class="error">{srv.status.last_error}</span>{/if}
             {#if srv.status.state === "failed"}<br /><span class="error">{srv.status.message}</span>{/if}
           {:else}
-            not started (it starts at launch when an engine and streaming models are selected)
+            not running (it loads when the record sheet opens or Ctrl+Alt+R is pressed, and unloads after the idle time in Settings)
           {/if}
         </dd>
         {#if srv}
@@ -272,8 +312,20 @@
   .error {
     color: var(--danger);
   }
-  .engine h2 {
+  .engine h2,
+  .recovered h2 {
     margin-bottom: 6px;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  .recovered ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
   }
   .facts {
     display: grid;

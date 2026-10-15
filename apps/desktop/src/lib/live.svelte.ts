@@ -340,7 +340,12 @@ class LiveStore {
   #onToggled(t: Toggled): void {
     const via = t.via === "shortcut" ? "Ctrl+Alt+R" : "the tray";
     if (t.action === "started") {
-      app.toast("info", `Recording started from ${via}. Press Ctrl+Alt+R again to stop.`);
+      app.toast("info", `Recording started from ${via}. ${via === "Ctrl+Alt+R" ? "Press it" : "Choose Stop"} again to stop (it asks first).`);
+    } else if (t.action === "confirm_stop") {
+      // The window is on screen: the usual "Stop recording?" dialog.
+      void this.stop();
+    } else if (t.action === "stop_armed") {
+      app.toast("info", `Press ${t.via === "shortcut" ? "Ctrl+Alt+R" : "Stop in the tray"} again within 3 s to stop.`);
     } else if (t.action === "stopped") {
       app.toast("info", `Recording stopped from ${via}. Finalizing the transcript…`);
     } else {

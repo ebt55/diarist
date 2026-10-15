@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AudioDevice } from "./generated/AudioDevice";
+import type { DataRootInfo } from "./generated/DataRootInfo";
 import type { DownloadItem } from "./generated/DownloadItem";
 import type { EngineStatus } from "./generated/EngineStatus";
 import type { JobEvent } from "./generated/JobEvent";
@@ -17,14 +18,20 @@ import type { MeetingSummary } from "./generated/MeetingSummary";
 import type { ModelFile } from "./generated/ModelFile";
 import type { ModelFileId } from "./generated/ModelFileId";
 import type { ModelRole } from "./generated/ModelRole";
+import type { MoveResult } from "./generated/MoveResult";
+import type { RetentionPlan } from "./generated/RetentionPlan";
+import type { RetentionReport } from "./generated/RetentionReport";
 import type { SearchHit } from "./generated/SearchHit";
 import type { SegmentId } from "./generated/SegmentId";
 import type { SegmentView } from "./generated/SegmentView";
 import type { Settings } from "./generated/Settings";
+import type { SetupStatus } from "./generated/SetupStatus";
 import type { SpeakerId } from "./generated/SpeakerId";
 import type { StartRequest } from "./generated/StartRequest";
+import type { StartupReport } from "./generated/StartupReport";
 import type { StopSummary } from "./generated/StopSummary";
 import type { TrackChannel } from "./generated/TrackChannel";
+import type { UpdateCheck } from "./generated/UpdateCheck";
 import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
@@ -95,7 +102,20 @@ export const api = {
   pullModel: (name: string) => invoke<string>("pull_model", { name }),
   recommendedDownloads: () => invoke<DownloadItem[]>("recommended_downloads"),
   openModelsFolder: () => invoke<void>("open_models_folder"),
+  openEngineFolder: () => invoke<void>("open_engine_folder"),
   openDataFolder: () => invoke<void>("open_data_folder"),
+  openLogFolder: () => invoke<void>("open_log_folder"),
+  setupStatus: () => invoke<SetupStatus>("setup_status"),
+
+  dataRootInfo: () => invoke<DataRootInfo>("data_root_info"),
+  moveDataRoot: (to: string) => invoke<MoveResult>("move_data_root", { to }),
+  restartApp: () => invoke<void>("restart_app"),
+  retentionPreview: () => invoke<RetentionPlan>("retention_preview"),
+  applyRetention: () => invoke<RetentionReport>("apply_retention"),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
+  checkForUpdate: () => invoke<UpdateCheck>("check_for_update"),
+  installUpdate: () => invoke<void>("install_update"),
 
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
   prepareRecording: () => invoke<void>("prepare_recording"),
@@ -107,6 +127,8 @@ export const api = {
 
   readLogTail: (max_lines: number) => invoke<string>("read_log_tail", { max_lines }),
   lastEngineStderr: () => invoke<string | null>("last_engine_stderr"),
+  diagnosticsReport: () => invoke<string>("diagnostics_report"),
+  startupReport: () => invoke<StartupReport>("startup_report"),
   log: (level: "info" | "warn" | "error", message: string) =>
     invoke<void>("ui_log", { level, message }).catch(() => {}),
 };

@@ -5,36 +5,53 @@
 //!
 //! The data root comes from `meet_core::models::paths` (`MEET_ASSIST_DATA_DIR`,
 //! `portable.txt`, `HKCU\Software\meet-assist\DataRoot`, then
-//! `app_local_data_dir`); the store is `SqliteStore` there. `--demo` runs on
-//! the seeded `MemoryStore::demo()` with a scratch data root instead (for
-//! screenshots; see `demo.rs`).
+//! `%LOCALAPPDATA%\app.meetassist.desktop`, which is Tauri's
+//! `app_local_data_dir`). It is resolved before the app is built, so the app
+//! log (`<root>\logs`), the WebView2 profile (`<root>\EBWebView`) and the
+//! window state follow it; the store is `SqliteStore` there. A data-folder
+//! move left by the previous run is finished first (`relocate`). `--demo`
+//! runs on the seeded `MemoryStore::demo()` with a scratch data root
+//! instead (for screenshots; see `demo.rs`).
 //!
 //! Live recording (`live.rs`): one recorder at a time, a tray icon with a
 //! recording indicator (`tray.rs`) and the global shortcut Ctrl+Alt+R that
-//! toggles recording from anywhere. Closing the window while recording hides
-//! it to the tray; quitting while recording leaves the meeting for the next
-//! launch's crash recovery.
+//! starts a recording from anywhere and, pressed again, asks to stop.
+//! Closing the window while recording hides it to the tray; quitting while
+//! recording leaves the meeting for the next launch's crash recovery.
+//!
+//! One instance at a time (a second launch focuses the first), optional
+//! start with Windows (`--autostart`: the window stays in the tray), window
+//! size and position remembered, and audio retention at launch and daily
+//! (`maintenance.rs`).
 
 mod asset;
 mod commands;
 mod demo;
 pub mod events;
 mod live;
+mod maintenance;
 mod tray;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use meet_core::models::{DataPaths, DataRootSource, DoctorReport};
+use meet_core::models::relocate::{self, CleanupReport};
+use meet_core::models::{DataPaths, DoctorReport};
 use meet_core::pipeline::JobQueue;
 use meet_core::store::{MemoryStore, RunStore, SqliteStore};
-use tauri::{Manager, RunEvent, WindowEvent};
+use meet_core::views::StartupReport;
+use tauri::{Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use tauri_plugin_log::{RotationStrategy, TimezoneStrategy};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+use tauri_plugin_window_state::StateFlags;
 
 /// If the frontend never calls `show()` (crashed bundle, failed load), reveal
 /// the window anyway so the app is not an invisible process.
 const SHOW_FALLBACK: Duration = Duration::from_secs(3);
+
+/// The argument Windows passes when it starts the app at sign-in.
+pub(crate) const AUTOSTART_ARG: &str = "--autostart";
 
 /// The store behind every command.
 pub(crate) struct AppStore(pub(crate) Arc<dyn RunStore>);
@@ -58,46 +75,113 @@ pub(crate) struct GpuCache(pub(crate) Arc<Mutex<DoctorSlot>>);
 /// When the report was taken, and the report (`None`: no engine or doctor failed).
 pub(crate) type DoctorSlot = Option<(Instant, Option<DoctorReport>)>;
 
-/// The data root, the store on it, and whether this is the demo.
-fn open_store(app: &tauri::App, demo: bool) -> Result<(DataPaths, Arc<dyn RunStore>), String> {
+/// What launch found and fixed (`recovery_report`, `app:startup`).
+#[derive(Default)]
+pub(crate) struct Startup(pub(crate) Mutex<StartupReport>);
+
+/// The data root for this run: the demo's scratch folder, or the resolved one.
+fn resolve_paths(demo: bool) -> Result<DataPaths, String> {
     if demo {
-        let paths = DataPaths::at(std::env::temp_dir().join("meet-assist-demo"));
-        return Ok((paths, Arc::new(MemoryStore::demo())));
+        return Ok(DataPaths::at(std::env::temp_dir().join("meet-assist-demo")));
     }
-    let mut paths = DataPaths::resolve().map_err(|e| e.to_string())?;
-    if paths.source == DataRootSource::Default {
-        // Same folder as `resolve` computes, but from Tauri's own path API so
-        // the installer, the asset scope and the store always agree.
-        if let Ok(dir) = app.path().app_local_data_dir() {
-            paths = DataPaths {
-                source: DataRootSource::Default,
-                ..DataPaths::at(dir)
-            };
-        }
+    DataPaths::resolve().map_err(|e| e.to_string())
+}
+
+/// The store on the data root (or the demo's).
+fn open_store(paths: &DataPaths, demo: bool) -> Result<Arc<dyn RunStore>, String> {
+    if demo {
+        return Ok(Arc::new(MemoryStore::demo()));
     }
-    std::fs::create_dir_all(&paths.root)
-        .map_err(|e| format!("cannot create {}: {e}", paths.root.display()))?;
     let store = SqliteStore::open(paths.db())
         .map_err(|e| format!("cannot open {}: {e}", paths.db().display()))?
         .with_audio_root(paths.audio());
-    Ok((paths, Arc::new(store)))
+    Ok(Arc::new(store))
+}
+
+/// Shows a fatal start-up error where a user can see it, then exits.
+fn fatal(message: &str) -> ! {
+    eprintln!("meet-assist cannot start: {message}");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (text, title) = (
+            wide(&format!("meet-assist cannot start:\n\n{message}")),
+            wide("meet-assist"),
+        );
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        unsafe {
+            MessageBoxW(0, text.as_ptr(), title.as_ptr(), 0x10);
+        }
+    }
+    std::process::exit(1);
 }
 
 pub fn run() {
     let demo = std::env::args().any(|a| a == "--demo");
+    let autostart = std::env::args().any(|a| a == AUTOSTART_ARG);
+    let paths = resolve_paths(demo).unwrap_or_else(|e| fatal(&e));
+    if let Err(e) = std::fs::create_dir_all(paths.logs()) {
+        fatal(&format!("cannot create {}: {e}", paths.logs().display()));
+    }
+    // The previous run moved the data folder here: delete the old copy now
+    // that nothing holds its files open (logged in setup).
+    let moved: Option<CleanupReport> = if demo {
+        None
+    } else {
+        relocate::finish_pending_move(&paths.root)
+    };
+    let window_state_file: PathBuf = paths.root.join(".window-state.json");
+    // A saved size and position replace the first-launch sizing in the UI.
+    let window_state_saved = window_state_file.is_file();
 
     let app = tauri::Builder::default()
+        // First, so a second launch only focuses this one.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main(app);
+        }))
         .manage(Jobs(Arc::new(JobQueue::new())))
         .manage(GpuCache::default())
+        .manage(Startup::default())
         .manage(live::LiveHandle(Arc::new(live::LiveState::new())))
         .plugin(
             tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Folder {
+                        path: paths.logs(),
+                        file_name: Some("meet-assist".into()),
+                    }),
+                ])
                 .level(tauri_plugin_log::log::LevelFilter::Info)
                 .max_file_size(2_000_000)
                 .rotation_strategy(RotationStrategy::KeepOne)
                 .timezone_strategy(TimezoneStrategy::UseLocal)
                 .build(),
         )
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                // Under the data root (an absolute name replaces the plugin's
+                // folder); the window stays hidden until the first paint.
+                .with_filename(window_state_file.display().to_string())
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![AUTOSTART_ARG]),
+        ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -142,11 +226,25 @@ pub fn run() {
             commands::install_engine,
             commands::pull_model,
             commands::open_models_folder,
+            commands::open_engine_folder,
             commands::open_data_folder,
+            commands::open_log_folder,
             commands::read_log_tail,
             commands::last_engine_stderr,
             commands::ui_log,
             commands::recommended_downloads,
+            commands::setup_status,
+            commands::data_root_info,
+            commands::move_data_root,
+            commands::restart_app,
+            commands::retention_preview,
+            commands::apply_retention,
+            commands::get_autostart,
+            commands::set_autostart,
+            commands::check_for_update,
+            commands::install_update,
+            commands::diagnostics_report,
+            commands::startup_report,
             live::list_audio_devices,
             live::prepare_recording,
             live::start_recording,
@@ -156,8 +254,7 @@ pub fn run() {
             live::rerun_post_pass,
         ])
         .setup(move |app| {
-            let (paths, store) = open_store(app, demo)?;
-            std::fs::create_dir_all(&paths.root)?;
+            let store = open_store(&paths, demo)?;
             // Playback reads stored audio through the asset protocol; the
             // scope starts at the data root (imports add their file on demand).
             app.asset_protocol_scope()
@@ -166,14 +263,55 @@ pub fn run() {
                 demo::attach_demo_audio(store.as_ref(), &paths.root);
             }
             log::info!(
-                "meet-assist {} started{}; data root {} ({:?})",
+                "meet-assist {} started{}{}; data root {} ({:?})",
                 meet_core::VERSION,
                 if demo { " in demo mode" } else { "" },
+                if autostart { " at sign-in" } else { "" },
                 paths.root.display(),
                 paths.source
             );
+            {
+                let startup = app.state::<Startup>();
+                let mut report = startup.0.lock().unwrap_or_else(|e| e.into_inner());
+                report.autostart = autostart;
+                if let Some(m) = &moved {
+                    log::info!(
+                        "data folder moved from {}: removed {:?}, kept {:?}, old folder {}",
+                        m.from.display(),
+                        m.removed,
+                        m.kept,
+                        if m.removed_root { "removed" } else { "kept" }
+                    );
+                    report.moved_from = Some(m.from.display().to_string());
+                    report.move_kept = m.kept.clone();
+                }
+                // Before the first import can be queued: imports a crash
+                // interrupted stop showing as busy.
+                if !demo {
+                    maintenance::recover_imports(store.as_ref(), &mut report);
+                }
+            }
             app.manage(AppStore(store));
-            app.manage(AppPaths { paths, demo });
+            app.manage(AppPaths {
+                paths: paths.clone(),
+                demo,
+            });
+
+            // The main window, with its WebView2 profile under the data root.
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .ok_or("no main window in tauri.conf.json")?;
+            let window = WebviewWindowBuilder::from_config(app.handle(), &config)?
+                .data_directory(paths.root.clone())
+                .initialization_script(format!(
+                    "window.__MEET_ASSIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
+                ))
+                .build()?;
 
             if let Err(e) = tray::build(app) {
                 log::warn!("tray icon not available: {e}");
@@ -181,17 +319,20 @@ pub fn run() {
             if !demo {
                 let live = live::handle(app.handle());
                 match app.global_shortcut().register(live::SHORTCUT) {
-                    Ok(()) => log::info!("global shortcut {} toggles recording", live::SHORTCUT),
+                    Ok(()) => log::info!(
+                        "global shortcut {} starts a recording (again: asks to stop)",
+                        live::SHORTCUT
+                    ),
                     Err(e) => {
                         log::warn!("global shortcut {} not registered: {e}", live::SHORTCUT);
                         live.set_shortcut_error(Some(e.to_string()));
                     }
                 }
             }
-            // Crash recovery first, then the live server warms up.
+            // Crash recovery, then audio retention (and daily after that).
             live::startup(app.handle());
 
-            if let Some(window) = app.get_webview_window("main") {
+            if !autostart {
                 std::thread::spawn(move || {
                     std::thread::sleep(SHOW_FALLBACK);
                     if !window.is_visible().unwrap_or(true) {
@@ -213,7 +354,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building meet-assist");
+        .unwrap_or_else(|e| fatal(&format!("error while building meet-assist: {e}")));
     app.run(|app, event| {
         if let RunEvent::Exit = event {
             live::handle(app).shutdown();

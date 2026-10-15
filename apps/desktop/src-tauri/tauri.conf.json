@@ -19,7 +19,8 @@
         "center": true,
         "minWidth": 760,
         "minHeight": 480,
-        "visible": false
+        "visible": false,
+        "create": false
       }
     ],
     "security": {
@@ -33,6 +34,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "Local meeting transcription with speaker labels",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,6 +46,21 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3NTI1Q0M4QzIzQzQ2QkMKUldTOFJqekN5RnhTOS90UldGbnQrTVdlSUQ0d05tdE8xZUhnQWg3b3h5cm00T01uTzVLeFZ1TDYK",
+      "endpoints": [
+        "https://github.com/REPLACE_WITH_GITHUB_OWNER/REPLACE_WITH_GITHUB_REPO/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

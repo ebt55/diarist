@@ -37,16 +37,16 @@ use meet_core::gpu::{self, VramReading, VramSource};
 pub use meet_core::live::LivePhase as Phase;
 use meet_core::live::{
     self, DegradedUpdate, DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveLevels,
-    LiveSink, LiveStateView, LiveStatusView, LiveWarning, PostPassView, Recorder, ServeView,
-    StartOptions, StartRequest, StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled,
-    WarningNote, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
+    LiveSink, LiveStateView, LiveStatusView, LiveWarning, PostPassView, Recorder, RecoveryAction,
+    ServeView, StartOptions, StartRequest, StopSummary, TextFinal, ToggleAction, ToggleVia,
+    Toggled, WarningNote, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
 use meet_core::models::{self, DataPaths, ResolvedSelection, SelectedEngine};
 use meet_core::pipeline::JobQueue;
 use meet_core::settings;
 use meet_core::store::{RunStore, StoreError};
 use meet_core::types::{Channel, JobId, MeetingId, MeetingStatus, RunId, Source};
-use meet_core::views::JobEvent;
+use meet_core::views::{JobEvent, RecoveredItem};
 use meet_core::CoreError;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -127,6 +127,9 @@ pub(crate) struct LiveState {
     recovered: Mutex<bool>,
     recovered_cv: Condvar,
     shortcut_error: Mutex<Option<String>>,
+    /// When the shortcut or the tray asked to stop with the window hidden
+    /// (a second ask within `STOP_CONFIRM_WINDOW_MS` stops).
+    stop_armed: Mutex<Option<Instant>>,
 }
 
 /// Managed handle (cheap to clone into threads).
@@ -158,6 +161,7 @@ impl LiveState {
             recovered: Mutex::new(false),
             recovered_cv: Condvar::new(),
             shortcut_error: Mutex::new(None),
+            stop_armed: Mutex::new(None),
         }
     }
 
@@ -243,6 +247,14 @@ impl LiveState {
         }
         if !title.is_empty() {
             e.title = title.to_owned();
+        }
+    }
+
+    /// Stops the live server (before a data-folder move; it starts again
+    /// on the next Record).
+    pub(crate) fn stop_server(&self) {
+        if let Some(s) = lock(&self.serve).take() {
+            s.supervisor.stop();
         }
     }
 
@@ -456,6 +468,11 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
     let (_, paths, _, _) = app_parts(app);
     let mut cfg = ServeConfig::new(&sel.engine_dir, paths.models(), &sel.asr, &sel.diarizer);
     cfg.device = DEVICE.into();
+    // Stopped after `engine.idle_minutes` without a recording (frees its VRAM).
+    let store = Arc::clone(&app.state::<AppStore>().0);
+    cfg.idle_timeout = settings::effective(&*store)
+        .map(|s| settings::engine_idle_timeout(&s))
+        .unwrap_or(Some(Duration::from_secs(600)));
     let log_path = paths.logs().join("serve.log");
     let _ = std::fs::create_dir_all(paths.logs());
     cfg.log_path = Some(log_path.clone());
@@ -473,10 +490,17 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
     let before = free_vram(app, Duration::from_secs(5)).map(|r| r.free_mb);
     supervisor.start();
     log::info!(
-        "live server starting: asr {} | diarizer {} | free VRAM before {}",
+        "live server starting: asr {} | diarizer {} | free VRAM before {} | idle stop {}",
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
-        before.map_or("unknown".into(), |m| format!("{m} MB"))
+        before.map_or("unknown".into(), |m| format!("{m} MB")),
+        supervisor
+            .config()
+            .idle_timeout
+            .map_or("never".into(), |d| format!(
+                "after {} min",
+                d.as_secs() / 60
+            ))
     );
     watch_ready(app, key, supervisor.clone(), Some(before));
     (supervisor, multilingual)
@@ -811,8 +835,85 @@ pub(crate) fn stop(app: &AppHandle) -> CmdResult<StopSummary> {
     out
 }
 
-/// Start with the remembered choices, or stop: the global shortcut and the
-/// tray. Runs on its own thread; reports through `live:toggled`.
+/// The main window is on screen (visible and not minimised).
+fn window_on_screen(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
+}
+
+/// A Windows notification (best effort: the shortcut and the tray act
+/// while the window is hidden, so an in-app toast would not be seen).
+fn notify(app: &AppHandle, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("meet-assist")
+        .body(body)
+        .show()
+    {
+        log::warn!("notification failed: {e}");
+    }
+}
+
+/// Stop asked from the shortcut or the tray while recording. With the
+/// window on screen the UI asks "Stop recording?"; otherwise the first
+/// press arms and a second press within
+/// [`live::STOP_CONFIRM_WINDOW_MS`] stops. Returns what to report, or
+/// `None` when the press stopped the recording (reported by the caller).
+fn confirm_stop(app: &AppHandle, via: ToggleVia) -> Option<Toggled> {
+    let live = handle(app);
+    let window = Duration::from_millis(live::STOP_CONFIRM_WINDOW_MS);
+    let armed = lock(&live.stop_armed)
+        .take()
+        .is_some_and(|at| at.elapsed() <= window);
+    if armed {
+        tray::set_stop_armed(app, false);
+        return None;
+    }
+    if window_on_screen(app) {
+        tray::show_main(app);
+        return Some(Toggled {
+            action: ToggleAction::ConfirmStop,
+            via,
+            meeting_id: lock(&live.slot).session.as_ref().map(|s| s.meeting_id),
+            message: None,
+        });
+    }
+    *lock(&live.stop_armed) = Some(Instant::now());
+    tray::set_stop_armed(app, true);
+    notify(
+        app,
+        match via {
+            ToggleVia::Shortcut => "Still recording. Press Ctrl+Alt+R again within 3 s to stop.",
+            ToggleVia::Tray => "Still recording. Choose Stop again within 3 s to stop.",
+        },
+    );
+    // Disarm after the window (unless a second press came first).
+    let app2 = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("stop-disarm".into())
+        .spawn(move || {
+            std::thread::sleep(window + Duration::from_millis(100));
+            let live = handle(&app2);
+            let mut armed = lock(&live.stop_armed);
+            if armed.is_some_and(|at| at.elapsed() > window) {
+                *armed = None;
+                drop(armed);
+                tray::set_stop_armed(&app2, false);
+            }
+        });
+    Some(Toggled {
+        action: ToggleAction::StopArmed,
+        via,
+        meeting_id: None,
+        message: None,
+    })
+}
+
+/// The global shortcut and the tray: start with the remembered choices
+/// when idle; while recording, stop only after a confirmation (see
+/// [`confirm_stop`]). Runs on its own thread; reports through `live:toggled`.
 pub(crate) fn toggle(app: &AppHandle, via: ToggleVia) {
     let app = app.clone();
     let spawned = std::thread::Builder::new()
@@ -837,23 +938,29 @@ pub(crate) fn toggle(app: &AppHandle, via: ToggleVia) {
                         },
                     }
                 }
-                Phase::Recording => match stop(&app) {
-                    Ok(v) => Toggled {
-                        action: ToggleAction::Stopped,
-                        via,
-                        meeting_id: Some(v.meeting_id),
-                        message: None,
-                    },
-                    Err(e) => Toggled {
-                        action: ToggleAction::Failed,
-                        via,
-                        meeting_id: None,
-                        message: Some(e),
+                Phase::Recording => match confirm_stop(&app, via) {
+                    Some(t) => t,
+                    None => match stop(&app) {
+                        Ok(v) => Toggled {
+                            action: ToggleAction::Stopped,
+                            via,
+                            meeting_id: Some(v.meeting_id),
+                            message: None,
+                        },
+                        Err(e) => Toggled {
+                            action: ToggleAction::Failed,
+                            via,
+                            meeting_id: None,
+                            message: Some(e),
+                        },
                     },
                 },
                 // A start or stop is under way; a second press does nothing.
                 Phase::Starting | Phase::Stopping => return,
             };
+            if toggled.action == ToggleAction::Stopped && !window_on_screen(&app) {
+                notify(&app, "Recording stopped. Finalizing the transcript…");
+            }
             emit(&app, EV_TOGGLED, toggled);
         });
     if let Err(e) = spawned {
@@ -880,8 +987,10 @@ fn remembered_request(app: &AppHandle) -> StartRequest {
 
 // ---- launch: recovery and warm-up ------------------------------------------------------------
 
-/// Finishes meetings a crash left in `recording`, then starts the live
-/// server in the background so the first Record is fast. Never blocks.
+/// Finishes meetings a crash left in `recording` or `processing`, then
+/// runs audio retention (and daily after that). The live server starts on
+/// the first Record or when the start sheet opens, not here, unless
+/// `engine.preload` is set. Never blocks.
 pub(crate) fn startup(app: &AppHandle) {
     let live = handle(app);
     let app = app.clone();
@@ -889,19 +998,32 @@ pub(crate) fn startup(app: &AppHandle) {
         .name("live-startup".into())
         .spawn(move || {
             let live = handle(&app);
-            if let Err(e) = recover_meetings(&app) {
-                log::error!("crash recovery failed: {e}");
-            }
+            let (items, error) = match recover_meetings(&app) {
+                Ok(items) => (items, None),
+                Err(e) => {
+                    log::error!("crash recovery failed: {e}");
+                    (Vec::new(), Some(e))
+                }
+            };
             live.set_recovered();
+            crate::maintenance::finish_recovery(&app, items, error);
             let (store, paths, _, demo) = app_parts(&app);
             if demo {
+                return;
+            }
+            crate::maintenance::start_retention(&app);
+            let preload = settings::effective(&*store)
+                .map(|s| settings::get_bool(&s, settings::ENGINE_PRELOAD))
+                .unwrap_or(false);
+            if !preload {
+                log::info!("live server starts on the first Record (engine.preload is off)");
                 return;
             }
             match select(&paths, &*store) {
                 Ok(built) => {
                     ensure_server(&app, &built.selection);
                 }
-                Err(e) => log::info!("live server not started: {e}"),
+                Err(e) => log::info!("live server not preloaded: {e}"),
             }
         });
     if let Err(e) = spawned {
@@ -910,10 +1032,11 @@ pub(crate) fn startup(app: &AppHandle) {
     }
 }
 
-fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
+/// Recovers interrupted live meetings; returns what it did, for the user.
+fn recover_meetings(app: &AppHandle) -> CmdResult<Vec<RecoveredItem>> {
     let (store, _, _, demo) = app_parts(app);
     if demo {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let pending: Vec<_> = store
         .list_meetings()
@@ -928,7 +1051,7 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
         })
         .collect();
     if pending.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     log::warn!(
         "recovering {} interrupted recording(s) or post-pass(es): {:?}",
@@ -946,12 +1069,35 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
     })?;
     let recovered = live::recover(&ctx).map_err(|e| e.to_string())?;
     let live = handle(app);
+    let mut items = Vec::new();
     for r in recovered {
         let title = pending
             .iter()
             .find(|m| m.id == r.meeting_id)
             .map(|m| m.title.clone())
             .unwrap_or_default();
+        items.push(RecoveredItem {
+            meeting_id: r.meeting_id,
+            title: title.clone(),
+            was: if r.was == MeetingStatus::Recording {
+                "recording".into()
+            } else {
+                "post-pass".into()
+            },
+            action: match r.action {
+                RecoveryAction::PostPassQueued => format!(
+                    "The recording was saved ({} s); the transcript is being finalized.",
+                    r.mic_frames.max(r.loopback_frames) / 16_000
+                ),
+                RecoveryAction::Finished => "The final transcript was already saved.".into(),
+                RecoveryAction::PromotedLive => {
+                    "The recorded audio was gone, so the live transcript is the final one.".into()
+                }
+                RecoveryAction::Failed => {
+                    "Neither audio nor a transcript was left; the meeting is marked failed.".into()
+                }
+            },
+        });
         log::info!(
             "recovered meeting {} (was {}): {:?}; mic {} / loopback {} frames, post-pass {}",
             r.meeting_id,
@@ -968,7 +1114,7 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
         }
     }
     emit_state(app);
-    Ok(())
+    Ok(items)
 }
 
 // ---- retry -------------------------------------------------------------------------------------

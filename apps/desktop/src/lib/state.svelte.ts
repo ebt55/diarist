@@ -1,7 +1,7 @@
 // App-wide state: route, meeting list, open meeting, jobs, toasts, theme.
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, errorText, onJobEvent } from "./api";
+import { api, errorText, onEvent, onJobEvent } from "./api";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
 import type { MeetingId } from "./generated/MeetingId";
@@ -9,9 +9,23 @@ import type { MeetingSummary } from "./generated/MeetingSummary";
 import type { PostPassView } from "./generated/PostPassView";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
+import type { StartupReport } from "./generated/StartupReport";
 import { SETTING_DEFAULTS, type SettingKey } from "./generated/settingDefaults";
 
-export type Route = "library" | "settings" | "diagnostics";
+export type Route = "library" | "settings" | "diagnostics" | "setup";
+
+/** Set by the backend before the page loads (`lib.rs`). */
+export interface StartupFlags {
+  /** Started by Windows at sign-in: the window stays in the tray. */
+  autostart: boolean;
+  /** A saved window size and position were restored. */
+  windowStateSaved: boolean;
+}
+
+export function startupFlags(): StartupFlags {
+  const f = (window as unknown as { __MEET_ASSIST_STARTUP__?: Partial<StartupFlags> }).__MEET_ASSIST_STARTUP__;
+  return { autostart: f?.autostart ?? false, windowStateSaved: f?.windowStateSaved ?? false };
+}
 export type Theme = "system" | "light" | "dark";
 
 export interface ToastAction {
@@ -84,6 +98,10 @@ class AppState {
   postPasses = $state.raw<PostPassView[]>([]);
   /** Why a meeting's post-pass failed (this session only). */
   postPassErrors = $state.raw(new Map<MeetingId, string>());
+  /** No engine, speech model or diarizer (`setup_status`); null until known. */
+  setupNeeded = $state<boolean | null>(null);
+  /** What launch recovered (`startup_report`, `app:startup`). */
+  startup = $state.raw<StartupReport | null>(null);
 
   #toastId = 0;
   #nonce = 0;
@@ -113,6 +131,52 @@ class AppState {
       .catch(() => {});
     this.ready = Promise.all([meetings, settings]).then(() => {});
     void onJobEvent((e) => this.#onJob(e));
+    // After the first paint data: the check scans the models folder.
+    void this.ready.then(() => this.#checkSetup());
+    void onEvent<StartupReport>("app:startup", (r) => this.#onStartup(r));
+    void api
+      .startupReport()
+      .then((r) => {
+        if (r.recovery_done) this.#onStartup(r);
+        else this.startup = r;
+      })
+      .catch(() => {});
+  }
+
+  /** Opens the first-run screen when there is nothing to transcribe with. */
+  async #checkSetup(): Promise<void> {
+    try {
+      const s = await api.setupStatus();
+      this.setupNeeded = s.needs_setup;
+      if (s.needs_setup && this.route === "library" && this.openId === null) this.route = "setup";
+    } catch (e) {
+      void api.log("warn", `setup check failed: ${errorText(e)}`);
+    }
+  }
+
+  #startupShown = false;
+
+  /** Tells the user once what launch recovered or finished. */
+  #onStartup(r: StartupReport): void {
+    this.startup = r;
+    if (this.#startupShown) return;
+    this.#startupShown = true;
+    const details = { label: "Details", run: () => (this.route = "diagnostics") };
+    if (r.recovered.length > 0) {
+      const what = r.recovered.map((x) => `"${x.title || "Untitled"}"`).join(", ");
+      this.toast("info", `Recovered after an unexpected exit: ${what}`, details);
+      void this.refreshMeetings();
+    }
+    if (r.recovery_error) this.toast("error", `Crash recovery could not run: ${r.recovery_error}`, details);
+    if (r.moved_from) {
+      this.toast(
+        "success",
+        r.move_kept.length === 0
+          ? `Data folder moved. The old copy in ${r.moved_from} was removed.`
+          : `Data folder moved. Some items stayed in ${r.moved_from}.`,
+        details,
+      );
+    }
   }
 
   async refreshMeetings(): Promise<void> {

@@ -22,7 +22,7 @@
         ["Ctrl K", "Search transcripts"],
         ["Ctrl O", "Import audio or video"],
         ["R", "Start a recording"],
-        ["Ctrl Alt R", "Record or stop from any app"],
+        ["Ctrl Alt R", "Record from any app; again: asks to stop"],
         ["Ctrl 1 / Ctrl 2", "Focus meeting list / transcript"],
         ["Ctrl ,", "Settings"],
         ["Ctrl Shift D", "Diagnostics"],
