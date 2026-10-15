@@ -210,6 +210,10 @@ pub struct CaptureConfig {
     /// Loopback only, and only with `device: None`: follow the endpoint a
     /// foreign process renders to.
     pub follow_foreign: bool,
+    /// With `autoconvert`: 32-bit float at 16 kHz mono instead of PCM16, so
+    /// quiet audio keeps its resolution until the AGC (falls back to PCM16
+    /// when the endpoint refuses).
+    pub float: bool,
 }
 
 impl CaptureConfig {
@@ -219,6 +223,7 @@ impl CaptureConfig {
             channel,
             device,
             autoconvert,
+            float: false,
         }
     }
 }

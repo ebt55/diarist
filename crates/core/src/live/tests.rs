@@ -19,7 +19,7 @@ struct FakeSource {
 }
 
 impl FakeSource {
-    fn start(hz: f32, mut ring: rtrb::Producer<Packet>) -> Self {
+    fn start(hz: f32, amp: f32, mut ring: rtrb::Producer<Packet>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let reopened = Arc::new(AtomicU32::new(0));
         let s = Arc::clone(&stop);
@@ -45,7 +45,7 @@ impl FakeSource {
                         let n = k * 160 + i;
                         if (n / 16_000) % 2 == 0 {
                             let t = n as f32 / 16_000.0;
-                            ((t * hz * std::f32::consts::TAU).sin() * 8_000.0) as i16
+                            ((t * hz * std::f32::consts::TAU).sin() * amp).round() as i16
                         } else {
                             0
                         }
@@ -239,7 +239,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
         } else {
             500.0
         };
-        Ok(Box::new(FakeSource::start(hz, ring)) as Box<dyn PacketSource>)
+        Ok(Box::new(FakeSource::start(hz, 8_000.0, ring)) as Box<dyn PacketSource>)
     });
     let ctx = LiveContext {
         store: store.clone(),
@@ -321,6 +321,21 @@ fn records_streams_and_runs_the_post_pass() {
     let mic_levels = levels.iter().filter(|l| l.channel == Channel::Mic).count();
     assert!((65..=80).contains(&mic_levels), "{mic_levels} mic levels");
     assert!(levels.iter().any(|l| l.peak_dbfs > -20.0));
+    // A loud loopback is not amplified (AGC on by default); the mic has none.
+    assert!(
+        levels.iter().all(|l| l.gain_db == 0.0),
+        "loud input got gain"
+    );
+    // Without gain, raw and recorded peaks agree (over the recording; per
+    // frame they are attributed at packet boundaries).
+    let lb_max = |f: fn(&LevelsUpdate) -> f32| {
+        levels
+            .iter()
+            .filter(|l| l.channel == Channel::Loopback)
+            .map(f)
+            .fold(-200.0f32, f32::max)
+    };
+    assert!((lb_max(|l| l.raw_peak_dbfs) - lb_max(|l| l.peak_dbfs)).abs() < 0.1);
     assert_eq!(sink.devices.lock().unwrap().len(), 2);
 
     // Post-pass: the new run is current, names carried over, FLAC in, WAVs out.
@@ -367,6 +382,99 @@ fn records_streams_and_runs_the_post_pass() {
         assert!(a.len() >= 8, "{c}: {} anchors", a.len());
     }
     let _ = SegmentId(0);
+}
+
+#[test]
+fn quiet_loopback_is_raised_and_warned_about() {
+    // The loopback arrives at -70 dBFS (a low Windows volume).
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ctx, store, _) = context(dir.path(), None);
+    ctx.sources = Arc::new(|cfg: CaptureConfig, ring| {
+        assert_eq!(
+            cfg.float,
+            cfg.channel == Channel::Loopback,
+            "float only with AGC"
+        );
+        let amp = if cfg.channel == Channel::Mic {
+            8_000.0
+        } else {
+            10.4
+        };
+        Ok(Box::new(FakeSource::start(440.0, amp, ring)) as Box<dyn PacketSource>)
+    });
+    let sink = Arc::new(Sink::default());
+    let rec = Recorder::start(ctx, StartOptions::default(), sink.clone()).unwrap();
+    std::thread::sleep(Duration::from_millis(3_200));
+    rec.stop().unwrap();
+    let levels = sink.levels.lock().unwrap();
+    let lb: Vec<&LevelsUpdate> = levels
+        .iter()
+        .filter(|l| l.channel == Channel::Loopback && l.raw_peak_dbfs > -85.0)
+        .collect();
+    let last = lb.last().unwrap();
+    assert!((last.gain_db - 40.0).abs() < 0.1, "{}", last.gain_db);
+    assert!(
+        (last.raw_peak_dbfs - -70.0).abs() < 1.5,
+        "{}",
+        last.raw_peak_dbfs
+    );
+    assert!((last.peak_dbfs - -30.0).abs() < 1.5, "{}", last.peak_dbfs);
+    // Gain reached within the first active second.
+    assert!(lb.iter().take(10).any(|l| l.gain_db > 39.0));
+    // Mic AGC is off by default.
+    assert!(levels
+        .iter()
+        .filter(|l| l.channel == Channel::Mic)
+        .all(|l| l.gain_db == 0.0));
+    let _ = store;
+}
+
+#[test]
+fn quiet_detector_needs_ten_quiet_seconds_with_audio() {
+    let mut q = QuietDetector::default();
+    // Silence for a minute: nothing.
+    for t in 0..600 {
+        assert_eq!(q.feed(t * 100, -100.0), None);
+    }
+    // 10 s of -70 dBFS audio with pauses: fires once at 10 s.
+    let mut fired = Vec::new();
+    for t in 0..150 {
+        let raw = if t % 4 == 3 {
+            -100.0
+        } else {
+            -70.0 + (t % 3) as f32
+        };
+        if let Some(p) = q.feed(60_000 + t * 100, raw) {
+            fired.push((t, p));
+        }
+    }
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert!(fired[0].0 >= 100 && fired[0].0 <= 103, "{fired:?}");
+    assert!((fired[0].1 - -68.0).abs() < 0.01);
+    // A normal peak re-arms; quiet again for 10 s fires again.
+    assert_eq!(q.feed(80_000, -12.0), None);
+    let again = (1..=101)
+        .filter_map(|t| q.feed(80_000 + t * 100, -60.0))
+        .count();
+    assert_eq!(again, 1);
+    // Mixed audio that reaches -50 dBFS now and then never fires.
+    let mut q = QuietDetector::default();
+    let n = (0..300)
+        .filter_map(|t| q.feed(t * 100, if t % 50 == 0 { -40.0 } else { -70.0 }))
+        .count();
+    assert_eq!(n, 0);
+    assert!(agc_setting(
+        &crate::views::Settings::default(),
+        Channel::Loopback
+    ));
+    assert!(!agc_setting(
+        &crate::views::Settings::default(),
+        Channel::Mic
+    ));
+    let mut s = crate::views::Settings::default();
+    s.0.insert(CAPTURE_LOOPBACK_AGC.into(), "false".into());
+    s.0.insert(CAPTURE_MIC_AGC.into(), "1".into());
+    assert!(!agc_setting(&s, Channel::Loopback) && agc_setting(&s, Channel::Mic));
 }
 
 #[test]

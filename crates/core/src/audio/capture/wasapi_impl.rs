@@ -281,6 +281,26 @@ fn open_stream(
     let dev_id = device.get_id()?;
     let name = device.get_friendlyname().unwrap_or_else(|_| dev_id.clone());
     let mut client = device.get_iaudioclient()?;
+    let mode = |autoconvert| StreamMode::PollingShared {
+        autoconvert,
+        buffer_duration_hns: BUFFER_HNS,
+    };
+    if cfg.autoconvert && cfg.float {
+        let format = WaveFormat::new(32, 32, &SampleType::Float, CAPTURE_RATE as usize, 1, None);
+        match client.initialize_client(&format, &Direction::Capture, &mode(true)) {
+            Ok(()) => {
+                let layout = Layout::Mix {
+                    rate: CAPTURE_RATE,
+                    channels: 1,
+                    float: true,
+                    bits: 32,
+                };
+                return finish_open(client, layout, dev_id, name);
+            }
+            // Try PCM16 on a fresh client.
+            Err(_) => client = device.get_iaudioclient()?,
+        }
+    }
     let (format, layout, autoconvert) = if cfg.autoconvert {
         (
             WaveFormat::new(16, 16, &SampleType::Int, CAPTURE_RATE as usize, 1, None),
@@ -298,14 +318,16 @@ fn open_stream(
         (mix, layout, false)
     };
     // Loopback: initializing a render device for capture sets AUDCLNT_STREAMFLAGS_LOOPBACK.
-    client.initialize_client(
-        &format,
-        &Direction::Capture,
-        &StreamMode::PollingShared {
-            autoconvert,
-            buffer_duration_hns: BUFFER_HNS,
-        },
-    )?;
+    client.initialize_client(&format, &Direction::Capture, &mode(autoconvert))?;
+    finish_open(client, layout, dev_id, name)
+}
+
+fn finish_open(
+    client: AudioClient,
+    layout: Layout,
+    dev_id: String,
+    name: String,
+) -> std::result::Result<Stream, WasapiError> {
     let frames = client.get_buffer_size()? as usize;
     let capture = client.get_audiocaptureclient()?;
     client.start_stream()?;

@@ -46,6 +46,7 @@ fn clock(ms: i64) -> String {
 struct CliSink {
     /// Latest revision per (channel, utt) not printed yet.
     pending: Mutex<BTreeMap<(Channel, u32), WordsUpdate>>,
+    /// (peak after AGC, highest AGC gain) per channel since the last meter line.
     levels: Mutex<BTreeMap<Channel, (f32, f32)>>,
 }
 
@@ -111,9 +112,9 @@ impl LiveSink for CliSink {
 
     fn levels(&self, u: &LevelsUpdate) {
         let mut l = self.levels.lock().unwrap_or_else(|e| e.into_inner());
-        let e = l.entry(u.channel).or_insert((-100.0, -100.0));
-        e.0 = e.0.max(u.rms_dbfs);
-        e.1 = e.1.max(u.peak_dbfs);
+        let e = l.entry(u.channel).or_insert((-100.0, 0.0));
+        e.0 = e.0.max(u.peak_dbfs);
+        e.1 = e.1.max(u.gain_db);
     }
 
     fn degraded(&self, u: &DegradedUpdate) {
@@ -128,6 +129,9 @@ impl LiveSink for CliSink {
         match w {
             LiveWarning::LoopbackSilent { seconds } => eprintln!(
                 "!! nothing from the loopback for {seconds} s while the mic is active (wrong output device?)"
+            ),
+            LiveWarning::LoopbackQuiet { device, peak_dbfs, .. } => eprintln!(
+                "!! system audio from {device} is very quiet (peaks {peak_dbfs:.0} dBFS); raise its Windows volume or pick another output"
             ),
             LiveWarning::Capture { channel, message } => eprintln!("!! {channel}: {message}"),
         }
@@ -268,8 +272,13 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
             next_meter += Duration::from_secs(1);
             let mut l = sink.levels.lock().unwrap_or_else(|e| e.into_inner());
             let fmt = |c: Channel| {
-                l.get(&c)
-                    .map_or("  --".into(), |(_, p)| format!("{:>4.0}", p))
+                l.get(&c).map_or("  --".into(), |(p, g)| {
+                    if *g > 0.05 {
+                        format!("{p:>4.0} (AGC +{g:.0} dB)")
+                    } else {
+                        format!("{p:>4.0}")
+                    }
+                })
             };
             eprintln!(
                 "[{}] level dBFS peak: mic {} | loopback {}",

@@ -48,6 +48,7 @@ use crate::audio::feed::{
     feed, spawn_feed_worker, FeedNotice, FeedReport, FeedTransition, FeedWorker, FEED_CAPACITY,
     FEED_RECOVER_BELOW,
 };
+use crate::audio::gain::AgcConfig;
 use crate::audio::pipeline::{
     spawn_pipeline, Level, PipelineCommand, PipelineEvent, PipelineNotice, PipelineResult,
     PipelineThreadConfig,
@@ -68,6 +69,14 @@ use crate::views::JobEvent;
 /// Setting: open the captures at 16 kHz mono via `AUTOCONVERTPCM` (`true`,
 /// the default when unset) or at the mix format with rubato (`false`).
 pub const CAPTURE_AUTOCONVERT: &str = "capture.autoconvert";
+/// Setting: automatic gain on the loopback (default `true`).
+pub const CAPTURE_LOOPBACK_AGC: &str = "capture.loopback_agc";
+/// Setting: automatic gain on the mic (default `false`).
+pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
+/// Loopback peaks (before the AGC) under this for [`LOOPBACK_QUIET_WINDOW`]
+/// while there is audio: the output's volume is too low.
+pub const LOOPBACK_QUIET_DBFS: f32 = -50.0;
+pub const LOOPBACK_QUIET_WINDOW: Duration = Duration::from_secs(10);
 /// Free VRAM needed to start (research/08 section 5).
 pub const MIN_FREE_VRAM_MB: u32 = 2_560;
 /// Free disk needed to start.
@@ -164,8 +173,13 @@ pub struct LevelsUpdate {
     pub channel: Channel,
     /// Channel time of the frame.
     pub at_ms: i64,
+    /// After the AGC (what is recorded and transcribed).
     pub rms_dbfs: f32,
     pub peak_dbfs: f32,
+    /// Gain the AGC applied (0 when the channel has no AGC).
+    pub gain_db: f32,
+    /// Peak before the AGC.
+    pub raw_peak_dbfs: f32,
 }
 
 /// The engine feed of a channel stopped (record-only) or resumed.
@@ -182,6 +196,17 @@ pub struct DegradedUpdate {
 pub enum LiveWarning {
     /// Nothing came from the loopback for this long while the mic was active.
     LoopbackSilent { seconds: u32 },
+    /// The loopback carries audio, but for 10 s its peaks stayed under
+    /// -50 dBFS before the AGC: the output's Windows volume is very low.
+    /// UI: "System audio from <device> is very quiet; raise its Windows
+    /// volume or pick another output".
+    LoopbackQuiet {
+        device: String,
+        /// Highest raw peak in the window.
+        peak_dbfs: f32,
+        /// AGC gain at the time.
+        gain_db: f32,
+    },
     /// A capture or storage problem (recording continues).
     Capture { channel: Channel, message: String },
 }
@@ -340,12 +365,74 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// A boolean setting with a default (these keys are not in
+/// `settings::DEFAULTS`).
+fn bool_setting(s: &crate::views::Settings, key: &str, default: bool) -> bool {
+    match settings::get(s, key).trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
 /// `capture.autoconvert` (true unless set to a false value).
 pub fn autoconvert_setting(s: &crate::views::Settings) -> bool {
-    let v = settings::get(s, CAPTURE_AUTOCONVERT)
-        .trim()
-        .to_ascii_lowercase();
-    !matches!(v.as_str(), "0" | "false" | "no" | "off")
+    bool_setting(s, CAPTURE_AUTOCONVERT, true)
+}
+
+/// Whether `channel` gets automatic gain (`capture.loopback_agc`, default
+/// true; `capture.mic_agc`, default false).
+pub fn agc_setting(s: &crate::views::Settings, channel: Channel) -> bool {
+    match channel {
+        Channel::Loopback => bool_setting(s, CAPTURE_LOOPBACK_AGC, true),
+        _ => bool_setting(s, CAPTURE_MIC_AGC, false),
+    }
+}
+
+/// Watches the loopback's raw peaks for [`LiveWarning::LoopbackQuiet`]:
+/// fires once when, for [`LOOPBACK_QUIET_WINDOW`] of channel time with
+/// audio present, no raw peak reached [`LOOPBACK_QUIET_DBFS`]; re-arms once
+/// a peak does.
+#[derive(Debug, Default, Clone)]
+pub struct QuietDetector {
+    /// Channel time (ms) of the first quiet-but-active frame of the window.
+    since_ms: Option<i64>,
+    max_peak: f32,
+    fired: bool,
+}
+
+/// Raw peaks at or under this count as no audio.
+const QUIET_FLOOR_DBFS: f32 = -85.0;
+
+impl QuietDetector {
+    /// Feeds one level reading; returns the window's highest raw peak when
+    /// the warning should be shown now.
+    pub fn feed(&mut self, at_ms: i64, raw_peak_dbfs: f32) -> Option<f32> {
+        if raw_peak_dbfs >= LOOPBACK_QUIET_DBFS {
+            *self = Self::default();
+            return None;
+        }
+        if raw_peak_dbfs <= QUIET_FLOOR_DBFS {
+            // Silence neither proves nor disproves anything.
+            return None;
+        }
+        let since = *self.since_ms.get_or_insert(at_ms);
+        self.max_peak = if at_ms == since {
+            raw_peak_dbfs
+        } else {
+            self.max_peak.max(raw_peak_dbfs)
+        };
+        if !self.fired && at_ms - since >= LOOPBACK_QUIET_WINDOW.as_millis() as i64 {
+            self.fired = true;
+            return Some(self.max_peak);
+        }
+        None
+    }
+
+    /// Starts over (e.g. the loopback moved to another endpoint).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl Recorder {
@@ -377,6 +464,7 @@ impl Recorder {
             .filter(|l| !l.trim().is_empty())
             .unwrap_or_else(|| settings::default_language(&stored));
         let autoconvert = autoconvert_setting(&stored);
+        let agc_for = |ch: Channel| agc_setting(&stored, ch).then(AgcConfig::default);
         let started_at = now_ms();
         let title = opts
             .title
@@ -402,6 +490,10 @@ impl Recorder {
         info["language"] = serde_json::json!(language);
         info["diarize_mic"] = serde_json::json!(opts.diarize_mic);
         info["capture_autoconvert"] = serde_json::json!(autoconvert);
+        info["agc"] = serde_json::json!({
+            "loopback": agc_setting(&stored, Channel::Loopback),
+            "mic": agc_setting(&stored, Channel::Mic),
+        });
         let run = match store
             .create_run(meeting.id, RunKind::Live, info)
             .and_then(|r| store.set_current_run(meeting.id, r.id).map(|_| r))
@@ -457,6 +549,8 @@ impl Recorder {
             loopback_active: Instant::now(),
             mic_active: None,
             warned: false,
+            quiet: QuietDetector::default(),
+            loopback_device: String::new(),
         };
         let mut cmds = Vec::new();
         let result = (|| -> Result<()> {
@@ -477,6 +571,7 @@ impl Recorder {
                         store: Some(Arc::clone(&store)),
                         meeting: meeting.id,
                         clock: Arc::clone(&clocks[&ch]),
+                        agc: agc_for(ch),
                         notify,
                     },
                     cons,
@@ -509,7 +604,11 @@ impl Recorder {
                     Channel::Mic => opts.devices.mic.clone(),
                     _ => opts.devices.loopback.clone(),
                 };
-                let source = (ctx.sources)(CaptureConfig::new(ch, device, autoconvert), prod)?;
+                let mut capture = CaptureConfig::new(ch, device, autoconvert);
+                // With AGC, take float samples so quiet audio is not
+                // quantized to a few bits before the gain.
+                capture.float = autoconvert && agc_for(ch).is_some();
+                let source = (ctx.sources)(capture, prod)?;
                 sources
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -858,6 +957,8 @@ struct EventLoop {
     loopback_active: Instant,
     mic_active: Option<Instant>,
     warned: bool,
+    quiet: QuietDetector,
+    loopback_device: String,
 }
 
 /// Level above which a channel counts as active.
@@ -1024,7 +1125,12 @@ impl EventLoop {
 
     fn on_pipeline(&mut self, ch: Channel, n: PipelineNotice) {
         match n {
-            PipelineNotice::Level { at_sample, level } => self.on_level(ch, at_sample, level),
+            PipelineNotice::Level {
+                at_sample,
+                level,
+                gain_db,
+                raw_peak_dbfs,
+            } => self.on_level(ch, at_sample, level, gain_db, raw_peak_dbfs),
             PipelineNotice::Event(PipelineEvent::Gap { samples, .. }) => {
                 self.issues(|i| {
                     i.gaps += 1;
@@ -1040,6 +1146,10 @@ impl EventLoop {
             }) => {
                 if reason != ChangeReason::Initial {
                     self.issues(|i| i.device_changes += 1);
+                }
+                if ch == Channel::Loopback {
+                    self.loopback_device = name.clone();
+                    self.quiet.reset();
                 }
                 self.sink.device_changed(&DeviceChange {
                     channel: ch,
@@ -1080,13 +1190,32 @@ impl EventLoop {
         }
     }
 
-    fn on_level(&mut self, ch: Channel, at_sample: u64, level: Level) {
+    fn on_level(
+        &mut self,
+        ch: Channel,
+        at_sample: u64,
+        level: Level,
+        gain_db: f32,
+        raw_peak_dbfs: f32,
+    ) {
+        let at_ms = (at_sample / 16) as i64;
         self.sink.levels(&LevelsUpdate {
             channel: ch,
-            at_ms: (at_sample / 16) as i64,
+            at_ms,
             rms_dbfs: level.rms_dbfs,
             peak_dbfs: level.peak_dbfs,
+            gain_db,
+            raw_peak_dbfs,
         });
+        if ch == Channel::Loopback {
+            if let Some(peak) = self.quiet.feed(at_ms, raw_peak_dbfs) {
+                self.sink.warning(&LiveWarning::LoopbackQuiet {
+                    device: self.loopback_device.clone(),
+                    peak_dbfs: peak,
+                    gain_db,
+                });
+            }
+        }
         let active = level.peak_dbfs > ACTIVE_DBFS;
         let now = Instant::now();
         match ch {

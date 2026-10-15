@@ -34,6 +34,7 @@ use crate::audio::capture::{
 };
 use crate::audio::clock::ClockMap;
 use crate::audio::feed::{FeedTransition, FeedTx};
+use crate::audio::gain::{dbfs, Agc, AgcConfig};
 use crate::audio::wav::WavSink;
 use crate::error::Result;
 use crate::store::RunStore;
@@ -96,7 +97,12 @@ pub struct Frame {
     /// `start_sample` in microseconds (channel-sample time).
     pub pts_us: u64,
     pub pcm: Vec<i16>,
+    /// Level of `pcm` (after the AGC: what the WAV and the engine get).
     pub level: Level,
+    /// AGC gain at the end of the frame (0 without AGC).
+    pub gain_db: f32,
+    /// Peak before the AGC (dBFS, -100 for silence).
+    pub raw_peak_dbfs: f32,
 }
 
 /// Something worth logging that happened on the timeline.
@@ -173,6 +179,7 @@ pub struct ChannelPipeline {
     /// packet is filled but is not a lost-audio gap.
     after_synthetic: bool,
     mix: Option<MixResampler>,
+    agc: Option<Agc>,
     stats: PipelineStats,
 }
 
@@ -190,8 +197,21 @@ impl ChannelPipeline {
             no_fill_next: false,
             after_synthetic: false,
             mix: None,
+            agc: None,
             stats: PipelineStats::default(),
         }
+    }
+
+    /// Applies automatic gain ([`Agc`]) to everything before it reaches the
+    /// timeline (WAV and engine alike).
+    pub fn with_agc(mut self, cfg: Option<AgcConfig>) -> Self {
+        self.agc = cfg.map(Agc::new);
+        self
+    }
+
+    /// Current AGC gain (0 without AGC).
+    pub fn gain_db(&self) -> f32 {
+        self.agc.as_ref().map_or(0.0, Agc::gain_db)
     }
 
     pub fn channel(&self) -> Channel {
@@ -258,7 +278,13 @@ impl ChannelPipeline {
                     self.stats.discontinuities += 1;
                 }
                 let result = match data {
-                    PacketData::Pcm16(samples) => {
+                    PacketData::Pcm16(mut samples) => {
+                        if let Some(agc) = self.agc.as_mut() {
+                            if flags.silent {
+                                samples.iter_mut().for_each(|s| *s = 0);
+                            }
+                            agc.process_i16(&mut samples);
+                        }
                         self.place(qpc_100ns, samples, flags, out);
                         Ok(())
                     }
@@ -275,7 +301,11 @@ impl ChannelPipeline {
                             }
                         };
                         let chunks = mix.push(qpc_100ns, &samples, flags.silent)?;
-                        for (q, pcm) in chunks {
+                        for (q, mut chunk) in chunks {
+                            if let Some(agc) = self.agc.as_mut() {
+                                agc.process_f32(&mut chunk);
+                            }
+                            let pcm: Vec<i16> = chunk.into_iter().map(to_i16).collect();
                             let f = PacketFlags {
                                 discontinuity: flags.discontinuity,
                                 ..Default::default()
@@ -392,11 +422,18 @@ impl ChannelPipeline {
         let pcm = std::mem::replace(&mut self.frame, Vec::with_capacity(FRAME_SAMPLES));
         let start = self.frame_start;
         self.frame_start += pcm.len() as u64;
+        let level = Level::of(&pcm);
+        let (gain_db, raw_peak_dbfs) = match self.agc.as_mut() {
+            Some(agc) => (agc.gain_db(), dbfs(agc.take_raw_peak()).max(-100.0)),
+            None => (0.0, level.peak_dbfs),
+        };
         out.frames.push(Frame {
             channel: self.channel,
             start_sample: start,
             pts_us: start * 1_000_000 / u64::from(CAPTURE_RATE),
-            level: Level::of(&pcm),
+            level,
+            gain_db,
+            raw_peak_dbfs,
             pcm,
         });
     }
@@ -498,13 +535,13 @@ impl MixResampler {
     }
 
     /// Adds a packet (interleaved, `channels` per frame) at QPC `q`; returns
-    /// 16 kHz chunks with the QPC of their first sample.
+    /// 16 kHz mono float chunks with the QPC of their first sample.
     pub fn push(
         &mut self,
         q: i64,
         interleaved: &[f32],
         silent: bool,
-    ) -> Result<Vec<(i64, Vec<i16>)>> {
+    ) -> Result<Vec<(i64, Vec<f32>)>> {
         let ch = usize::from(self.channels);
         let scale = 1.0 / ch as f32;
         let mono: Vec<f32> = interleaved
@@ -536,7 +573,7 @@ impl MixResampler {
         let mut chunks = Vec::new();
         let Some(r) = self.resampler.as_mut() else {
             let fq = self.fifo_qpc.unwrap_or(q as f64);
-            let pcm = self.fifo.drain(..).map(to_i16).collect::<Vec<_>>();
+            let pcm = std::mem::take(&mut self.fifo);
             self.fifo_qpc = Some(fq + pcm.len() as f64 * per);
             if !pcm.is_empty() {
                 chunks.push((fq.round() as i64, pcm));
@@ -564,11 +601,7 @@ impl MixResampler {
             self.to_trim -= trim;
             if produced > trim {
                 let qpc = chunk_qpc - self.delay_hns + trim as f64 * HNS_PER_SAMPLE as f64;
-                let pcm = self.out[trim..produced]
-                    .iter()
-                    .copied()
-                    .map(to_i16)
-                    .collect();
+                let pcm = self.out[trim..produced].to_vec();
                 chunks.push((qpc.round() as i64, pcm));
             }
         }
@@ -589,6 +622,8 @@ pub enum PipelineNotice {
     Level {
         at_sample: u64,
         level: Level,
+        gain_db: f32,
+        raw_peak_dbfs: f32,
     },
     Event(PipelineEvent),
     Feed(FeedTransition),
@@ -618,6 +653,8 @@ pub struct PipelineThreadConfig {
     pub meeting: MeetingId,
     /// Anchors also go here for live time mapping.
     pub clock: Arc<Mutex<ClockMap>>,
+    /// Automatic gain before the WAV and the feed (`None`: off).
+    pub agc: Option<AgcConfig>,
     pub notify: Arc<dyn Fn(Channel, PipelineNotice) + Send + Sync>,
 }
 
@@ -644,7 +681,7 @@ pub fn spawn_pipeline(
         .name(format!("pipeline-{}", cfg.channel))
         .spawn(move || {
             let mut cfg = cfg;
-            let mut p = ChannelPipeline::new(cfg.channel, cfg.origin_qpc);
+            let mut p = ChannelPipeline::new(cfg.channel, cfg.origin_qpc).with_agc(cfg.agc);
             let mut out = Outputs::default();
             let mut pending: Vec<ClockAnchor> = Vec::new();
             let mut stop_at: Option<i64> = None;
@@ -728,6 +765,8 @@ fn deliver(
             PipelineNotice::Level {
                 at_sample: frame.start_sample,
                 level: frame.level,
+                gain_db: frame.gain_db,
+                raw_peak_dbfs: frame.raw_peak_dbfs,
             },
         );
         if let Some(feed) = cfg.feed.as_mut() {
@@ -894,6 +933,53 @@ mod tests {
     }
 
     #[test]
+    fn agc_raises_quiet_audio_before_the_wav_and_reports_its_gain() {
+        let mut p =
+            ChannelPipeline::new(Channel::Loopback, ORIGIN).with_agc(Some(AgcConfig::default()));
+        // 3 s of a -70 dBFS tone (about 10 LSB) in 10 ms packets.
+        let packets: Vec<Packet> = (0..300i64)
+            .map(|k| Packet::Audio {
+                qpc_100ns: ORIGIN + k * 100_000,
+                flags: PacketFlags::default(),
+                data: PacketData::Pcm16(
+                    (0..160)
+                        .map(|i| {
+                            let t = (k * 160 + i) as f32 / 16_000.0;
+                            ((t * 300.0 * std::f32::consts::TAU).sin() * 10.4).round() as i16
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
+        let out = run(&mut p, packets);
+        assert_eq!(out.samples.len(), 48_000);
+        let last = out.frames.last().unwrap();
+        assert!((last.gain_db - 40.0).abs() < 0.1, "{}", last.gain_db);
+        assert!(
+            (last.raw_peak_dbfs - -70.0).abs() < 1.5,
+            "{}",
+            last.raw_peak_dbfs
+        );
+        // What the WAV and the engine get: near -30 dBFS (the +40 dB ceiling).
+        assert!(
+            (last.level.peak_dbfs - -30.0).abs() < 1.5,
+            "{}",
+            last.level.peak_dbfs
+        );
+        let peak = out.samples[16_000..]
+            .iter()
+            .map(|s| s.unsigned_abs())
+            .max()
+            .unwrap();
+        assert!((900..1_100).contains(&peak), "{peak}");
+        // Without AGC the frame reports 0 dB and the raw peak is the level.
+        let mut q = ChannelPipeline::new(Channel::Mic, ORIGIN);
+        let out = run(&mut q, vec![pcm(ORIGIN, 1_600, 100)]);
+        assert_eq!(out.frames[0].gain_db, 0.0);
+        assert_eq!(out.frames[0].raw_peak_dbfs, out.frames[0].level.peak_dbfs);
+    }
+
+    #[test]
     fn silent_packets_are_zeroed() {
         let mut p = ChannelPipeline::new(Channel::Mic, ORIGIN);
         let out = run(
@@ -1002,6 +1088,7 @@ mod tests {
             store: None,
             meeting: MeetingId(1),
             clock: Arc::new(Mutex::new(ClockMap::new(ORIGIN))),
+            agc: None,
             notify: Arc::new(move |_, n| {
                 if let PipelineNotice::Feed(t) = n {
                     n2.lock().unwrap().push(t);

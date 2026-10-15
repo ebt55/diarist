@@ -13,6 +13,9 @@
 //! loopback, the FLAC holds every sample, and a rename made on the live run
 //! before Stop survives into the post-pass run. Prints the measurements.
 //!
+//! `MEET_ASSIST_LIVE_TEST_HALF=loopback` plays only the loopback cut (the
+//! mic records cable silence) and checks only the loopback.
+//!
 //! Override the cable endpoints with `MEET_ASSIST_CABLE_RENDER` and
 //! `MEET_ASSIST_CABLE_CAPTURE`, the AMI file with `MEET_ASSIST_AMI_WAV`, and
 //! the loopback endpoint with `MEET_ASSIST_LOOPBACK_RENDER` (an endpoint
@@ -34,8 +37,8 @@ use meet_core::audio::capture::{
 use meet_core::audio::flac::decode_i16;
 use meet_core::engine::{NemoCliEngine, NemoWsLiveEngine, ServeConfig, ServeSupervisor};
 use meet_core::live::{
-    DeviceChange, DeviceSelection, LiveContext, LiveSink, Recorder, StartOptions, WordsUpdate,
-    MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
+    DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveSink, LiveWarning, Recorder,
+    StartOptions, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
 use meet_core::pipeline::JobQueue;
 use meet_core::store::{RunStore, SqliteStore, Store};
@@ -157,6 +160,9 @@ struct TestSink {
     first_final: Mutex<BTreeMap<String, WordsUpdate>>,
     updates: Mutex<usize>,
     devices: Mutex<Vec<DeviceChange>>,
+    /// Loopback levels with audio: (raw peak, recorded peak, gain).
+    loopback_levels: Mutex<Vec<(f32, f32, f32)>>,
+    warnings: Mutex<Vec<LiveWarning>>,
 }
 
 impl LiveSink for TestSink {
@@ -183,6 +189,17 @@ impl LiveSink for TestSink {
     }
     fn device_changed(&self, d: &DeviceChange) {
         self.devices.lock().unwrap().push(d.clone());
+    }
+    fn levels(&self, l: &LevelsUpdate) {
+        if l.channel == Channel::Loopback && l.raw_peak_dbfs > -85.0 {
+            self.loopback_levels
+                .lock()
+                .unwrap()
+                .push((l.raw_peak_dbfs, l.peak_dbfs, l.gain_db));
+        }
+    }
+    fn warning(&self, w: &LiveWarning) {
+        self.warnings.lock().unwrap().push(w.clone());
     }
 }
 
@@ -318,22 +335,25 @@ fn live_recording_end_to_end() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let mic_player = Command::new(exe)
-        .args([
-            "play",
-            "--device",
-            &cable_render,
-            mic_src_path.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let both = std::env::var("MEET_ASSIST_LIVE_TEST_HALF").ok().as_deref() != Some("loopback");
+    let mic_player = both.then(|| {
+        Command::new(exe)
+            .args([
+                "play",
+                "--device",
+                &cable_render,
+                mic_src_path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    });
     let mut vram_live = vram_idle;
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let a = lb_player.wait_with_output().unwrap();
-        let b = mic_player.wait_with_output().unwrap();
+        let b = mic_player.map(|p| p.wait_with_output().unwrap());
         done_tx.send((a, b)).unwrap();
     });
     let (lb_out, mic_out) = loop {
@@ -342,8 +362,9 @@ fn live_recording_end_to_end() {
         }
         vram_live = vram_live.max(vram_mb());
     };
-    assert!(lb_out.status.success() && mic_out.status.success());
-    let (lb_play, mic_play) = (play_qpc(&lb_out), play_qpc(&mic_out));
+    assert!(lb_out.status.success() && mic_out.as_ref().is_none_or(|o| o.status.success()));
+    let lb_play = play_qpc(&lb_out);
+    let mic_play = mic_out.as_ref().map(play_qpc);
     std::thread::sleep(Duration::from_millis(1_500));
 
     // A rename on the live run before Stop.
@@ -362,9 +383,13 @@ fn live_recording_end_to_end() {
         .join(&store.get_meeting(out.meeting_id).unwrap().meeting.uid);
     let mic = read_wav(&folder.join("mic.wav"));
     let lb = read_wav(&folder.join("loopback.wav"));
-    let exp_mic = (mic_play - origin) / 625;
+    let exp_mic = mic_play.map_or(0, |q| (q - origin) / 625);
     let exp_lb = (lb_play - origin) / 625;
-    let (mic_lag, mic_ncc) = locate(&mic, &mic_src, exp_mic, 2);
+    let (mic_lag, mic_ncc) = if both {
+        locate(&mic, &mic_src, exp_mic, 2)
+    } else {
+        (0, 0.0)
+    };
     let (lb_lag, lb_ncc) = locate(&lb, &lb_src, exp_lb, 2);
     // Level of each capture against its source over the aligned span.
     let gain_db = |cap: &[i16], src: &[i16], lag: i64| {
@@ -397,7 +422,8 @@ fn live_recording_end_to_end() {
     let first = sink.first.lock().unwrap().clone();
     let finals = sink.first_final.lock().unwrap().clone();
     let mut latency = BTreeMap::new();
-    for (ch, play) in [("mic", mic_play), ("loopback", lb_play)] {
+    for (ch, play) in [("mic", mic_play), ("loopback", Some(lb_play))] {
+        let Some(play) = play else { continue };
         let (arrival, _) = first
             .get(ch)
             .unwrap_or_else(|| panic!("no live words on {ch}"));
@@ -494,6 +520,19 @@ fn live_recording_end_to_end() {
         report.wav_bytes as f64 / 1e6
     );
     eprintln!("drift ppm: {:?}", report.drift_ppm);
+    {
+        let l = sink.loopback_levels.lock().unwrap();
+        let max = |f: fn(&(f32, f32, f32)) -> f32| l.iter().map(f).fold(-200.0f32, f32::max);
+        eprintln!(
+            "loopback AGC: {} active frames, raw peak max {:.1} dBFS, recorded peak max {:.1} dBFS, gain max {:.1} dB, gain at end {:.1} dB",
+            l.len(),
+            max(|x| x.0),
+            max(|x| x.1),
+            max(|x| x.2),
+            l.last().map_or(0.0, |x| x.2)
+        );
+    }
+    eprintln!("warnings: {:?}", sink.warnings.lock().unwrap());
     eprintln!("VRAM MiB: before {vram_before:?} | server idle {vram_idle:?} | two sessions peak {vram_live:?} | post-pass peak {vram_pp:?}");
 
     // Lengths within 50 ms (before padding, too).
@@ -503,7 +542,7 @@ fn live_recording_end_to_end() {
     assert_eq!(mic.len() as u64, out.mic_samples);
     // Each capture lines up with its source within 100 ms.
     assert!(
-        mic_ncc > 0.5 && (mic_lag - exp_mic).abs() <= 1_600,
+        !both || (mic_ncc > 0.5 && (mic_lag - exp_mic).abs() <= 1_600),
         "mic {mic_lag} vs {exp_mic} ({mic_ncc})"
     );
     assert!(
@@ -520,7 +559,7 @@ fn live_recording_end_to_end() {
         .iter()
         .filter(|s| s.channel == Channel::Mic)
         .all(|s| label_of(s.speaker_id) == "me"));
-    assert!(segs.iter().any(|s| s.channel == Channel::Mic));
+    assert!(!both || segs.iter().any(|s| s.channel == Channel::Mic));
     let lb_labels: Vec<String> = segs
         .iter()
         .filter(|s| s.channel == Channel::Loopback)

@@ -382,6 +382,8 @@ mod tests {
             pts_us: i * 100_000,
             pcm: vec![0; 1_600],
             level: Default::default(),
+            gain_db: 0.0,
+            raw_peak_dbfs: -100.0,
         }
     }
 
