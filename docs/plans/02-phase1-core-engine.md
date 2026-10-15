@@ -44,7 +44,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 - `assign_words(words, segments) -> Vec<TaggedWord>`: start-anchored window rule from docs/03; nearest-segment fallback; `spk_N` labels in order of first appearance; keeps `raw_label`.
 - Tests on hand-written cases: a word straddling a boundary goes to the speaker active at its start; a word in a gap goes to the nearest segment; label numbering is stable. A fixture test re-tags `parakeet_transcribe_5min.json` with `diarize_5min` from `docs/research/fixtures/` and checks agreement with `nemotron_transcribe_diarize_5min.json` above 95 percent on words both have.
 - Fixtures: the real JSON produced by the spike, committed under `crates/core/tests/fixtures/nemo_cli_*.json`. Tests cover the mapping, the absent-speaker case and the error path. A GPU integration test runs the real binary when `MEET_ASSIST_ENGINE_DIR` and `MEET_ASSIST_MODELS_DIR` are set.
-- Long files: a GPU-gated acceptance test transcribes the 77-minute CIMC WAV already in `data/samples/` and asserts word count within 2 percent of 12,266, 8 speakers, and no 60 s bucket with zero words where the fixture run had more than 20 (the spike's coverage check).
+- Long files: a GPU-gated acceptance test transcribes the 77-minute in-room recording (Aug 14) already converted under `data/samples/` and asserts word count within 2 percent of 12,266, 8 speakers, and no 60 s bucket with zero words where the fixture run had more than 20 (the spike's coverage check).
 - `models::download` uses rustls with `rustls-platform-verifier` so the Windows certificate store and system proxy are honoured; HF URLs are pinned to commit SHAs in the manifest and redirects are re-resolved when resuming.
 
 ### `pipeline`

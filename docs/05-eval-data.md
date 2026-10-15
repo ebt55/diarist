@@ -2,12 +2,12 @@
 
 Status: v0.1, 15 Oct 2026.
 
-## Sources (user's own recordings, never committed to the repo)
+## Sources (the owner's own recordings, never committed to the repo; local paths live in tools/eval/sessions.toml, which is gitignored)
 
 | Folder | Count | Content |
 |---|---|---|
-| `C:\Users\ebin\Documents\digital-minds-meet-aug2026-archive` | 15 sessions | Zoom recordings, Aug 2026: talks with host intro and Q&A; one in-room multi-speaker session; one logistics presentation with Q&A |
-| `C:\Users\ebin\glm-ground\meets` | 8 sessions | Zoom recordings, Sep 2026: same shape, one logistics presentation |
+| Folder A (private, Aug 2026 archive) | 15 sessions | Zoom recordings, Aug 2026: talks with host intro and Q&A; one in-room multi-speaker session; one logistics presentation with Q&A |
+| Folder B (private, Sep 2026) | 8 sessions | Zoom recordings, Sep 2026: same shape, one logistics presentation |
 
 Each session has: `*.m4a` audio (use this), `*_WxH.mp4` video (ignore), `*.transcript.vtt` (Zoom transcript with speaker names per cue), `*.cc.vtt` (closed captions without speakers), `*newChat.txt`.
 
@@ -35,7 +35,7 @@ Mostly one speaker for long stretches (a talk), then dense turn-taking in Q&A. T
 | 5 | 42 | 55 | Aug 7 |
 | 1 | 0 | 46 | Sep Logistics (single speaker) |
 
-Caveat: in the CIMC session the labels "CIMC" and "Team Apart" are shared room devices, so one Zoom label can hide several real speakers. Treat its reference as speaker-count lower bound only.
+Caveat: in the Aug 14 session two labels are shared room devices, so one Zoom label can hide several real speakers. Treat its reference as speaker-count lower bound only.
 
 ## Selection for the first eval set (to confirm in Phase 4)
 
