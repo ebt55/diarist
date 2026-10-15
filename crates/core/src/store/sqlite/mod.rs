@@ -220,6 +220,50 @@ impl RunStore for SqliteStore {
         self.materialise_live_run_impl(run, opts)
     }
 
+    fn live_speaker(
+        &self,
+        run: RunId,
+        channel: Channel,
+        engine_label: &str,
+    ) -> StoreResult<Speaker> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let r = get_run(&tx, run)?;
+        if r.kind != RunKind::Live {
+            return Err(StoreError::Invalid(format!("run {run} is not a live run")));
+        }
+        if run_has_segments(&tx, run)? {
+            return Err(StoreError::Conflict(format!(
+                "run {run} is already materialised"
+            )));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO speakers (run_id, meeting_id, channel, engine_label, needs_review)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![run.0, r.meeting_id.0, channel.as_str(), engine_label],
+        )?;
+        let s = tx.query_row(
+            &format!(
+                "SELECT {SPEAKER_COLS} FROM speakers
+                 WHERE run_id = ?1 AND channel = ?2 AND engine_label = ?3"
+            ),
+            params![run.0, channel.as_str(), engine_label],
+            speaker_from_row,
+        )?;
+        tx.commit()?;
+        Ok(s)
+    }
+
+    fn delete_audio_track(&self, track: TrackId) -> StoreResult<()> {
+        let n = self
+            .lock()?
+            .execute("DELETE FROM audio_tracks WHERE id = ?1", [track.0])?;
+        if n == 0 {
+            return Err(StoreError::not_found("audio track", track));
+        }
+        Ok(())
+    }
+
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -856,12 +900,15 @@ fn validate_transcript(t: &NewTranscript) -> StoreResult<()> {
     Ok(())
 }
 
-/// Writes a validated transcript into `run` (inside the caller's transaction).
+/// Writes a validated transcript into `run` (inside the caller's
+/// transaction). With `reuse_speakers`, speaker rows the run already has
+/// (from `live_speaker`) are used for matching `(channel, engine_label)`.
 fn write_transcript(
     tx: &Transaction<'_>,
     run: RunId,
     meeting: MeetingId,
     t: &NewTranscript,
+    reuse_speakers: bool,
 ) -> StoreResult<()> {
     let mut speaker_ids = Vec::with_capacity(t.speakers.len());
     {
@@ -869,7 +916,21 @@ fn write_transcript(
             "INSERT INTO speakers (run_id, meeting_id, channel, engine_label, display_name, color, needs_review)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
+        let mut find = tx.prepare(
+            "SELECT id FROM speakers WHERE run_id = ?1 AND channel = ?2 AND engine_label = ?3",
+        )?;
         for s in &t.speakers {
+            if reuse_speakers {
+                let found: Option<i64> = find
+                    .query_row(params![run.0, s.channel.as_str(), s.engine_label], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                if let Some(id) = found {
+                    speaker_ids.push(id);
+                    continue;
+                }
+            }
             stmt.execute(params![
                 run.0,
                 meeting.0,
@@ -921,6 +982,14 @@ fn write_transcript(
         }
     }
     Ok(())
+}
+
+fn run_has_segments(conn: &Connection, run: RunId) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM segments WHERE run_id = ?1)",
+        [run.0],
+        |r| r.get(0),
+    )?)
 }
 
 fn run_has_transcript(conn: &Connection, run: RunId) -> StoreResult<bool> {
@@ -1461,7 +1530,7 @@ impl Store for SqliteStore {
             )));
         }
         validate_transcript(transcript)?;
-        write_transcript(&tx, run, meeting, transcript)?;
+        write_transcript(&tx, run, meeting, transcript, false)?;
         tx.commit()?;
         Ok(())
     }

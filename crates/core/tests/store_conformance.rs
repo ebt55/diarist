@@ -62,6 +62,11 @@ const RUN_CASES: &[(&str, RunCase)] = &[
     ),
     ("carry_over_user_speaker", carry_over_user_speaker),
     ("carry_over_rejects_bad_runs", carry_over_rejects_bad_runs),
+    (
+        "live_speakers_survive_materialise",
+        live_speakers_survive_materialise,
+    ),
+    ("delete_audio_track", delete_audio_track),
 ];
 
 fn report(name: &str, e: Box<dyn std::any::Any + Send>) -> ! {
@@ -873,6 +878,97 @@ fn live_latest_revisions(store: &dyn RunStore) {
     // Live rows go with the run.
     store.delete_run(run).unwrap();
     assert!(is_not_found(store.list_live_utterances(run)));
+}
+
+fn live_speakers_survive_materialise(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let run = store
+        .create_run(m, RunKind::Live, serde_json::json!({}))
+        .unwrap()
+        .id;
+    // While recording: the provisional speaker gets a row on first use...
+    let a = store.live_speaker(run, Channel::Loopback, "spk_0").unwrap();
+    assert_eq!(a.engine_label, "spk_0");
+    assert_eq!(a.channel, Channel::Loopback);
+    assert_eq!(a.run_id, run);
+    assert_eq!(
+        store
+            .live_speaker(run, Channel::Loopback, "spk_0")
+            .unwrap()
+            .id,
+        a.id
+    );
+    let b = store.live_speaker(run, Channel::Loopback, "spk_1").unwrap();
+    assert_ne!(a.id, b.id);
+    // ...and can be renamed, recoloured and merged before Stop.
+    store.rename_speaker(a.id, "Alice", None).unwrap();
+    store.set_speaker_color(a.id, "#123456").unwrap();
+    store.merge_speakers(b.id, a.id).unwrap();
+    store
+        .append_live_utterance(
+            run,
+            Channel::Loopback,
+            0,
+            0,
+            &[
+                ew(0, 300, "hello", Some("spk_0")),
+                ew(400, 700, "there", Some("spk_1")),
+            ],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(run, Channel::Mic, 0, 0, &[ew(900, 1_000, "hi", None)])
+        .unwrap();
+    store
+        .materialise_live_run(run, &SegmentOptions::default())
+        .unwrap();
+    store.set_current_run(m, run).unwrap();
+    let speakers = store.run_speakers(run).unwrap();
+    assert_eq!(speakers.len(), 3, "{speakers:?}");
+    let alice = speakers.iter().find(|s| s.id == a.id).unwrap();
+    assert_eq!(alice.display_name.as_deref(), Some("Alice"));
+    assert_eq!(alice.color.as_deref(), Some("#123456"));
+    assert_eq!(
+        speakers.iter().find(|s| s.id == b.id).unwrap().merged_into,
+        Some(a.id)
+    );
+    let segs = segments(store, m);
+    assert_eq!(segs[0].speaker_name, "Alice");
+    assert!(segs
+        .iter()
+        .any(|s| s.text == "hi" && s.speaker_name == "Me"));
+    // After materialising, no new live speakers.
+    assert!(matches!(
+        store.live_speaker(run, Channel::Loopback, "spk_9"),
+        Err(StoreError::Conflict(_))
+    ));
+    // Only live runs have live speakers.
+    let (_, file_run) = seeded_meeting(store, "File", T0);
+    assert!(is_invalid(store.live_speaker(
+        file_run,
+        Channel::Source,
+        "spk_0"
+    )));
+    assert!(is_not_found(store.live_speaker(
+        RunId(424_242),
+        Channel::Mic,
+        "me"
+    )));
+}
+
+fn delete_audio_track(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let mic = store
+        .add_audio_track(track(m, TrackChannel::Mic, AudioFormat::Wav))
+        .unwrap();
+    let flac = store
+        .add_audio_track(track(m, TrackChannel::Playback, AudioFormat::Flac))
+        .unwrap();
+    store.delete_audio_track(mic.id).unwrap();
+    let left = store.list_audio_tracks(m).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, flac.id);
+    assert!(is_not_found(store.delete_audio_track(mic.id)));
 }
 
 fn anchors_uid_speakers_edits(store: &dyn RunStore) {

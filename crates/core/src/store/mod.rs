@@ -37,7 +37,7 @@ use crate::transcript::SegmentOptions;
 use crate::types::{
     AudioFormat, AudioTrack, Channel, ClockAnchor, Edit, LiveUtterance, Meeting, MeetingId,
     MeetingStatus, ModelCapabilities, ModelFile, ModelRole, ModelSource, RunId, RunKind, RunStatus,
-    SegmentId, Source, Speaker, SpeakerId, TrackChannel, TranscriptRun, Word, WordId,
+    SegmentId, Source, Speaker, SpeakerId, TrackChannel, TrackId, TranscriptRun, Word, WordId,
 };
 use crate::views::{MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings};
 
@@ -338,8 +338,26 @@ pub trait RunStore: Store {
     /// Turns the latest revision of every live utterance of `run` into the
     /// run's speakers, segments and words (one transaction). Mic words
     /// without a speaker become `me`; other untagged words `spk_unknown`.
-    /// `Conflict` if the run already has a transcript.
+    /// Speaker rows created earlier with [`RunStore::live_speaker`] are
+    /// reused with everything the user set on them (name, colour, merges).
+    /// `Conflict` if the run already has segments.
     fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()>;
+
+    /// The speaker row of `(channel, engine_label)` in a live run that has
+    /// not been materialised yet, created on first use, so provisional
+    /// speakers can be renamed, recoloured or merged while recording.
+    /// `Invalid` for a run that is not `live`; `Conflict` once the run has
+    /// segments.
+    fn live_speaker(
+        &self,
+        run: RunId,
+        channel: Channel,
+        engine_label: &str,
+    ) -> StoreResult<Speaker>;
+
+    /// Removes one audio track row (the file is the caller's business), e.g.
+    /// the per-channel WAVs once the stereo FLAC replaced them.
+    fn delete_audio_track(&self, track: TrackId) -> StoreResult<()>;
 
     /// Inserts (or replaces) clock anchors.
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()>;

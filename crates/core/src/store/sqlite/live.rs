@@ -4,7 +4,7 @@
 
 use rusqlite::{params, Connection};
 
-use super::{get_run, run_has_transcript, validate_transcript, write_transcript, SqliteStore};
+use super::{get_run, run_has_segments, validate_transcript, write_transcript, SqliteStore};
 use crate::protocol::EngineWord;
 use crate::store::live::{latest_revisions, live_row, transcript_from_live, LiveWordJson};
 use crate::store::{StoreError, StoreResult};
@@ -105,7 +105,8 @@ impl SqliteStore {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let meeting = get_run(&tx, run)?.meeting_id;
-        if run_has_transcript(&tx, run)? {
+        // Speaker rows from `live_speaker` may exist; segments may not.
+        if run_has_segments(&tx, run)? {
             return Err(StoreError::Conflict(format!(
                 "run {run} already has a transcript"
             )));
@@ -113,7 +114,7 @@ impl SqliteStore {
         let rows = live_rows(&tx, run)?;
         let transcript = transcript_from_live(&latest_revisions(&rows), opts);
         validate_transcript(&transcript)?;
-        write_transcript(&tx, run, meeting, &transcript)?;
+        write_transcript(&tx, run, meeting, &transcript, true)?;
         tx.commit()?;
         Ok(())
     }

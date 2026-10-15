@@ -680,6 +680,140 @@ fn match_and_snippet(text: &str, terms: &[Vec<char>]) -> Option<Vec<SnippetPart>
     Some(parts)
 }
 
+impl MemoryStore {
+    /// Writes a transcript into `run`. With `reuse_speakers` (live
+    /// materialisation) the run may already hold speaker rows from
+    /// `live_speaker`; they are reused, and only segments make it a conflict.
+    fn write_transcript(
+        &self,
+        run: RunId,
+        t: &NewTranscript,
+        reuse_speakers: bool,
+    ) -> StoreResult<()> {
+        let mut st = self.lock()?;
+        let meeting_id = st.run(run)?.meeting_id;
+        let has_rows = st.run_segments.get(&run).is_some_and(|v| !v.is_empty())
+            || (!reuse_speakers && st.speakers.values().any(|s| s.run_id == run));
+        if has_rows {
+            return Err(StoreError::Conflict(format!(
+                "run {run} already has a transcript"
+            )));
+        }
+        let mut labels = HashSet::new();
+        for s in &t.speakers {
+            if !labels.insert((s.channel, s.engine_label.as_str())) {
+                return Err(StoreError::Invalid(format!(
+                    "duplicate speaker {} on channel {}",
+                    s.engine_label, s.channel
+                )));
+            }
+            if let Some(c) = &s.color {
+                if !is_hex_color(c) {
+                    return Err(StoreError::Invalid(format!("bad colour {c:?}")));
+                }
+            }
+        }
+        for (i, seg) in t.segments.iter().enumerate() {
+            if seg.speaker >= t.speakers.len() {
+                return Err(StoreError::Invalid(format!(
+                    "segment {i} refers to speaker index {}",
+                    seg.speaker
+                )));
+            }
+            if seg.end_ms < seg.start_ms {
+                return Err(StoreError::Invalid(format!(
+                    "segment {i} ends before it starts"
+                )));
+            }
+        }
+        for (i, w) in t.words.iter().enumerate() {
+            if w.segment >= t.segments.len() {
+                return Err(StoreError::Invalid(format!(
+                    "word {i} refers to segment index {}",
+                    w.segment
+                )));
+            }
+        }
+
+        let existing: HashMap<(Channel, String), SpeakerId> = if reuse_speakers {
+            st.speakers
+                .values()
+                .filter(|s| s.run_id == run)
+                .map(|s| ((s.channel, s.engine_label.clone()), s.id))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let speaker_ids: Vec<SpeakerId> = t
+            .speakers
+            .iter()
+            .map(|s| {
+                if let Some(id) = existing.get(&(s.channel, s.engine_label.clone())) {
+                    return *id;
+                }
+                let id = SpeakerId(st.alloc());
+                st.speakers.insert(
+                    id,
+                    Speaker {
+                        id,
+                        run_id: run,
+                        meeting_id,
+                        channel: s.channel,
+                        engine_label: s.engine_label.clone(),
+                        display_name: s.display_name.clone(),
+                        color: s.color.clone(),
+                        global_id: None,
+                        merged_into: None,
+                        needs_review: s.needs_review,
+                        name_anchor_start_ms: None,
+                        name_anchor_end_ms: None,
+                    },
+                );
+                id
+            })
+            .collect();
+        let segment_ids: Vec<SegmentId> =
+            t.segments.iter().map(|_| SegmentId(st.alloc())).collect();
+        let mut words_by_segment: Vec<Vec<Word>> = vec![Vec::new(); t.segments.len()];
+        for w in &t.words {
+            let id = WordId(st.alloc());
+            words_by_segment[w.segment].push(Word {
+                id,
+                segment_id: segment_ids[w.segment],
+                meeting_id,
+                start_ms: w.start_ms,
+                end_ms: w.end_ms,
+                text: w.text.clone(),
+                confidence: w.confidence,
+                raw_label: w.raw_label.clone(),
+                margin: w.margin,
+                overlap: w.overlap,
+            });
+        }
+        for ((i, seg), words) in t.segments.iter().enumerate().zip(words_by_segment) {
+            let id = segment_ids[i];
+            st.segments.insert(
+                id,
+                SegRow {
+                    seg: Segment {
+                        id,
+                        run_id: run,
+                        meeting_id,
+                        speaker_id: speaker_ids[seg.speaker],
+                        start_ms: seg.start_ms,
+                        end_ms: seg.end_ms,
+                        text: seg.text.clone(),
+                        seq: i as i64,
+                    },
+                    words: Words::Stored(words),
+                },
+            );
+        }
+        st.run_segments.insert(run, segment_ids);
+        Ok(())
+    }
+}
+
 impl Store for MemoryStore {
     fn list_meetings(&self) -> StoreResult<Vec<MeetingSummary>> {
         let st = self.lock()?;
@@ -1140,115 +1274,7 @@ impl Store for MemoryStore {
     }
 
     fn insert_transcript(&self, run: RunId, t: &NewTranscript) -> StoreResult<()> {
-        let mut st = self.lock()?;
-        let meeting_id = st.run(run)?.meeting_id;
-        let has_rows = st.run_segments.get(&run).is_some_and(|v| !v.is_empty())
-            || st.speakers.values().any(|s| s.run_id == run);
-        if has_rows {
-            return Err(StoreError::Conflict(format!(
-                "run {run} already has a transcript"
-            )));
-        }
-        let mut labels = HashSet::new();
-        for s in &t.speakers {
-            if !labels.insert((s.channel, s.engine_label.as_str())) {
-                return Err(StoreError::Invalid(format!(
-                    "duplicate speaker {} on channel {}",
-                    s.engine_label, s.channel
-                )));
-            }
-            if let Some(c) = &s.color {
-                if !is_hex_color(c) {
-                    return Err(StoreError::Invalid(format!("bad colour {c:?}")));
-                }
-            }
-        }
-        for (i, seg) in t.segments.iter().enumerate() {
-            if seg.speaker >= t.speakers.len() {
-                return Err(StoreError::Invalid(format!(
-                    "segment {i} refers to speaker index {}",
-                    seg.speaker
-                )));
-            }
-            if seg.end_ms < seg.start_ms {
-                return Err(StoreError::Invalid(format!(
-                    "segment {i} ends before it starts"
-                )));
-            }
-        }
-        for (i, w) in t.words.iter().enumerate() {
-            if w.segment >= t.segments.len() {
-                return Err(StoreError::Invalid(format!(
-                    "word {i} refers to segment index {}",
-                    w.segment
-                )));
-            }
-        }
-
-        let speaker_ids: Vec<SpeakerId> = t
-            .speakers
-            .iter()
-            .map(|s| {
-                let id = SpeakerId(st.alloc());
-                st.speakers.insert(
-                    id,
-                    Speaker {
-                        id,
-                        run_id: run,
-                        meeting_id,
-                        channel: s.channel,
-                        engine_label: s.engine_label.clone(),
-                        display_name: s.display_name.clone(),
-                        color: s.color.clone(),
-                        global_id: None,
-                        merged_into: None,
-                        needs_review: s.needs_review,
-                        name_anchor_start_ms: None,
-                        name_anchor_end_ms: None,
-                    },
-                );
-                id
-            })
-            .collect();
-        let segment_ids: Vec<SegmentId> =
-            t.segments.iter().map(|_| SegmentId(st.alloc())).collect();
-        let mut words_by_segment: Vec<Vec<Word>> = vec![Vec::new(); t.segments.len()];
-        for w in &t.words {
-            let id = WordId(st.alloc());
-            words_by_segment[w.segment].push(Word {
-                id,
-                segment_id: segment_ids[w.segment],
-                meeting_id,
-                start_ms: w.start_ms,
-                end_ms: w.end_ms,
-                text: w.text.clone(),
-                confidence: w.confidence,
-                raw_label: w.raw_label.clone(),
-                margin: w.margin,
-                overlap: w.overlap,
-            });
-        }
-        for ((i, seg), words) in t.segments.iter().enumerate().zip(words_by_segment) {
-            let id = segment_ids[i];
-            st.segments.insert(
-                id,
-                SegRow {
-                    seg: Segment {
-                        id,
-                        run_id: run,
-                        meeting_id,
-                        speaker_id: speaker_ids[seg.speaker],
-                        start_ms: seg.start_ms,
-                        end_ms: seg.end_ms,
-                        text: seg.text.clone(),
-                        seq: i as i64,
-                    },
-                    words: Words::Stored(words),
-                },
-            );
-        }
-        st.run_segments.insert(run, segment_ids);
-        Ok(())
+        self.write_transcript(run, t, false)
     }
 
     fn finish_run(&self, run: RunId, status: RunStatus) -> StoreResult<()> {
@@ -1376,8 +1402,60 @@ impl RunStore for MemoryStore {
                 .collect();
             transcript_from_live(&latest_revisions(&rows), opts)
         };
-        // Conflict (a transcript already there) and validation as for any insert.
-        self.insert_transcript(run, &transcript)
+        // Conflict (segments already there) and validation as for any insert;
+        // speaker rows from `live_speaker` are kept.
+        self.write_transcript(run, &transcript, true)
+    }
+
+    fn live_speaker(
+        &self,
+        run: RunId,
+        channel: Channel,
+        engine_label: &str,
+    ) -> StoreResult<Speaker> {
+        let mut st = self.lock()?;
+        let r = st.run(run)?;
+        if r.kind != RunKind::Live {
+            return Err(StoreError::Invalid(format!("run {run} is not a live run")));
+        }
+        let meeting_id = r.meeting_id;
+        if st.run_segments.get(&run).is_some_and(|v| !v.is_empty()) {
+            return Err(StoreError::Conflict(format!(
+                "run {run} is already materialised"
+            )));
+        }
+        if let Some(s) = st
+            .speakers
+            .values()
+            .find(|s| s.run_id == run && s.channel == channel && s.engine_label == engine_label)
+        {
+            return Ok(s.clone());
+        }
+        let id = SpeakerId(st.alloc());
+        let row = Speaker {
+            id,
+            run_id: run,
+            meeting_id,
+            channel,
+            engine_label: engine_label.to_owned(),
+            display_name: None,
+            color: None,
+            global_id: None,
+            merged_into: None,
+            needs_review: false,
+            name_anchor_start_ms: None,
+            name_anchor_end_ms: None,
+        };
+        st.speakers.insert(id, row.clone());
+        Ok(row)
+    }
+
+    fn delete_audio_track(&self, track: TrackId) -> StoreResult<()> {
+        self.lock()?
+            .tracks
+            .remove(&track)
+            .map(|_| ())
+            .ok_or_else(|| StoreError::not_found("audio track", track))
     }
 
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
