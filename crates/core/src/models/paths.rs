@@ -112,6 +112,34 @@ impl DataPaths {
         Ok(local.join(APP_IDENTIFIER))
     }
 
+    /// The root as Settings shows it, with why it cannot be moved, if so.
+    pub fn info(&self) -> crate::views::DataRootInfo {
+        let (source, move_blocked) = match self.source {
+            DataRootSource::Default => ("default", None),
+            DataRootSource::Registry => ("relocated", None),
+            DataRootSource::Portable => (
+                "portable",
+                Some(format!(
+                    "Portable mode: the data folder is set by {PORTABLE_MARKER} next to meet-assist.exe."
+                )),
+            ),
+            DataRootSource::Explicit => (
+                "explicit",
+                Some(format!(
+                    "The data folder is set by {DATA_DIR_ENV} (or --data-dir) for this run."
+                )),
+            ),
+        };
+        crate::views::DataRootInfo {
+            root: self.root.display().to_string(),
+            source: source.to_owned(),
+            default_root: Self::default_root()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            move_blocked,
+        }
+    }
+
     /// `models\`, also `NEMO_SPEECH_MODEL_DIR` for `nemo-speech pull`.
     pub fn models(&self) -> PathBuf {
         self.models_override

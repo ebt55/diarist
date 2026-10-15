@@ -129,6 +129,20 @@ enum Command {
     Unpin { meeting: String },
     /// Delete a meeting and its audio folder.
     Delete { meeting: String },
+    /// Audio retention: list (--dry-run, the default) or delete (--apply) the
+    /// playback FLAC and WAVs of unpinned meetings older than
+    /// audio_retention_days. Transcripts are never touched.
+    Retention {
+        /// List what would be deleted (the default).
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Delete it.
+        #[arg(long)]
+        apply: bool,
+        /// Use this many days instead of the setting.
+        #[arg(long)]
+        days: Option<u32>,
+    },
     /// Models: list, scan, select, pull.
     Models {
         #[command(subcommand)]
@@ -384,6 +398,7 @@ fn run(cli: &Cli) -> CliResult {
             println!("deleted");
             Ok(())
         }
+        Command::Retention { apply, days, .. } => retention(&ctx, *apply, *days),
         Command::Models { command } => match command {
             ModelsCommand::List => models_list(&ctx),
             ModelsCommand::Scan => models_scan(&ctx),
@@ -993,6 +1008,66 @@ fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
     eprintln!();
     println!("installed {}", dir.display());
     models_scan(ctx)
+}
+
+/// `retention`: what audio is past retention, and with `apply` deletes it.
+fn retention(ctx: &Ctx, apply: bool, days: Option<u32>) -> CliResult {
+    use meet_core::retention;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let plan = match days {
+        Some(d) => retention::plan(&*ctx.store, &ctx.paths.root, d, now)?,
+        None => retention::plan_from_settings(&*ctx.store, &ctx.paths.root, now)?,
+    };
+    if plan.days == 0 {
+        println!("audio_retention_days is 0: audio is kept forever");
+        return Ok(());
+    }
+    for m in &plan.meetings {
+        println!(
+            "meeting {} {:?}: {} files, {:.1} MB",
+            m.meeting_id,
+            m.title,
+            m.files.len(),
+            m.files.iter().map(|f| f.bytes).sum::<u64>() as f64 / 1e6
+        );
+        for f in &m.files {
+            println!("  {} ({} bytes)", f.path, f.bytes);
+        }
+    }
+    println!(
+        "{} meetings older than {} days: {} files, {:.1} MB{}",
+        plan.meetings.len(),
+        plan.days,
+        plan.files,
+        plan.bytes as f64 / 1e6,
+        if plan.pinned_skipped > 0 {
+            format!(" ({} pinned meetings kept)", plan.pinned_skipped)
+        } else {
+            String::new()
+        }
+    );
+    if !apply {
+        if !plan.meetings.is_empty() {
+            println!(
+                "dry run: nothing deleted (add --apply to delete the audio; transcripts stay)"
+            );
+        }
+        return Ok(());
+    }
+    let report = retention::apply(&*ctx.store, &plan);
+    println!(
+        "deleted {} files ({:.1} MB) of {} meetings",
+        report.files,
+        report.bytes as f64 / 1e6,
+        report.meetings
+    );
+    if !report.errors.is_empty() {
+        return Err(CliError::Failed(report.errors.join("; ")));
+    }
+    Ok(())
 }
 
 fn doctor(ctx: &Ctx) -> CliResult {

@@ -6,8 +6,9 @@
 //!    measures what will be copied.
 //! 2. [`copy_data`] copies the database through a caller-supplied backup
 //!    (the SQLite backup API: the database is open), then `audio\`,
-//!    `engine\`, `models\`, `manifests\` and `logs\` file by file, checking
-//!    every file's size after the copy. Links (junctions) are recreated as
+//!    `engine\`, `models\` and `manifests\` file by file, checking every
+//!    file's size after the copy. `logs\` and the window state are copied as
+//!    they are (the log grows while copying). Links (junctions) are recreated as
 //!    links, never followed. A [`MOVE_MARKER`] in the new root records the
 //!    old root and what was copied.
 //! 3. The caller points `HKCU\Software\meet-assist\DataRoot` at the new root
@@ -32,11 +33,14 @@ use crate::error::{CoreError, Result};
 pub const MOVE_MARKER: &str = "moved-from.json";
 /// The database file name under the data root.
 pub const DB_FILE: &str = "meet-assist.db";
-/// Folders copied to the new root, in order.
-pub const MOVED_DIRS: &[&str] = &["audio", "engine", "models", "manifests", "logs"];
+/// Folders copied to the new root and verified, in order.
+pub const MOVED_DIRS: &[&str] = &["audio", "engine", "models", "manifests"];
+/// Copied as they are (they change while the app runs) and removed from
+/// the old root after the move.
+pub const BEST_EFFORT: &[&str] = &["logs", ".window-state.json"];
 /// Removed from the old root after the move but not copied: the WebView
-/// profile and the window state are recreated in the new root.
-const RECREATED: &[&str] = &["EBWebView", ".window-state.json"];
+/// profile is recreated in the new root.
+const RECREATED: &[&str] = &["EBWebView"];
 /// Head room kept free on the destination volume.
 const SPACE_MARGIN: u64 = 64 << 20;
 
@@ -364,6 +368,16 @@ pub fn copy_data(
             ));
             items.push((*d).to_owned());
         }
+        for name in BEST_EFFORT {
+            let src = plan.from.join(name);
+            let dest = plan.to.join(name);
+            if src.is_dir() {
+                let mut ignored = MoveReport::default();
+                let _ = copy_tree(&src, &dest, &mut ignored, &mut |_| {});
+            } else if src.is_file() {
+                let _ = fs::copy(&src, &dest);
+            }
+        }
         let marker = Marker {
             from: plan.from.clone(),
             items,
@@ -387,7 +401,7 @@ fn remove_copy(to: &Path, created: bool) {
     for name in [DB_FILE, "meet-assist.db.tmp", MOVE_MARKER] {
         let _ = fs::remove_file(to.join(name));
     }
-    for d in MOVED_DIRS {
+    for d in MOVED_DIRS.iter().chain(BEST_EFFORT) {
         let _ = remove_item(&to.join(d));
     }
     if created {
@@ -494,7 +508,7 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
             Err(e) => report.kept.push(format!("{item}: {e}")),
         }
     }
-    for name in RECREATED {
+    for name in BEST_EFFORT.iter().chain(RECREATED) {
         let p = old.join(name);
         if p.exists() && remove_item(&p).is_ok() {
             report.removed.push((*name).to_owned());
@@ -543,8 +557,8 @@ mod tests {
         fake_root(&old);
 
         let plan = plan_move(&old, &new).unwrap();
-        assert_eq!(plan.files, 6, "{plan:?}"); // db + flac + json + gguf + exe + log
-        assert_eq!(plan.bytes, 15 + 5000 + 2 + 3000 + 2 + 5);
+        assert_eq!(plan.files, 5, "{plan:?}"); // db + flac + json + gguf + exe (logs: best effort)
+        assert_eq!(plan.bytes, 15 + 5000 + 2 + 3000 + 2);
         let mut last = (0, 0);
         let report = copy_data(&plan, &backup(old.clone()), &mut |d, t| last = (d, t)).unwrap();
         assert_eq!((report.files, report.bytes), (plan.files, plan.bytes));

@@ -26,6 +26,56 @@ pub struct DiagnosticsInput {
     pub stderr_lines: usize,
 }
 
+/// "Windows 11 (build 26200, 25H2)" from the registry; "" elsewhere.
+pub fn os_version() -> String {
+    #[cfg(windows)]
+    {
+        let key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+        let build = hklm_string(key, "CurrentBuildNumber").unwrap_or_default();
+        let display = hklm_string(key, "DisplayVersion").unwrap_or_default();
+        let name = match build.parse::<u32>() {
+            Ok(b) if b >= 22_000 => "Windows 11",
+            Ok(_) => "Windows 10",
+            Err(_) => "Windows",
+        };
+        let mut s = format!("{name} (build {build}");
+        if !display.is_empty() {
+            s.push_str(&format!(", {display}"));
+        }
+        s.push(')');
+        s
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+#[cfg(windows)]
+fn hklm_string(key: &str, value: &str) -> Option<String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let (k, v) = (HSTRING::from(key), HSTRING::from(value));
+    let mut buf = [0u16; 128];
+    let mut size = (buf.len() * 2) as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &k,
+            &v,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if rc.is_err() {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
 fn source_name(s: DataRootSource) -> &'static str {
     match s {
         DataRootSource::Explicit => "explicit (MEET_ASSIST_DATA_DIR or --data-dir)",
@@ -197,5 +247,8 @@ mod tests {
             assert!(text.contains(want), "{want:?} missing from:\n{text}");
         }
         assert!(!text.contains("line 1"));
+        if cfg!(windows) {
+            assert!(os_version().starts_with("Windows"), "{}", os_version());
+        }
     }
 }

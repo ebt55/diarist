@@ -455,6 +455,88 @@ pub struct DownloadItem {
     pub licence: String,
 }
 
+/// One meeting the launch-time recovery finished (`recovery_report`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RecoveredItem {
+    pub meeting_id: MeetingId,
+    pub title: String,
+    /// What it was doing when the app stopped: `recording`, `post-pass`
+    /// or `import`.
+    pub was: String,
+    /// What recovery did, for the user.
+    pub action: String,
+}
+
+/// What the app found and fixed at launch (crash recovery, a finished
+/// data-folder move). Shown once as a notice and on the Diagnostics page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StartupReport {
+    pub recovered: Vec<RecoveredItem>,
+    /// Live recovery runs in the background; false until it finished.
+    pub recovery_done: bool,
+    /// Recovery could not run (no engine, a store error).
+    pub recovery_error: Option<String>,
+    /// A data-folder move finished: the old folder.
+    pub moved_from: Option<String>,
+    /// Items of the old folder left in place after the move, with reasons.
+    pub move_kept: Vec<String>,
+    /// Launched by Windows at sign-in (autostart): the window stays in the tray.
+    pub autostart: bool,
+}
+
+impl StartupReport {
+    /// Payload of `app:startup` when recovery finished.
+    pub const EVENT: &'static str = "app:startup";
+}
+
+/// The data root as Settings shows it, and whether it can be moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DataRootInfo {
+    pub root: String,
+    /// `default`, `relocated`, `portable` or `explicit`.
+    pub source: String,
+    pub default_root: String,
+    /// Why "Move data folder" is not available (portable mode, an
+    /// environment override, the demo), or `None`.
+    pub move_blocked: Option<String>,
+}
+
+/// Payload of `data:move_progress` while the data folder is copied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MoveProgress {
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl MoveProgress {
+    pub const EVENT: &'static str = "data:move_progress";
+}
+
+/// What a finished "Move data folder" copied (the app restarts next).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MoveResult {
+    pub to: String,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Result of "Check for updates".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateCheck {
+    /// The build has a real update endpoint (not the placeholder).
+    pub configured: bool,
+    pub current: String,
+    /// A newer version, if one is published.
+    pub available: Option<String>,
+    pub notes: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
