@@ -245,8 +245,7 @@ fn live_recording_end_to_end() {
     let lb_src = cut(&ami, &lb_src_path, 400, 60);
 
     let devs = list_devices().unwrap();
-    let cap_q =
-        std::env::var("DIARIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
+    let cap_q = std::env::var("DIARIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
     let mic_dev = find_device(&devs, DeviceFlow::Capture, &cap_q).expect("CABLE Output");
     let cable_render = std::env::var("DIARIST_CABLE_RENDER")
         .ok()
