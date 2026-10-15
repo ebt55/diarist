@@ -32,6 +32,37 @@ pub struct ImportRequest {
     pub diarize: bool,
 }
 
+/// The log of the most recent engine job under `audio_root`
+/// (`audio/<uid>/engine.log`, newest by modification time) and its last
+/// `max_bytes` (cut at a line start). `None` when no job has run.
+pub fn last_engine_log(
+    audio_root: &std::path::Path,
+    max_bytes: usize,
+) -> Option<(PathBuf, String)> {
+    let newest = std::fs::read_dir(audio_root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("engine.log"))
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((modified, p))
+        })
+        .max_by_key(|(m, _)| *m)?
+        .1;
+    let bytes = std::fs::read(&newest).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut start = text.len().saturating_sub(max_bytes);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &text[start..];
+    let tail = match (start > 0, tail.find('\n')) {
+        (true, Some(i)) => &tail[i + 1..],
+        _ => tail,
+    };
+    Some((newest, tail.trim().to_owned()))
+}
+
 /// Cooperative cancellation flag handed to each queued job.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
@@ -227,6 +258,21 @@ mod tests {
 
     fn id(s: &str) -> JobId {
         JobId(s.to_owned())
+    }
+
+    #[test]
+    fn last_engine_log_is_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(last_engine_log(dir.path(), 100).is_none());
+        for (uid, text) in [("A", "old run\n"), ("B", "first line\nsecond line\n")] {
+            std::fs::create_dir_all(dir.path().join(uid)).unwrap();
+            std::fs::write(dir.path().join(uid).join("engine.log"), text).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (path, tail) = last_engine_log(dir.path(), 100).unwrap();
+        assert!(path.ends_with("B/engine.log") || path.ends_with("B\\engine.log"));
+        assert_eq!(tail, "first line\nsecond line");
+        assert_eq!(last_engine_log(dir.path(), 14).unwrap().1, "second line");
     }
 
     #[test]

@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use meet_core::audio::{find_on_path, ChainDecoder};
-use meet_core::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use meet_core::export::{render, ExportDoc, ExportFormat};
 use meet_core::models::{self, DataPaths, DoctorReport, Manifest};
 use meet_core::pipeline::{import_file, ImportOptions, ImportRequest, JobQueue};
@@ -379,21 +378,6 @@ fn parse_role(s: &str) -> CliResult<ModelRole> {
     }
 }
 
-/// The selection, scanning first when nothing usable is selected yet.
-fn selection(ctx: &Ctx) -> CliResult<models::ResolvedSelection> {
-    match models::resolve_selection(&ctx.paths, &*ctx.store) {
-        Ok(s) => Ok(s),
-        Err(_) => {
-            let manifest = Manifest::load(&ctx.paths.root)?;
-            let report = models::scan(&ctx.paths, &*ctx.store, &manifest)?;
-            for n in &report.notes {
-                eprintln!("{n}");
-            }
-            Ok(models::resolve_selection(&ctx.paths, &*ctx.store)?)
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn transcribe(
     ctx: &Ctx,
@@ -412,25 +396,16 @@ fn transcribe(
             file.display()
         )));
     }
-    let sel = selection(ctx)?;
-    let models_dir = ctx.paths.models();
-    let engine: Arc<dyn Engine> = if sel.asr_file.capabilities.streaming {
-        let mut e = NemoCliEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
-        e.device = device.to_owned();
-        e.version = sel.engine_version.clone();
-        Arc::new(e)
-    } else {
+    let built = models::select_engine(&ctx.paths, &*ctx.store, device)?;
+    let sel = built.selection;
+    if built.experimental {
         eprintln!(
             "warning: {} is not a streaming model; using the experimental cascade (may drop speech)",
             sel.asr_file.display_name
         );
-        let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
-        e.device = device.to_owned();
-        e.version = sel.engine_version.clone();
-        Arc::new(e)
-    };
-    let mut runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
-    runner.device = device.to_owned();
+    }
+    let engine = built.engine;
+    let runner = built.diarize_runner;
     let mut opts = ImportOptions::new(&ctx.paths.root, &ctx.store.get_settings()?);
     opts.language = language.to_owned();
     opts.keep_intermediate |= keep_wav;

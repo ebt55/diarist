@@ -4,27 +4,35 @@
 //! [`Store`] trait (speakers resolved through merges, so exports show what
 //! the UI shows); [`render`] turns it into one of the [`ExportFormat`]s.
 //! RTTM is for the eval harness: one line per segment with the speaker's
-//! engine label (no spaces), times in seconds.
+//! engine label (no spaces), times in seconds. [`file_name`] and
+//! [`ExportFormat::filter_name`] serve the desktop save dialog; the format
+//! crosses the Tauri boundary as its extension (`"md"`, `"txt"`, ...).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::str::FromStr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::store::Store;
 use crate::types::{Meeting, MeetingId, SegmentId, Word};
 use crate::views::{SegmentView, SpeakerView};
 
-/// Output formats of [`render`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Output formats of [`render`]. Serialized as the file extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExportFormat {
+    #[serde(rename = "md", alias = "markdown")]
     Markdown,
+    #[serde(rename = "txt", alias = "text")]
     Text,
+    #[serde(rename = "json")]
     Json,
+    #[serde(rename = "srt")]
     Srt,
+    #[serde(rename = "vtt")]
     Vtt,
+    #[serde(rename = "rttm")]
     Rttm,
 }
 
@@ -49,6 +57,34 @@ impl ExportFormat {
             ExportFormat::Rttm => "rttm",
         }
     }
+
+    /// Name of the save dialog's file-type filter.
+    pub fn filter_name(self) -> &'static str {
+        match self {
+            ExportFormat::Markdown => "Markdown",
+            ExportFormat::Text => "Plain text",
+            ExportFormat::Json => "JSON",
+            ExportFormat::Srt => "SubRip subtitles",
+            ExportFormat::Vtt => "WebVTT subtitles",
+            ExportFormat::Rttm => "RTTM",
+        }
+    }
+}
+
+/// A file name for the save dialog: the meeting title without characters
+/// Windows rejects, plus the format's extension.
+pub fn file_name(title: &str, format: ExportFormat) -> String {
+    let clean: String = title
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let clean = clean.trim().trim_end_matches('.');
+    let stem = if clean.is_empty() { "meeting" } else { clean };
+    format!("{stem}.{}", format.extension())
 }
 
 impl FromStr for ExportFormat {
@@ -180,8 +216,14 @@ pub fn utc_datetime(ms: i64) -> String {
     )
 }
 
+/// Escapes what a Markdown renderer would take as HTML: `&` and `<`.
+fn md_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;")
+}
+
 /// Markdown: title, a facts list, then the transcript with a speaker heading
-/// at every change of speaker.
+/// at every change of speaker. Text, names and the title are escaped so
+/// transcript content never renders as HTML.
 pub fn to_markdown(doc: &ExportDoc) -> String {
     let m = &doc.meeting;
     let mut out = String::new();
@@ -190,13 +232,14 @@ pub fn to_markdown(doc: &ExportDoc) -> String {
     } else {
         m.title.trim()
     };
-    let _ = writeln!(out, "# {title}\n");
+    let _ = writeln!(out, "# {}\n", md_escape(title));
     let _ = writeln!(out, "- Date: {}", utc_datetime(m.started_at));
     if let Some(d) = m.duration_ms {
         let _ = writeln!(out, "- Duration: {}", hms(d, false));
     }
     let names = doc.speaker_names();
     if !names.is_empty() {
+        let names: Vec<String> = names.iter().map(|n| md_escape(n)).collect();
         let _ = writeln!(out, "- Speakers: {}", names.join(", "));
     }
     let _ = writeln!(out, "- Language: {}", m.language);
@@ -206,14 +249,14 @@ pub fn to_markdown(doc: &ExportDoc) -> String {
             let _ = write!(
                 out,
                 "\n**{}** [{}]\n\n",
-                s.speaker_name,
+                md_escape(&s.speaker_name),
                 hms(s.start_ms, true)
             );
             last = Some(s.speaker_id);
         } else {
             out.push('\n');
         }
-        let _ = writeln!(out, "{}", s.text);
+        let _ = writeln!(out, "{}", md_escape(&s.text));
     }
     out
 }
@@ -565,6 +608,28 @@ mod tests {
         assert_eq!(utc_datetime(1_792_054_800_000), "2026-10-15 09:00 UTC");
         assert_eq!(hms(3_725_000, true), "01:02:05");
         assert_eq!(cue_time(3_725_042, ','), "01:02:05,042");
+        assert_eq!(
+            serde_json::from_str::<ExportFormat>("\"md\"").unwrap(),
+            ExportFormat::Markdown
+        );
+        assert_eq!(
+            serde_json::to_string(&ExportFormat::Text).unwrap(),
+            "\"txt\""
+        );
+        assert_eq!(ExportFormat::Vtt.filter_name(), "WebVTT subtitles");
+    }
+
+    #[test]
+    fn file_names_and_markdown_escaping() {
+        assert_eq!(
+            file_name("Design review: onboarding", ExportFormat::Srt),
+            "Design review- onboarding.srt"
+        );
+        assert_eq!(file_name("  ", ExportFormat::Markdown), "meeting.md");
+        assert_eq!(file_name("a/b.", ExportFormat::Json), "a-b.json");
+        let md = to_markdown(&doc());
+        assert!(md.contains("Yes &lt;finally> &amp; fast"), "{md}");
+        assert!(!md.contains("<finally>"));
     }
 
     #[test]

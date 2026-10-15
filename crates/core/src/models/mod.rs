@@ -13,7 +13,9 @@
 //!   extraction; [`pull`]: `nemo-speech pull` for models, verified against
 //!   the manifest; [`doctor`]: runtime version and GPU.
 //! - [`status`] assembles the Settings screen's [`EngineStatus`];
-//!   [`resolve_selection`] gives the engine and model paths to run with.
+//!   [`resolve_selection`] gives the engine and model paths to run with and
+//!   [`select_engine`] builds the file engine from them (scanning first when
+//!   nothing usable is selected); [`select_by_id`] validates a pick.
 
 pub mod classify;
 pub mod doctor;
@@ -25,6 +27,7 @@ pub mod pull;
 pub mod scan;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use classify::{classify, Classification, Sidecar};
@@ -36,8 +39,9 @@ pub use paths::{free_disk_bytes, DataPaths, DataRootSource};
 pub use pull::{pull, Pulled};
 pub use scan::{ensure_selections, recommended, scan, ScanReport};
 
+use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
-use crate::store::Store;
+use crate::store::{Store, StoreError};
 use crate::types::{ModelFile, ModelFileId, ModelRole};
 use crate::views::{selection_key, EngineStatus};
 
@@ -107,6 +111,78 @@ pub fn resolve_selection(paths: &DataPaths, store: &dyn Store) -> Result<Resolve
         diarizer: paths.absolute(&diar.path),
         diarizer_file: diar,
     })
+}
+
+/// The file engine for the current selection.
+pub struct SelectedEngine {
+    pub engine: Arc<dyn Engine>,
+    /// The standalone diarization pass with the same runtime and diarizer.
+    pub diarize_runner: DiarizeRunner,
+    pub selection: ResolvedSelection,
+    /// The ASR model is not a streaming one, so the experimental cascade
+    /// (`NemoCascadeEngine`, may drop speech) runs instead of `NemoCliEngine`.
+    pub experimental: bool,
+}
+
+/// Builds the engine for the selected runtime, ASR model and diarizer on
+/// `device` (`cuda:0`, `cpu`). When nothing usable is selected, scans the
+/// models and engine folders first (which also picks the recommended
+/// files: Nemotron 3.5 and Nemotron 3 Diarization).
+pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Result<SelectedEngine> {
+    let sel = match resolve_selection(paths, store) {
+        Ok(s) => s,
+        Err(_) => {
+            let manifest = Manifest::load(&paths.root)?;
+            scan(paths, store, &manifest)?;
+            resolve_selection(paths, store)?
+        }
+    };
+    let models_dir = paths.models();
+    let experimental = !sel.asr_file.capabilities.streaming;
+    let engine: Arc<dyn Engine> = if experimental {
+        let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
+        e.device = device.to_owned();
+        e.version = sel.engine_version.clone();
+        Arc::new(e)
+    } else {
+        let mut e = NemoCliEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
+        e.device = device.to_owned();
+        e.version = sel.engine_version.clone();
+        Arc::new(e)
+    };
+    let mut diarize_runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
+    diarize_runner.device = device.to_owned();
+    Ok(SelectedEngine {
+        engine,
+        diarize_runner,
+        selection: sel,
+        experimental,
+    })
+}
+
+/// Selects file `id` for `role` after checking it can be: a known role,
+/// a file of that role, present on disk. Returns the file.
+pub fn select_by_id(store: &dyn Store, role: ModelRole, id: ModelFileId) -> Result<ModelFile> {
+    if role == ModelRole::Unknown {
+        return Err(StoreError::Invalid("unrecognised files cannot be selected".into()).into());
+    }
+    let file = store
+        .list_model_files()?
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or_else(|| StoreError::not_found("model file", id))?;
+    if file.role != role {
+        return Err(
+            StoreError::Invalid(format!("{} is not a {role} file", file.display_name)).into(),
+        );
+    }
+    if file.missing {
+        return Err(
+            StoreError::Invalid(format!("{} is missing from disk", file.display_name)).into(),
+        );
+    }
+    store.set_setting(&selection_key(role), &id.to_string())?;
+    Ok(file)
 }
 
 /// Selects a file for `role` by id, path (or path suffix), manifest name,
@@ -245,8 +321,34 @@ mod tests {
         assert_eq!(r.engine_version.as_deref(), Some("0.2.0"));
         let st = status(&paths, &store, None).unwrap();
         assert_eq!(st.engines.len(), 1);
+        assert_eq!(st.engines[0].display_name, "nemo-speech-0.2.0");
         assert!(st.engines[0].tested);
         assert_eq!(st.selected.asr, Some(r.asr_file.id));
         assert_eq!(st.models_by_role[&ModelRole::Asr].len(), 2);
+
+        // By id, with the checks the Settings screen relies on.
+        let one = st.models_by_role[&ModelRole::Asr]
+            .iter()
+            .find(|f| f.display_name == "one")
+            .unwrap()
+            .id;
+        assert_eq!(
+            select_by_id(&store, ModelRole::Asr, one)
+                .unwrap()
+                .display_name,
+            "one"
+        );
+        assert_eq!(
+            selected_file(&store, ModelRole::Asr).unwrap().unwrap().id,
+            one
+        );
+        assert!(select_by_id(&store, ModelRole::Diarizer, one).is_err());
+        assert!(select_by_id(&store, ModelRole::Unknown, one).is_err());
+        assert!(select_by_id(&store, ModelRole::Asr, ModelFileId(9_999)).is_err());
+        // Engines that cannot run are reported, not built: the paths do not exist.
+        let built = select_engine(&paths, &store, "cpu").unwrap();
+        assert!(!built.experimental);
+        assert_eq!(built.diarize_runner.device, "cpu");
+        assert!(built.engine.info().runtime.contains("0.2.0"));
     }
 }

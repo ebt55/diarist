@@ -13,7 +13,7 @@ Shall we start?
 
 **Speaker 2** [00:00:05]
 
-Yes <finally> & fast
+Yes &lt;finally> &amp; fast
 
 **Priya** [01:02:05]
 

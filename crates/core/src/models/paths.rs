@@ -1,6 +1,8 @@
 //! The data root and the folders under it (`docs/01`, "Data layout on disk").
 //!
 //! Resolution order:
+//! 0. `MEET_ASSIST_DATA_DIR` (development and tests: run the app or the CLI
+//!    against a scratch data root).
 //! 1. Portable mode: a `portable.txt` next to the executable. The data root
 //!    is `<exe dir>\data`, or the path on the file's first line (relative
 //!    paths are taken from the exe dir).
@@ -18,11 +20,13 @@ pub const REGISTRY_KEY: &str = r"Software\meet-assist";
 pub const REGISTRY_VALUE: &str = "DataRoot";
 /// Marker file next to the executable that turns on portable mode.
 pub const PORTABLE_MARKER: &str = "portable.txt";
+/// Environment variable that overrides the data root (development, tests).
+pub const DATA_DIR_ENV: &str = "MEET_ASSIST_DATA_DIR";
 
 /// Why the data root is where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataRootSource {
-    /// Given explicitly (CLI `--data-dir`, tests).
+    /// Given explicitly (CLI `--data-dir`, `MEET_ASSIST_DATA_DIR`, tests).
     Explicit,
     Portable,
     Registry,
@@ -63,8 +67,12 @@ impl DataPaths {
         self
     }
 
-    /// Resolves the data root (portable marker, registry, default).
+    /// Resolves the data root (`MEET_ASSIST_DATA_DIR`, portable marker,
+    /// registry, default).
     pub fn resolve() -> Result<Self> {
+        if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
+            return Ok(Self::at(dir));
+        }
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf));
