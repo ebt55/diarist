@@ -1,0 +1,67 @@
+{
+  "$comment": "Benchmark data for the charts on diarist.dev/models/. Every number is copied from the file named in each block's `from` field; the website build fails if this file is missing or malformed. Published numbers are from leaderboards cited in docs/04; measured numbers are from docs/eval on the machine below.",
+  "updated": "2026-10-15",
+  "machine": "Windows 11, RTX 3080 10 GB, driver 610.88",
+  "diarization_published": {
+    "from": "docs/04-model-guide.md, section 2 (table)",
+    "source": "VoiceArena Diarization-Bench v1, 139 English conversations, collar 0, overlap scored",
+    "url": null,
+    "metric": "DER, percent, lower is better",
+    "rows": [
+      { "system": "Nemotron 3 Diarization", "value": 14.7, "licence": "OpenMDW-1.1", "local": true, "used": true },
+      { "system": "DiariZen s80-MD-v2", "value": 19.3, "licence": "weights CC BY-NC", "local": "yes, non-commercial", "used": false },
+      { "system": "pyannoteAI Precision-3", "value": 20.6, "licence": "commercial API", "local": false, "used": false },
+      { "system": "pyannoteAI Precision-2", "value": 23.4, "licence": "commercial API", "local": false, "used": false },
+      { "system": "Sortformer 4spk v2 (NVIDIA, previous generation)", "short": "Sortformer 4spk v2 (NVIDIA)", "value": 24.6, "licence": "CC-BY-4.0", "local": true, "used": false },
+      { "system": "pyannote community-1", "value": 30.6, "licence": "CC-BY-4.0, gated", "local": "token required", "used": false }
+    ]
+  },
+  "asr_published": {
+    "from": "docs/04-model-guide.md, section 3 (first table)",
+    "source": "Open ASR leaderboard, October 2026",
+    "url": null,
+    "metric": "average WER, percent, lower is better",
+    "rows": [
+      { "model": "Canary-Qwen 2.5B", "value": 5.63, "timestamps": false, "runs": false, "streaming": false },
+      { "model": "Qwen3-ASR 1.7B", "value": 5.76, "timestamps": false, "runs": false, "streaming": false, "note": "vLLM only" },
+      { "model": "Parakeet TDT 0.6B v2 (English)", "short": "Parakeet TDT 0.6B v2", "value": 6.05, "timestamps": true, "runs": true, "streaming": false },
+      { "model": "Parakeet TDT 0.6B v3 (25 languages)", "short": "Parakeet TDT 0.6B v3", "value": 6.34, "timestamps": true, "runs": true, "streaming": false, "note": "experimental in Diarist, off by default" },
+      { "model": "Kyutai STT 2.6B", "value": 6.4, "timestamps": "with a 2.5 s delay", "runs": false, "streaming": true },
+      { "model": "Nemotron Speech Streaming EN 0.6B", "short": "Nemotron Speech EN 0.6B", "value": 6.93, "timestamps": true, "runs": true, "streaming": true, "note": "at 1.1 s latency; Diarist's default for English" },
+      { "model": "Nemotron 3.5 ASR Streaming 0.6B (40+ locales)", "short": "Nemotron 3.5 ASR 0.6B", "value": null, "timestamps": true, "runs": true, "streaming": true, "note": "not on the leaderboard yet; measured below" },
+      { "model": "Whisper large-v3 (for reference)", "short": "Whisper large-v3", "value": 7.4, "approximate": true, "timestamps": "approximate", "runs": false, "streaming": false }
+    ]
+  },
+  "asr_measured": {
+    "from": "docs/eval/2026-10-15-nemotron_en.md and docs/eval/2026-10-15-nemotron35.md (cpWER column of the transcript attribution tables); session names, minutes and groups from docs/05-eval-data.md and the same tables; the per-model summary is in docs/04-model-guide.md, section 3",
+    "source": "docs/eval, 15 Oct 2026",
+    "metric": "cpWER, percent, lower is better",
+    "series": { "en": "Nemotron Speech Streaming EN 0.6B", "n35": "Nemotron 3.5 ASR Streaming 0.6B" },
+    "sessions": [
+      { "name": "Aug 2", "group": "tuning", "minutes": 44, "speakers": 6, "en": 10.3, "n35": 12.0 },
+      { "name": "Aug 9", "group": "tuning", "minutes": 44, "speakers": 3, "en": 8.5, "n35": 9.2 },
+      { "name": "Sep 5", "group": "held-out", "minutes": 45, "speakers": 5, "en": 5.1, "n35": 5.4 },
+      { "name": "Sep 7", "group": "held-out", "minutes": 48, "speakers": 5, "en": 7.8, "n35": 7.9 },
+      { "name": "Sep Logistics", "group": "single-speaker control", "minutes": 46, "speakers": 1, "en": 7.1, "n35": 7.3 },
+      { "name": "AMI ES2002a", "group": "public AMI meeting, far-field mix, word-level reference", "minutes": 21, "speakers": 4, "en": 19.8, "n35": 23.0 }
+    ],
+    "note": "The Zoom sessions are the author's own meetings; their references are Zoom's machine transcripts with per-participant speaker labels, so cpWER there mixes recognition disagreement with attribution. AMI ES2002a has a hand-made word-level reference. The in-room stress session (Aug 14) is left out: its reference hides several people behind shared room devices, so its cpWER (44.7 and 44.3) measures the reference, not the models."
+  },
+  "vram_measured": {
+    "from": "docs/04-model-guide.md, section 4 (VRAM table)",
+    "source": "measured on the RTX 3080, excluding the desktop's own 1.5 GB",
+    "metric": "peak GPU memory, GB",
+    "rows": [
+      { "scenario": "Live recording, idle (Nemotron 3.5 and the diarizer resident)", "short": "Live recording, idle", "gb": 1.05, "note": "the EN model sits at 1.18 GB" },
+      { "scenario": "Live recording, two sessions (microphone and system audio)", "short": "Live recording, two sessions", "gb": 1.26, "note": "spikes of 0.5 to 0.6 GB per session; the app budgets 2 GB" },
+      { "scenario": "File transcription, Nemotron 3.5 (77-minute file)", "short": "File, Nemotron 3.5", "gb": 1.82 },
+      { "scenario": "File transcription, EN model (77-minute file)", "short": "File, EN model", "gb": 2.6 },
+      { "scenario": "File transcription, experimental Parakeet", "short": "File, Parakeet", "gb": 4.9 }
+    ]
+  },
+  "speed_measured": {
+    "from": "README.md (What it does) and docs/research/08-runtime-cli-contract.md, section 7 (77-minute file: 171 s, 27 times real time; live first text about 0.2 s), summarised in docs/04-model-guide.md, section 3",
+    "import_realtime_factor": 27,
+    "live_first_text_s": 0.2
+  }
+}
