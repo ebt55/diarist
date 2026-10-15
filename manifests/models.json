@@ -1,0 +1,29 @@
+[
+  {
+    "name": "Nemotron-3-Diarization.q8_0.gguf",
+    "version": "",
+    "kind": "diarizer",
+    "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization",
+    "sha256": "",
+    "size_bytes": 0,
+    "licence": "OpenMDW-1.1"
+  },
+  {
+    "name": "nemotron-speech-streaming-en-0.6b.q8_0.gguf",
+    "version": "",
+    "kind": "asr_streaming",
+    "url": "https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b",
+    "sha256": "",
+    "size_bytes": 0,
+    "licence": "NVIDIA Open Model License"
+  },
+  {
+    "name": "parakeet-tdt-0.6b-v3.q8_0.gguf",
+    "version": "",
+    "kind": "asr_offline",
+    "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+    "sha256": "",
+    "size_bytes": 0,
+    "licence": "CC-BY-4.0"
+  }
+]
