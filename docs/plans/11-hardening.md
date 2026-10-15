@@ -79,3 +79,9 @@ Coding agents and scripts set Diarist up for people (docs/SETUP-WITH-AN-AGENT.md
 ## Out of scope
 
 Fusion (docs/plans/06), echo handling (docs/plans/04 section 3f), speaker identity, punctuation restoration. Each is a feature phase with its own plan and its own eval gate.
+
+## Small things noticed along the way
+
+- While recording, the sidebar brand truncates to "Di..." because the Record button grows into "0:59 Stop" (docs/screenshots/recording-light.png, 15 Oct 2026). Give the timer its own space or let the brand collapse to the mark.
+- Stop asks "Stop recording?" even for a recording under a minute; keep the confirmation (the user chose it) but make sure the Ctrl+Alt+R path and the tray path show the same dialog.
+- `%APPDATA%\app.diarist.desktop` is created empty by the WebView or Tauri on first launch, next to the real data folder under `%LOCALAPPDATA%`; harmless, but the uninstaller's "Delete the application data" should remove it too.
