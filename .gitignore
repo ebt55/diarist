@@ -1,0 +1,22 @@
+# Rust
+target/
+# Node
+node_modules/
+dist/
+# Models and runtime binaries (downloaded on first run)
+models/
+engine/bin/
+*.gguf
+*.onnx
+# Local data
+data/
+*.db
+*.db-wal
+*.db-shm
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Scratch
+scratch/
