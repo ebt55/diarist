@@ -14,7 +14,7 @@ models" in the [README](../README.md#choosing-your-package-and-models).
    installer downloads it from Microsoft.
 3. Start meet-assist.
 
-The installer is about 10 MB. The speech engine and the models are not in
+The installer is about 7 MB. The speech engine and the models are not in
 it; the app downloads them on first use.
 
 ## 2. First start: engine and models

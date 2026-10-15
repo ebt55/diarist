@@ -208,7 +208,7 @@ The Tauri CLI downloads NSIS into its cache on the first bundle. If that
 download is blocked, add `--no-bundle` to get just the exe.
 
 Release build on the reference machine (15 Oct 2026, 5 min 47 s from a warm
-cache): installer `meet-assist_0.1.0_x64-setup.exe` 6.66 MiB, exe 24.9 MiB.
+cache): installer `meet-assist_0.1.0_x64-setup.exe` 6.67 MiB, exe 24.9 MiB.
 Startup and import timings: "Release measurements" below.
 
 ### Installer and uninstaller
@@ -456,5 +456,31 @@ Release build of 15 Oct 2026 on the reference machine:
 
 | What | Value |
 |---|---|
-| Installer | 6.66 MiB (`meet-assist_0.1.0_x64-setup.exe`) |
-| Exe | 24.9 MiB |
+| Installer | 6.67 MiB, 6,990,679 bytes (`meet-assist_0.1.0_x64-setup.exe`, plus a 440-byte `.sig`) |
+| Exe | 24.9 MiB, 26,150,400 bytes |
+| Release build time | 5 min 47 s (LTO, codegen-units 1, warm dependency cache) |
+| Start, second and later launches | 756 to 779 ms from process start to the "interactive" log line (3 runs); 113 to 136 ms after navigation start (`performance.now()`); library with 0 meetings, scratch data root |
+| Start, first launch of a new exe | 6.8 s (cold file cache and the first antivirus scan of the new binary) |
+| Import, AMI ES2002a WAV (21 min 13 s) | 45.4 s wall (about 28x real time), EN model and Nemotron 3 Diarization, 4 speakers |
+| Live server ready after the sheet opened | 3.2 s, holds 1099 MB of VRAM |
+| Downloads on this network | engine zip about 9.5 MB/s after about 15 s of connection setup (a stuck first CDN address); diarizer pull 102 MB in about 15 s |
+
+## Install and uninstall test (15 Oct 2026)
+
+On the reference machine, with the real data root protected: a byte copy and
+a SHA-256 manifest of `%LOCALAPPDATA%\app.meetassist.desktop` first (232
+files), `HKCU\Software\meet-assist\DataRoot` pointed at an empty scratch
+folder, and the real root renamed aside only for the ticked uninstall (the
+template removes `%LOCALAPPDATA%\app.meetassist.desktop` whenever the box is
+ticked).
+
+| Step | Result |
+|---|---|
+| `meet-assist_0.1.0_x64-setup.exe /S` | 13 s; `%LOCALAPPDATA%\meet-assist\{meet-assist.exe, uninstall.exe}`, Start menu entry, uninstall key |
+| Launch the installed app | setup screen for the empty scratch root (GPU, driver 610.88, CUDA 13.3; Install engine (98 MB), Install recommended models (770 MB)); log, WebView2 profile and window state written under the scratch root |
+| Uninstall, box unticked (driven with BM_CLICK on the NSIS controls) | question "Remove the downloaded engine and models (903 MB)? Transcripts and recordings are kept in ...", answered Yes: `engine\` and `models\` removed; database (the AMI transcript), `audio\`, logs and the DataRoot key kept; program, Start menu entry and uninstall key removed |
+| Reinstall `/S`, uninstall with the box ticked | no question; the scratch root's items and then the folder removed, `HKCU\Software\meet-assist` removed, `%APPDATA%\app.meetassist.desktop` removed |
+| Real data root afterwards | renamed back; 232 files with the same sizes and SHA-256 as before the test |
+
+UI Automation exposes the NSIS controls only as panes, so the test script
+sends `BM_GETCHECK` / `BM_CLICK` to the checkbox and buttons by window handle.
