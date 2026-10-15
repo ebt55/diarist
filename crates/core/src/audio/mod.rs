@@ -15,11 +15,15 @@ use std::path::Path;
 use crate::error::Result;
 
 pub mod capture;
+pub mod clock;
 pub mod decode;
+pub mod feed;
 #[cfg(windows)]
 mod mf;
 pub mod mp4;
 pub mod peaks;
+pub mod pipeline;
+pub mod wav;
 
 pub use decode::{
     find_on_path, ChainDecoder, FfmpegDecoder, MediaFoundationDecoder, SymphoniaDecoder,
