@@ -1,6 +1,6 @@
-# Eval configurations for run.py. Each runs `meet-cli transcribe --rttm` with
+# Eval configurations for run.py. Each runs `diarist-cli transcribe --rttm` with
 # its own scratch data root (.work/data/<config>), because the ASR model is a
-# selection stored in that root's database (`meet-cli models select asr`).
+# selection stored in that root's database (`diarist-cli models select asr`).
 #
 # asr / diarizer: manifest names from manifests/models.json.
 # language: passed as `transcribe --language` (`auto` lets Nemotron 3.5 detect).
@@ -23,4 +23,4 @@ description = "Nemotron 3.5 with the runtime's --verbatim flag (fillers kept)"
 asr = "nemotron-3.5"
 diarizer = "nemotron-3-diarization"
 language = "en"
-skip = "meet-cli transcribe has no way to pass --verbatim to nemo-speech (NemoCliEngine::args builds a fixed argument list)"
+skip = "diarist-cli transcribe has no way to pass --verbatim to nemo-speech (NemoCliEngine::args builds a fixed argument list)"

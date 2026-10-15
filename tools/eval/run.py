@@ -1,4 +1,4 @@
-"""Run meet-cli over the eval sessions, score against references, write the
+"""Run diarist-cli over the eval sessions, score against references, write the
 results table to docs/eval/<yyyy-mm-dd>-<config>.md.
 
   uv run python -I run.py --config nemotron35 --sessions aug2,aug9,seplog,ami
@@ -7,7 +7,7 @@ results table to docs/eval/<yyyy-mm-dd>-<config>.md.
   uv run python -I run.py --config nemotron35 --export-for-correction aug2
 
 Per session: the audio is converted once to 16 kHz mono WAV (.work/wav), then
-`meet-cli transcribe --rttm` runs into the config's scratch data root
+`diarist-cli transcribe --rttm` runs into the config's scratch data root
 (.work/data/<config>); the transcript is exported as JSON and RTTM, and the
 standalone diarizer RTTM is copied next to it (.work/runs/<config>/<session>).
 A finished run is cached by (session, config): re-runs only recompute metrics
@@ -55,13 +55,13 @@ from common import (  # noqa: E402
 import metrics as M  # noqa: E402
 import zoom_vtt_to_ref  # noqa: E402
 
-CLI = Path(os.environ.get("MEET_EVAL_CLI", BIN / "meet-cli.exe"))
+CLI = Path(os.environ.get("DIARIST_EVAL_CLI", BIN / "diarist-cli.exe"))
 ENGINE_DIR = Path(
     os.environ.get(
-        "MEET_EVAL_ENGINE_DIR", REPO / "engine" / "nemo-speech" / "nemo-speech-0.2.0-windows-x86_64-cuda"
+        "DIARIST_EVAL_ENGINE_DIR", REPO / "engine" / "nemo-speech" / "nemo-speech-0.2.0-windows-x86_64-cuda"
     )
 )
-MODELS_DIR = Path(os.environ.get("MEET_EVAL_MODELS_DIR", REPO / "models"))
+MODELS_DIR = Path(os.environ.get("DIARIST_EVAL_MODELS_DIR", REPO / "models"))
 RUN_SCHEMA = 1
 
 
@@ -70,7 +70,7 @@ def log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Audio and meet-cli
+# Audio and diarist-cli
 
 
 def probe(path: Path) -> dict:
@@ -114,14 +114,14 @@ def cli(data: Path, *args: str, capture: bool = True) -> subprocess.CompletedPro
     cmd = [str(CLI), "--data-dir", str(data), "--models-dir", str(MODELS_DIR), "--engine-dir", str(ENGINE_DIR), *args]
     p = subprocess.run(cmd, capture_output=capture, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:
-        raise RuntimeError(f"meet-cli {' '.join(args[:2])} failed ({p.returncode}): {(p.stderr or '')[-2000:]}")
+        raise RuntimeError(f"diarist-cli {' '.join(args[:2])} failed ({p.returncode}): {(p.stderr or '')[-2000:]}")
     return p
 
 
 def prepare_data_root(config: str, cfg: dict) -> Path:
     data = WORK / "data" / config
     data.mkdir(parents=True, exist_ok=True)
-    if not (data / "meet-assist.db").is_file():
+    if not (data / "diarist.db").is_file():
         cli(data, "models", "scan")
     cli(data, "models", "select", "asr", cfg["asr"])
     cli(data, "models", "select", "diarizer", cfg["diarizer"])
@@ -145,7 +145,7 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
     if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
-        log(f"[{sid}] note: cached run was made by a different meet-cli build (use --force to redo)")
+        log(f"[{sid}] note: cached run was made by a different diarist-cli build (use --force to redo)")
     return meta
 
 
@@ -153,7 +153,7 @@ def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
     d = run_dir(config, s.id)
     d.mkdir(parents=True, exist_ok=True)
     wav, duration = wav_for(s)
-    log(f"[{s.id}] meet-cli transcribe ({duration / 60:.1f} min, config {config})")
+    log(f"[{s.id}] diarist-cli transcribe ({duration / 60:.1f} min, config {config})")
     t0 = time.perf_counter()
     p = cli(
         data, "transcribe", str(wav), "--language", cfg["language"], "--title", s.id, "--rttm",
@@ -162,7 +162,7 @@ def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
     wall = time.perf_counter() - t0
     m = re.search(r"^meeting (\d+) \((\w+)\)", p.stdout, re.M)
     if not m:
-        raise RuntimeError(f"cannot find the meeting id in meet-cli output:\n{p.stdout}")
+        raise RuntimeError(f"cannot find the meeting id in diarist-cli output:\n{p.stdout}")
     mid, uid = m.group(1), m.group(2)
     cli(data, "export", mid, "--format", "rttm", "--out", str(d / "hyp.rttm"))
     audio_dir = data / "audio" / uid
@@ -292,7 +292,7 @@ def model_info(name: str) -> dict:
 
 
 def engine_commands(config: str, metas: dict[str, dict]) -> list[str]:
-    """The nemo-speech command lines meet-core ran, from a run's engine.log,
+    """The nemo-speech command lines diarist-core ran, from a run's engine.log,
     with paths reduced to placeholders."""
     for sid, meta in metas.items():
         log_path = run_dir(config, sid) / "engine.log"
@@ -421,14 +421,14 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         "## Setup",
         "",
         f"- Date: {today}",
-        f"- meet-cli: `{CLI.name}` sha256 `{(any_meta.get('cli_sha256') or sha256_file(CLI))[:16]}` (built once from this repo at the start of Phase 4; see tools/eval/.bin)",
+        f"- diarist-cli: `{CLI.name}` sha256 `{(any_meta.get('cli_sha256') or sha256_file(CLI))[:16]}` (built once from this repo at the start of Phase 4; see tools/eval/.bin)",
         f"- Engine: nemo-speech {any_meta.get('engine_version') or '?'} (`{ENGINE_DIR.name}`)",
         f"- ASR: {asr.get('name')} `{asr.get('repo')}` rev `{asr.get('revision', '')[:12]}` sha256 `{asr.get('sha256', '')[:16]}`"
         f" (local .verified matches: {asr.get('verified')})",
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
         f" (local .verified matches: {diar.get('verified')}); preset v3-streaming (runtime default)",
-        f"- meet-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ...`, then `export --format rttm`",
-        "- Engine command lines (from meet-core's engine.log): "
+        f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ...`, then `export --format rttm`",
+        "- Engine command lines (from diarist-core's engine.log): "
         + "; ".join(f"`{c}`" for c in engine_commands(config, metas)),
         "- Word-to-speaker fusion: the runtime's own tags (start-anchored argmax); no app-side smoothing yet",
         f"- Text normaliser: {NORMALIZER_NAME}",
@@ -572,7 +572,7 @@ def main() -> None:
         meta = None if a.force else cached(a.config, sid, cfg)
         if meta is None and not a.metrics_only:
             if not CLI.is_file():
-                raise SystemExit(f"{CLI} missing: build meet-cli once and copy it there (README)")
+                raise SystemExit(f"{CLI} missing: build diarist-cli once and copy it there (README)")
             data = data or prepare_data_root(a.config, cfg)
             meta = transcribe(s, a.config, cfg, data)
         if meta is None:

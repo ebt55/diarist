@@ -73,7 +73,7 @@ wheels = [
 ]
 
 [[package]]
-name = "meet-assist-eval"
+name = "diarist-eval"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

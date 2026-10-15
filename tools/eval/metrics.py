@@ -205,7 +205,7 @@ def wer_metrics(ref_segs: list[dict], hyp_segs: list[dict], hyp_word_segs: list[
 
 
 # --------------------------------------------------------------------------
-# Hypothesis loading (meet-cli export --format json)
+# Hypothesis loading (diarist-cli export --format json)
 
 
 def hyp_from_export(doc: dict, session_id: str) -> tuple[list[dict], list[dict]]:
@@ -281,7 +281,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ref-seglst", type=Path, required=True)
     ap.add_argument("--ref-rttm", type=Path, required=True)
-    ap.add_argument("--hyp-json", type=Path, required=True, help="meet-cli export --format json")
+    ap.add_argument("--hyp-json", type=Path, required=True, help="diarist-cli export --format json")
     ap.add_argument("--hyp-rttm", type=Path)
     ap.add_argument("--duration", type=float)
     ap.add_argument("--session-id", default="s")

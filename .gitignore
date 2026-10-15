@@ -27,7 +27,7 @@ apps/desktop/src-tauri/gen/schemas/
 # Agent worktrees created inside the repo
 .claude/worktrees/
 
-# Eval harness (tools/eval): local meet-cli copy, scratch and cache, venv, and
+# Eval harness (tools/eval): local diarist-cli copy, scratch and cache, venv, and
 # the private session list (absolute paths to the user's recordings)
 tools/eval/.bin/
 tools/eval/.work/
