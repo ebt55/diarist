@@ -29,12 +29,39 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Dev CLI:
+Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p meet-cli -- version               # prints "meet-cli 0.1.0"
-cargo run -p meet-cli -- transcribe some.wav   # stub: "not implemented", exit code 1 (2 = usage error)
+cargo run -p meet-cli -- version                     # prints "meet-cli 0.1.0"
+cargo run -p meet-cli -- doctor                      # data root, selections, GPU, free VRAM
+cargo run -p meet-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
+cargo run -p meet-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
+cargo run -p meet-cli -- engine install              # runtime zip from manifests/engine.json
+cargo run --release -p meet-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
+cargo run -p meet-cli -- list | show <id> | search <words> | export <id> --format srt
 ```
+
+Global flags: `--data-dir` (default: `portable.txt` next to the exe, then
+`HKCU\Software\meet-assist\DataRoot`, then
+`%LOCALAPPDATA%\app.meetassist.desktop`), `--db`, and `--models-dir` /
+`--engine-dir` to use models and a runtime from elsewhere, e.g. the repo's
+local copies:
+
+```sh
+cargo run --release -p meet-cli -- --data-dir %TEMP%\ma --models-dir models --engine-dir engine transcribe data\samples\ES2002a.Mix-Headset.wav
+```
+
+Gated tests (skipped unless the variables are set):
+
+| Variable | Tests |
+|---|---|
+| `MEET_ASSIST_SAMPLES` (folders, `;`-separated) | `--test decode_samples`: every `*.m4a` decodes within 50 ms of ffprobe (run with `--release`) |
+| `MEET_ASSIST_MODELS_DIR` | real GGUF headers, scan, classification |
+| `MEET_ASSIST_ENGINE_DIR` + `MEET_ASSIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
+| `MEET_ASSIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
+
+`UPDATE_GOLDEN=1 cargo test -p meet-core golden` rewrites the export golden
+files in `crates/core/tests/golden/`.
 
 `.cargo/config.toml` turns on the MSRV-aware resolver
 (`incompatible-rust-versions = "fallback"`), so `cargo update` picks dependency
@@ -56,8 +83,8 @@ versions that support the workspace `rust-version` (1.90) when they exist.
   `.cargo/config.toml` sets `TS_RS_EXPORT_DIR` and `TS_RS_LARGE_INT=number`
   (ids and timestamps are `i64` but stay below 2^53).
 - **Store conformance:** `crates/core/tests/store_conformance.rs` runs every
-  case against `MemoryStore`; a new `Store` implementation adds one test that
-  calls `run_all` with its own factory.
+  case against `MemoryStore` and `SqliteStore` (in-memory); a new `Store`
+  implementation adds one test that calls `run_all` with its own factory.
 - **FFI sidecar wire format** (not on the main path):
   `cargo test -p meet-core --features ffi-wire`.
 - **Mock data:** the desktop app starts on `MemoryStore::demo()` (500
