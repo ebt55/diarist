@@ -1,5 +1,3 @@
-# Diarist
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="branding/wordmark-dark.svg">
   <img src="branding/wordmark.svg" alt="Diarist" height="64">
