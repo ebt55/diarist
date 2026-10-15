@@ -29,7 +29,7 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cd apps/desktop && bun install && bun run build && bun run check
+cd apps/desktop && bun install && bun run build && bun run check && bun run test
 ```
 
 All of these must pass on every commit. Tests that need a GPU, the runtime,

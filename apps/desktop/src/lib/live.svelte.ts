@@ -17,6 +17,7 @@ import type { Toggled } from "./generated/Toggled";
 import type { WarningNote } from "./generated/WarningNote";
 import type { WordsUpdate } from "./generated/WordsUpdate";
 import { ME_COLOR, SPEAKER_PALETTE } from "./generated/palette";
+import { OpenOnce } from "./openOnce";
 import { app } from "./state.svelte";
 
 /** Text for a warning banner. */
@@ -146,7 +147,7 @@ class LiveStore {
   #rebuild: ReturnType<typeof setTimeout> | undefined;
   #ticker: ReturnType<typeof setInterval> | undefined;
   #noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  #openedFor: MeetingId | null = null;
+  #opener = new OpenOnce();
   #lag: Record<string, Lag> = {};
 
   get active(): boolean {
@@ -312,9 +313,9 @@ class LiveStore {
       clearInterval(this.#ticker);
       this.#ticker = undefined;
     }
-    if (v.phase === "recording" && v.meeting_id !== null && this.#openedFor !== v.meeting_id) {
-      this.#openedFor = v.meeting_id;
-      app.open(v.meeting_id);
+    const open = this.#opener.update(v.phase, v.meeting_id);
+    if (open !== null) {
+      app.open(open);
       void app.refreshMeetings();
     }
     if (prev === "stopping" && v.phase === "idle") void app.refreshMeetings();

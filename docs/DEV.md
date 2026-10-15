@@ -165,6 +165,7 @@ From `apps/desktop`:
 bun install
 bun run build     # vite build into apps/desktop/dist
 bun run check     # svelte-check (TypeScript + Svelte)
+bun run test      # bun test: plain TypeScript logic under tests/
 bun run dev       # Vite dev server on http://127.0.0.1:1420 (no Tauri APIs in a plain browser)
 ```
 

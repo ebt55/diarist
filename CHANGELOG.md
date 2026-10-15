@@ -4,6 +4,11 @@ All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [Unreleased]
 
+- Fixed: the live view did not open for the second and later recordings of
+  a session until Stop. A recording made after deleting the previous one
+  gets that meeting id again, and the app took it for the recording it had
+  already opened.
+
 ## [0.1.0-beta.1] - 2026-10-15
 
 The first public release, as a beta pre-release.
