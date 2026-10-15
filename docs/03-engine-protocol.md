@@ -58,14 +58,19 @@ Rules:
 
 ## v1 adapter: `NemoCliEngine`
 
-Two child-process passes per file, exact command lines in `docs/research/08-runtime-cli-contract.md`:
-1. `nemo-speech.exe transcribe <wav> --json --output <words.json>` with Parakeet TDT 0.6B v3 and no `--diarize`. Output `words[{word, start, end, confidence, speaker?}]` (seconds; confidence always 1.0 in v0.2.0, stored as `None`).
-2. `nemo-speech.exe diarize <wav>` with the streaming preset (never `--offline`, see research/03 D), output segments `{start, end, speaker}`.
-3. `fusion::assign_words(words, segments)`: for each word, the speaker whose segment overlaps the start-anchored window [t0 - 40 ms, min(t1, t0 + 160 ms)] the most; words with no overlap take the nearest segment's speaker; labels normalized to `spk_N` in order of first appearance. Then `Utterance` per contiguous same-speaker stretch, `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
+One child process per file, exact command line and output schema in `docs/research/08-runtime-cli-contract.md` section 1:
 
-Never run plain `transcribe --diarize` on a file: on a 21-minute file the runtime's fused path tags only 63 percent of words correctly in the first ten minutes (research/03). Fallback adapter when Parakeet's 4.9 GB does not fit: Nemotron Speech Streaming EN with `--stream --endpointing --diarize --json` (99.6 percent tags), whose words carry `speaker` directly.
+`nemo-speech.exe transcribe <wav> --model <nemotron.gguf> --stream --endpointing --diarize --diar-model <diar.gguf> --device cuda:0 --json --output <words.json> --force`
 
-Long files: the spike follow-up runs the 77-minute CIMC recording and a 2-hour file. If the ASR pass degrades past the runtime's positional limit, split the WAV at silences into chunks of at most 10 minutes, transcribe each, and offset the timestamps before fusion.
+- Environment: `NEMO_SPEECH_MODEL_DIR` set to our models dir; `PATH` = engine `bin`, System32, Windows. Model paths are always absolute (a short name triggers a download).
+- Output `words[{word, start, end, confidence, speaker?}]` (seconds on an 80 ms grid; confidence always 1.0 in v0.2.0, stored as `None`; `speaker` 1-based, absent when untagged). Normalized to `spk_N` in order of first appearance; `Utterance` per contiguous same-speaker stretch; then `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
+- Errors: exit codes 0 ok, 1 runtime, 2 invalid argument, 3 missing model, 4 unsupported; with `--json` a one-line `{"error":{...}}` object on stderr. Mapped to `Error { code }`.
+- No progress output exists; the adapter emits `Progress` from elapsed time against the expected duration (27x real time measured).
+- Optional second pass when requested (eval harness, `keep_diarization_segments` setting): `nemo-speech.exe diarize <wav> --model <diar.gguf> --device cuda:0 --format rttm --output <seg.rttm> --force` (streaming preset; never `--offline`). Kept for the eval harness and re-fusion.
+
+Rules learned the hard way (research/03 and 08): never plain `transcribe --diarize` without `--stream --endpointing` (first ten minutes mislabelled); never Parakeet as the only ASR on long files (silent drops); at most 8 labels per stream for a whole recording.
+
+Experimental `NemoCascadeEngine` (behind a setting): Parakeet TDT v3 `transcribe` without diarize, standalone `diarize`, then `fusion::assign_words(words, segments)` (start-anchored window [t0 - 40 ms, min(t1, t0 + 160 ms)], nearest segment otherwise). Only trusted once gap detection against a Nemotron pass exists.
 
 ## v2 live adapter: `NemoWsLiveEngine`
 
