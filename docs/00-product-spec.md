@@ -21,6 +21,10 @@ Primarily the author, on one machine: Windows 11, RTX 3080 10 GB, 32 GB RAM. Sec
 7. **Fast and light.** Native-feeling Windows app. Cold start to window well under a second. Installer small; the ML models download on first run into a local models folder.
 8. **Painless install.** No Python, no torch, no CUDA toolkit required from the user. A single installer or portable zip plus a first-run model download. The GPU driver is the only prerequisite.
 
+## Guiding principle: nobody fights the app
+
+Like ComfyUI, the user owns the folders. Models and the runtime are plain files in plain folders; drop one in and it is usable after Refresh, no app release needed. Every download has Retry, a copyable link, the expected hash and the destination folder, so a browser plus a file copy always works when the built-in download does not. Nothing is a hard gate: first-run setup can be skipped and each action (Import, Record) says exactly what it is missing and offers the one-click fix. Users can add models the app has never heard of by URL or by file, pick the runtime package that matches their GPU (CUDA, Vulkan, CPU) with a manual override, and read a plain "why isn't it working" checklist with fix buttons. The app checks what it can and explains what it cannot, in the user's words, with the next step attached.
+
 ## What it does not do
 
 - No meeting notes, summaries, action items or LLM features in v1 or v2. The transcript is the deliverable. (A later "send transcript to a local LLM" hook is fine, but out of scope now.)
