@@ -40,6 +40,15 @@ pub const CAPTURE_AUTOCONVERT: &str = "capture.autoconvert";
 pub const CAPTURE_LOOPBACK_AGC: &str = "capture.loopback_agc";
 /// Automatic gain on the mic.
 pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
+/// Start `nemo-speech serve` at app launch instead of on the first Record
+/// or when the start sheet opens.
+pub const ENGINE_PRELOAD: &str = "engine.preload";
+/// Minutes without a recording after which the live server is stopped
+/// (frees its VRAM); `0` keeps it running.
+pub const ENGINE_IDLE_MINUTES: &str = "engine.idle_minutes";
+/// Low-VRAM mode: file imports use Nemotron 3.5 when it is installed (it
+/// peaks at 1.8 GB against 2.6 GB for the EN model).
+pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
@@ -61,6 +70,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (CAPTURE_AUTOCONVERT, "true"),
     (CAPTURE_LOOPBACK_AGC, "true"),
     (CAPTURE_MIC_AGC, "false"),
+    (ENGINE_PRELOAD, "false"),
+    (ENGINE_IDLE_MINUTES, "10"),
+    (ENGINE_LOW_VRAM, "false"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -111,6 +123,26 @@ pub fn get_bool(settings: &Settings, key: &str) -> bool {
     parse_bool(get(settings, key))
         .or_else(|| default_of(key).and_then(parse_bool))
         .unwrap_or(false)
+}
+
+/// A non-negative integer setting: the stored value when it parses, else
+/// the key's default, else 0.
+pub fn get_u64(settings: &Settings, key: &str) -> u64 {
+    get(settings, key)
+        .trim()
+        .parse()
+        .ok()
+        .or_else(|| default_of(key).and_then(|d| d.parse().ok()))
+        .unwrap_or(0)
+}
+
+/// How long the live server may sit without a recording before it is
+/// stopped (`engine.idle_minutes`; `None` for 0: never).
+pub fn engine_idle_timeout(settings: &Settings) -> Option<std::time::Duration> {
+    match get_u64(settings, ENGINE_IDLE_MINUTES) {
+        0 => None,
+        m => Some(std::time::Duration::from_secs(m.min(7 * 24 * 60) * 60)),
+    }
 }
 
 /// The language for new imports and recordings (`default_language`, "en"
@@ -172,6 +204,19 @@ mod tests {
         assert!(get_bool(&s, KEEP_LIVE_RUNS));
         store.remove_setting(DEFAULT_LANGUAGE).unwrap();
         assert_eq!(default_language(&effective(&store).unwrap()), "en");
+        // Engine lifecycle: lazy start, 10 idle minutes by default.
+        assert!(!get_bool(&s, ENGINE_PRELOAD) && !get_bool(&s, ENGINE_LOW_VRAM));
+        assert_eq!(
+            engine_idle_timeout(&s),
+            Some(std::time::Duration::from_secs(600))
+        );
+        store.set_setting(ENGINE_IDLE_MINUTES, "0").unwrap();
+        assert_eq!(engine_idle_timeout(&effective(&store).unwrap()), None);
+        store.set_setting(ENGINE_IDLE_MINUTES, "soon").unwrap();
+        assert_eq!(
+            get_u64(&effective(&store).unwrap(), ENGINE_IDLE_MINUTES),
+            10
+        );
         assert_eq!(get(&Settings::default(), "unknown"), "");
     }
 

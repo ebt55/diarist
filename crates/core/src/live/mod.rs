@@ -39,7 +39,7 @@ pub use rerun::rerun_post_pass;
 pub use snapshot::snapshot;
 pub use views::{
     LiveLevels, LivePhase, LiveStateView, LiveStatusView, PostPassView, ServeView, StartRequest,
-    StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled, WarningNote,
+    StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled, WarningNote, STOP_CONFIRM_WINDOW_MS,
 };
 
 use std::collections::{BTreeMap, HashMap};

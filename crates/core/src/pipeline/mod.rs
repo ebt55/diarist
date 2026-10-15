@@ -32,6 +32,24 @@ pub struct ImportRequest {
     pub diarize: bool,
 }
 
+/// Imports a crash or a forced quit interrupted: file meetings still in
+/// `processing` when the app starts (no import job can be running yet)
+/// become `failed`, so the library stops showing them as busy. Returns
+/// their ids and titles. Call it before the first import is queued.
+pub fn recover_interrupted_imports(
+    store: &dyn crate::store::Store,
+) -> crate::Result<Vec<(crate::types::MeetingId, String)>> {
+    use crate::types::{MeetingStatus, Source};
+    let mut out = Vec::new();
+    for m in store.list_meetings()? {
+        if m.source == Source::File && m.status == MeetingStatus::Processing {
+            store.set_meeting_status(m.id, MeetingStatus::Failed)?;
+            out.push((m.id, m.title));
+        }
+    }
+    Ok(out)
+}
+
 /// The log of the most recent engine job under `audio_root`
 /// (`audio/<uid>/engine.log`, newest by modification time) and its last
 /// `max_bytes` (cut at a line start). `None` when no job has run.
@@ -296,6 +314,41 @@ mod tests {
 
     fn id(s: &str) -> JobId {
         JobId(s.to_owned())
+    }
+
+    #[test]
+    fn interrupted_imports_become_failed() {
+        use crate::store::{MemoryStore, NewMeeting, Store};
+        use crate::types::{MeetingStatus, Source};
+        let store = MemoryStore::new();
+        let new = |title: &str, source: Source, status: MeetingStatus| {
+            store
+                .create_meeting(NewMeeting {
+                    title: title.into(),
+                    source,
+                    source_path: None,
+                    language: "en".into(),
+                    diarize_mic: false,
+                    started_at: 1,
+                    status,
+                })
+                .unwrap()
+                .id
+        };
+        let stuck = new("stuck import", Source::File, MeetingStatus::Processing);
+        let live = new("live", Source::Live, MeetingStatus::Processing);
+        let done = new("done", Source::File, MeetingStatus::Done);
+        let r = recover_interrupted_imports(&store).unwrap();
+        assert_eq!(r, vec![(stuck, "stuck import".to_owned())]);
+        let status = |id| store.get_meeting(id).unwrap().meeting.status;
+        assert_eq!(status(stuck), MeetingStatus::Failed);
+        assert_eq!(
+            status(live),
+            MeetingStatus::Processing,
+            "live recovery owns it"
+        );
+        assert_eq!(status(done), MeetingStatus::Done);
+        assert!(recover_interrupted_imports(&store).unwrap().is_empty());
     }
 
     #[test]

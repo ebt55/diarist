@@ -10,4 +10,22 @@ export type DownloadItem = { kind: DownloadKind,
 /**
  * What `install_engine` / `pull_model` take.
  */
-name: string, label: string, size_bytes: number, installed: boolean, };
+name: string, label: string, size_bytes: number, installed: boolean, 
+/**
+ * Fetched by the first-run screen (the engine, the diarizer and the
+ * default ASR model); the others are optional, from Settings.
+ */
+required: boolean, 
+/**
+ * Offered only with a warning (Parakeet: may skip speech).
+ */
+experimental: boolean, 
+/**
+ * Where it is downloaded from, and its SHA-256, so a failed download
+ * can be fetched by hand.
+ */
+url: string, sha256: string, 
+/**
+ * The folder it lands in (absolute).
+ */
+dest: string, licence: string, };

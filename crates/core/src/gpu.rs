@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use nvml_wrapper::Nvml;
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
 
@@ -94,6 +96,48 @@ pub fn nvml_vram(index: u32) -> Option<VramReading> {
     })
 }
 
+/// The oldest CUDA driver API the runtime's CUDA package runs on (CUDA 13,
+/// driver R580 or newer; docs/04 section 4).
+pub const MIN_CUDA_DRIVER: i32 = 13_000;
+
+/// One NVIDIA GPU as NVML describes it (first-run check, diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct GpuInfo {
+    /// e.g. "NVIDIA GeForce RTX 3080".
+    pub name: String,
+    pub vram_total_mb: u32,
+    pub vram_free_mb: u32,
+    /// Display driver version, e.g. "610.88".
+    pub driver_version: String,
+    /// Highest CUDA version the driver supports, e.g. "13.1".
+    pub cuda_version: Option<String>,
+    /// The driver is new enough for the CUDA package.
+    pub cuda_ok: bool,
+}
+
+/// GPU `index` from NVML (`None` without an NVIDIA driver).
+pub fn gpu_info(index: u32) -> Option<GpuInfo> {
+    let nvml = nvml()?;
+    let dev = nvml.device_by_index(index).ok()?;
+    let mem = dev.memory_info().ok()?;
+    let cuda = nvml.sys_cuda_driver_version().ok();
+    Some(GpuInfo {
+        name: dev.name().unwrap_or_else(|_| "NVIDIA GPU".into()),
+        vram_total_mb: (mem.total >> 20) as u32,
+        vram_free_mb: (mem.free >> 20) as u32,
+        driver_version: nvml.sys_driver_version().unwrap_or_default(),
+        cuda_version: cuda.map(|v| {
+            format!(
+                "{}.{}",
+                nvml_wrapper::cuda_driver_version_major(v),
+                nvml_wrapper::cuda_driver_version_minor(v)
+            )
+        }),
+        cuda_ok: cuda.is_some_and(|v| v >= MIN_CUDA_DRIVER),
+    })
+}
+
 /// Free memory from NVML, else from `nemo-speech doctor` in `engine_dir`
 /// (`None` when neither can tell).
 pub fn free_vram(index: u32, engine_dir: Option<&Path>) -> Option<VramReading> {
@@ -151,6 +195,10 @@ mod tests {
             let total = r.total_mb.unwrap();
             assert!(r.free_mb <= total && total >= 1_024, "{r:?}");
             assert_eq!(r.source, VramSource::Nvml);
+            let g = gpu_info(0).unwrap();
+            assert!(g.name.contains("NVIDIA") || !g.name.is_empty(), "{g:?}");
+            assert!(!g.driver_version.is_empty(), "{g:?}");
+            assert_eq!(g.vram_total_mb, total);
         }
     }
 }

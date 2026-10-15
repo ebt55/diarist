@@ -678,7 +678,8 @@ pub async fn pull_model(
     .await
 }
 
-/// What "Download recommended" would fetch, engine first.
+/// Every manifest download (engine first, then required, optional and
+/// experimental models) with whether it is installed, its URL and hash.
 #[tauri::command]
 pub async fn recommended_downloads(
     store: State<'_, AppStore>,
@@ -687,33 +688,11 @@ pub async fn recommended_downloads(
     let data_paths = paths.paths.clone();
     with_store(&store, move |s| -> meet_core::Result<Vec<DownloadItem>> {
         let manifest = Manifest::load(&data_paths.root)?;
-        let files = s.list_model_files()?;
-        let mut items = Vec::new();
-        if let Some(e) = manifest.default_engine() {
-            items.push(DownloadItem {
-                kind: DownloadKind::Engine,
-                name: e.name.clone(),
-                label: format!("Engine {} ({})", e.version, e.backend),
-                size_bytes: e.size_bytes,
-                installed: files.iter().any(|f| {
-                    f.role == ModelRole::Engine
-                        && !f.missing
-                        && f.architecture.as_deref() == Some(e.version.as_str())
-                }),
-            });
-        }
-        for m in manifest.required() {
-            items.push(DownloadItem {
-                kind: DownloadKind::Model,
-                name: m.name.clone(),
-                label: format!("{} ({})", m.name, m.role),
-                size_bytes: m.size_bytes,
-                installed: files
-                    .iter()
-                    .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str())),
-            });
-        }
-        Ok(items)
+        Ok(models::download_items(
+            &data_paths,
+            &manifest,
+            &s.list_model_files()?,
+        ))
     })
     .await
 }

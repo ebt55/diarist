@@ -441,6 +441,18 @@ pub struct DownloadItem {
     pub label: String,
     pub size_bytes: u64,
     pub installed: bool,
+    /// Fetched by the first-run screen (the engine, the diarizer and the
+    /// default ASR model); the others are optional, from Settings.
+    pub required: bool,
+    /// Offered only with a warning (Parakeet: may skip speech).
+    pub experimental: bool,
+    /// Where it is downloaded from, and its SHA-256, so a failed download
+    /// can be fetched by hand.
+    pub url: String,
+    pub sha256: String,
+    /// The folder it lands in (absolute).
+    pub dest: String,
+    pub licence: String,
 }
 
 #[cfg(test)]

@@ -3,4 +3,4 @@
 /**
  * What the global shortcut or the tray did.
  */
-export type ToggleAction = "started" | "stopped" | "failed";
+export type ToggleAction = "started" | "stopped" | "failed" | "confirm_stop" | "stop_armed";

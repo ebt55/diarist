@@ -18,6 +18,9 @@ export const SETTING_DEFAULTS = {
   "capture.autoconvert": "true",
   "capture.loopback_agc": "true",
   "capture.mic_agc": "false",
+  "engine.preload": "false",
+  "engine.idle_minutes": "10",
+  "engine.low_vram": "false",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

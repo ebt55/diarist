@@ -1,6 +1,7 @@
 [
   {
     "name": "nemotron-3.5",
+    "label": "Nemotron 3.5 ASR Streaming 0.6B: 40+ languages, less VRAM",
     "pull_name": "nemotron-3.5",
     "role": "asr",
     "required": false,
@@ -20,6 +21,7 @@
   },
   {
     "name": "nemotron-3-diarization",
+    "label": "Nemotron 3 Diarization: who spoke when, up to 8 speakers",
     "pull_name": "nemotron-3-diarization",
     "role": "diarizer",
     "required": true,
@@ -38,6 +40,7 @@
   },
   {
     "name": "nemotron-en",
+    "label": "Nemotron Speech Streaming EN 0.6B: English speech to text (default)",
     "pull_name": "nemotron-en",
     "role": "asr",
     "required": true,
@@ -56,6 +59,7 @@
   },
   {
     "name": "parakeet-tdt",
+    "label": "Parakeet TDT 0.6B v3: experimental, punctuates but may skip speech",
     "pull_name": "parakeet-tdt",
     "role": "asr",
     "required": false,

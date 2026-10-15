@@ -13,6 +13,8 @@
 //! - [`download`]: engine zip download (resume, SHA-256, atomic rename) and
 //!   extraction; [`pull`]: `nemo-speech pull` for models, verified against
 //!   the manifest; [`doctor`]: runtime version and GPU.
+//! - [`setup`]: the first-run check (engine, models, GPU, disk) and the
+//!   download list with URLs and hashes.
 //! - [`status`] assembles the Settings screen's [`EngineStatus`];
 //!   [`resolve_selection`] gives the engine and model paths to run with and
 //!   [`select_engine`] builds the file engine from them (scanning first when
@@ -27,6 +29,7 @@ pub mod paths;
 pub mod pull;
 pub mod relocate;
 pub mod scan;
+pub mod setup;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,8 +41,9 @@ pub use download::{download_file, install_engine, sha256_file, verify_file};
 pub use gguf::{read_header, GgufHeader, GgufValue};
 pub use manifest::{EngineEntry, Manifest, ModelEntry, TESTED_ENGINE_VERSIONS};
 pub use paths::{free_disk_bytes, DataPaths, DataRootSource};
-pub use pull::{pull, Pulled};
+pub use pull::{pull, pull_dir, pull_with_progress, Pulled};
 pub use scan::{ensure_selections, recommended, scan, ScanReport};
+pub use setup::{download_items, setup_status, SetupStatus};
 
 use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
@@ -192,6 +196,46 @@ pub fn select_engine_with(
         selection: sel,
         experimental,
     })
+}
+
+/// The manifest model low-VRAM mode switches file imports to: Nemotron 3.5,
+/// whose file pass peaks at 1.8 GB against 2.6 GB for the EN model (docs/04
+/// section 4).
+pub const LOW_VRAM_MODEL: &str = "nemotron-3.5";
+
+/// The installed [`LOW_VRAM_MODEL`] file, if any.
+pub fn low_vram_asr(store: &dyn Store) -> Result<Option<ModelFile>> {
+    Ok(store.list_model_files()?.into_iter().find(|f| {
+        f.role == ModelRole::Asr && !f.missing && f.manifest_name.as_deref() == Some(LOW_VRAM_MODEL)
+    }))
+}
+
+/// The engine for a file import: the selection, except that with
+/// `low_vram` set and Nemotron 3.5 installed, the import runs on Nemotron
+/// 3.5 (the stored selection is unchanged). Returns whether it switched.
+pub fn select_import_engine(
+    paths: &DataPaths,
+    store: &dyn Store,
+    device: &str,
+    low_vram: bool,
+) -> Result<(SelectedEngine, bool)> {
+    let switch = if low_vram {
+        low_vram_asr(store)?.filter(|f| {
+            selected_file(store, ModelRole::Asr)
+                .ok()
+                .flatten()
+                .is_none_or(|sel| sel.id != f.id)
+        })
+    } else {
+        None
+    };
+    let overrides = EngineOverrides {
+        // The stored relative path: `find_file` matches it exactly.
+        asr: switch.as_ref().map(|f| f.path.clone()),
+        ..Default::default()
+    };
+    let built = select_engine_with(paths, store, device, &overrides)?;
+    Ok((built, switch.is_some()))
 }
 
 /// A model given as a path (scanned or not) or a [`find_file`] query, as an
@@ -394,6 +438,53 @@ mod tests {
             },
             manifest_name: None,
         }
+    }
+
+    #[test]
+    fn low_vram_mode_switches_imports_to_nemotron_35() {
+        let store = MemoryStore::new();
+        let paths = DataPaths::at("D:/data");
+        let mut n35 = scanned("models/n35.gguf", ModelRole::Asr, "n35");
+        n35.manifest_name = Some(LOW_VRAM_MODEL.into());
+        store
+            .sync_model_files(
+                &[
+                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
+                    scanned("models/en.gguf", ModelRole::Asr, "en"),
+                    scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
+                ],
+                1,
+            )
+            .unwrap();
+        select(&store, ModelRole::Engine, "e").unwrap();
+        select(&store, ModelRole::Asr, "en").unwrap();
+        select(&store, ModelRole::Diarizer, "diar").unwrap();
+        // Not installed: the selection runs.
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", true).unwrap();
+        assert!(!switched && b.selection.asr_file.display_name == "en");
+        store
+            .sync_model_files(
+                &[
+                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
+                    scanned("models/en.gguf", ModelRole::Asr, "en"),
+                    scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
+                    n35,
+                ],
+                2,
+            )
+            .unwrap();
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", true).unwrap();
+        assert!(switched);
+        assert_eq!(b.selection.asr_file.display_name, "n35");
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", false).unwrap();
+        assert!(!switched && b.selection.asr_file.display_name == "en");
+        assert_eq!(
+            selected_file(&store, ModelRole::Asr)
+                .unwrap()
+                .unwrap()
+                .display_name,
+            "en"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@
 
 pub mod audio;
 pub mod db;
+pub mod diagnostics;
 pub mod engine;
 pub mod error;
 pub mod export;
@@ -23,6 +24,7 @@ pub mod live;
 pub mod models;
 pub mod pipeline;
 pub mod protocol;
+pub mod retention;
 pub mod settings;
 pub mod store;
 pub mod transcript;

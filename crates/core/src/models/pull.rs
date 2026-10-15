@@ -49,10 +49,51 @@ pub struct Pulled {
 /// Pulls `entry` with the runtime in `engine_dir` into `models_dir`
 /// (`NEMO_SPEECH_MODEL_DIR`) and verifies size and SHA-256 against the manifest.
 pub fn pull(engine_dir: &Path, models_dir: &Path, entry: &ModelEntry) -> Result<Pulled> {
+    pull_with_progress(engine_dir, models_dir, entry, &mut |_| {})
+}
+
+/// Where `nemo-speech pull` puts `entry`: `<models>\<repo>\<revision>\`
+/// (`nvidia\Nemotron-3-Diarization\f667...\`).
+pub fn pull_dir(models_dir: &Path, entry: &ModelEntry) -> PathBuf {
+    entry
+        .repo
+        .split('/')
+        .fold(models_dir.to_path_buf(), |p, part| p.join(part))
+        .join(&entry.revision)
+}
+
+/// Bytes of the files under `dir` (partial downloads included).
+fn dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| match e.file_type() {
+                    Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+                    Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                    _ => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// [`pull`], reporting the bytes in the model's folder about four times a
+/// second while the runtime downloads (it prints no progress itself; its
+/// downloader resumes a partial file on the next pull).
+pub fn pull_with_progress(
+    engine_dir: &Path,
+    models_dir: &Path,
+    entry: &ModelEntry,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Pulled> {
     std::fs::create_dir_all(models_dir)?;
+    let watch = pull_dir(models_dir, entry);
     let mut cmd = process::command(engine_dir, Some(models_dir));
     cmd.args(["--json", "pull", &entry.pull_name]);
-    let out = process::run_with_timeout(cmd, Duration::from_secs(3_600))?;
+    progress(dir_bytes(&watch).min(entry.size_bytes));
+    let out = process::run_with_timeout_ticking(cmd, Duration::from_secs(3_600), &mut || {
+        progress(dir_bytes(&watch).min(entry.size_bytes))
+    })?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         return Err(CoreError::Models(format!(
@@ -96,6 +137,26 @@ mod tests {
         assert!(a[0].cached);
         assert_eq!(a[0].role, "diarization");
         assert!(parse_pull_output("garbage").is_err());
+    }
+
+    #[test]
+    fn pull_dir_matches_the_runtime_layout() {
+        let manifest = Manifest::builtin();
+        let entry = manifest.model("nemotron-3-diarization").unwrap();
+        let dir = pull_dir(Path::new("C:/m"), entry);
+        assert_eq!(
+            dir,
+            Path::new("C:/m")
+                .join("nvidia")
+                .join("Nemotron-3-Diarization")
+                .join("f667ed73aee57d40cc39428eb768b4fd87a0a29e")
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+        std::fs::write(tmp.path().join("a/b/x.part"), [0u8; 1234]).unwrap();
+        std::fs::write(tmp.path().join("a/y"), [0u8; 10]).unwrap();
+        assert_eq!(dir_bytes(tmp.path()), 1244);
+        assert_eq!(dir_bytes(&tmp.path().join("missing")), 0);
     }
 
     /// Re-pulls the (already present) diarizer with the real runtime when

@@ -122,7 +122,16 @@ pub enum ToggleAction {
     Started,
     Stopped,
     Failed,
+    /// Stop was asked while the window is visible: the UI asks "Stop
+    /// recording?" itself.
+    ConfirmStop,
+    /// Stop was asked once while the window is hidden: a second press
+    /// within [`STOP_CONFIRM_WINDOW_MS`] stops.
+    StopArmed,
 }
+
+/// How long a first Stop from the shortcut or the tray waits for the second.
+pub const STOP_CONFIRM_WINDOW_MS: u64 = 3_000;
 
 /// Where a toggle came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]

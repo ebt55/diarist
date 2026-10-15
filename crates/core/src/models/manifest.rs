@@ -20,6 +20,9 @@ pub const TESTED_ENGINE_VERSIONS: &[&str] = &["0.2.0"];
 pub struct ModelEntry {
     /// Our name, e.g. `nemotron-3.5`.
     pub name: String,
+    /// What the first-run screen and Settings show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Index name for `nemo-speech pull`.
     pub pull_name: String,
     pub role: ModelRole,
