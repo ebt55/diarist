@@ -213,7 +213,7 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 ## Speaker rename, merge, reassign
 
-- Rename: update `display_name` and set `name_anchor_start_ms/end_ms` to the segment the rename was invoked from (NULL when renamed from the legend without a segment). Colour: update the row.
+- Rename: update `display_name` and set `name_anchor_start_ms/end_ms` to the segment the rename was invoked from (`rename_speaker` with a segment), or to an explicit time range while recording, when no segment exists yet (`rename_speaker_at` with the live utterance's range). NULL when renamed from the legend. Anchored names carry over even for speakers with under 5 s of speech; the 5 s rule applies only to unanchored overlap matches. Colour: update the row.
 - Merge A into B: set `A.merged_into = root(B)`, and repoint any speaker whose `merged_into = A` to `root(B)` so chains stay one level deep; reject cycles. Queries resolve `COALESCE(merged_into, id)`.
 - Reassign a segment: update `segments.speaker_id`, write an `edits` row. To reassign part of a segment, split it at a word boundary first (segments and words are updated in one transaction).
 
