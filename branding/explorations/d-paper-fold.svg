@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- D: paper tile with a hairline edge, dog-ear top right; blue / brown / red, medium / long / short -->
+  <path fill="#f5f1e8" stroke="#cdc5b4" stroke-width="12" d="M112 6H381.5L506 130.5V400A106 106 0 0 1 400 506H112A106 106 0 0 1 6 400V112A106 106 0 0 1 112 6Z"/>
+  <path fill="#ddd4c2" d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+  <rect x="96" y="96" width="224" height="64" rx="32" fill="#4e79a7"/>
+  <rect x="96" y="224" width="320" height="64" rx="32" fill="#9c755f"/>
+  <rect x="96" y="352" width="160" height="64" rx="32" fill="#e15759"/>
+</svg>

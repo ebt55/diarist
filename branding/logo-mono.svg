@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="currentColor">
+  <title>Diarist</title>
+  <!-- One colour: the tile with the three lines cut out (even-odd), and the dog-ear
+       set apart from the tile by a 32-unit gap (one pixel at 16 px). -->
+  <path fill-rule="evenodd" d="M112 0H352V96A64 64 0 0 0 416 160H512V400A112 112 0 0 1 400 512H112A112 112 0 0 1 0 400V112A112 112 0 0 1 112 0Z
+    M112 96H304A16 16 0 0 1 320 112V144A16 16 0 0 1 304 160H112A16 16 0 0 1 96 144V112A16 16 0 0 1 112 96Z
+    M112 224H400A16 16 0 0 1 416 240V272A16 16 0 0 1 400 288H112A16 16 0 0 1 96 272V240A16 16 0 0 1 112 224Z
+    M112 352H240A16 16 0 0 1 256 368V400A16 16 0 0 1 240 416H112A16 16 0 0 1 96 400V368A16 16 0 0 1 112 352Z"/>
+  <path d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+</svg>

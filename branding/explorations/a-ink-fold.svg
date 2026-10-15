@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- A: ink tile, dog-ear top right; speakers 1, 2, 3 (blue, orange, red), medium / long / short -->
+  <path fill="#1b1f27" d="M112 0H384L512 128V400A112 112 0 0 1 400 512H112A112 112 0 0 1 0 400V112A112 112 0 0 1 112 0Z"/>
+  <path fill="#64748b" d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+  <rect x="96" y="96" width="224" height="64" rx="32" fill="#4e79a7"/>
+  <rect x="96" y="224" width="320" height="64" rx="32" fill="#f28e2b"/>
+  <rect x="96" y="352" width="160" height="64" rx="32" fill="#e15759"/>
+</svg>
