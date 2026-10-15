@@ -16,7 +16,7 @@ Constraints: pure SVG, no raster effects, no embedded fonts, under 8 kB each; th
 
 ## Rename checklist (done 15 Oct 2026)
 
-The project was renamed from meet-assist (now Diarist; decision in `docs/research/09-naming.md`). Identifiers, applied everywhere:
+The project was renamed from meet-assist (now Diarist; the naming decision is in local notes outside the repository). Identifiers, applied everywhere:
 - Product name (installer, window title, tray): `Diarist`.
 - Bundle identifier: `app.diarist.desktop`, so the default data root is `%LOCALAPPDATA%\app.diarist.desktop` (see migration).
 - Executable `diarist.exe`; CLI `diarist-cli` (crate `diarist-cli` in `crates/cli`); core crate `diarist-core` (lib `diarist_core`); Tauri package `diarist` (lib `diarist_lib`).
