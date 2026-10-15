@@ -34,3 +34,8 @@ Acceptance: `git grep -niE "meet[-_]?assist|meet[-_](core|cli)"` finds the old n
 ## Logo outcome (15 Oct 2026)
 
 Chosen: variant E, `branding/logo.svg`: ink tile `#1b1f27` with a folded top-right corner in the "me" slate `#64748b`, three lines (medium, long, short) in the first three speaker palette colours `#4e79a7`, `#f28e2b`, `#e15759`, on a 32-unit grid so edges land on whole pixels at 16 and 32 px. Contrast of the lines against the tile: 3.6, 6.8 and 4.5 to 1 (the lines never appear without the tile, so the plan's "against white" rule was relaxed for orange). Mono, tray-recording, wordmark (Inter 4.001 outlines, light and dark files), social preview and contact sheet are in `branding/`; the Tauri icon set is regenerated. Known limit: the tile outline is faint on very dark backgrounds; the lines and corner carry the shape. The app's tray still draws its red dot at runtime over the colour icon; switching it to `tray-recording.svg` is optional polish.
+
+## Domain and key (15 Oct 2026)
+
+- `diarist.dev` is registered to the owner. The landing page (GitHub Pages, plan in the "Landing page for diarist.dev" session card) goes there; the README links to it once the site is live.
+- The updater signing key files were renamed to `%USERPROFILE%\.tauri\diarist.key` and `.pub` to match the docs; the key material is unchanged, so the public key already in `tauri.conf.json` still matches. The owner must back the private key up (no password set) before the first release.
