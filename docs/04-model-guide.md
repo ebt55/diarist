@@ -78,7 +78,7 @@ Realistic expectation: on clean meeting audio about 1 word in 15 to 20 is wrong 
 
 ## 4. Which package for which PC
 
-The runtime ships three Windows zips. The app downloads the right one after checking the GPU.
+The runtime ships three Windows zips. The setup screen checks the GPU (NVML for NVIDIA, DXGI for any vendor), preselects the package and lets you override it: CUDA 98 MB, Vulkan 19 MB, CPU 6 MB.
 
 | Your GPU | Package | Status |
 |---|---|---|
@@ -116,8 +116,10 @@ Other requirements:
 
 - Open Settings, Models, "Open models folder". Drop any GGUF the runtime supports anywhere in that folder (subfolders are fine; `asr\` and `diarization\` exist for tidiness). Press Refresh. The app reads the file's header, lists it under the right role with its size and a VRAM estimate, and you can select it. Nothing else to configure.
 - If a file is listed as "unrecognised", the runtime does not know its architecture, or it is not a speech model. You can still force it with a `<file>.meet.json` sidecar (`{"role":"asr","streaming":true}`), and the runtime's own error is shown if it cannot load it.
-- New runtime versions: extract the zip into a new folder under `engine\`, press Refresh, select it. The app warns when a version is newer than the ones it has been tested against.
-- "Download recommended" fetches the models in this guide into the same folders with hash verification. Offline machines can copy the files in by hand.
+- If a file is unrecognised but you know what it is, Settings offers "Use for speech to text" and "Use for speakers" on it, with a warning.
+- New runtime versions: Settings, Models, "Check for newer runtime" lists the NeMo-Speech.cpp releases on GitHub and installs a package next to the others. Or put the zip (checked against the manifest and extracted on Refresh) or the extracted folder under `engine\`, press Refresh, select it. The app warns when a version is newer than the ones it has been tested against.
+- "Download recommended" fetches the models in this guide into the same folders with hash verification. Every download shows its URL, SHA-256, size and folder with Retry and Copy link, so a browser and a file copy always work; a file placed by hand is hash-checked on Refresh. Offline machines copy the files in the same way.
+- Models no list knows: "Add from URL" (optional SHA-256) and "Add from file" put them into `models\user\`; `models.user.json` in the data folder adds entries to the recommended list.
 - Selections are per role; the app remembers them and falls back to the recommended model with a notice if a selected file disappears.
 
 ## 6. Languages

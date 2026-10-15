@@ -37,6 +37,7 @@ cargo run -p meet-cli -- doctor                      # data root, selections, GP
 cargo run -p meet-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
 cargo run -p meet-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
 cargo run -p meet-cli -- engine install              # runtime zip from manifests/engine.json
+cargo run -p meet-cli -- retention [--apply]         # audio past audio_retention_days (dry run by default)
 cargo run --release -p meet-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
 cargo run -p meet-cli -- list | show <id> | search <words> | export <id> --format srt
 cargo run -p meet-cli -- devices                     # audio endpoints with ids, default and comms marks
@@ -175,13 +176,52 @@ re-run it; the registry connection is occasionally refused on this network.
 From `apps/desktop`:
 
 ```sh
-bun run tauri dev            # dev window with hot reload (not yet run)
-bun run tauri build --debug  # target/debug/meet-assist.exe + target/debug/bundle/nsis/*-setup.exe
-bun run tauri build          # release build and NSIS installer (not yet run)
+bun run tauri dev                       # dev window with hot reload (not yet run)
+bun run tauri build --debug --no-bundle # target/debug/meet-assist.exe, frontend embedded
+bun run tauri build                     # release exe + NSIS installer + updater signature
 ```
+
+A plain `cargo build -p meet-assist` builds an exe that loads the frontend
+from the Vite dev server (`bun run dev`); use the `tauri build` commands for
+an exe with the frontend inside.
+
+The release build signs the updater artifact (`bundle.createUpdaterArtifacts`)
+and needs the updater private key:
+
+```sh
+export TAURI_SIGNING_PRIVATE_KEY="$USERPROFILE/.tauri/meet-assist.key"   # a path or the key itself
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""                              # this key has no password
+bun run tauri build
+```
+
+Without the key, build with `bun run tauri build -c '{"bundle":{"createUpdaterArtifacts":false}}'`.
+The key was generated once with `bunx tauri signer generate --ci -w
+%USERPROFILE%\.tauri\meet-assist.key`; it is not in the repository. Its public
+half is `plugins.updater.pubkey` in `tauri.conf.json`. Losing the private key
+means installed copies can no longer verify updates: back it up, and give it
+to CI as the `TAURI_SIGNING_PRIVATE_KEY` secret (`.github/workflows/release.yml`,
+not run yet). The update endpoint in `tauri.conf.json` is a placeholder
+(`REPLACE_WITH_GITHUB_OWNER/REPLACE_WITH_GITHUB_REPO`); while it is, Check for
+updates says the build has no update address.
 
 The Tauri CLI downloads NSIS into its cache on the first bundle. If that
 download is blocked, add `--no-bundle` to get just the exe.
+
+Release build on the reference machine (15 Oct 2026, 5 min 47 s from a warm
+cache): installer `meet-assist_0.1.0_x64-setup.exe` 6.66 MiB, exe 24.9 MiB.
+Startup and import timings: "Release measurements" below.
+
+### Installer and uninstaller
+
+`apps/desktop/src-tauri/windows/hooks.nsh` hooks Tauri's NSIS template
+(per-user install, `downloadBootstrapper` for WebView2). The POSTUNINSTALL
+hook reads `HKCU\Software\meet-assist\DataRoot`: with "Delete the application
+data" ticked it also removes meet-assist's items from a moved data root and
+the key; unticked it asks whether to remove `engine\` and `models\`. For
+tests, `uninstall.exe /S /DELETEAPPDATA` acts as if the box were ticked and
+`/S /REMOVEMODELS` answers Yes to the question. **The ticked box (and
+`/DELETEAPPDATA`) always removes `%LOCALAPPDATA%\app.meetassist.desktop`**:
+move a real data folder out of the way before testing it.
 
 Smoke test (PowerShell), as used for Phase 0 acceptance:
 
@@ -192,8 +232,13 @@ $p.Refresh(); "alive: $(-not $p.HasExited)"
 Stop-Process -Id $p.Id; $p.WaitForExit(5000) | Out-Null; "exited: $($p.HasExited)"
 ```
 
-Runtime locations: app log under `%LOCALAPPDATA%\app.meetassist.desktop\logs\`,
-WebView2 profile under `%LOCALAPPDATA%\app.meetassist.desktop\EBWebView\`.
+Runtime locations, all under the resolved data root (default
+`%LOCALAPPDATA%\app.meetassist.desktop`): the app log `logs\meet-assist.log`
+and the live server's `logs\serve.log`, the WebView2 profile `EBWebView\`,
+the window state `.window-state.json`. A scratch data root
+(`MEET_ASSIST_DATA_DIR`, `portable.txt` or the registry key) therefore never
+touches the real one. Only one instance runs at a time (single-instance
+plugin): close the app before starting another build.
 To inspect the page from outside, start the exe with
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` and
 attach any Chrome DevTools client to `http://127.0.0.1:9223`; commands can be
@@ -272,7 +317,19 @@ meet-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (HyperX Q
   `record.loopback_device`); **Enter** starts. R never stops a recording.
 - **Ctrl+.** or the Stop button asks "Stop recording?" every time;
   **Enter** confirms, Esc keeps recording. **Ctrl+Alt+R** (global) and the
-  tray toggle without asking.
+  tray's Stop ask too: with the window on screen they bring it forward and
+  show the same question (`live:toggled` `confirm_stop`); with the window
+  hidden the first press arms (Windows notification, tray item "choose again
+  to confirm", `stop_armed`) and a second press within 3 s stops.
+- The live server starts when the start sheet opens or Ctrl+Alt+R starts a
+  recording, not at launch (`engine.preload` = true starts it at launch), and
+  stops after `engine.idle_minutes` (default 10, 0 = never) without a
+  recording; the log line `live server starting: ... | idle stop after N min`
+  shows the value it was launched with.
+- Before the sheet opens, `check_ready("record")` runs; when something is
+  missing (engine, models, a streaming model, a usable GPU for the CUDA
+  build) an inline panel lists it with Install/Download, Copy link and Open
+  folder instead. Import does the same with `check_ready("import")`.
 - **R** (or a double-click) on a live line renames its speaker with
   `rename_speaker_at`: the line's meeting-time range becomes the name
   anchor, so the post-pass gives the name to whoever speaks there, even a
@@ -348,5 +405,56 @@ recorded:
 | R while recording | still recording, a hint toast, no sheet |
 | Live legend | no chip for speakers without words |
 
-The app log goes to `%LOCALAPPDATA%\app.meetassist.desktop\logs\`
-(the folder tauri-plugin-log uses) whatever the data root.
+The app log goes to `<data root>\logs\meet-assist.log`.
+
+## First run, downloads and the data folder (Phase 5)
+
+Checked on the reference machine on 15 Oct 2026 with scratch data roots set
+through `HKCU\Software\meet-assist\DataRoot` (and removed afterwards).
+
+- `setup_status` scans, installs runtime zips dropped into `engine\`
+  (`download::install_dropped_engines`, SHA-checked), and reports the GPU
+  (NVML: name, VRAM, driver, CUDA version; DXGI for other vendors), the
+  recommended runtime package (`cuda`, `vulkan`, `cpu`), free disk and every
+  download with URL, SHA-256, size and folder. The first launch opens the
+  setup screen until the user picks "Set up later" (`setup.later`).
+- Engine zips: `download_file` (ureq, platform verifier) resumes
+  `<zip>.part` with Range requests; each request runs at most two minutes,
+  three requests in a row without data end it as stalled.
+- Models: `nemo-speech pull` downloads with System32 `curl.exe` into
+  `<file>.partial` in the model's folder; `pull_with_progress` polls that
+  folder (opening each file, since a directory listing keeps the old size of
+  a file being written) and stops a pull after two minutes without new bytes.
+  `models.user.json` entries (`"direct": true` by default) are fetched by our
+  own downloader into `models\user\`.
+- Hand-placed manifest models without the runtime's `.verified` sidecar are
+  hashed once on scan and cached in `<file>.sha256`; a mismatch is reported
+  and the file is not treated as the manifest model. Linked folders under
+  `models\` are scanned.
+- Observed connections: the engine zip from `meet-assist.exe` (github.com,
+  then GitHub's download CDN on 185.199.108-111.133); model pulls only from
+  `C:\Windows\System32\curl.exe` (huggingface.co, us.aws.cdn.hf.co).
+- Move data folder: `move_data_root` copies (database through the backup
+  API, then audio, engine, models, manifests; logs and window state as they
+  are), verifies sizes, writes the registry key (cleared when the target is
+  the default root) and leaves `moved-from.json`; the UI restarts the app and
+  the next launch deletes the copied items from the old root, retrying for up
+  to 10 s while the exiting instance still holds files.
+- Retention runs at launch and every 24 h (`maintenance.rs`);
+  `meet-cli retention --dry-run|--apply [--days N]` does the same from the CLI.
+- `health_check` is the Diagnostics checklist; `diagnostics_report` (Copy
+  diagnostics) includes it.
+
+A quick way to drive the app is the DevTools protocol (see "Smoke run over
+DevTools"): `window.__TAURI_INTERNALS__.invoke('setup_status')`,
+`invoke('check_ready', {action: 'record'})`, `invoke('health_check')`,
+`invoke('move_data_root', {to})`.
+
+## Release measurements
+
+Release build of 15 Oct 2026 on the reference machine:
+
+| What | Value |
+|---|---|
+| Installer | 6.66 MiB (`meet-assist_0.1.0_x64-setup.exe`) |
+| Exe | 24.9 MiB |

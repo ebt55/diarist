@@ -1,6 +1,6 @@
 # Phase 5: ship
 
-Status: draft. Depends on Phases 2 and 3. Decisions from docs/01 and research/06 C.
+Status: delivered 15 Oct 2026 (release 0.1.0 prepared, not published). Depends on Phases 2 and 3. Decisions from docs/01 and research/06 C; the "nobody fights the app" additions from docs/00. Measurements and test results: docs/DEV.md, "First run, downloads and the data folder" and "Release measurements".
 
 ## Goal
 
