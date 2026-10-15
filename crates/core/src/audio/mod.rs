@@ -14,6 +14,7 @@ use std::path::Path;
 
 use crate::error::Result;
 
+pub mod capture;
 pub mod decode;
 #[cfg(windows)]
 mod mf;

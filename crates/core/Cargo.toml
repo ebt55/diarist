@@ -28,6 +28,15 @@ hound = "3.5"
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
 sha2 = "0.11"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# Live capture (Phase 3): lock-free rings between the capture threads and the
+# per-channel pipelines.
+rtrb = "0.3"
+# Live engine adapter: `nemo-speech serve` realtime WebSocket.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Stereo playback track after the post-pass (docs/research/06 B). Pinned to 1.x.
+flac-codec = { version = "1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
@@ -35,8 +44,14 @@ windows = { version = "0.61", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Performance",
+    "Win32_System_Power",
     "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+# WASAPI mic and render-endpoint loopback capture (docs/01 "Audio capture").
+# Pinned to 0.26.x.
+wasapi = "0.26"
 
 [dev-dependencies]
 tempfile = "3"

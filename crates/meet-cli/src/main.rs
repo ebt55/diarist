@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use meet_core::audio::capture::{self, DeviceFlow};
 use meet_core::audio::{find_on_path, ChainDecoder};
 use meet_core::engine::NemoCliEngine;
 use meet_core::export::{render, ExportDoc, ExportFormat};
@@ -138,6 +139,15 @@ enum Command {
     },
     /// Data root, selections, GPU and free VRAM.
     Doctor,
+    /// Audio endpoints (render endpoints are loopback sources).
+    Devices,
+    /// Play a 16-bit WAV to a render endpoint (dev helper for capture tests).
+    Play {
+        /// Render endpoint id or name (default: the default render endpoint).
+        #[arg(long)]
+        device: Option<String>,
+        wav: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -242,13 +252,22 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> CliResult {
-    if let Command::Version = cli.command {
-        println!("meet-cli {}", meet_core::VERSION);
-        return Ok(());
+    match &cli.command {
+        Command::Version => {
+            println!("meet-cli {}", meet_core::VERSION);
+            return Ok(());
+        }
+        Command::Devices => return devices(),
+        Command::Play { device, wav } => {
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            capture::play_wav(device.as_deref(), wav, &stop)?;
+            return Ok(());
+        }
+        _ => {}
     }
     let ctx = Ctx::open(cli)?;
     match &cli.command {
-        Command::Version => unreachable!(),
+        Command::Version | Command::Devices | Command::Play { .. } => unreachable!(),
         Command::Transcribe {
             file,
             language,
@@ -353,6 +372,41 @@ fn run(cli: &Cli) -> CliResult {
         },
         Command::Doctor => doctor(&ctx),
     }
+}
+
+fn devices() -> CliResult {
+    let devs = capture::list_devices()?;
+    for flow in [DeviceFlow::Capture, DeviceFlow::Render] {
+        println!(
+            "{}",
+            if flow == DeviceFlow::Capture {
+                "capture (mic):"
+            } else {
+                "render (loopback sources):"
+            }
+        );
+        for d in devs.iter().filter(|d| d.flow == flow) {
+            let mut marks = Vec::new();
+            if d.is_default {
+                marks.push("default");
+            }
+            if d.is_default_comms {
+                marks.push("comms");
+            }
+            println!(
+                "  {}{}
+    {}",
+                d.name,
+                if marks.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", marks.join(", "))
+                },
+                d.id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Resolves `--format`/`--out` into an export target.
