@@ -1,12 +1,18 @@
 # Diarist
 
-![Diarist: local meeting transcription with speaker labels](branding/social.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="branding/wordmark-dark.svg">
+  <img src="branding/wordmark.svg" alt="Diarist" height="64">
+</picture>
+
+Meeting transcripts with speaker labels, on your own PC. Free forever.
 
 A meeting transcriber for Windows that runs entirely on your own PC. It records
 your microphone and the sound your computer plays (Teams, Zoom, Meet, a
 browser), or imports an audio or video file, and turns it into a transcript
 where every line says who spoke. Transcripts live in a local, searchable
-database. Nothing is uploaded: there is no account, no cloud and no telemetry.
+database. Nothing is uploaded: there is no account, no cloud, no telemetry, no
+paid tier and no licence key.
 
 The speech and speaker models are NVIDIA's open Nemotron models, run by
 NVIDIA's NeMo-Speech.cpp runtime on your GPU. No Python, PyTorch or CUDA

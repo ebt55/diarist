@@ -11,7 +11,7 @@ the app gives to speakers 1, 2 and 3. It needs no text and reads at 16 px.
 | `tray-recording.svg` | One-colour mark with the red recording dot. |
 | `wordmark.svg` | Mark plus the name, for light backgrounds. |
 | `wordmark-dark.svg` | Mark plus the name, for dark backgrounds. |
-| `social.svg`, `social.png` | GitHub social preview, 1200 x 630. |
+| `social.svg`, `social.png` | GitHub social preview, 1200 x 630. Not a README banner; the README header is the wordmark. |
 | `preview.png` | Contact sheet: the mark at 16 to 512 px on light and dark, mono and tray marks. |
 | `explorations/` | The variants that were tried, and `compare.png` (each at 16 to 128 px, plus 16 and 32 px zoomed). |
 
@@ -104,10 +104,15 @@ cd apps/desktop && bunx tauri icon ../../branding/logo.svg -o src-tauri/icons
 resvg branding/social.svg branding/social.png
 ```
 
-The name and tagline are Inter 4.001 (variable) converted to outlines with fontTools,
-kerned from the font's GPOS table: the name at weight 600, optical size 32, the tagline at
-weight 400, optical size 22. Path data is relative, in units of 1/1024 em (name) and
-1/512 em (tagline), placed with a `matrix` transform.
+The name and tagline are Inter 4.001 (variable: `InterVariable.ttf` from the rsms/inter
+v4.1 release) converted to outlines with fontTools, kerned from the font's GPOS table: the
+name at weight 600, optical size 32, the tagline at weight 400, optical size 22. Path data
+is relative, in units of 1/1024 em (name) and 1/512 em (tagline), with points rounded to
+whole units, placed with a `matrix` transform. The tagline, "Meeting transcripts with
+speaker labels, on your own PC. Free forever.", is set at 44 px and does not fit one line
+at that size, so it is two lines broken after the comma, each centred on the card by its
+advance width. The first baseline is at y 452, the second one Inter line height (1.21 em,
+53.2 px) below it, at 505.2.
 
 ## Explorations
 
