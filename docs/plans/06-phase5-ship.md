@@ -21,6 +21,12 @@ A stranger with an NVIDIA GPU installs meet-assist from a 10 MB setup file, the 
 7. **Diagnostics.** Log folder opener, "copy diagnostics" (versions, GPU, data root, last engine stderr), crash recovery report on launch.
 8. **Docs.** README with screenshots and a "Choosing your package and models" section lifted from docs/04-model-guide.md (which GPU gets which runtime zip, VRAM per scenario, why these models, the 8-speaker limit, languages), INSTALL.md, PRIVACY.md (nothing leaves the machine), LICENSES.md listing runtime and model licences, CONTRIBUTING.md.
 
+## Carried over from Phases 1.5 and 2 (small, do first)
+
+- "Download recommended" still shows a toast; wire it to `install_engine` and `pull_model`, and make the `models:progress` payload a view type (ts-rs) with per-item progress.
+- Library header says "1 meetings" (pluralization).
+- Peaks for an import's original file are cached in the meeting folder (keep; just document).
+
 ## Acceptance
 
 - Fresh Windows 11 VM or a second user account: install, first run, import a file, record 2 minutes, uninstall with the checkbox off keeps the DB and FLAC; with it on, removes everything.
