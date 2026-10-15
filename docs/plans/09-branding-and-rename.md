@@ -39,3 +39,12 @@ Chosen: variant E, `branding/logo.svg`: ink tile `#1b1f27` with a folded top-rig
 
 - `diarist.dev` is registered to the owner. The landing page (GitHub Pages, plan in the "Landing page for diarist.dev" session card) goes there; the README links to it once the site is live.
 - The updater signing key files were renamed to `%USERPROFILE%\.tauri\diarist.key` and `.pub` to match the docs; the key material is unchanged, so the public key already in `tauri.conf.json` still matches. The owner must back the private key up (no password set) before the first release.
+
+## Follow-up: icon v2 (noted 15 Oct 2026)
+
+On a dark Windows taskbar next to saturated app icons (Explorer, Firefox, Brave, VS Code, Notion), the Diarist icon reads as faint: the ink tile is 1.14:1 against the taskbar by design, so only the three thin lines and the grey corner remain, and they are the quietest thing in the row. The mark works as a mark; it fails as a taskbar icon. Rework before 1.0:
+
+- Keep the concept (a page with three speaker lines and a turned corner); change the icon's surface, not the idea.
+- Candidates to draw and compare: (a) a paper tile (`#f6f3ec`) with the ink lines, which pops on dark taskbars and was only rejected for fading on white; (b) a brand-blue tile (`#4e79a7`) with paper lines and the orange and red kept as two of the three lines; (c) the ink tile with a 1 px lighter edge (`#2a3040`) and lines 25 percent thicker and brighter, the smallest change. The "no border or glow" rule in branding/README.md is up for revision for the icon only; the in-app mark on the ink UI can stay as it is.
+- The test that was missing the first time: a contact sheet of each candidate at 24, 32 and 48 px placed on screenshots of a real dark and a real light taskbar between Explorer, a browser and VS Code. Pick by that sheet, not by the mark alone.
+- Scope: `apps/desktop/src-tauri/icons/` (taskbar, Start, tray), the favicon, and `branding/`. The wordmark, social preview and website can follow or keep the current mark; they are not the problem.
