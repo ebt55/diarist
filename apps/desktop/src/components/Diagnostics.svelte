@@ -2,7 +2,8 @@
   import { onMount, tick } from "svelte";
   import { api, errorText } from "../lib/api";
   import { formatClock, formatDuration } from "../lib/format";
-  import type { LiveStatusView, ServeStatus } from "../lib/live";
+  import type { LiveStatusView } from "../lib/generated/LiveStatusView";
+  import type { ServeStatus } from "../lib/generated/ServeStatus";
   import { app } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 

@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::error::{CoreError, Result};
 use crate::types::Channel;
@@ -51,8 +52,9 @@ pub const FOLLOW_INTERVAL_MS: u64 = 2_000;
 pub const FOLLOW_CONFIRMATIONS: u32 = 2;
 
 /// Direction of an endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum DeviceFlow {
     /// Speakers, headsets, virtual cables' inputs: loopback sources.
     Render,
@@ -60,8 +62,10 @@ pub enum DeviceFlow {
     Capture,
 }
 
-/// An active audio endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// An active audio endpoint (`list_audio_devices`). TypeScript calls it
+/// `AudioDevice`: `views::DeviceInfo` is the GPU.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, rename = "AudioDevice")]
 pub struct DeviceInfo {
     /// Endpoint id (stable across reboots), used by `--mic` / `--loopback`.
     pub id: String,
@@ -148,8 +152,9 @@ impl PacketData {
 }
 
 /// Why a capture (re)opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ChangeReason {
     /// First open of the recording.
     Initial,
@@ -229,7 +234,8 @@ impl CaptureConfig {
 }
 
 /// What a running capture reports.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct CaptureStatus {
     pub device_id: Option<String>,
     pub device_name: Option<String>,

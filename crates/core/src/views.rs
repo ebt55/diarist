@@ -399,49 +399,48 @@ pub struct Waveform {
     pub peaks: Vec<Vec<u8>>,
 }
 
-/// A word in a live preview event. Times are meeting milliseconds.
+/// What a download fetches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DownloadKind {
+    /// A runtime zip (`install_engine`).
+    Engine,
+    /// A manifest model (`pull_model`).
+    Model,
+}
+
+/// Payload of `models:progress` while `install_engine` or `pull_model` runs
+/// (Settings, "Download recommended").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct LiveWord {
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub text: String,
-    /// Provisional engine label (`spk_N`, `me`), if any.
-    pub speaker_label: Option<String>,
+pub struct DownloadProgress {
+    pub kind: DownloadKind,
+    /// Engine folder name or manifest model name.
+    pub name: String,
+    pub done_bytes: u64,
+    pub total_bytes: Option<u64>,
+    /// The download (and the rescan after it) finished, successfully or not.
+    pub finished: bool,
+    pub error: Option<String>,
 }
 
-/// Payload of `transcript:words` (live mode, reserved: no producer yet).
-/// A later `rev` of the same (`channel`, `utt`) replaces the earlier one.
+impl DownloadProgress {
+    pub const NAME: &'static str = "models:progress";
+}
+
+/// One item of "Download recommended" (`recommended_downloads`): the
+/// default runtime and the required models from the manifest, with whether
+/// a matching file is already there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct LiveWordsEvent {
-    pub meeting_id: MeetingId,
-    pub channel: Channel,
-    pub utt: u32,
-    pub rev: u32,
-    /// Text may still change (not yet covered by `TextFinalUntil`).
-    pub tentative: bool,
-    pub words: Vec<LiveWord>,
-}
-
-impl LiveWordsEvent {
-    pub const NAME: &'static str = "transcript:words";
-}
-
-/// Payload of `transcript:relabel` (live mode, reserved: no producer yet).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct LiveRelabelEvent {
-    pub meeting_id: MeetingId,
-    pub channel: Channel,
-    pub from_ms: i64,
-    pub to_ms: i64,
-    /// Old label to new label.
-    pub map: BTreeMap<String, String>,
-}
-
-impl LiveRelabelEvent {
-    pub const NAME: &'static str = "transcript:relabel";
+pub struct DownloadItem {
+    pub kind: DownloadKind,
+    /// What `install_engine` / `pull_model` take.
+    pub name: String,
+    pub label: String,
+    pub size_bytes: u64,
+    pub installed: bool,
 }
 
 #[cfg(test)]

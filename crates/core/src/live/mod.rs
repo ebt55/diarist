@@ -26,10 +26,17 @@
 pub mod postpass;
 pub mod power;
 mod recover;
+mod snapshot;
+pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
 pub use recover::{recover, RecoveredMeeting};
+pub use snapshot::snapshot;
+pub use views::{
+    LiveLevels, LivePhase, LiveStateView, LiveStatusView, PostPassView, ServeView, StartRequest,
+    StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled, WarningNote,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -39,6 +46,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::audio::capture::{
     qpc_now_100ns, CaptureConfig, CaptureStatus, ChangeReason, PacketSource, SourceFactory,
@@ -135,7 +143,8 @@ pub struct StartOptions {
 }
 
 /// One live word as the UI shows it. Times are meeting time.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct LiveWord {
     pub start_ms: i64,
     pub end_ms: i64,
@@ -147,8 +156,9 @@ pub struct LiveWord {
 }
 
 /// A revision of one utterance: it replaces every earlier `rev` of the same
-/// `(channel, utt)` entirely.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `(channel, utt)` entirely (`live:words`, `live_snapshot`).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct WordsUpdate {
     pub meeting_id: MeetingId,
     pub run_id: RunId,
@@ -168,7 +178,8 @@ pub struct RelabelUpdate {
 }
 
 /// One 100 ms level reading.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct LevelsUpdate {
     pub channel: Channel,
     /// Channel time of the frame.
@@ -182,8 +193,10 @@ pub struct LevelsUpdate {
     pub raw_peak_dbfs: f32,
 }
 
-/// The engine feed of a channel stopped (record-only) or resumed.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// The engine feed of a channel stopped (record-only) or resumed
+/// (`live:degraded`).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct DegradedUpdate {
     pub channel: Channel,
     pub degraded: bool,
@@ -191,8 +204,9 @@ pub struct DegradedUpdate {
 }
 
 /// Something the user should know.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
 pub enum LiveWarning {
     /// Nothing came from the loopback for this long while the mic was active.
     LoopbackSilent { seconds: u32 },
@@ -211,8 +225,9 @@ pub enum LiveWarning {
     Capture { channel: Channel, message: String },
 }
 
-/// A capture opened on a (new) endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// A capture opened on a (new) endpoint (`live:device_changed`).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct DeviceChange {
     pub channel: Channel,
     pub device_id: String,
@@ -241,7 +256,8 @@ pub trait LiveSink: Send + Sync {
 }
 
 /// What went wrong while recording (decides `post_pass_mode = on_issues`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct LiveIssues {
     /// Feed overflows (engine too slow; record-only for a while).
     pub degraded: u32,
@@ -266,7 +282,8 @@ impl LiveIssues {
 }
 
 /// A snapshot of a running recording.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
 pub struct RecorderStatus {
     pub meeting_id: MeetingId,
     pub run_id: RunId,
@@ -313,6 +330,20 @@ pub struct StopOutcome {
     pub feed_dropped: BTreeMap<String, u64>,
     pub feed_reports: BTreeMap<String, FeedReport>,
     pub post_pass: PostPassHandle,
+}
+
+impl StopOutcome {
+    /// What the UI needs of it (`stop_recording`).
+    pub fn summary(&self) -> StopSummary {
+        StopSummary {
+            meeting_id: self.meeting_id,
+            live_run: self.live_run,
+            duration_ms: self.duration_ms,
+            job_id: self.post_pass.job_id.clone(),
+            transcribe: self.post_pass.transcribe,
+            issues: self.issues.clone(),
+        }
+    }
 }
 
 enum Ev {

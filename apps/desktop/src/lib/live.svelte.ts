@@ -2,22 +2,36 @@
 // controls and the live meeting view render. One recording at a time.
 import { api, errorText, onEvent } from "./api";
 import type { Channel } from "./generated/Channel";
+import type { DegradedUpdate } from "./generated/DegradedUpdate";
+import type { DeviceChange } from "./generated/DeviceChange";
+import type { LevelsUpdate } from "./generated/LevelsUpdate";
+import type { LiveLevels } from "./generated/LiveLevels";
+import type { LivePhase } from "./generated/LivePhase";
+import type { LiveStateView } from "./generated/LiveStateView";
+import type { LiveWarning } from "./generated/LiveWarning";
 import type { MeetingId } from "./generated/MeetingId";
 import type { SpeakerId } from "./generated/SpeakerId";
-import type {
-  DegradedUpdate,
-  DeviceChange,
-  LevelsPayload,
-  LiveStateView,
-  LivePhase,
-  LiveWarning,
-  StartRequest,
-  TextFinal,
-  Toggled,
-  WordsUpdate,
-} from "./live";
+import type { StartRequest } from "./generated/StartRequest";
+import type { TextFinal } from "./generated/TextFinal";
+import type { Toggled } from "./generated/Toggled";
+import type { WarningNote } from "./generated/WarningNote";
+import type { WordsUpdate } from "./generated/WordsUpdate";
 import { ME_COLOR, SPEAKER_PALETTE } from "./generated/palette";
 import { app } from "./state.svelte";
+
+/** Text for a warning banner. */
+export function warningText(w: LiveWarning): string {
+  switch (w.kind) {
+    case "loopback_silent":
+      return `No system audio for ${w.seconds} s while the microphone hears speech. Is the right output selected?`;
+    case "loopback_quiet":
+      return `System audio from ${w.device || "the output"} is very quiet (peaks ${Math.round(w.peak_dbfs)} dBFS); raise its Windows volume or pick another output.`;
+    case "capture":
+      return `${w.channel === "mic" ? "Microphone" : "System audio"}: ${w.message}`;
+    default:
+      return JSON.stringify(w);
+  }
+}
 
 /** `meet_core::views::default_speaker_name` for labels without a speaker row. */
 export function defaultSpeakerName(label: string): string {
@@ -59,9 +73,16 @@ export interface LiveRow {
 export interface Meter {
   rms: number;
   peak: number;
-  gain: number | null;
+  /** Automatic gain applied (0 without AGC). */
+  gain: number;
+  /** Peak before the automatic gain. */
+  rawPeak: number;
   /** Date.now() of the reading. */
   at: number;
+}
+
+function meter(l: LevelsUpdate, at: number): Meter {
+  return { rms: l.rms_dbfs, peak: l.peak_dbfs, gain: l.gain_db, rawPeak: l.raw_peak_dbfs, at };
 }
 
 /** Stopping a recording younger than this asks first. */
@@ -110,7 +131,7 @@ class LiveStore {
   /** The latest endpoint switch after the first open (shown as a chip). */
   deviceNotice = $state.raw<DeviceChange | null>(null);
   degraded = $state.raw<Record<string, DegradedUpdate>>({});
-  warnings = $state.raw<LiveWarning[]>([]);
+  warnings = $state.raw<WarningNote[]>([]);
   /** Warnings before this index are dismissed. */
   warningsSeen = $state(0);
   error = $state<string | null>(null);
@@ -148,12 +169,10 @@ class LiveStore {
       const cur = this.finalUntil[t.channel] ?? -1;
       if (t.until_ms > cur) this.finalUntil = { ...this.finalUntil, [t.channel]: t.until_ms };
     });
-    void onEvent<LevelsPayload>("live:levels", (l) => {
+    void onEvent<LiveLevels>("live:levels", (l) => {
       const at = Date.now();
-      if (l.mic) this.mic = { rms: l.mic.rms_dbfs, peak: l.mic.peak_dbfs, gain: l.mic.gain_db, at };
-      if (l.loopback) {
-        this.loopback = { rms: l.loopback.rms_dbfs, peak: l.loopback.peak_dbfs, gain: l.loopback.gain_db, at };
-      }
+      if (l.mic) this.mic = meter(l.mic, at);
+      if (l.loopback) this.loopback = meter(l.loopback, at);
     });
     void onEvent<DegradedUpdate>("live:degraded", (d) => {
       const next = { ...this.degraded };
@@ -161,7 +180,7 @@ class LiveStore {
       else delete next[d.channel];
       this.degraded = next;
     });
-    void onEvent<LiveWarning>("live:warning", (w) => {
+    void onEvent<WarningNote>("live:warning", (w) => {
       this.warnings = [...this.warnings, w];
     });
     void onEvent<DeviceChange>("live:device_changed", (d) => {

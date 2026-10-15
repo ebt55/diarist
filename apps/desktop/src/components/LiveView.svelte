@@ -6,8 +6,14 @@
   import { formatClock } from "../lib/format";
   import type { SpeakerId } from "../lib/generated/SpeakerId";
   import type { SpeakerView } from "../lib/generated/SpeakerView";
-  import { warningText } from "../lib/live";
-  import { defaultSpeakerColor, defaultSpeakerName, live, type LiveRow, type Meter } from "../lib/live.svelte";
+  import {
+    defaultSpeakerColor,
+    defaultSpeakerName,
+    live,
+    warningText,
+    type LiveRow,
+    type Meter,
+  } from "../lib/live.svelte";
 
   interface Props {
     speakers: SpeakerView[];
@@ -155,8 +161,10 @@
             <div class="m-peak" style="left: calc({peak}% - 2px)" class:hidden={!m.meter}></div>
           </div>
           <span class="m-db mono">{m.meter ? `${Math.round(m.meter.peak)} dB` : "–"}</span>
-          {#if m.meter?.gain != null && Math.abs(m.meter.gain) >= 0.5}
-            <span class="chip gain mono" title="Automatic gain applied to this channel">+{m.meter.gain.toFixed(0)} dB</span>
+          {#if m.meter && Math.abs(m.meter.gain) >= 0.5}
+            <span class="chip gain mono" title="Automatic gain on this channel; peak before it {Math.round(m.meter.rawPeak)} dB"
+              >+{m.meter.gain.toFixed(0)} dB</span
+            >
           {/if}
           <span class="m-dev">{m.device}</span>
         </div>

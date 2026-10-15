@@ -18,15 +18,15 @@ use meet_core::types::{
     TrackChannel, Word, WordId,
 };
 use meet_core::views::{
-    EngineStatus, JobEvent, MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings,
-    Waveform,
+    DownloadItem, DownloadKind, DownloadProgress, EngineStatus, JobEvent, MeetingDetail,
+    MeetingSummary, SearchHit, SegmentView, Settings, Waveform,
 };
 use meet_core::CoreError;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::asset::asset_url;
-use crate::events::{emit_download, emit_job, DownloadProgress};
+use crate::events::{emit_download, emit_job};
 use crate::{demo, AppPaths, AppStore, GpuCache, Jobs};
 
 /// Where imports run.
@@ -568,7 +568,7 @@ pub async fn install_engine(
             emit_download(
                 &app,
                 &DownloadProgress {
-                    kind: "engine",
+                    kind: DownloadKind::Engine,
                     name: entry.name.clone(),
                     done_bytes: done,
                     total_bytes: total,
@@ -630,7 +630,7 @@ pub async fn pull_model(
             emit_download(
                 &app,
                 &DownloadProgress {
-                    kind: "model",
+                    kind: DownloadKind::Model,
                     name: entry.name.clone(),
                     done_bytes: done,
                     total_bytes: Some(entry.size_bytes),
@@ -661,20 +661,6 @@ pub async fn pull_model(
     .await
 }
 
-/// One item of "Download recommended": the default runtime and the required
-/// models from the manifest, with whether a matching file is already there.
-// TODO(phase3b): move into `meet_core::views` with `DownloadProgress`.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DownloadItem {
-    /// `engine` or `model`.
-    pub kind: &'static str,
-    /// What `install_engine` / `pull_model` take.
-    pub name: String,
-    pub label: String,
-    pub size_bytes: u64,
-    pub installed: bool,
-}
-
 /// What "Download recommended" would fetch, engine first.
 #[tauri::command]
 pub async fn recommended_downloads(
@@ -688,7 +674,7 @@ pub async fn recommended_downloads(
         let mut items = Vec::new();
         if let Some(e) = manifest.default_engine() {
             items.push(DownloadItem {
-                kind: "engine",
+                kind: DownloadKind::Engine,
                 name: e.name.clone(),
                 label: format!("Engine {} ({})", e.version, e.backend),
                 size_bytes: e.size_bytes,
@@ -701,7 +687,7 @@ pub async fn recommended_downloads(
         }
         for m in manifest.required() {
             items.push(DownloadItem {
-                kind: "model",
+                kind: DownloadKind::Model,
                 name: m.name.clone(),
                 label: format!("{} ({})", m.name, m.role),
                 size_bytes: m.size_bytes,

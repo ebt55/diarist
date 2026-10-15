@@ -104,7 +104,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        live::toggle(app, "shortcut");
+                        live::toggle(app, meet_core::live::ToggleVia::Shortcut);
                     }
                 })
                 .build(),

@@ -6,7 +6,7 @@
   import { formatDate } from "../lib/format";
   import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
   import { LANGUAGES, languageLabel } from "../lib/languages";
-  import type { AudioDevice } from "../lib/live";
+  import type { AudioDevice } from "../lib/generated/AudioDevice";
   import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
 

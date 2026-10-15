@@ -24,6 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::engine::process;
 use crate::error::{CoreError, Result};
@@ -102,8 +103,9 @@ impl ServeConfig {
 }
 
 /// State of the server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[ts(export)]
 pub enum ServeStatus {
     Stopped,
     /// Launched, waiting for `/ready`.

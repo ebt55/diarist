@@ -282,6 +282,21 @@ fn records_streams_and_runs_the_post_pass() {
         .live_speaker(rec.run_id(), Channel::Loopback, "spk_0")
         .unwrap();
     store.rename_speaker(alice.id, "Alice", None).unwrap();
+    // A view that opens now gets the newest revision of every utterance.
+    let snap = snapshot(&*store, m).unwrap();
+    assert!(snap.iter().filter(|u| u.channel == Channel::Mic).count() >= 5);
+    assert!(snap.iter().all(|u| u.run_id == rec.run_id()));
+    let lb_snap: Vec<&WordsUpdate> = snap
+        .iter()
+        .filter(|u| u.channel == Channel::Loopback)
+        .collect();
+    assert!(lb_snap
+        .iter()
+        .all(|u| u.words[0].label == "spk_0" && u.words[0].speaker_id == Some(alice.id)));
+    assert!(snap.iter().filter(|u| u.channel == Channel::Mic).all(|u| u
+        .words
+        .iter()
+        .all(|w| w.label == "me" && w.speaker_id.is_some())));
     let st = rec.status();
     assert!(
         st.revisions["mic"] >= 10 && st.revisions["loopback"] >= 10,

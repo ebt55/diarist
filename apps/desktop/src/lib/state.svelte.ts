@@ -6,9 +6,9 @@ import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
 import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
+import type { PostPassView } from "./generated/PostPassView";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
-import type { PostPassView } from "./live";
 
 export type Route = "library" | "settings" | "diagnostics";
 export type Theme = "system" | "light" | "dark";

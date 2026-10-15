@@ -1,11 +1,16 @@
-// Typed wrappers over the Tauri commands in src-tauri/src/commands.rs.
-// Types come from meet_core::views via ts-rs (`cargo test -p meet-core`);
-// argument names are snake_case on the wire, like the command contract.
+// Typed wrappers over the Tauri commands in src-tauri/src/{commands,live}.rs.
+// Types come from meet_core::views and meet_core::live via ts-rs
+// (`cargo test -p meet-core`); argument names are snake_case on the wire,
+// like the command contract.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { AudioDevice } from "./generated/AudioDevice";
+import type { DownloadItem } from "./generated/DownloadItem";
 import type { EngineStatus } from "./generated/EngineStatus";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobId } from "./generated/JobId";
+import type { LiveStateView } from "./generated/LiveStateView";
+import type { LiveStatusView } from "./generated/LiveStatusView";
 import type { MeetingDetail } from "./generated/MeetingDetail";
 import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
@@ -17,19 +22,13 @@ import type { SegmentId } from "./generated/SegmentId";
 import type { SegmentView } from "./generated/SegmentView";
 import type { Settings } from "./generated/Settings";
 import type { SpeakerId } from "./generated/SpeakerId";
+import type { StartRequest } from "./generated/StartRequest";
+import type { StopSummary } from "./generated/StopSummary";
 import type { TrackChannel } from "./generated/TrackChannel";
 import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
-import type {
-  AudioDevice,
-  DownloadItem,
-  LiveStateView,
-  LiveStatusView,
-  StartRequest,
-  StopView,
-  WordsUpdate,
-} from "./live";
+import type { WordsUpdate } from "./generated/WordsUpdate";
 
 export type { Waveform };
 
@@ -98,7 +97,7 @@ export const api = {
   listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
   prepareRecording: () => invoke<void>("prepare_recording"),
   startRecording: (opts: StartRequest) => invoke<LiveStateView>("start_recording", { opts }),
-  stopRecording: () => invoke<StopView>("stop_recording"),
+  stopRecording: () => invoke<StopSummary>("stop_recording"),
   recordingStatus: () => invoke<LiveStatusView>("recording_status"),
   liveSnapshot: (meeting_id: MeetingId) => invoke<WordsUpdate[]>("live_snapshot", { meeting_id }),
   rerunPostPass: (meeting_id: MeetingId) => invoke<JobId>("rerun_post_pass", { meeting_id }),

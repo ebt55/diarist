@@ -2,13 +2,15 @@
   import { onMount } from "svelte";
   import { api, errorText, onEvent } from "../lib/api";
   import { formatBytes, formatVram, plural } from "../lib/format";
+  import type { AudioDevice } from "../lib/generated/AudioDevice";
+  import type { DownloadItem } from "../lib/generated/DownloadItem";
+  import type { DownloadProgress } from "../lib/generated/DownloadProgress";
   import type { EngineStatus } from "../lib/generated/EngineStatus";
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
   import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
   import { LANGUAGES, languageLabel } from "../lib/languages";
-  import type { AudioDevice, DownloadItem, DownloadProgress } from "../lib/live";
   import { app, type Theme } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
