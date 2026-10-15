@@ -70,6 +70,25 @@ Status: v0.6, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/
 - `JobQueue` runs one GPU job at a time (imports, post-passes, re-runs) and exposes cancel. Live sessions are not jobs; they hold the GPU while recording, and the post-pass is queued at Stop.
 - The engine supervisor owns child processes. If one dies, in-flight jobs become `Error`, the UI is told, and the next job relaunches. A dead live session leaves recording running; the post-pass makes the transcript whole.
 
+## Data layout on disk
+
+```
+%LOCALAPPDATA%\meet-assist\              Tauri app install dir (NSIS, per-user, about 10 MB)
+
+%LOCALAPPDATA%\app.meetassist.desktop\   data root (relocatable; portable mode: <exe dir>\data)
+  engine\
+    nemo-speech-0.2.0-windows-x86_64-cuda\   one folder per runtime version; drop in a newer one to try it
+  models\                                 scanned recursively; drop any GGUF here
+    asr\                                  convention only: the app reads the GGUF header to find the role
+    diarization\
+    nvidia\<repo>\<rev>\...               where `nemo-speech pull` puts files (NEMO_SPEECH_MODEL_DIR points here)
+  meet-assist.db (+ -wal)                 SQLite
+  audio\<meeting_uid>\                    mic.wav, loopback.wav while recording; playback.flac after
+  logs\
+```
+
+The repo ships `manifests/engine.json` and `manifests/models.json` (URLs, sha256, sizes, licences, measured VRAM) as the "recommended" list the downloader uses; they are a convenience, not a gate. Anything the scanner finds is selectable.
+
 ## File-mode flow (v1)
 
 1. User drops a file. The decoder chain (symphonia, Media Foundation, ffmpeg) produces `audio\<uid>\source.wav` at 16 kHz mono PCM16; the original path is stored as the `original` playback track.
