@@ -7,13 +7,17 @@
 //! The seam to the UI is frozen in [`views`] (types, exported to TypeScript),
 //! [`store::Store`] (every query and mutation) and [`pipeline`] (import and the
 //! GPU [`pipeline::JobQueue`]). The engine contract is [`engine`] over the
-//! data types in [`protocol`]. `db`, `models`, `audio` and `transcript` are
-//! filled in by Phases 1 and 3.
+//! data types in [`protocol`]. [`store::SqliteStore`] persists everything;
+//! [`audio`] decodes files, [`transcript`] builds segments, [`fusion`] tags
+//! words with diarization segments, [`export`] writes transcripts out and
+//! [`models`] finds, selects and downloads engines and models.
 
 pub mod audio;
 pub mod db;
 pub mod engine;
 pub mod error;
+pub mod export;
+pub mod fusion;
 pub mod models;
 pub mod pipeline;
 pub mod protocol;
