@@ -58,9 +58,18 @@ Rules:
 
 ## v1 adapter: `NemoCliEngine`
 
-Spawns `nemo-speech.exe transcribe <wav> --diarize --json --output <tmp.json> --device cuda:0` plus the model and preset flags recorded in `docs/research/03-runtime-spike.md`. Parses `words[{word, start, end, confidence, speaker?}]` (seconds, speaker 1-based, absent when none) into one `Utterance` per contiguous same-speaker stretch. Confidence is always 1.0 in runtime v0.2.0 and is stored as `None`.
+Two child-process passes per file, exact command lines in `docs/research/08-runtime-cli-contract.md`:
+1. `nemo-speech.exe transcribe <wav> --json --output <words.json>` with Parakeet TDT 0.6B v3 and no `--diarize`. Output `words[{word, start, end, confidence, speaker?}]` (seconds; confidence always 1.0 in v0.2.0, stored as `None`).
+2. `nemo-speech.exe diarize <wav>` with the streaming preset (never `--offline`, see research/03 D), output segments `{start, end, speaker}`.
+3. `fusion::assign_words(words, segments)`: for each word, the speaker whose segment overlaps the start-anchored window [t0 - 40 ms, min(t1, t0 + 160 ms)] the most; words with no overlap take the nearest segment's speaker; labels normalized to `spk_N` in order of first appearance. Then `Utterance` per contiguous same-speaker stretch, `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
 
-Long files: if the runtime rejects or degrades on inputs over its positional limit, the adapter falls back to one diarization pass over the whole file (`diarize` subcommand, `v3-offline` preset) plus ASR over silence-cut chunks of at most 10 minutes, fused by the start-anchored window rule from research/04. This fallback is a Phase 1 acceptance test on the 77-minute CIMC recording.
+Never run plain `transcribe --diarize` on a file: on a 21-minute file the runtime's fused path tags only 63 percent of words correctly in the first ten minutes (research/03). Fallback adapter when Parakeet's 4.9 GB does not fit: Nemotron Speech Streaming EN with `--stream --endpointing --diarize --json` (99.6 percent tags), whose words carry `speaker` directly.
+
+Long files: the spike follow-up runs the 77-minute CIMC recording and a 2-hour file. If the ASR pass degrades past the runtime's positional limit, split the WAV at silences into chunks of at most 10 minutes, transcribe each, and offset the timestamps before fusion.
+
+## v2 live adapter: `NemoWsLiveEngine`
+
+One `nemo-speech.exe serve` process, started lazily at app launch with `--asr.endpointing.enable=true`, `state_arena_slots 2`, `--host 127.0.0.1`, a free port and an API key passed by environment variable; ready when `GET /ready` succeeds (4.6 to 5.9 s). One WebSocket session per channel at `/v1/audio/transcriptions/realtime` with `session.update {sample_rate: 16000, word_timestamps: true, speaker_diarization: <channel.diarize>}`; binary PCM16 frames of 100 ms. `transcription.delta` becomes an `Utterance` with the current `utt` and incremented `rev`; `transcription.completed` becomes the final `rev` of that `utt` with words and speaker ids, followed by `TextFinalUntil` at the utterance end. `SpeakersFinalUntil` is never sent by this adapter. Speaker ids are 1-based per session and normalized to `spk_N`.
 
 ## Performance targets
 

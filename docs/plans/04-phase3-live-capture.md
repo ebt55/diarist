@@ -27,9 +27,12 @@ Press Record: the app captures the microphone and the system render loopback, ke
 - Keep the system awake with `SetThreadExecutionState(ES_SYSTEM_REQUIRED | ES_CONTINUOUS)` while recording; on `WM_POWERBROADCAST` suspend, flush and anchor; on resume, reopen captures and record a gap anchor.
 - Tests with synthetic packets: a 300 ms gap yields exactly 4800 zero samples at 16 kHz; a SILENT packet is zeroed; 48 kHz stereo sine comes out at the right length and frequency; anchors reproduce an injected 100 ppm drift within 10 percent; a stalled consumer makes the feed degrade and recover without the WAV losing a sample.
 
-### 3c Live engine adapter (`engine::live`) PENDING spike
-- Interface fixed now: `trait LiveEngine { fn open(&self, channel: Channel, diarize: bool) -> Result<Box<dyn LiveSession>> }`, `trait LiveSession { fn push(&mut self, pcm16: &[i16], pts_us: u64); fn events(&mut self) -> &mut Receiver<EngineEvent>; fn close(self) }`.
-- Implementation chosen from the spike: WebSocket to `nemo-speech serve` (one long-lived process, two sessions) or Rust FFI to the C ABI in a `meet-engine` sidecar. Either way the adapter emits protocol `words` (final false), `relabel` if available, and `finalized` when the runtime commits (or after a fixed horizon of 10 s if it never does).
+### 3c Live engine adapter (`engine::live_ws`), decided by the spike
+- Implements `LiveEngine` / `LiveSession` from docs/03 v0.2 over `nemo-speech serve` (docs/03 "v2 live adapter", command lines and WebSocket schema in docs/research/08-runtime-cli-contract.md).
+- `ServeSupervisor`: starts the server lazily at app launch with endpointing on and 2 slots, picks a free port, generates a per-launch API key passed by environment, polls `/ready`, restarts on exit with backoff, exposes `status()`.
+- `WsSession`: `tokio-tungstenite` client; `session.update`, binary PCM16 frames, event parsing into `Utterance` (`utt`/`rev`), `TextFinalUntil` on `.completed`; speaker ids normalized to `spk_N`; clean close.
+- Tests: an in-process fake WebSocket server replays `docs/research/fixtures/ws_session_events.jsonl` and the adapter produces the expected `EngineEvent` sequence; a GPU-gated test runs against the real server with a 30 s WAV.
+- Later upgrade (not this phase): Rust FFI to the C ABI (`diar_frame_probs`) for our own live label refresh.
 
 ### 3d Live orchestrator (`live::Recorder`)
 - Start: NVML free-VRAM check (refuse under 2 GB) and free-disk check; create meeting (status recording) and a `live` run; start captures and pipelines; open sessions `mic` (diarize off unless `diarize_mic`, speaker `me`) and `loopback` (diarize on); route frames through the feed.
