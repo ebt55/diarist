@@ -1,6 +1,6 @@
 # Model and hardware guide
 
-Status: v0.1, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. PENDING items have a test running or planned.
+Status: v0.2, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. Remaining PENDING items are the Vulkan and CPU packages, untested by us.
 
 ## 1. What runs inside meet-assist
 
@@ -10,11 +10,11 @@ Three neural models and one runtime. Nothing else. No Python, no PyTorch, no CUD
 |---|---|---|---|
 | NeMo-Speech.cpp 0.2.0 (NVIDIA) | GGUF inference runtime, one zip per GPU backend | 98 MB zip, 134 MB extracted (CUDA build) | Apache-2.0 |
 | Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers, streaming and file | 102 MB | OpenMDW-1.1 |
-| Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text for live and file mode (default) | 668 MB | NVIDIA Open Model Licence |
-| Parakeet TDT 0.6B v3, q8_0 | Optional higher-accuracy speech to text for files, 25 languages | 681 MB | CC-BY-4.0 |
-| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | PENDING test: multilingual streaming model that may replace the EN model for both modes | 742 MB | OpenMDW-1.1 |
+| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text for live and file mode (default), 40+ locales with automatic detection | 742 MB | OpenMDW-1.1 |
+| Nemotron Speech Streaming EN 0.6B, q8_0 | Optional English fallback, keeps more filler words | 668 MB | NVIDIA Open Model Licence |
+| Parakeet TDT 0.6B v3, q8_0 | Experimental only, off by default: better punctuation but drops speech (see section 3) | 681 MB | CC-BY-4.0 |
 
-First-run download with the defaults: engine plus diarizer plus one ASR model, about 870 MB. Everything: 1.6 GB.
+First-run download with the defaults: engine plus diarizer plus Nemotron 3.5, about 940 MB. With every optional model: 2.3 GB.
 
 ## 2. Speaker diarization: why Nemotron 3
 
@@ -37,7 +37,7 @@ Limits you should know (*published* and **measured**):
 - The "offline" full-attention preset scored worse than streaming on our test clip (DER 43 versus 24) and is not used.
 - Hard cases listed on the model card: heavy overlap, far-field microphones, noisy rooms.
 
-## 3. Speech to text: why Nemotron streaming by default and Parakeet as an option
+## 3. Speech to text: why Nemotron 3.5 for everything, and why not Parakeet
 
 Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 
@@ -48,16 +48,23 @@ Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 | Parakeet TDT 0.6B v2 (English) | 6.05 | yes | yes | no |
 | **Parakeet TDT 0.6B v3** (25 languages) | 6.34 | yes | yes | no |
 | Kyutai STT 2.6B | 6.4 | yes, 2.5 s delay | no | yes |
-| **Nemotron Speech Streaming EN 0.6B** | 6.93 at 1.1 s latency | yes | yes | yes |
+| Nemotron Speech Streaming EN 0.6B | 6.93 at 1.1 s latency | yes | yes | yes |
+| **Nemotron 3.5 ASR Streaming 0.6B** (40+ locales) | not on the leaderboard yet; see measured comparison below | yes | yes | yes |
 | Whisper large-v3 (for reference) | about 7.4 | approximate | no | no |
 
 Why not the top two: they give no word timestamps, and speaker assignment needs the start and end of every word. They also run only inside a Python stack.
 
-Why Nemotron streaming is the default for both live and file mode:
-- Live needs a cache-aware streaming model; this is the one in the runtime. **Measured** 0.83 s from audio to first text.
-- For files, the same model fed through the runtime's streaming recognizer with endpointing and diarization covered a 77-minute recording completely (12,266 words, 8 labels, 27x real time, 2.6 GB VRAM) and its speaker tags agreed 99.9 percent with the standalone diarizer. **Measured.**
-- Parakeet TDT v3 is about 0.6 WER points better and adds punctuation and casing, but on the same 77-minute file it silently dropped a 45-second span and two 10-second spans with no error. **Measured.** PENDING: a chunked test will show whether that is the runtime's long-file splitter (then Parakeet returns as the file-mode default with our own chunking) or the model.
-- PENDING: Nemotron 3.5 streaming is multilingual (40+ locales, `language: auto`) and is the runtime's own default. If it matches the EN model on coverage and adds punctuation, it becomes the single ASR model.
+Why Nemotron 3.5 is the single model for both live and file mode (**measured**, docs/research/08 section 7):
+- On the 77-minute recording it dropped nothing (143 words in the span Parakeet lost), found all 8 labels, and its speaker tags agreed 99.9 percent with the standalone diarizer, exactly like the EN model.
+- Same speed (26x real time) with 30 percent less VRAM (1.82 GB peak versus 2.58 GB).
+- Live: 0.18 s to the first text delta, finals 0.86 s after the last word, two channels in real time.
+- It detects the language automatically (`en-US` on our tests) and accepts a language hint live; 40+ locales.
+- Trade-off: it writes clean verbatim, dropping about 40 percent of "um" and "uh", so word counts run 3 to 13 percent below the EN model. Neither Nemotron model punctuates much (2.5 percent of words for 3.5, 0.2 for EN).
+
+Why Parakeet TDT v3 is experimental only (**measured**, docs/research/08 section 8):
+- It is about 0.6 WER points better than the EN model and writes real punctuation and casing (12 percent of words punctuated).
+- But it silently dropped a 46-second span and two 10-second spans in the 77-minute file with no error. Cutting the file into 10-minute pieces recovered them, yet a 2-minute cut around the gap lost the same 46 seconds again. The drop depends on the audio content, not the file length, so no chunk size is safe. The same behaviour is reported for this model in another runtime (transcribe.cpp issue #71).
+- A transcript tool cannot ship a model that may skip a minute of a meeting without telling you. It stays reachable behind an experimental setting for short clips where punctuation matters, and a dual-pass mode that fills its gaps from Nemotron is possible later.
 
 Realistic expectation: on clean meeting audio about 1 word in 15 to 20 is wrong or missing with any of these models; on AMI-style far-field recordings about 1 in 9 (*published* AMI WER 11.3 for Parakeet v3). The product's value is in who said what, stored and searchable, not in a perfect verbatim.
 
@@ -75,17 +82,17 @@ VRAM needed (**measured** on the 3080, excluding the desktop's own 1.5 GB):
 
 | Scenario | VRAM | Notes |
 |---|---|---|
-| Live recording, two channels (mic plus system audio), ASR and diarizer resident | about 1.3 GB | Server idle 1.18 GB, plus 50 to 100 MB per session |
-| File transcription, default Nemotron path | 2.2 to 2.6 GB peak | 21 min and 77 min files |
+| Live recording, two channels (mic plus system audio), Nemotron 3.5 and diarizer resident | 1.05 GB idle, 1.26 GB with two sessions, transient spikes of 0.5 to 0.6 GB per session; budget 2 GB | The EN model sits at 1.18 GB with smaller spikes |
+| File transcription, default Nemotron 3.5 path | 1.82 GB peak | 77 min file; the EN model peaks at 2.6 GB |
 | Standalone diarization pass only | 0.7 to 0.85 GB | |
-| File transcription, Parakeet option | 4.9 GB peak | |
+| File transcription, experimental Parakeet | 4.9 GB peak | |
 | Live recording plus a queued file job | not concurrent | The app runs file jobs after recording stops |
 
 Estimated tiers (not measured; the app enforces them by reading free VRAM before starting):
 
 | Card VRAM | What works |
 |---|---|
-| 4 GB | Live and default file mode should fit with the server limited to 2 sessions; Parakeet will not. A user with a 4 GB card reported out-of-memory with the runtime's default 16 slots, which we do not use |
+| 4 GB | Default file mode (1.8 GB) should fit; live (2 GB budget with spikes) is borderline next to the desktop's own use; Parakeet will not fit. A user with a 4 GB card reported out-of-memory with the runtime's default 16 slots, which we do not use |
 | 6 GB | Live and default file mode comfortably; Parakeet only with nothing else on the GPU |
 | 8 GB and up | Everything, including Parakeet |
 | 10 GB (RTX 3080, the development machine) | Everything, with room for a browser and the meeting app on the same GPU |
@@ -100,8 +107,7 @@ Other requirements:
 ## 5. Languages
 
 - Diarization is language-independent.
-- Live: English only with the EN streaming model. PENDING: Nemotron 3.5 would add 40+ locales with automatic detection.
-- File mode: Parakeet v3 covers 25 European languages; the EN streaming model is English only.
+- Live and file mode: Nemotron 3.5 covers 40+ locales. Set the meeting's language when you know it; automatic detection works but loses about a second of the first utterance. The optional EN model is English only.
 - Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language.
 
 ## 6. Honest caveats

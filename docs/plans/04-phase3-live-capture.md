@@ -31,7 +31,8 @@ Press Record: the app captures the microphone and the system render loopback, ke
 ### 3c Live engine adapter (`engine::live_ws`), decided by the spike
 - Implements `LiveEngine` / `LiveSession` from docs/03 v0.2 over `nemo-speech serve` (docs/03 "v2 live adapter", command lines and WebSocket schema in docs/research/08-runtime-cli-contract.md).
 - `ServeSupervisor`: starts the server lazily at app launch with endpointing on and 2 slots, picks a free port, generates a per-launch API key passed by environment, polls `/ready`, restarts on exit with backoff, exposes `status()`.
-- `WsSession`: `tokio-tungstenite` client; `session.update`, binary PCM16 frames, event parsing into `Utterance` (`utt`/`rev`), `TextFinalUntil` on `.completed`; speaker ids normalized to `spk_N`; clean close.
+- `WsSession`: `tokio-tungstenite` client; `session.update` with `sample_rate`, `word_timestamps`, `speaker_diarization` and `language` (omitted for `auto`), binary PCM16 frames, event parsing into `Utterance` (`utt`/`rev`), `TextFinalUntil` on `.completed`; speaker ids normalized to `spk_N`; `input_audio_buffer.commit` then close 1000. Keep sending frames (silence included) because the server's read timeout is 30 s.
+- VRAM gate before opening sessions: at least 2.5 GB free (research/08 section 5), because 3.5 spikes 0.5 to 0.6 GB per session.
 - Tests: an in-process fake WebSocket server replays `docs/research/fixtures/ws_session_events.jsonl` and the adapter produces the expected `EngineEvent` sequence; a GPU-gated test runs against the real server with a 30 s WAV.
 - Later upgrade (not this phase): Rust FFI to the C ABI (`diar_frame_probs`) for our own live label refresh.
 
