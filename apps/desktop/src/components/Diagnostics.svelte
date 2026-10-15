@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { api, errorText } from "../lib/api";
+  import { formatClock, formatDuration } from "../lib/format";
+  import type { LiveStatusView, ServeStatus } from "../lib/live";
   import { app } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -10,9 +12,30 @@
   let stderr = $state<string | null>(null);
   let auto = $state(true);
   let pre: HTMLPreElement | undefined = $state();
+  let liveStatus = $state.raw<LiveStatusView | null>(null);
+  let liveError = $state<string | null>(null);
+
+  const STATES: Record<ServeStatus["state"], string> = {
+    stopped: "stopped",
+    starting: "starting (loading models)",
+    ready: "running",
+    restarting: "restarting",
+    failed: "failed",
+  };
+
+  async function refreshLive() {
+    try {
+      liveStatus = await api.recordingStatus();
+      liveError = null;
+    } catch (e) {
+      liveError = errorText(e);
+    }
+  }
 
   onMount(() => {
     void refresh();
+    void refreshLive();
+    const tl = setInterval(() => void refreshLive(), 2000);
     void api.lastEngineStderr().then((s) => (stderr = s)).catch(() => {});
     const t = setInterval(() => auto && void refresh(), 2000);
     const onRefresh = () => void refresh();
@@ -21,6 +44,7 @@
     window.addEventListener("app:copy", onCopy);
     return () => {
       clearInterval(t);
+      clearInterval(tl);
       window.removeEventListener("app:refresh", onRefresh);
       window.removeEventListener("app:copy", onCopy);
     };
@@ -58,6 +82,76 @@
     <h1>Diagnostics</h1>
     <span class="hint">Esc closes · Ctrl+R refreshes · Ctrl+Shift+C copies</span>
   </header>
+
+  <section class="engine">
+    <h2>Live engine</h2>
+    {#if liveError}
+      <p class="help error">{liveError}</p>
+    {:else if liveStatus}
+      {@const srv = liveStatus.server}
+      {@const rec = liveStatus.recorder}
+      <dl class="facts">
+        <dt>Server</dt>
+        <dd>
+          {#if srv}
+            <span class="chip st-{srv.status.state}">{STATES[srv.status.state]}</span>
+            {#if "port" in srv.status}port <span class="mono">{srv.status.port}</span>{/if}
+            {#if srv.pid !== null}· pid <span class="mono">{srv.pid}</span>{/if}
+            {#if srv.uptime_ms !== null}· up {formatDuration(srv.uptime_ms)}{/if}
+            · {srv.restarts} {srv.restarts === 1 ? "restart" : "restarts"}
+            {#if srv.resident_vram_mb !== null}· holds {srv.resident_vram_mb} MB of VRAM{/if}
+            {#if srv.status.state === "restarting"}<br /><span class="error">{srv.status.last_error}</span>{/if}
+            {#if srv.status.state === "failed"}<br /><span class="error">{srv.status.message}</span>{/if}
+          {:else}
+            not started (it starts at launch when an engine and streaming models are selected)
+          {/if}
+        </dd>
+        {#if srv}
+          <dt>Models</dt>
+          <dd class="mono small">{srv.asr_model} · {srv.diar_model}</dd>
+          {#if srv.log_path}<dt>Server log</dt><dd class="mono small">{srv.log_path}</dd>{/if}
+        {/if}
+        <dt>Recording</dt>
+        <dd>
+          {#if rec}
+            meeting {rec.meeting_id} · {formatClock(rec.elapsed_ms)} ·
+            {Object.entries(rec.revisions)
+              .map(([ch, n]) => `${ch} ${n} revisions`)
+              .join(", ") || "no words yet"}
+          {:else}
+            {liveStatus.state.phase === "idle" ? "not recording" : liveStatus.state.phase}
+          {/if}
+        </dd>
+        {#if rec}
+          {#each Object.entries(rec.captures) as [ch, c] (ch)}
+            <dt>{ch === "mic" ? "Mic capture" : "Loopback capture"}</dt>
+            <dd>
+              {c.device_name ?? "?"} · {c.reopens} reopens · {c.overflow_packets} dropped packets
+              {#if c.last_error}<br /><span class="error">{c.last_error}</span>{/if}
+            </dd>
+          {/each}
+          <dt>Issues</dt>
+          <dd class="mono small">
+            degraded {rec.issues.degraded} · engine down {rec.issues.engine_down} · restarts {rec.issues.restarts} ·
+            gaps {rec.issues.gaps} ({rec.issues.gap_ms} ms) · device changes {rec.issues.device_changes}
+          </dd>
+        {/if}
+        <dt>GPU queue</dt>
+        <dd>
+          {liveStatus.queue_running ? "1 job running" : "idle"}{liveStatus.queue_waiting.length > 0
+            ? ` · ${liveStatus.queue_waiting.length} waiting${liveStatus.state.phase === "recording" ? " (paused while recording)" : ""}`
+            : ""}
+        </dd>
+        <dt>Shortcut</dt>
+        <dd>
+          <kbd>{liveStatus.shortcut}</kbd>
+          {#if liveStatus.shortcut_error}<span class="error">not registered: {liveStatus.shortcut_error}</span>{:else}toggles recording from any app{/if}
+        </dd>
+      </dl>
+    {:else}
+      <p class="placeholder">Reading…</p>
+    {/if}
+  </section>
 
   <section class="log">
     <div class="bar">
@@ -173,7 +267,43 @@
     border-radius: var(--radius);
     color: var(--fg-muted);
   }
-  .help.error {
+  .help.error,
+  .error {
     color: var(--danger);
+  }
+  .engine h2 {
+    margin-bottom: 6px;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 3px 14px;
+    margin: 0;
+    font-size: 13px;
+  }
+  .facts dt {
+    color: var(--fg-muted);
+  }
+  .facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .small {
+    font-size: 12px;
+  }
+  .st-ready {
+    border-color: var(--ok-fg);
+    background: var(--ok-bg);
+    color: var(--ok-fg);
+  }
+  .st-failed,
+  .st-restarting {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .st-starting {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--warning-fg);
   }
 </style>

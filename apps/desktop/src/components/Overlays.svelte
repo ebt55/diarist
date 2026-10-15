@@ -21,6 +21,8 @@
       [
         ["Ctrl K", "Search transcripts"],
         ["Ctrl O", "Import audio or video"],
+        ["R", "Record, or stop the recording"],
+        ["Ctrl Alt R", "Record or stop from any app"],
         ["Ctrl 1 / Ctrl 2", "Focus meeting list / transcript"],
         ["Ctrl ,", "Settings"],
         ["Ctrl Shift D", "Diagnostics"],
@@ -63,6 +65,16 @@
         ["F", "Follow playback on or off"],
         ["Ctrl E", "Export"],
         ["Ctrl Delete", "Delete meeting"],
+      ],
+    ],
+    [
+      "Recording",
+      [
+        ["Ctrl .", "Stop recording"],
+        ["↑ ↓", "Move between live lines"],
+        ["R", "Rename the line's speaker"],
+        ["End", "Follow the live text again"],
+        ["Ctrl 2", "Focus the live transcript"],
       ],
     ],
   ];

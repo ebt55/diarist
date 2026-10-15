@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { api, errorText, type ExportFormat, type Waveform } from "../lib/api";
-  import { formatDate, formatDuration } from "../lib/format";
+  import { formatClock, formatDate, formatDuration } from "../lib/format";
   import type { MeetingDetail } from "../lib/generated/MeetingDetail";
   import type { MeetingId } from "../lib/generated/MeetingId";
   import type { SegmentId } from "../lib/generated/SegmentId";
@@ -9,10 +9,12 @@
   import type { SpeakerId } from "../lib/generated/SpeakerId";
   import type { SpeakerView } from "../lib/generated/SpeakerView";
   import { SPEAKER_PALETTE as PALETTE } from "../lib/generated/palette";
+  import { live } from "../lib/live.svelte";
   import { Player } from "../lib/player.svelte";
   import { app, isTyping } from "../lib/state.svelte";
   import AudioBar from "./AudioBar.svelte";
   import Icon from "./Icon.svelte";
+  import LiveView from "./LiveView.svelte";
   import Menu, { type MenuItem } from "./Menu.svelte";
   import SpeakerLegend from "./SpeakerLegend.svelte";
   import Transcript from "./Transcript.svelte";
@@ -33,11 +35,19 @@
     { format: "srt", label: "Subtitles (.srt)" },
     { format: "vtt", label: "WebVTT (.vtt)" },
   ];
+  const STAGE_TEXT: Record<string, string> = {
+    queued: "Waiting for the GPU",
+    decoding: "Reading the recording",
+    transcribing: "Transcribing the recorded channels again",
+    diarizing: "Finding speakers",
+    saving: "Saving the final transcript",
+  };
 
   const player = new Player();
   let audioEl: HTMLAudioElement | undefined = $state();
   let titleEl: HTMLInputElement | undefined = $state();
   let transcript: ReturnType<typeof Transcript> | undefined = $state();
+  let liveView: ReturnType<typeof LiveView> | undefined = $state();
 
   let detail = $state.raw<MeetingDetail | null>(null);
   let segments = $state.raw<SegmentView[]>([]);
@@ -48,6 +58,8 @@
   let noAudio = $state<string | null>(null);
   let renaming = $state.raw<{ speakerId: SpeakerId; anchor: SegmentId | null } | null>(null);
   let menu = $state.raw<{ items: MenuItem[]; x: number; y: number; label: string } | null>(null);
+  let retrying = $state(false);
+  let now = $state(Date.now());
 
   const meeting = $derived(detail?.meeting ?? null);
   const speakers = $derived(detail?.speakers ?? []);
@@ -57,10 +69,99 @@
   );
   const labelsFull = $derived(roots.filter((s) => s.channel !== "mic").length >= 8);
 
+  // ---- Live recording and the post-pass ---------------------------------------
+
+  /** This meeting is the one recording now. */
+  const isLive = $derived(live.meetingId === meetingId && live.active);
+  const postPass = $derived(app.postPassOf(meetingId));
+  const postPassJob = $derived(postPass ? (app.jobs.find((j) => j.id === postPass.job_id) ?? null) : null);
+  const finalizing = $derived(!isLive && (postPass !== null || meeting?.status === "processing"));
+  const postPassError = $derived(
+    !isLive && !postPass && meeting?.source === "live" && meeting.status === "failed"
+      ? (app.postPassErrors.get(meetingId) ?? "The post-pass did not finish.")
+      : null,
+  );
+
+  /** While recording, talk time comes from the live words (there are no segments yet). */
+  const shownSpeakers = $derived.by((): SpeakerView[] => {
+    if (!isLive) return speakers;
+    const talk = new Map<number, number>();
+    for (const r of live.rows) {
+      if (r.speakerId !== null) talk.set(r.speakerId, (talk.get(r.speakerId) ?? 0) + (r.end_ms - r.start_ms));
+    }
+    return speakers.map((s) => ({ ...s, talk_ms: talk.get(s.id) ?? 0 }));
+  });
+
+  $effect(() => {
+    if (!finalizing) return;
+    const t = setInterval(() => (now = Date.now()), 500);
+    return () => clearInterval(t);
+  });
+
+  // New provisional labels get speaker rows as they appear: fetch them.
+  let speakerFetch: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (!isLive || !detail) return;
+    const known = new Set(speakers.map((s) => s.id));
+    const missing = live.rows.some((r) => r.speakerId !== null && !known.has(r.speakerId));
+    if (missing && speakerFetch === undefined) {
+      speakerFetch = setTimeout(() => {
+        speakerFetch = undefined;
+        api
+          .getMeeting(meetingId)
+          .then((d) => (detail = d))
+          .catch(() => {});
+      }, 300);
+    }
+  });
+
+  // Stop finished: the live run is now a stored transcript; open it where the user was.
+  let wasLive = false;
+  $effect(() => {
+    const now = isLive;
+    untrack(() => {
+      if (wasLive && !now) {
+        const a = liveView?.anchor() ?? { follow: true, ms: null };
+        void refreshAll(a.follow || a.ms === null ? "end" : a.ms);
+      }
+      wasLive = now;
+    });
+  });
+
+  /** Scroll for a Transcript that mounts after a reload (live view to transcript). */
+  let pendingScroll = $state<number | "end" | null>(null);
+  $effect(() => {
+    const p = pendingScroll;
+    const t = transcript;
+    if (!t || p === null || segments.length === 0) return;
+    untrack(() => {
+      pendingScroll = null;
+      t.scrollTo(p);
+    });
+  });
+
   onMount(() => {
     if (audioEl) player.attach(audioEl);
     void load();
-    return () => player.destroy();
+    const off = app.onJob((e) => {
+      if (e.type === "done" && e.meeting_id === meetingId) {
+        const t0 = performance.now();
+        void refreshAll(transcript?.anchorMs() ?? null).then(() => {
+          void api.log(
+            "info",
+            `meeting ${meetingId}: post-pass run shown ${Math.round(performance.now() - t0)} ms after job:done`,
+          );
+          if (active) app.toast("success", "Final transcript ready: the post-pass replaced the live one.");
+        });
+      } else if ((e.type === "error" || e.type === "cancelled") && e.meeting_id === meetingId) {
+        void refreshAll(transcript?.anchorMs() ?? null);
+      }
+    });
+    return () => {
+      off();
+      clearTimeout(speakerFetch);
+      player.destroy();
+    };
   });
 
   async function load() {
@@ -70,7 +171,11 @@
       detail = d;
       segments = first;
       loaded = true;
-      void loadAudio(id);
+      if (d.meeting.status === "recording" || d.meeting.status === "processing") {
+        noAudio = d.meeting.status === "recording" ? "Recording…" : "Playback is ready when finalizing finishes.";
+      } else {
+        void loadAudio(id);
+      }
       let all = first;
       let page = first;
       let limit = FIRST_PAGE;
@@ -89,7 +194,10 @@
 
   async function loadAudio(id: MeetingId) {
     try {
-      player.url = await api.getAudioUrl(id);
+      const url = await api.getAudioUrl(id);
+      noAudio = null;
+      player.error = null;
+      player.url = url;
     } catch (e) {
       noAudio = errorText(e);
       return;
@@ -112,6 +220,41 @@
       segments = segs;
     } catch (e) {
       app.error(`Could not reload the meeting: ${errorText(e)}`);
+    }
+  }
+
+  /**
+   * Refetches everything (after Stop, a finished post-pass, a retry) and
+   * scrolls to `scroll`: a meeting time, the end, or nowhere in particular.
+   */
+  async function refreshAll(scroll: number | "end" | null) {
+    try {
+      const [d, segs] = await Promise.all([api.getMeeting(meetingId), api.getSegments(meetingId, 0, 1_000_000)]);
+      detail = d;
+      segments = segs;
+      fullyLoaded = true;
+      pendingScroll = scroll;
+      void app.refreshMeetings();
+      if (d.meeting.status === "processing") {
+        noAudio = "Playback is ready when finalizing finishes.";
+      } else if (d.meeting.status !== "recording") {
+        void loadAudio(meetingId);
+      }
+    } catch (e) {
+      app.error(`Could not reload the meeting: ${errorText(e)}`);
+    }
+  }
+
+  async function retryPostPass() {
+    retrying = true;
+    try {
+      const job = await api.rerunPostPass(meetingId);
+      app.trackPostPass(job, meetingId, meeting?.title ?? "");
+      await refreshAll(transcript?.anchorMs() ?? null);
+    } catch (e) {
+      app.error(`Retry failed: ${errorText(e)}`);
+    } finally {
+      retrying = false;
     }
   }
 
@@ -223,7 +366,8 @@
   }
 
   function refocus(anchor: SegmentId | null) {
-    if (anchor !== null) transcript?.focus();
+    if (isLive) liveView?.focus();
+    else if (anchor !== null) transcript?.focus();
   }
 
   async function edit(what: string, fn: () => Promise<void>) {
@@ -271,18 +415,22 @@
   // ---- Keyboard --------------------------------------------------------------
 
   function onkeydown(e: KeyboardEvent) {
-    if (!active || e.defaultPrevented || menu || renaming || app.confirmRequest || app.helpOpen) return;
+    if (!active || e.defaultPrevented || menu || renaming || app.confirmRequest || app.helpOpen || live.sheetOpen) {
+      return;
+    }
     const key = e.key;
     if (e.ctrlKey && !e.shiftKey && !e.altKey) {
-      if (key === "e" || key === "E") exportMenu();
-      else if (key === "Delete") void deleteMeeting();
-      else if (key === "2") transcript?.focus();
+      if ((key === "e" || key === "E") && !isLive) exportMenu();
+      else if (key === "Delete" && !isLive) void deleteMeeting();
+      else if (key === "2") (isLive ? liveView : transcript)?.focus();
       else return;
       e.preventDefault();
       return;
     }
     if (e.ctrlKey || e.altKey || e.metaKey || isTyping(e)) return;
     const onButton = e.target instanceof HTMLButtonElement || e.target instanceof HTMLAnchorElement;
+    // No audio to play while recording.
+    if (isLive && !["F2", "p", "P", "g", "G"].includes(key)) return;
     switch (key) {
       case " ":
         if (onButton) return;
@@ -359,11 +507,17 @@
       <div class="meta-row">
         <div class="meta">
           <span>{formatDate(meeting.started_at)}</span>
-          <span>{formatDuration(meeting.duration_ms)}</span>
+          {#if !isLive}<span>{formatDuration(meeting.duration_ms)}</span>{/if}
           <span>{meeting.source === "live" ? "Recorded live" : "Imported file"}</span>
           <span>{meeting.language}</span>
           {#if detail?.current_run}<span>{detail.current_run.kind.replace("_", "-")} run</span>{/if}
-          {#if meeting.status !== "done"}<span class="chip status-{meeting.status}">{meeting.status}</span>{/if}
+          {#if isLive}
+            <span class="chip status-recording">recording</span>
+          {:else if finalizing}
+            <span class="chip status-processing">finalizing</span>
+          {:else if meeting.status !== "done"}
+            <span class="chip status-{meeting.status}">{meeting.status}</span>
+          {/if}
           {#if (meeting.duration_ms ?? 0) > 3 * 3_600_000}
             <span class="chip warn" title="The diarizer keeps at most 8 labels per recording; past that, labels are reused">Over 3 h</span>
           {/if}
@@ -380,18 +534,20 @@
           >
             <Icon name="pin" /><span class="btn-label">{meeting.audio_keep ? "Pinned" : "Pin audio"}</span>
           </button>
-          <button type="button" id="export-btn" class="btn" onclick={() => exportMenu()} title="Export transcript (Ctrl+E)">
-            <Icon name="export" /><span class="btn-label">Export</span>
-          </button>
-          <button type="button" class="btn btn-icon" onclick={deleteMeeting} title="Delete meeting (Ctrl+Delete)" aria-label="Delete meeting">
-            <Icon name="trash" />
-          </button>
+          {#if !isLive}
+            <button type="button" id="export-btn" class="btn" onclick={() => exportMenu()} title="Export transcript (Ctrl+E)">
+              <Icon name="export" /><span class="btn-label">Export</span>
+            </button>
+            <button type="button" class="btn btn-icon" onclick={deleteMeeting} title="Delete meeting (Ctrl+Delete)" aria-label="Delete meeting">
+              <Icon name="trash" />
+            </button>
+          {/if}
         </div>
       </div>
     </header>
 
     <SpeakerLegend
-      {speakers}
+      speakers={shownSpeakers}
       renaming={renaming?.speakerId ?? null}
       oncommit={commitRename}
       oncancel={() => {
@@ -405,18 +561,52 @@
       onreviewed={markReviewed}
     />
 
-    <Transcript
-      bind:this={transcript}
-      {meetingId}
-      {segments}
-      {roots}
-      {player}
-      onchanged={reload}
-      onrename={startRename}
-    />
+    {#if isLive}
+      <LiveView bind:this={liveView} speakers={shownSpeakers} onrename={(id) => startRename(id, null)} />
+    {:else}
+      {#if finalizing}
+        {@const job = postPassJob}
+        {@const pct = job?.totalMs ? Math.min(100, Math.round((job.doneMs / job.totalMs) * 100)) : null}
+        <div class="banner info" role="status">
+          <div class="b-main">
+            <strong>Finalizing.</strong>
+            <span>
+              {job ? STAGE_TEXT[job.stage] : "Waiting for the post-pass"}{pct !== null ? ` · ${pct}%` : ""}.
+              This is the live transcript; the post-pass replaces it when it finishes.
+            </span>
+            <div class="bar" role="progressbar" aria-label="Finalizing" aria-valuenow={pct ?? undefined} aria-valuemin={0} aria-valuemax={100}>
+              <div class="bar-fill" class:indeterminate={pct === null} style="width: {pct ?? 30}%"></div>
+            </div>
+          </div>
+          {#if job}<span class="mono elapsed">{formatClock(now - job.startedAt)}</span>{/if}
+          {#if postPass}
+            <button type="button" class="link" onclick={() => app.cancelJob(postPass.job_id)} title="Keep the live transcript">Cancel</button>
+          {/if}
+        </div>
+      {:else if postPassError}
+        <div class="banner error" role="alert">
+          <div class="b-main">
+            <strong>Finalizing failed.</strong>
+            <span>{postPassError} The live transcript stays.</span>
+          </div>
+          <button type="button" class="btn" disabled={retrying} onclick={retryPostPass}>{retrying ? "Queuing…" : "Retry"}</button>
+        </div>
+      {/if}
+      <Transcript
+        bind:this={transcript}
+        {meetingId}
+        {segments}
+        {roots}
+        {player}
+        onchanged={reload}
+        onrename={startRename}
+      />
+    {/if}
   {/if}
 
-  <AudioBar {player} {waveform} {stereo} noAudio={loaded ? noAudio : null} fallbackMs={meeting?.duration_ms ?? 0} />
+  {#if !isLive}
+    <AudioBar {player} {waveform} {stereo} noAudio={loaded ? noAudio : null} fallbackMs={meeting?.duration_ms ?? 0} />
+  {/if}
 </section>
 
 {#if menu}
@@ -494,5 +684,51 @@
     border-color: var(--warning-border);
     background: var(--warning-bg);
     color: var(--warning-fg);
+  }
+  .banner {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin: 0 14px 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius);
+    background: var(--bg-selected);
+  }
+  .banner.error {
+    border-color: var(--danger);
+    background: var(--danger-bg);
+    color: var(--danger);
+  }
+  .b-main {
+    flex: 1;
+    min-width: 0;
+  }
+  .elapsed {
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+  .bar {
+    height: 4px;
+    margin-top: 6px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--bg-hover);
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.25s linear;
+  }
+  .bar-fill.indeterminate {
+    animation: slide 1.4s ease-in-out infinite;
+  }
+  @keyframes slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(340%);
+    }
   }
 </style>

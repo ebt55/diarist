@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, errorText } from "../lib/api";
+  import { api, errorText, onEvent } from "../lib/api";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { EngineStatus } from "../lib/generated/EngineStatus";
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
   import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
+  import { LANGUAGES, languageLabel } from "../lib/languages";
+  import type { AudioDevice, DownloadItem, DownloadProgress } from "../lib/live";
   import { app, type Theme } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -26,28 +28,71 @@
     pull: "pulled",
     user: "added by you",
   };
-  const LANGUAGES: [string, string][] = [
-    ["auto", "Detect automatically"],
-    ["en", "English"],
-    ["de", "German"],
-    ["es", "Spanish"],
-    ["fr", "French"],
-    ["it", "Italian"],
-    ["nl", "Dutch"],
-    ["pt", "Portuguese"],
-    ["pl", "Polish"],
-    ["ja", "Japanese"],
-    ["zh", "Chinese"],
+  /** Recording settings that are not in the core's defaults table, with their defaults. */
+  const CAPTURE_TOGGLES: { key: string; def: boolean; label: string; help: string }[] = [
+    {
+      key: "capture.loopback_agc",
+      def: true,
+      label: "Automatic gain on system audio",
+      help: "Raises quiet system audio (an output at low Windows volume) before it is recorded and transcribed.",
+    },
+    {
+      key: "capture.mic_agc",
+      def: false,
+      label: "Automatic gain on the microphone",
+      help: "Usually not needed: Windows and most headsets already level the mic.",
+    },
+    {
+      key: "capture.autoconvert",
+      def: true,
+      label: "Let Windows convert to 16 kHz",
+      help: "Turn off only if recordings sound wrong on this machine; the app then resamples itself.",
+    },
   ];
+
+  type DownloadRow = DownloadProgress & { state: "waiting" | "running" | "done" | "failed" };
 
   const pinned = $derived(app.meetings.filter((m) => m.audio_keep));
   const unknown = $derived(status?.models_by_role.unknown ?? []);
 
+  let devices = $state.raw<AudioDevice[]>([]);
+  let devicesError = $state<string | null>(null);
+  let downloads = $state.raw<DownloadItem[] | null>(null);
+  let progress = $state.raw<Record<string, DownloadRow>>({});
+  let downloading = $state(false);
+
+  const mics = $derived(devices.filter((d) => d.flow === "capture"));
+  const outputs = $derived(devices.filter((d) => d.flow === "render"));
+
+  function boolSetting(key: string, def: boolean): boolean {
+    const v = (app.settings[key] ?? "").trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(v)) return true;
+    if (["0", "false", "no", "off"].includes(v)) return false;
+    return def;
+  }
+
+  async function loadDevices() {
+    try {
+      devices = await api.listAudioDevices();
+      devicesError = null;
+    } catch (e) {
+      devicesError = errorText(e);
+    }
+  }
+
   onMount(() => {
+    void loadDevices();
+    const offProgress = onEvent<DownloadProgress>("models:progress", (p) => {
+      if (!progress[p.name]) return;
+      progress = { ...progress, [p.name]: { ...p, state: p.finished ? (p.error ? "failed" : "done") : "running" } };
+    });
     void loadStatus();
     const onRefresh = () => void rescan();
     window.addEventListener("app:refresh", onRefresh);
-    return () => window.removeEventListener("app:refresh", onRefresh);
+    return () => {
+      window.removeEventListener("app:refresh", onRefresh);
+      void offProgress.then((off) => off());
+    };
   });
 
   async function loadStatus() {
@@ -128,11 +173,49 @@
     }
   }
 
-  function downloadRecommended() {
-    app.toast(
-      "info",
-      "Downloads arrive with the first-run installer (Phase 5). Until then, drop GGUF files into the models folder and press Refresh.",
+  function setRow(name: string, patch: Partial<DownloadRow>) {
+    const cur = progress[name];
+    if (cur) progress = { ...progress, [name]: { ...cur, ...patch } };
+  }
+
+  /** Installs the default engine, then pulls the required models, one at a time. */
+  async function downloadRecommended() {
+    try {
+      downloads = await api.recommendedDownloads();
+    } catch (e) {
+      app.error(`Could not read the recommended list: ${errorText(e)}`);
+      return;
+    }
+    const missing = downloads.filter((d) => !d.installed);
+    if (missing.length === 0) {
+      app.toast("info", "Everything recommended is already installed.");
+      return;
+    }
+    downloading = true;
+    progress = Object.fromEntries(
+      missing.map((d): [string, DownloadRow] => [
+        d.name,
+        { kind: d.kind, name: d.name, done_bytes: 0, total_bytes: d.size_bytes, finished: false, error: null, state: "waiting" },
+      ]),
     );
+    // The engine first: `pull_model` uses the installed runtime's own downloader.
+    for (const d of missing) {
+      setRow(d.name, { state: "running" });
+      try {
+        if (d.kind === "engine") await api.installEngine(d.name);
+        else await api.pullModel(d.name);
+        setRow(d.name, { state: "done", finished: true });
+      } catch (e) {
+        setRow(d.name, { state: "failed", finished: true, error: errorText(e) });
+        if (d.kind === "engine") break;
+      }
+    }
+    downloading = false;
+    downloads = await api.recommendedDownloads().catch(() => downloads);
+    await loadStatus();
+    const failed = Object.values(progress).filter((p) => p.state === "failed").length;
+    if (failed > 0) app.error(`${plural(failed, "download")} failed; see the list in Settings`);
+    else app.toast("success", "Recommended engine and models installed");
   }
 </script>
 
@@ -216,10 +299,51 @@
         value={app.settings.default_language ?? SETTING_DEFAULTS.default_language}
         onchange={(e) => app.setSetting("default_language", (e.currentTarget as HTMLSelectElement).value)}
       >
-        {#each LANGUAGES as [code, name] (code)}<option value={code}>{name}{code === "auto" ? "" : ` (${code})`}</option>{/each}
+        {#each LANGUAGES as [code, name] (code)}<option value={code}>{languageLabel(code, name)}</option>{/each}
       </select>
       <p class="help">Used for new recordings and imports. Automatic detection loses about a second of the first utterance.</p>
     </div>
+
+  </section>
+
+  <section>
+    <h2>Recording</h2>
+    <div class="field">
+      <label class="label" for="rec-mic">Microphone</label>
+      <select
+        id="rec-mic"
+        value={app.settings["record.mic_device"] ?? ""}
+        onchange={(e) => app.setSetting("record.mic_device", (e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">Windows default communications microphone</option>
+        {#each mics as d (d.id)}<option value={d.id}>{d.name}{d.is_default_comms ? " (default)" : ""}</option>{/each}
+      </select>
+    </div>
+    <div class="field">
+      <label class="label" for="rec-out">System audio</label>
+      <select
+        id="rec-out"
+        value={app.settings["record.loopback_device"] ?? ""}
+        onchange={(e) => app.setSetting("record.loopback_device", (e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">Default output, following the app that plays</option>
+        {#each outputs as d (d.id)}<option value={d.id}>{d.name}{d.is_default ? " (default)" : ""}</option>{/each}
+      </select>
+      <p class="help">
+        Preselected in the start sheet and used by Ctrl+Alt+R. System audio is recorded after the output's volume, so
+        keep it at a normal level.
+        {#if devicesError}<span class="error">Could not list devices: {devicesError}</span>{/if}
+        <button type="button" class="link" onclick={loadDevices}>Refresh devices</button>
+      </p>
+    </div>
+    <label class="radio block">
+      <input
+        type="checkbox"
+        checked={boolSetting("record.diarize_mic", false)}
+        onchange={(e) => app.setSetting("record.diarize_mic", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
+      />
+      <span><strong>The mic hears a room with several people</strong>: find speakers on the mic channel too (the default in the start sheet)</span>
+    </label>
     <fieldset class="field">
       <legend class="label">Post-pass after a live recording</legend>
       <label class="radio block">
@@ -241,6 +365,29 @@
         <span><strong>Only on issues</strong>: when the live session reported a degraded feed, engine restarts or gaps</span>
       </label>
     </fieldset>
+    <label class="radio block">
+      <input
+        type="checkbox"
+        checked={boolSetting("keep_live_runs", false)}
+        onchange={(e) => app.setSetting("keep_live_runs", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
+      />
+      <span><strong>Keep the live transcript</strong> next to the final one after the post-pass (for comparison)</span>
+    </label>
+    {#each CAPTURE_TOGGLES as t (t.key)}
+      <label class="radio block">
+        <input
+          type="checkbox"
+          checked={boolSetting(t.key, t.def)}
+          onchange={(e) => app.setSetting(t.key, (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
+        />
+        <span><strong>{t.label}</strong>. {t.help}</span>
+      </label>
+    {/each}
+    <p class="help">
+      Recordings are kept as lossless FLAC (about 90 MB per hour) for
+      {plural(Number(app.settings.audio_retention_days ?? SETTING_DEFAULTS.audio_retention_days), "day")} (Keep audio
+      for, above), then deleted unless pinned; transcripts stay. Capture changes apply to the next recording.
+    </p>
   </section>
 
   <section>
@@ -253,11 +400,41 @@
         <button type="button" class="btn" onclick={() => api.openModelsFolder().catch((e) => app.error(errorText(e)))}>
           <Icon name="folder" /> Open models folder
         </button>
-        <button type="button" class="btn" onclick={downloadRecommended}>
-          <Icon name="download" /> Download recommended
+        <button type="button" class="btn" onclick={downloadRecommended} disabled={downloading}>
+          <Icon name="download" />{downloading ? "Downloading…" : "Download recommended"}
         </button>
       </div>
     </div>
+    {#if downloads}
+      <ul class="downloads" aria-label="Recommended downloads">
+        {#each downloads as d (d.name)}
+          {@const p = progress[d.name]}
+          {@const pct = p && p.total_bytes ? Math.min(100, Math.round((p.done_bytes / p.total_bytes) * 100)) : null}
+          <li>
+            <span class="dl-name">{d.label}</span>
+            <span class="mono dl-size">{formatBytes(d.size_bytes)}</span>
+            <span class="dl-state">
+              {#if p?.state === "running"}
+                {#if d.kind === "engine" && pct !== null}
+                  <span class="dl-bar"><span class="dl-fill" style="width: {pct}%"></span></span>
+                  <span class="mono">{pct}%</span>
+                {:else}
+                  Downloading and verifying…
+                {/if}
+              {:else if p?.state === "waiting"}
+                Waiting
+              {:else if p?.state === "failed"}
+                <span class="error" title={p.error ?? ""}>Failed: {p.error}</span>
+              {:else if p?.state === "done" || d.installed}
+                <span class="ok-text">Installed</span>
+              {:else}
+                Not installed
+              {/if}
+            </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     {#if statusError}
       <p class="help error">Could not read the engine status: {statusError}</p>
     {:else if status}
@@ -446,6 +623,9 @@
   .radio.block input {
     margin-top: 3px;
   }
+  .radio.block + .field {
+    margin-top: 12px;
+  }
   .path {
     flex: 1;
     min-width: 200px;
@@ -613,6 +793,58 @@
   .ok {
     background: var(--ok-bg);
     color: var(--ok-fg);
+  }
+  .error {
+    color: var(--danger);
+  }
+  .ok-text {
+    color: var(--ok-fg);
+  }
+  .downloads {
+    margin: 6px 0 10px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    list-style: none;
+  }
+  .downloads li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 80px minmax(0, 1.2fr);
+    gap: 10px;
+    align-items: center;
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+  }
+  .downloads li:first-child {
+    border-top: 0;
+  }
+  .dl-name {
+    font-weight: 600;
+  }
+  .dl-size {
+    color: var(--fg-muted);
+    font-size: 12px;
+    text-align: right;
+  }
+  .dl-state {
+    overflow: hidden;
+    font-size: 12px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .dl-bar {
+    display: inline-block;
+    width: 120px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--bg-hover);
+    vertical-align: middle;
+  }
+  .dl-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
   }
   .warn {
     border-color: var(--warning-border);

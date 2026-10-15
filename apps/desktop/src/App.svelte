@@ -5,10 +5,13 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, errorText } from "./lib/api";
+  import { plural } from "./lib/format";
+  import { live } from "./lib/live.svelte";
   import { AUDIO_EXTENSIONS, app, isTyping } from "./lib/state.svelte";
   import Library from "./components/Library.svelte";
   import MeetingView from "./components/MeetingView.svelte";
   import Overlays from "./components/Overlays.svelte";
+  import RecordSheet from "./components/RecordSheet.svelte";
 
   // Settings and Diagnostics are split into their own chunks.
   let settingsPage = $state.raw<Component | null>(null);
@@ -129,12 +132,14 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (app.confirmRequest) return;
+    if (app.confirmRequest || live.sheetOpen) return;
     const k = e.key;
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && !e.altKey) {
       const lower = k.toLowerCase();
-      if (!e.shiftKey && (lower === "k" || lower === "f")) focusSearch();
+      if (!e.shiftKey && k === ".") {
+        if (live.phase === "recording") void live.stop();
+      } else if (!e.shiftKey && (lower === "k" || lower === "f")) focusSearch();
       else if (!e.shiftKey && lower === "o") void importDialog();
       else if (!e.shiftKey && k === ",") app.route = app.route === "settings" ? "library" : "settings";
       else if (e.shiftKey && lower === "d") app.route = app.route === "diagnostics" ? "library" : "diagnostics";
@@ -157,7 +162,12 @@
       return;
     }
     if (isTyping(e) || e.altKey) return;
-    if (k === "F1" || k === "?") {
+    if ((k === "r" || k === "R") && !e.defaultPrevented && !e.shiftKey && !app.helpOpen) {
+      // Record or stop; R on a transcript row or a speaker chip renames instead
+      // (those handlers take the key first).
+      void live.toggle();
+      e.preventDefault();
+    } else if (k === "F1" || k === "?") {
       app.helpOpen = !app.helpOpen;
       e.preventDefault();
     } else if (k === "Escape" && !e.defaultPrevented && app.route !== "library") {
@@ -190,10 +200,10 @@
       <div class="welcome">
         <h1>Your meetings, searchable</h1>
         <p>
-          {app.meetings.length.toLocaleString()} meetings on this computer. Everything runs locally; nothing leaves
-          the machine.
+          {plural(app.meetings.length, "meeting")} on this computer. Everything runs locally; nothing leaves the machine.
         </p>
         <ul class="keys">
+          <li><kbd>R</kbd> record a meeting (<kbd>Ctrl Alt R</kbd> from any app)</li>
           <li><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Enter</kbd> open a meeting</li>
           <li><kbd>Ctrl K</kbd> search every transcript</li>
           <li><kbd>Ctrl O</kbd> import a recording, or drop files anywhere</li>
@@ -214,6 +224,7 @@
 </div>
 
 <Overlays />
+<RecordSheet />
 
 <style>
   .shell {

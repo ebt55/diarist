@@ -199,13 +199,9 @@ pub async fn cancel_job(app: AppHandle, jobs: State<'_, Jobs>, job_id: JobId) ->
         // The running job notices its token and emits job:cancelled itself.
         CancelOutcome::Signalled => Ok(()),
         CancelOutcome::Dequeued => {
-            emit_job(
-                &app,
-                &JobEvent::Cancelled {
-                    job_id,
-                    meeting_id: None,
-                },
-            );
+            // A queued post-pass leaves its meeting with the live transcript.
+            let meeting_id = crate::live::dequeued_post_pass(&app, &job_id);
+            emit_job(&app, &JobEvent::Cancelled { job_id, meeting_id });
             Ok(())
         }
         CancelOutcome::NotFound => Err(format!("job {job_id} is not queued or running")),
@@ -661,6 +657,60 @@ pub async fn pull_model(
             Err(e) => progress(0, true, Some(e.to_string())),
         }
         result.map(|p| p.path.display().to_string())
+    })
+    .await
+}
+
+/// One item of "Download recommended": the default runtime and the required
+/// models from the manifest, with whether a matching file is already there.
+// TODO(phase3b): move into `meet_core::views` with `DownloadProgress`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadItem {
+    /// `engine` or `model`.
+    pub kind: &'static str,
+    /// What `install_engine` / `pull_model` take.
+    pub name: String,
+    pub label: String,
+    pub size_bytes: u64,
+    pub installed: bool,
+}
+
+/// What "Download recommended" would fetch, engine first.
+#[tauri::command]
+pub async fn recommended_downloads(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<Vec<DownloadItem>> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<Vec<DownloadItem>> {
+        let manifest = Manifest::load(&data_paths.root)?;
+        let files = s.list_model_files()?;
+        let mut items = Vec::new();
+        if let Some(e) = manifest.default_engine() {
+            items.push(DownloadItem {
+                kind: "engine",
+                name: e.name.clone(),
+                label: format!("Engine {} ({})", e.version, e.backend),
+                size_bytes: e.size_bytes,
+                installed: files.iter().any(|f| {
+                    f.role == ModelRole::Engine
+                        && !f.missing
+                        && f.architecture.as_deref() == Some(e.version.as_str())
+                }),
+            });
+        }
+        for m in manifest.required() {
+            items.push(DownloadItem {
+                kind: "model",
+                name: m.name.clone(),
+                label: format!("{} ({})", m.name, m.role),
+                size_bytes: m.size_bytes,
+                installed: files
+                    .iter()
+                    .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str())),
+            });
+        }
+        Ok(items)
     })
     .await
 }

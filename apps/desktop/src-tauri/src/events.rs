@@ -4,11 +4,13 @@
 //! - `job:progress`, `job:done`, `job:error`, `job:cancelled`: [`JobEvent`]
 //!   (name from [`JobEvent::event_name`]).
 //! - `models:progress`: [`DownloadProgress`] while `install_engine` or
-//!   `pull_model` runs. Not a view type yet: no screen consumes it until the
-//!   first-run downloader UI (Phase 5) promotes it into `meet_core::views`.
+//!   `pull_model` runs (Settings, "Download recommended"). Not a view type
+//!   yet (TODO: move it into `meet_core::views`; the TypeScript copy is in
+//!   `src/lib/api.ts`).
+//! - `live:*`: the recording's output, see `live.rs`.
 //! - `transcript:words` ([`LiveWordsEvent`]) and `transcript:relabel`
-//!   ([`LiveRelabelEvent`]): reserved for live mode (Phase 3); the emitters
-//!   exist so the payload contract is fixed, but nothing produces them yet.
+//!   ([`LiveRelabelEvent`]): the Phase 0.5 placeholders; live mode uses the
+//!   `live:*` events instead, so nothing produces them.
 
 use meet_core::views::{JobEvent, LiveRelabelEvent, LiveWordsEvent};
 use serde::Serialize;

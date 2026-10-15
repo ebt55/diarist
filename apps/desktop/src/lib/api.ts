@@ -6,8 +6,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { EngineStatus } from "./generated/EngineStatus";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobId } from "./generated/JobId";
-import type { LiveRelabelEvent } from "./generated/LiveRelabelEvent";
-import type { LiveWordsEvent } from "./generated/LiveWordsEvent";
 import type { MeetingDetail } from "./generated/MeetingDetail";
 import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
@@ -23,6 +21,15 @@ import type { TrackChannel } from "./generated/TrackChannel";
 import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
+import type {
+  AudioDevice,
+  DownloadItem,
+  LiveStateView,
+  LiveStatusView,
+  StartRequest,
+  StopView,
+  WordsUpdate,
+} from "./live";
 
 export type { Waveform };
 
@@ -84,8 +91,17 @@ export const api = {
   rescanModels: () => invoke<ModelFile[]>("rescan_models"),
   installEngine: (name: string | null = null) => invoke<string>("install_engine", { name }),
   pullModel: (name: string) => invoke<string>("pull_model", { name }),
+  recommendedDownloads: () => invoke<DownloadItem[]>("recommended_downloads"),
   openModelsFolder: () => invoke<void>("open_models_folder"),
   openDataFolder: () => invoke<void>("open_data_folder"),
+
+  listAudioDevices: () => invoke<AudioDevice[]>("list_audio_devices"),
+  prepareRecording: () => invoke<void>("prepare_recording"),
+  startRecording: (opts: StartRequest) => invoke<LiveStateView>("start_recording", { opts }),
+  stopRecording: () => invoke<StopView>("stop_recording"),
+  recordingStatus: () => invoke<LiveStatusView>("recording_status"),
+  liveSnapshot: (meeting_id: MeetingId) => invoke<WordsUpdate[]>("live_snapshot", { meeting_id }),
+  rerunPostPass: (meeting_id: MeetingId) => invoke<JobId>("rerun_post_pass", { meeting_id }),
 
   readLogTail: (max_lines: number) => invoke<string>("read_log_tail", { max_lines }),
   lastEngineStderr: () => invoke<string | null>("last_engine_stderr"),
@@ -100,12 +116,7 @@ export async function onJobEvent(cb: (event: JobEvent) => void): Promise<Unliste
   return () => unlisten.forEach((u) => u());
 }
 
-/** `transcript:words` (live mode, Phase 3; no producer yet). */
-export function onLiveWords(cb: (event: LiveWordsEvent) => void): Promise<UnlistenFn> {
-  return listen<LiveWordsEvent>("transcript:words", (e) => cb(e.payload));
-}
-
-/** `transcript:relabel` (live mode, Phase 3; no producer yet). */
-export function onLiveRelabel(cb: (event: LiveRelabelEvent) => void): Promise<UnlistenFn> {
-  return listen<LiveRelabelEvent>("transcript:relabel", (e) => cb(e.payload));
+/** Subscribes to one backend event (`live:*`, `models:progress`). */
+export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<UnlistenFn> {
+  return listen<T>(name, (e) => cb(e.payload));
 }

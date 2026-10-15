@@ -306,6 +306,27 @@
   export function setPendingFocus(id: SegmentId) {
     pendingFocus = id;
   }
+
+  /** Meeting time of the first visible segment (to come back to after a reload). */
+  export function anchorMs(): number | null {
+    if (!vlist || segments.length === 0) return null;
+    return segments[vlist.findItemIndex(vlist.getScrollOffset())]?.start_ms ?? null;
+  }
+
+  /** Scrolls to the segment at meeting time `to`, or to the end. */
+  export function scrollTo(to: number | "end") {
+    if (segments.length === 0) return;
+    let i = to === "end" ? segments.length - 1 : segments.findIndex((s) => s.end_ms > to);
+    if (i < 0) i = segments.length - 1;
+    cursor = i;
+    lastUserScroll = performance.now();
+    void tick().then(() =>
+      requestAnimationFrame(() => {
+        vlist?.scrollToIndex(i, { align: to === "end" ? "end" : "start" });
+        scheduleWords(30);
+      }),
+    );
+  }
 </script>
 
 <div class="transcript-wrap">

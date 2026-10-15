@@ -32,6 +32,10 @@
   --warning-bg: #fff3d6;
   --warning-fg: #6f4600;
   --warning-border: #ecd295;
+  --rec: #d92d20;
+  --rec-solid: #d92d20;
+  --rec-hover: #b42318;
+  --rec-bg: #fde8e6;
   --mark-bg: #ffe17a;
   --mark-fg: #15171c;
   --word-now-bg: #2b57d6;
@@ -68,6 +72,10 @@
     --warning-bg: #3a2e12;
     --warning-fg: #f3c86f;
     --warning-border: #5d4a1d;
+    --rec: #ff6b5e;
+    --rec-solid: #c4321f;
+    --rec-hover: #a92a1a;
+    --rec-bg: #3d1c1a;
     --mark-bg: #75600f;
     --mark-fg: #fff7d6;
     --word-now-bg: #84a3ff;
@@ -109,6 +117,10 @@
   --warning-bg: #3a2e12;
   --warning-fg: #f3c86f;
   --warning-border: #5d4a1d;
+  --rec: #ff6b5e;
+  --rec-solid: #c4321f;
+  --rec-hover: #a92a1a;
+  --rec-bg: #3d1c1a;
   --mark-bg: #75600f;
   --mark-fg: #fff7d6;
   --word-now-bg: #84a3ff;
@@ -254,6 +266,48 @@ input[type="checkbox"] {
   padding: 5px 7px;
 }
 
+/* Record / Stop: red, with a dot that pulses while recording. */
+.btn-rec {
+  border-color: var(--rec-solid);
+  background: var(--rec-solid);
+  color: #fff;
+}
+
+.btn-rec:hover:not(:disabled) {
+  border-color: var(--rec-hover);
+  background: var(--rec-hover);
+}
+
+.btn-rec:disabled {
+  opacity: 0.7;
+  color: #fff;
+}
+
+.rec-dot {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.rec-dot.live {
+  animation: rec-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-dot.live {
+    animation: none;
+  }
+}
+
 .link {
   padding: 0;
   border: 0;
@@ -306,6 +360,12 @@ mark {
   border-color: var(--warning-border);
   background: var(--warning-bg);
   color: var(--warning-fg);
+}
+
+.status-recording {
+  border-color: var(--rec);
+  background: var(--rec-bg);
+  color: var(--rec);
 }
 
 .status-failed {

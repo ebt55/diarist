@@ -6,6 +6,7 @@
   import type { SearchHit } from "../lib/generated/SearchHit";
   import type { MeetingSummary } from "../lib/generated/MeetingSummary";
   import type { JobStage } from "../lib/generated/JobStage";
+  import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -199,8 +200,31 @@
   <header class="side-head">
     <span class="brand">meet-assist</span>
     <div class="head-actions">
-      <button type="button" class="btn btn-primary" onclick={onimport} title="Import audio or video (Ctrl+O)">
-        <Icon name="import" /> Import
+      {#if live.active}
+        <button
+          type="button"
+          class="btn btn-rec"
+          disabled={live.phase === "stopping"}
+          onclick={() => live.toggle()}
+          title="Stop recording (Ctrl+. or R; Ctrl+Alt+R from any app)"
+        >
+          <span class="rec-dot live" aria-hidden="true"></span>
+          <span class="mono">{formatClock(live.elapsedMs)}</span>
+          <span class="sr-only">recording,</span>{live.phase === "stopping" ? "…" : "Stop"}
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="btn btn-rec"
+          disabled={live.phase === "starting"}
+          onclick={() => live.toggle()}
+          title="Record a meeting (R; Ctrl+Alt+R from any app)"
+        >
+          <span class="rec-dot" aria-hidden="true"></span>{live.phase === "starting" ? "Starting…" : "Record"}
+        </button>
+      {/if}
+      <button type="button" class="btn" onclick={onimport} title="Import audio or video (Ctrl+O)" aria-label="Import">
+        <Icon name="import" /><span class="import-label">Import</span>
       </button>
       <button
         type="button"
@@ -242,19 +266,39 @@
   </div>
 
   {#if app.jobs.length > 0}
-    <section class="jobs" aria-label="Imports in progress">
+    <section class="jobs" aria-label="Imports and finalizing in progress">
       {#each app.jobs as job (job.id)}
         {@const pct = job.totalMs ? Math.min(100, Math.round((job.doneMs / job.totalMs) * 100)) : 0}
-        <div class="job">
+        {@const waiting = job.stage === "queued" && live.active}
+        <div class="job" class:postpass={job.kind === "postpass"}>
           <div class="job-line">
-            <span class="job-name" title={job.name}>{job.name}</span>
+            <span class="job-name" title={job.name}>
+              {#if job.kind === "postpass"}
+                <button type="button" class="link name-link" onclick={() => job.meetingId !== null && app.open(job.meetingId)}
+                  >Finalizing {job.name}</button
+                >
+              {:else}{job.name}{/if}
+            </span>
             <span class="mono">{pct}%</span>
           </div>
-          <div class="bar" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100" aria-label="Import {job.name}">
+          <div
+            class="bar"
+            role="progressbar"
+            aria-valuenow={pct}
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-label="{job.kind === 'postpass' ? 'Finalizing' : 'Import'} {job.name}"
+          >
             <div class="bar-fill" style="width: {pct}%"></div>
           </div>
           <div class="job-line job-meta">
-            <span>{job.cancelling ? "Cancelling…" : STAGES[job.stage]} · {formatClock(now - job.startedAt)} elapsed</span>
+            <span
+              >{job.cancelling
+                ? "Cancelling…"
+                : waiting
+                  ? "Waiting for the recording to stop"
+                  : STAGES[job.stage]}{waiting ? "" : ` · ${formatClock(now - job.startedAt)} elapsed`}</span
+            >
             <button type="button" class="link" disabled={job.cancelling} onclick={() => app.cancelJob(job.id)}>Cancel</button>
           </div>
         </div>
@@ -320,7 +364,7 @@
   {:else if app.meetingsError}
     <p class="empty error" role="alert">Could not load meetings: {app.meetingsError}</p>
   {:else if app.meetingsLoaded && app.meetings.length === 0}
-    <p class="empty">No meetings yet. Import a recording with Ctrl+O or drop files here.</p>
+    <p class="empty">No meetings yet. Press R to record one, import a recording with Ctrl+O, or drop files here.</p>
   {:else}
     <VList
       id="meeting-list"
@@ -354,7 +398,11 @@
           <div class="row-top">
             <span class="row-title">{m.title || "Untitled meeting"}</span>
             {#if m.audio_keep}<span class="pin" title="Audio pinned"><Icon name="pin" size={12} /></span>{/if}
-            {#if m.status !== "done"}<span class="chip status-{m.status}">{m.status}</span>{/if}
+            {#if m.status !== "done"}
+              <span class="chip status-{m.status}"
+                >{m.status === "processing" && m.source === "live" ? "finalizing" : m.status}</span
+              >
+            {/if}
           </div>
           <div class="row-meta">
             <span>{formatShortDate(m.started_at)}</span>
@@ -391,7 +439,16 @@
   }
   .head-actions {
     display: flex;
+    flex: none;
     gap: 4px;
+  }
+  .head-actions .btn-rec {
+    min-width: 0;
+  }
+  @media (max-width: 1000px) {
+    .import-label {
+      display: none;
+    }
   }
   .search {
     position: relative;
@@ -441,6 +498,17 @@
   .job-meta {
     color: var(--fg-muted);
     font-size: 12px;
+  }
+  .job.postpass {
+    border-color: var(--accent-border);
+  }
+  .name-link {
+    overflow: hidden;
+    max-width: 100%;
+    color: inherit;
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .bar {
     height: 4px;
