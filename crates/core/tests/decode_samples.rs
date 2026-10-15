@@ -1,12 +1,12 @@
-//! Decodes real recordings when `MEET_ASSIST_SAMPLES` names one or more
+//! Decodes real recordings when `DIARIST_SAMPLES` names one or more
 //! folders (separated like `PATH`). Every `*.m4a` under them, recursively,
 //! goes through the decoder chain; the 16 kHz output must be within 50 ms of
 //! the container duration reported by `ffprobe`.
 //!
 //! The files are only read; outputs go to a temp folder and are deleted.
 //! Run in release mode, it decodes hours of audio:
-//! `MEET_ASSIST_SAMPLES=... cargo test --release -p diarist-core --test decode_samples -- --nocapture`
-//! `MEET_ASSIST_SAMPLES_LIMIT=n` decodes only the first n files.
+//! `DIARIST_SAMPLES=... cargo test --release -p diarist-core --test decode_samples -- --nocapture`
+//! `DIARIST_SAMPLES_LIMIT=n` decodes only the first n files.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,13 +17,13 @@ use diarist_core::audio::{ChainDecoder, Decoder, MediaFoundationDecoder, Symphon
 const TOLERANCE_MS: f64 = 50.0;
 
 fn sample_files() -> Option<Vec<PathBuf>> {
-    let roots = std::env::var_os("MEET_ASSIST_SAMPLES")?;
+    let roots = std::env::var_os("DIARIST_SAMPLES")?;
     let mut files = Vec::new();
     for root in std::env::split_paths(&roots) {
         collect(&root, &mut files);
     }
     files.sort();
-    if let Some(limit) = std::env::var("MEET_ASSIST_SAMPLES_LIMIT")
+    if let Some(limit) = std::env::var("DIARIST_SAMPLES_LIMIT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
     {
@@ -73,10 +73,10 @@ fn wav_ms(path: &Path) -> f64 {
 #[test]
 fn decodes_every_sample_within_50_ms() {
     let Some(files) = sample_files() else {
-        eprintln!("MEET_ASSIST_SAMPLES not set; skipping");
+        eprintln!("DIARIST_SAMPLES not set; skipping");
         return;
     };
-    assert!(!files.is_empty(), "no *.m4a under MEET_ASSIST_SAMPLES");
+    assert!(!files.is_empty(), "no *.m4a under DIARIST_SAMPLES");
     let tmp = tempfile::tempdir().unwrap();
     let chain = ChainDecoder::new();
     let mut failures = Vec::new();

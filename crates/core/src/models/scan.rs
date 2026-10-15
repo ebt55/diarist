@@ -732,11 +732,11 @@ mod tests {
         assert_eq!(pick.id, ModelFileId(2));
     }
 
-    /// The real data layout when `MEET_ASSIST_MODELS_DIR` and
-    /// `MEET_ASSIST_ENGINE_DIR` are set (read-only: files are only listed).
+    /// The real data layout when `DIARIST_MODELS_DIR` and
+    /// `DIARIST_ENGINE_DIR` are set (read-only: files are only listed).
     #[test]
     fn scans_the_real_models_when_available() {
-        let Some(models) = std::env::var_os("MEET_ASSIST_MODELS_DIR") else {
+        let Some(models) = std::env::var_os("DIARIST_MODELS_DIR") else {
             return;
         };
         let models = PathBuf::from(models);

@@ -3,8 +3,8 @@
 //! within 2 percent of the Nemotron 3.5 reference run (11,896), 8 speakers,
 //! and no empty 60 s bucket where the reference had more than 20 words.
 //!
-//! Runs only with `MEET_ASSIST_CIMC_WAV` (the 16 kHz WAV), `MEET_ASSIST_ENGINE_DIR`
-//! and `MEET_ASSIST_MODELS_DIR` set; takes about 2.5 minutes on an RTX 3080.
+//! Runs only with `DIARIST_LONGFILE_WAV` (the 16 kHz WAV), `DIARIST_ENGINE_DIR`
+//! and `DIARIST_MODELS_DIR` set; takes about 2.5 minutes on an RTX 3080.
 //! The reference is `tests/fixtures/cimc_nemotron35_buckets.json` (word counts
 //! per minute of the research/08 run, no audio or text).
 
@@ -33,11 +33,11 @@ fn find(dir: &Path, name: &str) -> Option<PathBuf> {
 #[test]
 fn cimc_77_minutes_matches_the_reference() {
     let (Some(wav), Some(engine_dir), Some(models)) = (
-        std::env::var_os("MEET_ASSIST_CIMC_WAV"),
-        std::env::var_os("MEET_ASSIST_ENGINE_DIR"),
-        std::env::var_os("MEET_ASSIST_MODELS_DIR"),
+        std::env::var_os("DIARIST_LONGFILE_WAV"),
+        std::env::var_os("DIARIST_ENGINE_DIR"),
+        std::env::var_os("DIARIST_MODELS_DIR"),
     ) else {
-        eprintln!("MEET_ASSIST_CIMC_WAV / ENGINE_DIR / MODELS_DIR not set; skipping");
+        eprintln!("DIARIST_LONGFILE_WAV / ENGINE_DIR / MODELS_DIR not set; skipping");
         return;
     };
     let models = PathBuf::from(models);
@@ -58,7 +58,7 @@ fn cimc_77_minutes_matches_the_reference() {
         .collect();
 
     let tmp = tempfile::tempdir().unwrap();
-    let store = SqliteStore::open(tmp.path().join("meet-assist.db")).unwrap();
+    let store = SqliteStore::open(tmp.path().join("diarist.db")).unwrap();
     let engine = NemoCliEngine::new(
         PathBuf::from(engine_dir),
         &models,

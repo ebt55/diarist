@@ -146,7 +146,7 @@ fn tempfile_path(path: &Path) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     std::env::temp_dir().join(format!(
-        "meet-assist-peaks-{}-{}-{stem}.wav",
+        "diarist-peaks-{}-{}-{stem}.wav",
         std::process::id(),
         crate::types::new_id()
     ))

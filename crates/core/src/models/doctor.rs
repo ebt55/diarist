@@ -126,10 +126,10 @@ mod tests {
         assert!(DoctorReport::parse("nope").is_err());
     }
 
-    /// The real runtime when `MEET_ASSIST_ENGINE_DIR` is set.
+    /// The real runtime when `DIARIST_ENGINE_DIR` is set.
     #[test]
     fn real_doctor_when_available() {
-        let Some(dir) = std::env::var_os("MEET_ASSIST_ENGINE_DIR") else {
+        let Some(dir) = std::env::var_os("DIARIST_ENGINE_DIR") else {
             return;
         };
         let r = doctor(Path::new(&dir)).unwrap();

@@ -453,10 +453,10 @@ mod tests {
         assert!(parse_header(&huge[..]).unwrap_err().contains("implausible"));
     }
 
-    /// Reads every GGUF under `MEET_ASSIST_MODELS_DIR` (the real downloads).
+    /// Reads every GGUF under `DIARIST_MODELS_DIR` (the real downloads).
     #[test]
     fn real_models_when_available() {
-        let Some(dir) = std::env::var_os("MEET_ASSIST_MODELS_DIR") else {
+        let Some(dir) = std::env::var_os("DIARIST_MODELS_DIR") else {
             return;
         };
         let mut found = 0;

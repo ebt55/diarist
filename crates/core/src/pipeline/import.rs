@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn imports_a_file_into_a_current_run() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
         let src = input(dir.path());
         let engine = FakeEngine::new(Mode::Fixture);
         let events = Mutex::new(Vec::new());
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn engine_failure_marks_meeting_and_run_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
         let src = input(dir.path());
         store
             .set_setting(crate::settings::KEEP_INTERMEDIATE_WAV, "1")
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn cancel_reaches_the_engine() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
         let src = input(dir.path());
         let engine = FakeEngine::new(Mode::WaitForCancel);
         let token = CancelToken::default();

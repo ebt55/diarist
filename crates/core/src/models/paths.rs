@@ -1,32 +1,32 @@
 //! The data root and the folders under it (`docs/01`, "Data layout on disk").
 //!
 //! Resolution order:
-//! 0. `MEET_ASSIST_DATA_DIR` (development and tests: run the app or the CLI
+//! 0. `DIARIST_DATA_DIR` (development and tests: run the app or the CLI
 //!    against a scratch data root).
 //! 1. Portable mode: a `portable.txt` next to the executable. The data root
 //!    is `<exe dir>\data`, or the path on the file's first line (relative
 //!    paths are taken from the exe dir).
-//! 2. `HKCU\Software\meet-assist\DataRoot` (REG_SZ), set when the user moves it.
-//! 3. `%LOCALAPPDATA%\app.meetassist.desktop` (Tauri's `app_local_data_dir`).
+//! 2. `HKCU\Software\Diarist\DataRoot` (REG_SZ), set when the user moves it.
+//! 3. `%LOCALAPPDATA%\app.diarist.desktop` (Tauri's `app_local_data_dir`).
 
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{CoreError, Result};
 
 /// Tauri bundle identifier: the default data root's folder name.
-pub const APP_IDENTIFIER: &str = "app.meetassist.desktop";
+pub const APP_IDENTIFIER: &str = "app.diarist.desktop";
 /// Registry key (under HKCU) and value naming a relocated data root.
-pub const REGISTRY_KEY: &str = r"Software\meet-assist";
+pub const REGISTRY_KEY: &str = r"Software\Diarist";
 pub const REGISTRY_VALUE: &str = "DataRoot";
 /// Marker file next to the executable that turns on portable mode.
 pub const PORTABLE_MARKER: &str = "portable.txt";
 /// Environment variable that overrides the data root (development, tests).
-pub const DATA_DIR_ENV: &str = "MEET_ASSIST_DATA_DIR";
+pub const DATA_DIR_ENV: &str = "DIARIST_DATA_DIR";
 
 /// Why the data root is where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataRootSource {
-    /// Given explicitly (CLI `--data-dir`, `MEET_ASSIST_DATA_DIR`, tests).
+    /// Given explicitly (CLI `--data-dir`, `DIARIST_DATA_DIR`, tests).
     Explicit,
     Portable,
     Registry,
@@ -70,7 +70,7 @@ impl DataPaths {
         self
     }
 
-    /// Resolves the data root (`MEET_ASSIST_DATA_DIR`, portable marker,
+    /// Resolves the data root (`DIARIST_DATA_DIR`, portable marker,
     /// registry, default).
     pub fn resolve() -> Result<Self> {
         if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
@@ -102,7 +102,7 @@ impl DataPaths {
         })
     }
 
-    /// `%LOCALAPPDATA%\app.meetassist.desktop`: the data root when nothing
+    /// `%LOCALAPPDATA%\app.diarist.desktop`: the data root when nothing
     /// else names one (Tauri's `app_local_data_dir`).
     pub fn default_root() -> Result<PathBuf> {
         let local = std::env::var_os("LOCALAPPDATA")
@@ -120,7 +120,7 @@ impl DataPaths {
             DataRootSource::Portable => (
                 "portable",
                 Some(format!(
-                    "Portable mode: the data folder is set by {PORTABLE_MARKER} next to meet-assist.exe."
+                    "Portable mode: the data folder is set by {PORTABLE_MARKER} next to diarist.exe."
                 )),
             ),
             DataRootSource::Explicit => (
@@ -156,7 +156,7 @@ impl DataPaths {
 
     /// The SQLite database.
     pub fn db(&self) -> PathBuf {
-        self.root.join("meet-assist.db")
+        self.root.join("diarist.db")
     }
 
     /// `audio\`: `audio\<meeting uid>\...`.
@@ -263,13 +263,13 @@ fn registry_root() -> Option<PathBuf> {
     None
 }
 
-/// The relocated data root stored in `HKCU\Software\meet-assist\DataRoot`,
+/// The relocated data root stored in `HKCU\Software\Diarist\DataRoot`,
 /// if any (what [`DataPaths::resolve`] uses when there is no portable marker).
 pub fn registry_data_root() -> Option<PathBuf> {
     registry_root()
 }
 
-/// Points `HKCU\Software\meet-assist\DataRoot` at `root`, or removes the
+/// Points `HKCU\Software\Diarist\DataRoot` at `root`, or removes the
 /// value (and the key when it is empty) for `None`, so the default root is
 /// used again. The uninstaller reads the same value.
 #[cfg(windows)]
@@ -372,7 +372,7 @@ mod tests {
     fn children_and_relative_paths() {
         let p = DataPaths::at("D:/data");
         assert_eq!(p.models(), Path::new("D:/data").join("models"));
-        assert_eq!(p.db(), Path::new("D:/data").join("meet-assist.db"));
+        assert_eq!(p.db(), Path::new("D:/data").join("diarist.db"));
         let file = p.models().join("nvidia").join("x.gguf");
         assert_eq!(p.relative(&file), "models/nvidia/x.gguf");
         assert_eq!(p.absolute("models/nvidia/x.gguf"), file);

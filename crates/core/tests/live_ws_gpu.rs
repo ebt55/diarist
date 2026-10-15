@@ -1,7 +1,7 @@
 //! The live WebSocket adapter against the real `nemo-speech serve`, gated on
-//! `MEET_ASSIST_ENGINE_DIR` (an extracted runtime) and
-//! `MEET_ASSIST_MODELS_DIR`. A 30 s cut of the AMI ES2002a mix (from
-//! `MEET_ASSIST_AMI_WAV`, default `<models>/../data/samples/...`) is streamed
+//! `DIARIST_ENGINE_DIR` (an extracted runtime) and
+//! `DIARIST_MODELS_DIR`. A 30 s cut of the AMI ES2002a mix (from
+//! `DIARIST_AMI_WAV`, default `<models>/../data/samples/...`) is streamed
 //! in real time as 100 ms frames; words and speaker tags must arrive.
 //! Uses the EN model (the default selection), or Nemotron 3.5 when it is
 //! the only one present.
@@ -44,8 +44,8 @@ pub fn vram_used_mb() -> Option<u32> {
 #[test]
 fn streams_ami_in_real_time() {
     let (Some(engine_dir), Some(models)) = (
-        std::env::var_os("MEET_ASSIST_ENGINE_DIR").map(PathBuf::from),
-        std::env::var_os("MEET_ASSIST_MODELS_DIR").map(PathBuf::from),
+        std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from),
+        std::env::var_os("DIARIST_MODELS_DIR").map(PathBuf::from),
     ) else {
         return;
     };
@@ -53,7 +53,7 @@ fn streams_ami_in_real_time() {
         .or_else(|| find(&models, "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"))
         .expect("a streaming ASR model");
     let diar = find(&models, "Nemotron-3-Diarization.q8_0.gguf").expect("diarizer");
-    let ami = std::env::var_os("MEET_ASSIST_AMI_WAV")
+    let ami = std::env::var_os("DIARIST_AMI_WAV")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             models

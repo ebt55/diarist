@@ -287,7 +287,7 @@ mod tests {
     fn deletes_old_unpinned_audio_and_never_transcripts_or_originals() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let store = SqliteStore::open(root.join("meet-assist.db")).unwrap();
+        let store = SqliteStore::open(root.join("diarist.db")).unwrap();
 
         let old = meeting(&store, "old", 40, MeetingStatus::Done);
         track(&store, root, &old, "playback.flac", AudioFormat::Flac, 900);

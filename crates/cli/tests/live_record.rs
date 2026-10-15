@@ -1,6 +1,6 @@
 //! Live recording end to end on real audio devices and the GPU, gated on
-//! `MEET_ASSIST_LIVE_TEST=1` plus `MEET_ASSIST_ENGINE_DIR` (an extracted
-//! runtime) and `MEET_ASSIST_MODELS_DIR` (EN model and Nemotron 3
+//! `DIARIST_LIVE_TEST=1` plus `DIARIST_ENGINE_DIR` (an extracted
+//! runtime) and `DIARIST_MODELS_DIR` (EN model and Nemotron 3
 //! Diarization). Needs VB-Audio Virtual Cable.
 //!
 //! The mic is made deterministic: `diarist-cli play` renders a 60 s AMI cut
@@ -13,12 +13,12 @@
 //! loopback, the FLAC holds every sample, and a rename made on the live run
 //! before Stop survives into the post-pass run. Prints the measurements.
 //!
-//! `MEET_ASSIST_LIVE_TEST_HALF=loopback` plays only the loopback cut (the
+//! `DIARIST_LIVE_TEST_HALF=loopback` plays only the loopback cut (the
 //! mic records cable silence) and checks only the loopback.
 //!
-//! Override the cable endpoints with `MEET_ASSIST_CABLE_RENDER` and
-//! `MEET_ASSIST_CABLE_CAPTURE`, the AMI file with `MEET_ASSIST_AMI_WAV`, and
-//! the loopback endpoint with `MEET_ASSIST_LOOPBACK_RENDER` (an endpoint
+//! Override the cable endpoints with `DIARIST_CABLE_RENDER` and
+//! `DIARIST_CABLE_CAPTURE`, the AMI file with `DIARIST_AMI_WAV`, and
+//! the loopback endpoint with `DIARIST_LOOPBACK_RENDER` (an endpoint
 //! with software volume, e.g. S/PDIF, delivers loopback audio after the
 //! volume slider: at a few percent the speech is too quiet to transcribe).
 
@@ -219,18 +219,18 @@ fn play_qpc(out: &std::process::Output) -> i64 {
 
 #[test]
 fn live_recording_end_to_end() {
-    if std::env::var("MEET_ASSIST_LIVE_TEST").ok().as_deref() != Some("1") {
+    if std::env::var("DIARIST_LIVE_TEST").ok().as_deref() != Some("1") {
         return;
     }
     let (Some(engine_dir), Some(models)) = (
-        std::env::var_os("MEET_ASSIST_ENGINE_DIR").map(PathBuf::from),
-        std::env::var_os("MEET_ASSIST_MODELS_DIR").map(PathBuf::from),
+        std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from),
+        std::env::var_os("DIARIST_MODELS_DIR").map(PathBuf::from),
     ) else {
         return;
     };
     let asr = find(&models, "nemotron-speech-streaming-en-0.6b.q8_0.gguf").expect("EN model");
     let diar = find(&models, "Nemotron-3-Diarization.q8_0.gguf").expect("diarizer");
-    let ami = std::env::var_os("MEET_ASSIST_AMI_WAV")
+    let ami = std::env::var_os("DIARIST_AMI_WAV")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             models
@@ -246,9 +246,9 @@ fn live_recording_end_to_end() {
 
     let devs = list_devices().unwrap();
     let cap_q =
-        std::env::var("MEET_ASSIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
+        std::env::var("DIARIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
     let mic_dev = find_device(&devs, DeviceFlow::Capture, &cap_q).expect("CABLE Output");
-    let cable_render = std::env::var("MEET_ASSIST_CABLE_RENDER")
+    let cable_render = std::env::var("DIARIST_CABLE_RENDER")
         .ok()
         .unwrap_or_else(|| {
             [
@@ -262,15 +262,15 @@ fn live_recording_end_to_end() {
             .expect("the cable's render endpoint")
             .id
         });
-    let default_render = match std::env::var("MEET_ASSIST_LOOPBACK_RENDER") {
-        Ok(q) => find_device(&devs, DeviceFlow::Render, &q).expect("MEET_ASSIST_LOOPBACK_RENDER"),
+    let default_render = match std::env::var("DIARIST_LOOPBACK_RENDER") {
+        Ok(q) => find_device(&devs, DeviceFlow::Render, &q).expect("DIARIST_LOOPBACK_RENDER"),
         Err(_) => devs
             .iter()
             .find(|d| d.flow == DeviceFlow::Render && d.is_default)
             .expect("default render endpoint")
             .clone(),
     };
-    let explicit_loopback = std::env::var("MEET_ASSIST_LOOPBACK_RENDER").is_ok();
+    let explicit_loopback = std::env::var("DIARIST_LOOPBACK_RENDER").is_ok();
 
     // The live server, as the app keeps it running.
     let vram_before = vram_mb();
@@ -284,7 +284,7 @@ fn live_recording_end_to_end() {
     std::thread::sleep(Duration::from_secs(1));
     let vram_idle = vram_mb();
 
-    let store = Arc::new(SqliteStore::open(root.join("meet-assist.db")).unwrap());
+    let store = Arc::new(SqliteStore::open(root.join("diarist.db")).unwrap());
     let queue = Arc::new(JobQueue::new());
     let mut file_engine = NemoCliEngine::new(&engine_dir, &models, &asr, &diar);
     file_engine.pass_language = false;
@@ -335,7 +335,7 @@ fn live_recording_end_to_end() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let both = std::env::var("MEET_ASSIST_LIVE_TEST_HALF").ok().as_deref() != Some("loopback");
+    let both = std::env::var("DIARIST_LIVE_TEST_HALF").ok().as_deref() != Some("loopback");
     let mic_player = both.then(|| {
         Command::new(exe)
             .args([

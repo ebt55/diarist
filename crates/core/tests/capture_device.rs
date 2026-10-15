@@ -1,9 +1,9 @@
-//! Real-device capture checks, gated on `MEET_ASSIST_AUDIO_TEST=1` (they need
+//! Real-device capture checks, gated on `DIARIST_AUDIO_TEST=1` (they need
 //! VB-Audio Virtual Cable: a render endpoint whose audio comes out of the
 //! "CABLE Output" capture endpoint). A 440 Hz tone is played into the cable
 //! with `play_wav` while `start_capture` records "CABLE Output"; the packets
 //! must carry the tone with QPC timestamps that advance at 16 kHz.
-//! Override the endpoints with `MEET_ASSIST_CABLE_RENDER` / `MEET_ASSIST_CABLE_CAPTURE`.
+//! Override the endpoints with `DIARIST_CABLE_RENDER` / `DIARIST_CABLE_CAPTURE`.
 
 #![cfg(windows)]
 
@@ -18,13 +18,13 @@ use diarist_core::audio::capture::{
 use diarist_core::types::Channel;
 
 fn enabled() -> bool {
-    std::env::var("MEET_ASSIST_AUDIO_TEST").is_ok_and(|v| v == "1")
+    std::env::var("DIARIST_AUDIO_TEST").is_ok_and(|v| v == "1")
 }
 
 /// The cable's render side: an explicit override, else any render endpoint
 /// whose name mentions "VB-Audio Virtual Cable" and is not the 16-channel one.
 pub fn cable_render() -> String {
-    if let Ok(q) = std::env::var("MEET_ASSIST_CABLE_RENDER") {
+    if let Ok(q) = std::env::var("DIARIST_CABLE_RENDER") {
         return q;
     }
     let devs = list_devices().unwrap();
@@ -67,7 +67,7 @@ fn cable_tone_is_captured() {
     tone(&wav, 2.0);
     let devs = list_devices().unwrap();
     let capture_q =
-        std::env::var("MEET_ASSIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
+        std::env::var("DIARIST_CABLE_CAPTURE").unwrap_or_else(|_| "CABLE Output".into());
     let mic = find_device(&devs, DeviceFlow::Capture, &capture_q).expect("CABLE Output");
     let render = cable_render();
     eprintln!("render {render} -> capture {}", mic.name);

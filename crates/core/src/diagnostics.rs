@@ -48,7 +48,7 @@ impl HealthCheck {
 /// Everything the report needs that `diarist-core` cannot look up itself.
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsInput {
-    /// e.g. "meet-assist 0.1.0".
+    /// e.g. "Diarist 0.1.0".
     pub app: String,
     /// e.g. "Windows 11 (26200)".
     pub os: String,
@@ -115,9 +115,9 @@ fn hklm_string(key: &str, value: &str) -> Option<String> {
 
 fn source_name(s: DataRootSource) -> &'static str {
     match s {
-        DataRootSource::Explicit => "explicit (MEET_ASSIST_DATA_DIR or --data-dir)",
+        DataRootSource::Explicit => "explicit (DIARIST_DATA_DIR or --data-dir)",
         DataRootSource::Portable => "portable (portable.txt next to the exe)",
-        DataRootSource::Registry => r"relocated (HKCU\Software\meet-assist\DataRoot)",
+        DataRootSource::Registry => r"relocated (HKCU\Software\Diarist\DataRoot)",
         DataRootSource::Default => "default",
     }
 }
@@ -262,7 +262,7 @@ mod tests {
         select(&store, ModelRole::Engine, "0.2.0").unwrap();
         select(&store, ModelRole::Asr, "en.gguf").unwrap();
         let input = DiagnosticsInput {
-            app: "meet-assist 0.1.0".into(),
+            app: "Diarist 0.1.0".into(),
             os: "Windows 11".into(),
             gpu: Some(GpuInfo {
                 name: "NVIDIA GeForce RTX 3080".into(),
@@ -279,7 +279,7 @@ mod tests {
         };
         let text = report(&DataPaths::at("D:/data"), &store, &input);
         for want in [
-            "meet-assist 0.1.0",
+            "Diarist 0.1.0",
             "driver 610.88 | CUDA 13.1",
             "data root: D:/data [explicit",
             "engine: nemo-speech-0.2.0 0.2.0 | engine/nemo-speech-0.2.0",

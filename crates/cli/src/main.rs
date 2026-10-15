@@ -22,13 +22,13 @@ use diarist_core::views::{JobEvent, JobStage};
 use diarist_core::CoreError;
 
 #[derive(Debug, Parser)]
-#[command(name = "diarist-cli", version, about = "meet-assist developer CLI")]
+#[command(name = "diarist-cli", version, about = "Diarist developer CLI")]
 struct Cli {
     /// Data root (default: portable.txt next to the exe, then the registry,
-    /// then %LOCALAPPDATA%\app.meetassist.desktop).
+    /// then %LOCALAPPDATA%\app.diarist.desktop).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// Database file (default: <data root>\meet-assist.db).
+    /// Database file (default: <data root>\diarist.db).
     #[arg(long, global = true)]
     db: Option<PathBuf>,
     /// Models folder (default: <data root>\models).

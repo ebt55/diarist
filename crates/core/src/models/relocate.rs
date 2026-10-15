@@ -11,7 +11,7 @@
 //!    they are (the log grows while copying). Links (junctions) are recreated as
 //!    links, never followed. A [`MOVE_MARKER`] in the new root records the
 //!    old root and what was copied.
-//! 3. The caller points `HKCU\Software\meet-assist\DataRoot` at the new root
+//! 3. The caller points `HKCU\Software\Diarist\DataRoot` at the new root
 //!    ([`super::paths::set_registry_root`]) and restarts the app.
 //! 4. At the next launch, from the new root, [`finish_pending_move`] deletes
 //!    exactly the copied items from the old root (plus the WebView profile
@@ -32,7 +32,7 @@ use crate::error::{CoreError, Result};
 /// Marker in the new root naming the old one (deleted after the cleanup).
 pub const MOVE_MARKER: &str = "moved-from.json";
 /// The database file name under the data root.
-pub const DB_FILE: &str = "meet-assist.db";
+pub const DB_FILE: &str = "diarist.db";
 /// Folders copied to the new root and verified, in order.
 pub const MOVED_DIRS: &[&str] = &["audio", "engine", "models", "manifests"];
 /// Copied as they are (they change while the app runs) and removed from
@@ -398,7 +398,7 @@ pub fn copy_data(
 
 /// Removes what [`copy_data`] wrote into `to` (and `to` when it created it).
 fn remove_copy(to: &Path, created: bool) {
-    for name in [DB_FILE, "meet-assist.db.tmp", MOVE_MARKER] {
+    for name in [DB_FILE, "diarist.db.tmp", MOVE_MARKER] {
         let _ = fs::remove_file(to.join(name));
     }
     for d in MOVED_DIRS.iter().chain(BEST_EFFORT) {
@@ -560,7 +560,7 @@ mod tests {
             &root.join("engine/nemo-speech-0.2.0/bin/nemo-speech.exe"),
             b"MZ",
         );
-        write(&root.join("logs/meet-assist.log"), b"line\n");
+        write(&root.join("logs/diarist.log"), b"line\n");
         write(&root.join("EBWebView/Default/prefs"), b"x");
         write(&root.join("unrelated.txt"), b"keep me");
     }
@@ -598,7 +598,7 @@ mod tests {
         assert!(r.kept.is_empty(), "{r:?}");
         for item in [
             DB_FILE,
-            "meet-assist.db-wal",
+            "diarist.db-wal",
             "audio",
             "models",
             "engine",
@@ -615,7 +615,7 @@ mod tests {
         assert!(finish_pending_move(&new).is_none());
         // The new copy is intact.
         assert_eq!(
-            fs::read(new.join("logs/meet-assist.log")).unwrap(),
+            fs::read(new.join("logs/diarist.log")).unwrap(),
             b"line\n"
         );
     }

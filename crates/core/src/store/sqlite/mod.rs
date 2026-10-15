@@ -1695,7 +1695,7 @@ mod tests {
     #[test]
     fn migration_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db").join("meet-assist.db");
+        let path = dir.path().join("db").join("diarist.db");
         {
             let store = SqliteStore::open(&path).unwrap();
             assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
@@ -1762,7 +1762,7 @@ mod tests {
     #[test]
     fn delete_leaves_no_fts_orphans_and_removes_audio() {
         let dir = tempfile::tempdir().unwrap();
-        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
         let a = meeting(&store, "A");
         let b = meeting(&store, "B");
         current(&store, a.id, &["alpha one", "alpha two"]);

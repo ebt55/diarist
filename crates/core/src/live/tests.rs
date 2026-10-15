@@ -240,7 +240,7 @@ impl LiveSink for Sink {
 }
 
 fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc<FakeFile>) {
-    let store = Arc::new(SqliteStore::open(dir.join("meet-assist.db")).unwrap());
+    let store = Arc::new(SqliteStore::open(dir.join("diarist.db")).unwrap());
     let file = Arc::new(FakeFile {
         jobs: Mutex::new(Vec::new()),
         fail_next: AtomicBool::new(false),

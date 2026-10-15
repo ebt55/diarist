@@ -1,8 +1,8 @@
 //! GPU integration tests for the nemo-speech adapters. They run only when
-//! `MEET_ASSIST_ENGINE_DIR` (an extracted runtime) and
-//! `MEET_ASSIST_MODELS_DIR` (holding the Nemotron 3.5 and Nemotron 3
+//! `DIARIST_ENGINE_DIR` (an extracted runtime) and
+//! `DIARIST_MODELS_DIR` (holding the Nemotron 3.5 and Nemotron 3
 //! Diarization GGUFs) are set. Audio: a 30 s cut of the AMI ES2002a WAV from
-//! `MEET_ASSIST_AMI_WAV`, or `<models dir>/../data/samples/ES2002a.Mix-Headset.wav`.
+//! `DIARIST_AMI_WAV`, or `<models dir>/../data/samples/ES2002a.Mix-Headset.wav`.
 //! The cut is written to a temp folder.
 
 use std::path::{Path, PathBuf};
@@ -39,9 +39,9 @@ fn find(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 fn env() -> Option<Env> {
-    let engine = PathBuf::from(std::env::var_os("MEET_ASSIST_ENGINE_DIR")?);
-    let models = PathBuf::from(std::env::var_os("MEET_ASSIST_MODELS_DIR")?);
-    let ami = std::env::var_os("MEET_ASSIST_AMI_WAV")
+    let engine = PathBuf::from(std::env::var_os("DIARIST_ENGINE_DIR")?);
+    let models = PathBuf::from(std::env::var_os("DIARIST_MODELS_DIR")?);
+    let ami = std::env::var_os("DIARIST_AMI_WAV")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             models
@@ -97,7 +97,7 @@ fn drain(rx: Receiver<EngineEvent>) -> Vec<EngineEvent> {
 #[test]
 fn transcribes_a_30s_ami_cut() {
     let Some(env) = env() else {
-        eprintln!("MEET_ASSIST_ENGINE_DIR / MEET_ASSIST_MODELS_DIR not set; skipping");
+        eprintln!("DIARIST_ENGINE_DIR / DIARIST_MODELS_DIR not set; skipping");
         return;
     };
     let tmp = tempfile::tempdir().unwrap();

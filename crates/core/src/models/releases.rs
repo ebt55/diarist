@@ -123,12 +123,12 @@ fn get_text(url: &str) -> Result<String> {
     let agent = super::download::agent(Some(std::time::Duration::from_secs(30)));
     let mut resp = agent
         .get(url)
-        .header("User-Agent", format!("meet-assist/{}", crate::VERSION))
+        .header("User-Agent", format!("diarist/{}", crate::VERSION))
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| {
             CoreError::Models(format!(
-                "GET {url}: {e}. Check the connection (a firewall may need to allow meet-assist.exe), \
+                "GET {url}: {e}. Check the connection (a firewall may need to allow diarist.exe), \
                  or download a zip from {RELEASES_PAGE} and put it into the engine folder"
             ))
         })?;

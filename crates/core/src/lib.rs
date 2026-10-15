@@ -1,4 +1,4 @@
-//! `diarist-core`: everything in meet-assist that is not UI.
+//! `diarist-core`: everything in Diarist that is not UI.
 //!
 //! The desktop app (`apps/desktop/src-tauri`) and the dev CLI (`crates/cli`)
 //! are thin shells over this crate. All logic lives here so it can be tested
