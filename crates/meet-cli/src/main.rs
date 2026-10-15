@@ -53,7 +53,7 @@ mod tests {
     fn parses_transcribe() {
         let cli = Cli::try_parse_from(["meet-cli", "transcribe", "a.wav"]).unwrap();
         assert!(
-            matches!(cli.command, Command::Transcribe { file } if file == PathBuf::from("a.wav"))
+            matches!(cli.command, Command::Transcribe { file } if file == std::path::Path::new("a.wav"))
         );
         assert!(Cli::try_parse_from(["meet-cli", "transcribe"]).is_err());
     }

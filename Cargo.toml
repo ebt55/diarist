@@ -1,21 +1,13 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/core",
-    "crates/meet-cli",
-    # BLOCKED: "apps/desktop/src-tauri" is parked outside the workspace because
-    # Tauri 2.12.x (tauri, tauri-build 2.7, tauri-runtime(-wry) 2.12, tauri-utils 2.10,
-    # muda 0.20, plugins shell 2.5 / dialog 2.8 / log 2.10 / fs 2.7) declares
-    # rust-version 1.90 and the dev toolchain is 1.88. Re-add it here once the
-    # toolchain is >= 1.90, or after pinning Tauri to 2.11.x. See docs/DEV.md.
-]
+members = ["crates/core", "crates/meet-cli", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-# Pinned to the toolchain on the dev machine. `.cargo/config.toml` makes the
+# Minimum supported Rust: Tauri 2.12 needs 1.90. `.cargo/config.toml` makes the
 # resolver prefer dependency versions that support this rust-version.
-rust-version = "1.88"
+rust-version = "1.90"
 license = "MIT"
 authors = ["meet-assist contributors"]
 publish = false
