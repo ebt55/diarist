@@ -10,7 +10,7 @@
 //! log (`<root>\logs`), the WebView2 profile (`<root>\EBWebView`) and the
 //! window state follow it; the store is `SqliteStore` there. A data-folder
 //! move left by the previous run is finished first (`relocate`). When the
-//! new root is fresh and a pre-rename meet-assist data root exists, the app
+//! new root is fresh and a data root from before the rename exists, the app
 //! runs on an empty `MemoryStore` and asks once whether to move that data in
 //! (`diarist_core::models::legacy`, the `migrate_legacy_data` and
 //! `start_fresh` commands). `--demo`
