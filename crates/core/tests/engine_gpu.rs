@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use meet_core::engine::{
+use diarist_core::engine::{
     DiarPreset, DiarizeRunner, Engine, EngineEvent, ErrorCode, FileJob, NemoCascadeEngine,
     NemoCliEngine,
 };
-use meet_core::types::JobId;
+use diarist_core::types::JobId;
 
 struct Env {
     engine: PathBuf,

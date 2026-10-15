@@ -1,4 +1,4 @@
-//! Conformance suite for `meet_core::store::Store` and `RunStore`
+//! Conformance suite for `diarist_core::store::Store` and `RunStore`
 //! implementations.
 //!
 //! Every case is a function over `&dyn Store` (or `&dyn RunStore`) that
@@ -8,17 +8,17 @@
 //! Cases assert behaviour the UI relies on, not implementation details: no
 //! assumptions about id values, search ranking or snippet window size.
 
-use meet_core::engine::EngineWord;
-use meet_core::store::{
+use diarist_core::engine::EngineWord;
+use diarist_core::store::{
     MemoryStore, NewAudioTrack, NewMeeting, NewSegment, NewSpeaker, NewTranscript, NewWord,
     RunStore, ScannedModelFile, SqliteStore, Store, StoreError,
 };
-use meet_core::transcript::SegmentOptions;
-use meet_core::types::{
+use diarist_core::transcript::SegmentOptions;
+use diarist_core::types::{
     AudioFormat, Channel, ClockAnchor, MeetingId, MeetingStatus, ModelCapabilities, ModelRole,
     ModelSource, RunId, RunKind, RunStatus, SegmentId, Source, Speaker, SpeakerId, TrackChannel,
 };
-use meet_core::views::{default_speaker_color, SegmentView};
+use diarist_core::views::{default_speaker_color, SegmentView};
 
 type Case = fn(&dyn Store);
 type RunCase = fn(&dyn RunStore);

@@ -76,7 +76,7 @@ pub(crate) fn build(app: &App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            ID_TOGGLE => live::toggle(app, meet_core::live::ToggleVia::Tray),
+            ID_TOGGLE => live::toggle(app, diarist_core::live::ToggleVia::Tray),
             ID_OPEN => show_main(app),
             ID_QUIT => app.exit(0),
             _ => {}

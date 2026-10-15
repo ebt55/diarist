@@ -45,7 +45,7 @@ impl HealthCheck {
     }
 }
 
-/// Everything the report needs that `meet-core` cannot look up itself.
+/// Everything the report needs that `diarist-core` cannot look up itself.
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsInput {
     /// e.g. "meet-assist 0.1.0".

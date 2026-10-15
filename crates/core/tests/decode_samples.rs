@@ -5,14 +5,14 @@
 //!
 //! The files are only read; outputs go to a temp folder and are deleted.
 //! Run in release mode, it decodes hours of audio:
-//! `MEET_ASSIST_SAMPLES=... cargo test --release -p meet-core --test decode_samples -- --nocapture`
+//! `MEET_ASSIST_SAMPLES=... cargo test --release -p diarist-core --test decode_samples -- --nocapture`
 //! `MEET_ASSIST_SAMPLES_LIMIT=n` decodes only the first n files.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use meet_core::audio::{ChainDecoder, Decoder, MediaFoundationDecoder, SymphoniaDecoder};
+use diarist_core::audio::{ChainDecoder, Decoder, MediaFoundationDecoder, SymphoniaDecoder};
 
 const TOLERANCE_MS: f64 = 50.0;
 

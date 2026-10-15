@@ -4,8 +4,8 @@
 [resolver]
 incompatible-rust-versions = "fallback"
 
-# ts-rs: `cargo test -p meet-core` writes the TypeScript bindings for
-# `meet_core::views` and the domain types into the desktop frontend. Ids and
+# ts-rs: `cargo test -p diarist-core` writes the TypeScript bindings for
+# `diarist_core::views` and the domain types into the desktop frontend. Ids and
 # timestamps are i64 in Rust but always below 2^53, so they map to `number`.
 [env]
 TS_RS_EXPORT_DIR = { value = "apps/desktop/src/lib/generated", relative = true }

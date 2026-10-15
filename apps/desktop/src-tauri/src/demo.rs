@@ -8,9 +8,9 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::thread;
 
-use meet_core::store::{NewAudioTrack, Store};
-use meet_core::types::{AudioFormat, MeetingId, TrackChannel};
-use meet_core::views::DeviceInfo;
+use diarist_core::store::{NewAudioTrack, Store};
+use diarist_core::types::{AudioFormat, MeetingId, TrackChannel};
+use diarist_core::views::DeviceInfo;
 
 /// Relative to the data root, like every stored track.
 const DEMO_TRACK: &str = "audio/demo/playback.wav";

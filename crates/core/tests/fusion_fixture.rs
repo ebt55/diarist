@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use meet_core::fusion::{assign_words, AsrWord, DiarSegment};
+use diarist_core::fusion::{assign_words, AsrWord, DiarSegment};
 use serde_json::Value;
 
 fn fixture(name: &str) -> Value {

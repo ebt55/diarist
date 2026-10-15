@@ -1,4 +1,4 @@
-//! `meet-cli`: developer entry point to `meet-core` without the UI.
+//! `diarist-cli`: developer entry point to `diarist-core` without the UI.
 //!
 //! Exit codes: 0 ok, 1 error, 2 usage error.
 
@@ -10,19 +10,19 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 mod record;
-use meet_core::audio::capture::{self, DeviceFlow};
-use meet_core::audio::{find_on_path, ChainDecoder};
-use meet_core::engine::NemoCliEngine;
-use meet_core::export::{render, ExportDoc, ExportFormat};
-use meet_core::models::{self, DataPaths, DoctorReport, Manifest};
-use meet_core::pipeline::{import_file, ImportOptions, ImportRequest, JobQueue};
-use meet_core::store::{RunStore, SqliteStore, Store};
-use meet_core::types::{JobId, MeetingId, ModelFile, ModelRole, SegmentId, SpeakerId};
-use meet_core::views::{JobEvent, JobStage};
-use meet_core::CoreError;
+use diarist_core::audio::capture::{self, DeviceFlow};
+use diarist_core::audio::{find_on_path, ChainDecoder};
+use diarist_core::engine::NemoCliEngine;
+use diarist_core::export::{render, ExportDoc, ExportFormat};
+use diarist_core::models::{self, DataPaths, DoctorReport, Manifest};
+use diarist_core::pipeline::{import_file, ImportOptions, ImportRequest, JobQueue};
+use diarist_core::store::{RunStore, SqliteStore, Store};
+use diarist_core::types::{JobId, MeetingId, ModelFile, ModelRole, SegmentId, SpeakerId};
+use diarist_core::views::{JobEvent, JobStage};
+use diarist_core::CoreError;
 
 #[derive(Debug, Parser)]
-#[command(name = "meet-cli", version, about = "meet-assist developer CLI")]
+#[command(name = "diarist-cli", version, about = "meet-assist developer CLI")]
 struct Cli {
     /// Data root (default: portable.txt next to the exe, then the registry,
     /// then %LOCALAPPDATA%\app.meetassist.desktop).
@@ -43,7 +43,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print the meet-core version.
+    /// Print the diarist-core version.
     Version,
     /// Transcribe and diarize an audio or video file into a new meeting.
     Transcribe {
@@ -228,8 +228,8 @@ impl From<CoreError> for CliError {
     }
 }
 
-impl From<meet_core::store::StoreError> for CliError {
-    fn from(e: meet_core::store::StoreError) -> Self {
+impl From<diarist_core::store::StoreError> for CliError {
+    fn from(e: diarist_core::store::StoreError) -> Self {
         CliError::Failed(e.to_string())
     }
 }
@@ -295,7 +295,7 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> CliResult {
     match &cli.command {
         Command::Version => {
-            println!("meet-cli {}", meet_core::VERSION);
+            println!("diarist-cli {}", diarist_core::VERSION);
             return Ok(());
         }
         Command::Devices => return devices(),
@@ -517,7 +517,7 @@ fn hms(ms: i64) -> String {
 }
 
 fn date(ms: i64) -> String {
-    meet_core::export::utc_datetime(ms)
+    diarist_core::export::utc_datetime(ms)
 }
 
 fn parse_role(s: &str) -> CliResult<ModelRole> {
@@ -831,7 +831,7 @@ fn gpu_report(ctx: &Ctx) -> Option<DoctorReport> {
 fn print_files(files: &[ModelFile], ctx: &Ctx, free_mb: Option<u32>) -> CliResult {
     let settings = ctx.store.get_settings()?;
     let selected = |f: &ModelFile| {
-        settings.0.get(&meet_core::views::selection_key(f.role)) == Some(&f.id.to_string())
+        settings.0.get(&diarist_core::views::selection_key(f.role)) == Some(&f.id.to_string())
     };
     let mut last_role = None;
     for f in files.iter().filter(|f| f.role != ModelRole::Engine) {
@@ -873,7 +873,7 @@ fn print_files(files: &[ModelFile], ctx: &Ctx, free_mb: Option<u32>) -> CliResul
 fn models_list(ctx: &Ctx) -> CliResult {
     let files = ctx.store.list_model_files()?;
     if files.is_empty() {
-        println!("nothing scanned yet; run `meet-cli models scan`");
+        println!("nothing scanned yet; run `diarist-cli models scan`");
         return Ok(());
     }
     let report = gpu_report(ctx);
@@ -936,7 +936,7 @@ fn models_pull(ctx: &Ctx, names: &[String]) -> CliResult {
         None => {
             models::scan(&ctx.paths, &*ctx.store, &manifest)?;
             models::selected_file(&*ctx.store, ModelRole::Engine)?.ok_or_else(|| {
-                CliError::Failed("no engine installed; run `meet-cli engine install`".into())
+                CliError::Failed("no engine installed; run `diarist-cli engine install`".into())
             })?
         }
     };
@@ -1008,7 +1008,7 @@ fn manual_download_hint(url: &str, sha256: &str, size: u64, dest: &Path, what: &
     eprintln!("  sha256  {sha256}");
     eprintln!("  size    {size} bytes");
     eprintln!("  then {what} {}", dest.display());
-    eprintln!("  (a firewall such as simplewall may need to allow meet-cli.exe, or curl.exe for model pulls)");
+    eprintln!("  (a firewall such as simplewall may need to allow diarist-cli.exe, or curl.exe for model pulls)");
 }
 
 fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
@@ -1041,7 +1041,7 @@ fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
             &entry.sha256,
             entry.size_bytes,
             &ctx.paths.engine(),
-            "put the zip in (checked and extracted by `meet-cli models scan`)",
+            "put the zip in (checked and extracted by `diarist-cli models scan`)",
         );
     })?;
     eprintln!();
@@ -1051,7 +1051,7 @@ fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
 
 /// `retention`: what audio is past retention, and with `apply` deletes it.
 fn retention(ctx: &Ctx, apply: bool, days: Option<u32>) -> CliResult {
-    use meet_core::retention;
+    use diarist_core::retention;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1127,12 +1127,12 @@ fn doctor(ctx: &Ctx) -> CliResult {
     if let Some(free) = models::free_disk_bytes(&ctx.paths.root) {
         println!("free disk   {} MB", free >> 20);
     }
-    match meet_core::gpu::nvml_vram(0) {
+    match diarist_core::gpu::nvml_vram(0) {
         Some(r) => println!(
             "nvml        {} MB free of {} MB (the live start gate needs {} MB)",
             r.free_mb,
             r.total_mb.unwrap_or(0),
-            meet_core::live::MIN_FREE_VRAM_MB
+            diarist_core::live::MIN_FREE_VRAM_MB
         ),
         None => println!("nvml        not available (the live start gate uses doctor)"),
     }
@@ -1156,7 +1156,7 @@ fn doctor(ctx: &Ctx) -> CliResult {
             None => {
                 ok = false;
                 println!(
-                    "{:<11} none selected (run `meet-cli models scan`)",
+                    "{:<11} none selected (run `diarist-cli models scan`)",
                     role.as_str()
                 );
             }
@@ -1205,13 +1205,13 @@ mod tests {
 
     #[test]
     fn parses_transcribe() {
-        let cli = Cli::try_parse_from(["meet-cli", "transcribe", "a.wav"]).unwrap();
+        let cli = Cli::try_parse_from(["diarist-cli", "transcribe", "a.wav"]).unwrap();
         assert!(
             matches!(cli.command, Command::Transcribe { ref file, ref language, .. } if file == Path::new("a.wav") && language == "en")
         );
-        assert!(Cli::try_parse_from(["meet-cli", "transcribe"]).is_err());
+        assert!(Cli::try_parse_from(["diarist-cli", "transcribe"]).is_err());
         let cli = Cli::try_parse_from([
-            "meet-cli",
+            "diarist-cli",
             "--data-dir",
             "D:/x",
             "transcribe",
@@ -1229,7 +1229,7 @@ mod tests {
             Command::Transcribe { rttm: true, .. }
         ));
         let cli = Cli::try_parse_from([
-            "meet-cli",
+            "diarist-cli",
             "transcribe",
             "a.wav",
             "--json",
@@ -1262,22 +1262,22 @@ mod tests {
     #[test]
     fn parses_the_other_commands() {
         for args in [
-            vec!["meet-cli", "list"],
-            vec!["meet-cli", "show", "3", "--all"],
-            vec!["meet-cli", "search", "budget", "review"],
-            vec!["meet-cli", "export", "3", "--format", "md"],
-            vec!["meet-cli", "rename", "7", "Priya", "--segment", "12"],
-            vec!["meet-cli", "pin", "3"],
-            vec!["meet-cli", "unpin", "3"],
-            vec!["meet-cli", "models", "list"],
-            vec!["meet-cli", "models", "scan"],
-            vec!["meet-cli", "models", "select", "asr", "nemotron-3.5"],
-            vec!["meet-cli", "models", "pull", "nemotron-en"],
-            vec!["meet-cli", "engine", "list"],
-            vec!["meet-cli", "engine", "select", "0.2.0"],
-            vec!["meet-cli", "doctor"],
-            vec!["meet-cli", "devices"],
-            vec!["meet-cli", "play", "--device", "CABLE Input", "a.wav"],
+            vec!["diarist-cli", "list"],
+            vec!["diarist-cli", "show", "3", "--all"],
+            vec!["diarist-cli", "search", "budget", "review"],
+            vec!["diarist-cli", "export", "3", "--format", "md"],
+            vec!["diarist-cli", "rename", "7", "Priya", "--segment", "12"],
+            vec!["diarist-cli", "pin", "3"],
+            vec!["diarist-cli", "unpin", "3"],
+            vec!["diarist-cli", "models", "list"],
+            vec!["diarist-cli", "models", "scan"],
+            vec!["diarist-cli", "models", "select", "asr", "nemotron-3.5"],
+            vec!["diarist-cli", "models", "pull", "nemotron-en"],
+            vec!["diarist-cli", "engine", "list"],
+            vec!["diarist-cli", "engine", "select", "0.2.0"],
+            vec!["diarist-cli", "doctor"],
+            vec!["diarist-cli", "devices"],
+            vec!["diarist-cli", "play", "--device", "CABLE Input", "a.wav"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
         }
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn parses_record() {
         let cli = Cli::try_parse_from([
-            "meet-cli",
+            "diarist-cli",
             "record",
             "--seconds",
             "60",
@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(mic.as_deref(), Some("CABLE Output"));
         assert_eq!(loopback.as_deref(), Some("Speakers"));
         assert_eq!(device, "cuda:0");
-        let bare = Cli::try_parse_from(["meet-cli", "record"]).unwrap();
+        let bare = Cli::try_parse_from(["diarist-cli", "record"]).unwrap();
         assert!(matches!(
             bare.command,
             Command::Record { seconds: None, .. }

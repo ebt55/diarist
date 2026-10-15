@@ -1,11 +1,11 @@
-//! Error type shared by everything in `meet-core` except the store, which
+//! Error type shared by everything in `diarist-core` except the store, which
 //! has its own [`StoreError`] (wrapped here as [`CoreError::Store`]).
 
 use thiserror::Error;
 
 use crate::store::StoreError;
 
-/// Errors produced by `meet-core`.
+/// Errors produced by `diarist-core`.
 #[derive(Debug, Error)]
 pub enum CoreError {
     /// A string did not match any variant of a domain enum (for example a

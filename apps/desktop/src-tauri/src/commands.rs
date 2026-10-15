@@ -1,4 +1,4 @@
-//! Tauri commands: thin wrappers that run one `meet_core` call (or a few) on
+//! Tauri commands: thin wrappers that run one `diarist_core` call (or a few) on
 //! the blocking pool and map errors to strings. Argument names are
 //! snake_case on the wire, matching `docs/plans/03-phase2-desktop-ui.md`.
 
@@ -7,27 +7,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use meet_core::audio::{self, ChainDecoder};
-use meet_core::diagnostics::{self, DiagnosticsInput, HealthCheck};
-use meet_core::engine::ServeStatus;
-use meet_core::export::{self, ExportDoc, ExportFormat};
-use meet_core::gpu;
-use meet_core::models::releases::{self, RuntimeRelease};
-use meet_core::models::{self, relocate, DataPaths, Manifest};
-use meet_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
-use meet_core::retention::{self, RetentionPlan, RetentionReport};
-use meet_core::settings;
-use meet_core::store::{RunStore, Store};
-use meet_core::types::{
+use diarist_core::audio::{self, ChainDecoder};
+use diarist_core::diagnostics::{self, DiagnosticsInput, HealthCheck};
+use diarist_core::engine::ServeStatus;
+use diarist_core::export::{self, ExportDoc, ExportFormat};
+use diarist_core::gpu;
+use diarist_core::models::releases::{self, RuntimeRelease};
+use diarist_core::models::{self, relocate, DataPaths, Manifest};
+use diarist_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
+use diarist_core::retention::{self, RetentionPlan, RetentionReport};
+use diarist_core::settings;
+use diarist_core::store::{RunStore, Store};
+use diarist_core::types::{
     AudioTrack, JobId, MeetingId, ModelFile, ModelFileId, ModelRole, SegmentId, SpeakerId,
     TrackChannel, Word, WordId,
 };
-use meet_core::views::{
+use diarist_core::views::{
     DataRootInfo, DownloadItem, DownloadKind, DownloadProgress, EngineStatus, JobEvent,
     MeetingDetail, MeetingSummary, MoveProgress, MoveResult, SearchHit, SegmentView, Settings,
     StartupReport, UpdateCheck, Waveform,
 };
-use meet_core::CoreError;
+use diarist_core::CoreError;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -323,13 +323,13 @@ pub async fn delete_meeting(store: State<'_, AppStore>, id: MeetingId) -> CmdRes
 
 // ---- Export ------------------------------------------------------------------------
 
-/// The meeting rendered as `format` (`meet_core::export`) and its file name.
+/// The meeting rendered as `format` (`diarist_core::export`) and its file name.
 async fn render_export(
     store: &State<'_, AppStore>,
     id: MeetingId,
     format: ExportFormat,
 ) -> CmdResult<(String, String)> {
-    with_store(store, move |s| -> meet_core::Result<(String, String)> {
+    with_store(store, move |s| -> diarist_core::Result<(String, String)> {
         let doc = ExportDoc::from_store(s, id)?;
         Ok((
             export::file_name(&doc.meeting.title, format),
@@ -413,7 +413,7 @@ async fn playable_track(
                 .filter(|t| t.channel == c)
                 .max_by_key(|t| t.id),
         };
-        Ok::<_, meet_core::store::StoreError>((track, s.get_meeting(id)?.meeting.uid))
+        Ok::<_, diarist_core::store::StoreError>((track, s.get_meeting(id)?.meeting.uid))
     })
     .await?;
     let track = track.ok_or_else(|| "No audio file for this meeting (audio retention may have deleted it; pin meetings with P to keep their audio)".to_owned())?;
@@ -444,7 +444,7 @@ pub async fn get_audio_url(
     Ok(asset_url(&file))
 }
 
-/// Peak envelope of the playback track (`meet_core::audio::peaks`), cached
+/// Peak envelope of the playback track (`diarist_core::audio::peaks`), cached
 /// next to stored audio or in the meeting folder for an import's original.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_waveform(
@@ -465,7 +465,7 @@ pub async fn get_waveform(
 
 // ---- Settings, models, engine -------------------------------------------------
 
-/// Stored settings laid over `meet_core::settings::DEFAULTS`.
+/// Stored settings laid over `diarist_core::settings::DEFAULTS`.
 #[tauri::command]
 pub async fn get_settings(store: State<'_, AppStore>) -> CmdResult<Settings> {
     with_store(&store, |s| settings::effective(s)).await
@@ -490,7 +490,7 @@ pub async fn engine_status(
 ) -> CmdResult<EngineStatus> {
     let data_paths = paths.paths.clone();
     if paths.demo {
-        return with_store(&store, move |s| -> meet_core::Result<EngineStatus> {
+        return with_store(&store, move |s| -> diarist_core::Result<EngineStatus> {
             let (free, device) = demo::gpu();
             Ok(EngineStatus::from_parts(
                 data_paths.root.display().to_string(),
@@ -544,7 +544,7 @@ pub async fn select_model(
     Ok(())
 }
 
-/// Scans `models\` and `engine\` (`meet_core::models::scan`), keeping the
+/// Scans `models\` and `engine\` (`diarist_core::models::scan`), keeping the
 /// selections valid. The demo has no folders to scan.
 #[tauri::command]
 pub async fn rescan_models(
@@ -557,7 +557,7 @@ pub async fn rescan_models(
     }
     *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<Vec<ModelFile>> {
+    with_store(&store, move |s| -> diarist_core::Result<Vec<ModelFile>> {
         let manifest = Manifest::load(&data_paths.root)?;
         install_dropped(&data_paths, &manifest);
         let report = models::scan(&data_paths, s, &manifest)?;
@@ -617,7 +617,7 @@ fn run_engine_install(
     data_paths: &DataPaths,
     manifest: &Manifest,
     entry: &models::EngineEntry,
-) -> meet_core::Result<String> {
+) -> diarist_core::Result<String> {
     let mut last = Instant::now() - Duration::from_secs(1);
     let size = Some(entry.size_bytes);
     let result = models::install_engine(entry, data_paths, &mut |done, total| {
@@ -690,7 +690,7 @@ pub async fn install_engine(
 ) -> CmdResult<String> {
     *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let manifest = Manifest::load(&data_paths.root)?;
         let backend = recommended_backend_now();
         let entry = match name.as_deref() {
@@ -732,7 +732,7 @@ pub async fn pull_model(
     name: String,
 ) -> CmdResult<String> {
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let manifest = Manifest::load(&data_paths.root)?;
         let entry = manifest
             .model(&name)
@@ -845,7 +845,7 @@ pub async fn install_runtime(
 ) -> CmdResult<String> {
     *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let sha_url = package.sha_url.clone().ok_or_else(|| {
             CoreError::Models(format!(
                 "{} has no published SHA-256; download it by hand from {} and put the zip into the \
@@ -874,7 +874,7 @@ pub async fn add_model_url(
     sha256: Option<String>,
 ) -> CmdResult<String> {
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let name = models::add::file_name_from_url(url.trim())?;
         let mut last = Instant::now() - Duration::from_secs(1);
         let result = models::add::add_from_url(
@@ -941,7 +941,7 @@ pub async fn add_model_file(
     link: bool,
 ) -> CmdResult<String> {
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let dest = models::add::add_from_file(&data_paths, Path::new(&path), link)?;
         let manifest = Manifest::load(&data_paths.root)?;
         models::scan(&data_paths, s, &manifest)?;
@@ -956,7 +956,7 @@ pub async fn add_model_file(
 }
 
 /// Whether Import or Record (`action`) can run now; each missing part comes
-/// with its fix (`meet_core::models::readiness`).
+/// with its fix (`diarist_core::models::readiness`).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_ready(
     store: State<'_, AppStore>,
@@ -965,7 +965,7 @@ pub async fn check_ready(
 ) -> CmdResult<models::Readiness> {
     let data_paths = paths.paths.clone();
     let demo = paths.demo;
-    with_store(&store, move |s| -> meet_core::Result<models::Readiness> {
+    with_store(&store, move |s| -> diarist_core::Result<models::Readiness> {
         let manifest = Manifest::load(&data_paths.root)?;
         if demo {
             return Ok(models::Readiness {
@@ -999,7 +999,7 @@ pub async fn recommended_downloads(
     paths: State<'_, AppPaths>,
 ) -> CmdResult<Vec<DownloadItem>> {
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> meet_core::Result<Vec<DownloadItem>> {
+    with_store(&store, move |s| -> diarist_core::Result<Vec<DownloadItem>> {
         let manifest = Manifest::load(&data_paths.root)?;
         Ok(models::download_items(
             &data_paths,
@@ -1102,7 +1102,7 @@ pub async fn setup_status(
     if !demo {
         *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
-    with_store(&store, move |s| -> meet_core::Result<models::SetupStatus> {
+    with_store(&store, move |s| -> diarist_core::Result<models::SetupStatus> {
         let manifest = Manifest::load(&data_paths.root)?;
         let files = if demo {
             s.list_model_files()?
@@ -1174,7 +1174,7 @@ pub async fn data_root_info(paths: State<'_, AppPaths>) -> CmdResult<DataRootInf
 /// "Move data folder": copies the database (backup API), audio, engine and
 /// models to `to`, verifies them, points the registry at it and returns;
 /// the UI then restarts the app, and the next launch deletes the old copy
-/// (`meet_core::models::relocate`). Progress arrives as `data:move_progress`.
+/// (`diarist_core::models::relocate`). Progress arrives as `data:move_progress`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn move_data_root(
     app: AppHandle,
@@ -1209,9 +1209,9 @@ pub async fn move_data_root(
         );
         // Nothing may hold engine files or the GPU while copying.
         crate::live::handle(&app).stop_server();
-        let backup = |dest: &Path| -> meet_core::Result<()> {
+        let backup = |dest: &Path| -> diarist_core::Result<()> {
             store.backup(dest)?;
-            let copy = meet_core::store::SqliteStore::open(dest)?;
+            let copy = diarist_core::store::SqliteStore::open(dest)?;
             let (a, b) = (store.list_meetings()?.len(), copy.list_meetings()?.len());
             if a != b {
                 return Err(CoreError::Models(format!(
@@ -1420,7 +1420,7 @@ pub async fn diagnostics_report(
         ),
         None => "not started".into(),
     };
-    with_store(&store, move |s| -> meet_core::Result<String> {
+    with_store(&store, move |s| -> diarist_core::Result<String> {
         let stored = settings::effective(s)?;
         let engine_stderr = pipeline::last_engine_log(&data_paths.audio(), ENGINE_LOG_TAIL)
             .map(|(p, tail)| format!("{}\n{tail}", p.display()))
@@ -1431,7 +1431,7 @@ pub async fn diagnostics_report(
                 Some(format!("{}\n{text}", p.display()))
             });
         let input = DiagnosticsInput {
-            app: format!("meet-assist {}", meet_core::VERSION),
+            app: format!("meet-assist {}", diarist_core::VERSION),
             os: diagnostics::os_version(),
             gpu: gpu::gpu_info(0),
             extra: vec![
@@ -1504,7 +1504,7 @@ fn connection_error(e: &str) -> bool {
 /// The checklist (Diagnostics, Copy diagnostics). Runs the engine's
 /// `doctor` (a second or two) and lists audio devices.
 fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Vec<HealthCheck> {
-    use meet_core::types::ModelFile;
+    use diarist_core::types::ModelFile;
     let mut out = Vec::new();
     let manifest = Manifest::load(&paths.root).ok();
     let gpu_info = gpu::gpu_info(0);
@@ -1677,7 +1677,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
     // 5 and 6. Free VRAM for live and for file mode.
     match gpu::nvml_vram(0) {
         Some(r) => {
-            out.push(if r.free_mb >= meet_core::live::MIN_FREE_VRAM_MB {
+            out.push(if r.free_mb >= diarist_core::live::MIN_FREE_VRAM_MB {
                 HealthCheck::new(
                     "vram_live",
                     "GPU memory for live",
@@ -1685,7 +1685,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
                     format!(
                         "{} MB free, live needs {} MB",
                         r.free_mb,
-                        meet_core::live::MIN_FREE_VRAM_MB
+                        diarist_core::live::MIN_FREE_VRAM_MB
                     ),
                 )
             } else {
@@ -1697,7 +1697,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
                         "{} MB free, live needs {} MB. Close GPU-heavy apps (games, video editors, \
                          other AI tools) before recording.",
                         r.free_mb,
-                        meet_core::live::MIN_FREE_VRAM_MB
+                        diarist_core::live::MIN_FREE_VRAM_MB
                     ),
                 )
             });
@@ -1808,7 +1808,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         .server
         .as_ref()
         .is_some_and(|s| matches!(s.server.status, ServeStatus::Ready { .. }));
-    let should = live.state.phase != meet_core::live::LivePhase::Idle
+    let should = live.state.phase != diarist_core::live::LivePhase::Idle
         || settings::effective(store)
             .map(|s| settings::get_bool(&s, settings::ENGINE_PRELOAD))
             .unwrap_or(false);

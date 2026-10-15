@@ -10,11 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use meet_core::audio::ChainDecoder;
-use meet_core::engine::NemoCliEngine;
-use meet_core::pipeline::{import_file, CancelToken, ImportOptions, ImportRequest};
-use meet_core::store::{SqliteStore, Store};
-use meet_core::types::JobId;
+use diarist_core::audio::ChainDecoder;
+use diarist_core::engine::NemoCliEngine;
+use diarist_core::pipeline::{import_file, CancelToken, ImportOptions, ImportRequest};
+use diarist_core::store::{SqliteStore, Store};
+use diarist_core::types::JobId;
 
 fn find(dir: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {

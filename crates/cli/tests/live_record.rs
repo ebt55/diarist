@@ -3,10 +3,10 @@
 //! runtime) and `MEET_ASSIST_MODELS_DIR` (EN model and Nemotron 3
 //! Diarization). Needs VB-Audio Virtual Cable.
 //!
-//! The mic is made deterministic: `meet-cli play` renders a 60 s AMI cut
+//! The mic is made deterministic: `diarist-cli play` renders a 60 s AMI cut
 //! into the cable's render side while the recorder captures "CABLE Output".
 //! The loopback is the default render endpoint, fed with a different 60 s
-//! cut by a second `meet-cli play` (audible on the machine for a minute).
+//! cut by a second `diarist-cli play` (audible on the machine for a minute).
 //! Checks: equal-length WAVs, each WAV cross-correlates with its source at
 //! the expected offset, live words on both channels soon after playback,
 //! the post-pass run is current with `me` on the mic and `spk_N` on the
@@ -31,18 +31,18 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use meet_core::audio::capture::{
+use diarist_core::audio::capture::{
     find_device, list_devices, qpc_now_100ns, wasapi_source_factory, DeviceFlow,
 };
-use meet_core::audio::flac::decode_i16;
-use meet_core::engine::{NemoCliEngine, NemoWsLiveEngine, ServeConfig, ServeSupervisor};
-use meet_core::live::{
+use diarist_core::audio::flac::decode_i16;
+use diarist_core::engine::{NemoCliEngine, NemoWsLiveEngine, ServeConfig, ServeSupervisor};
+use diarist_core::live::{
     DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveSink, LiveWarning, Recorder,
     StartOptions, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
-use meet_core::pipeline::JobQueue;
-use meet_core::store::{RunStore, SqliteStore, Store};
-use meet_core::types::{Channel, JobId, RunKind};
+use diarist_core::pipeline::JobQueue;
+use diarist_core::store::{RunStore, SqliteStore, Store};
+use diarist_core::types::{Channel, JobId, RunKind};
 
 fn find(dir: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
@@ -323,7 +323,7 @@ fn live_recording_end_to_end() {
 
     // Loopback source first (so the loopback stays on the default output),
     // then the mic source into the cable.
-    let exe = env!("CARGO_BIN_EXE_meet-cli");
+    let exe = env!("CARGO_BIN_EXE_diarist-cli");
     let lb_player = Command::new(exe)
         .args([
             "play",

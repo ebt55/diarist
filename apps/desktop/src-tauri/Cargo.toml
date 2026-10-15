@@ -1,6 +1,6 @@
 [package]
-name = "meet-assist"
-description = "meet-assist desktop app (Tauri 2): thin command wrappers over meet-core"
+name = "diarist"
+description = "Diarist desktop app (Tauri 2): thin command wrappers over diarist-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,14 @@ publish.workspace = true
 [lib]
 # Distinct from the bin name to avoid the Windows PDB clash (rust-lang/cargo#8519).
 # Desktop-only, so no staticlib/cdylib (those are for Tauri mobile).
-name = "meet_assist_lib"
+name = "diarist_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-meet-core.workspace = true
+diarist-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log = "0.4"

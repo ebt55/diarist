@@ -1,22 +1,22 @@
-//! `meet-cli record`: live capture with live words, then the post-pass.
+//! `diarist-cli record`: live capture with live words, then the post-pass.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use meet_core::audio::capture::{self, find_device, DeviceFlow};
-use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeSupervisor};
-use meet_core::gpu;
-use meet_core::live::{
+use diarist_core::audio::capture::{self, find_device, DeviceFlow};
+use diarist_core::engine::{NemoWsLiveEngine, ServeConfig, ServeSupervisor};
+use diarist_core::gpu;
+use diarist_core::live::{
     DegradedUpdate, DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveSink,
     LiveWarning, Recorder, StartOptions, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
-use meet_core::models;
-use meet_core::pipeline::JobQueue;
-use meet_core::store::{RunStore, Store};
-use meet_core::types::Channel;
-use meet_core::views::{JobEvent, JobStage};
+use diarist_core::models;
+use diarist_core::pipeline::JobQueue;
+use diarist_core::store::{RunStore, Store};
+use diarist_core::types::Channel;
+use diarist_core::views::{JobEvent, JobStage};
 
 use super::{hms, CliError, CliResult, Ctx};
 
@@ -150,7 +150,7 @@ fn resolve(flow: DeviceFlow, q: &Option<String>) -> CliResult<Option<String>> {
         .map(|d| Some(d.id))
         .ok_or_else(|| {
             CliError::Usage(format!(
-                "no {} device matches {q:?} (see `meet-cli devices`)",
+                "no {} device matches {q:?} (see `diarist-cli devices`)",
                 if flow == DeviceFlow::Capture {
                     "capture"
                 } else {
@@ -167,7 +167,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
     let sel = built.selection.clone();
     if built.experimental {
         return Err(CliError::Failed(format!(
-            "{} is not a streaming model; select one for live recording (`meet-cli models select asr ...`)",
+            "{} is not a streaming model; select one for live recording (`diarist-cli models select asr ...`)",
             sel.asr_file.display_name
         )));
     }

@@ -11,11 +11,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use meet_core::audio::capture::{
+use diarist_core::audio::capture::{
     find_device, list_devices, play_wav, start_capture, CaptureConfig, DeviceFlow, Packet,
     PacketData,
 };
-use meet_core::types::Channel;
+use diarist_core::types::Channel;
 
 fn enabled() -> bool {
     std::env::var("MEET_ASSIST_AUDIO_TEST").is_ok_and(|v| v == "1")

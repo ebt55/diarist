@@ -1,6 +1,6 @@
 [package]
-name = "meet-cli"
-description = "meet-assist dev CLI: transcribe a file, dump JSON, run the post-pass (no UI)"
+name = "diarist-cli"
+description = "Diarist dev CLI: transcribe a file, dump JSON, run the post-pass (no UI)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,14 @@ authors.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "meet-cli"
+name = "diarist-cli"
 path = "src/main.rs"
 
 [dependencies]
-meet-core.workspace = true
+diarist-core.workspace = true
 clap.workspace = true
 serde_json.workspace = true
-# Ctrl-C stops `meet-cli record` cleanly (post-pass included).
+# Ctrl-C stops `diarist-cli record` cleanly (post-pass included).
 ctrlc = "3"
 
 [dev-dependencies]

@@ -9,10 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use meet_core::engine::{
+use diarist_core::engine::{
     EngineEvent, LiveEngine, LiveOpts, NemoWsLiveEngine, ServeConfig, ServeSupervisor,
 };
-use meet_core::types::{Channel, JobId};
+use diarist_core::types::{Channel, JobId};
 
 fn find(dir: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {

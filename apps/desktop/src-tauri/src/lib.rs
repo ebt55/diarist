@@ -1,9 +1,9 @@
 //! Tauri shell for meet-assist. Only command wrappers and event plumbing live
-//! here; logic belongs in `meet-core` (docs/01-architecture.md). Commands call
-//! [`RunStore`] methods (and `meet_core` functions) on the blocking pool and
+//! here; logic belongs in `diarist-core` (docs/01-architecture.md). Commands call
+//! [`RunStore`] methods (and `diarist_core` functions) on the blocking pool and
 //! map errors to strings.
 //!
-//! The data root comes from `meet_core::models::paths` (`MEET_ASSIST_DATA_DIR`,
+//! The data root comes from `diarist_core::models::paths` (`MEET_ASSIST_DATA_DIR`,
 //! `portable.txt`, `HKCU\Software\meet-assist\DataRoot`, then
 //! `%LOCALAPPDATA%\app.meetassist.desktop`, which is Tauri's
 //! `app_local_data_dir`). It is resolved before the app is built, so the app
@@ -36,11 +36,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use meet_core::models::relocate::{self, CleanupReport};
-use meet_core::models::{DataPaths, DoctorReport};
-use meet_core::pipeline::JobQueue;
-use meet_core::store::{MemoryStore, RunStore, SqliteStore};
-use meet_core::views::StartupReport;
+use diarist_core::models::relocate::{self, CleanupReport};
+use diarist_core::models::{DataPaths, DoctorReport};
+use diarist_core::pipeline::JobQueue;
+use diarist_core::store::{MemoryStore, RunStore, SqliteStore};
+use diarist_core::views::StartupReport;
 use tauri::{Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
@@ -189,7 +189,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        live::toggle(app, meet_core::live::ToggleVia::Shortcut);
+                        live::toggle(app, diarist_core::live::ToggleVia::Shortcut);
                     }
                 })
                 .build(),
@@ -273,7 +273,7 @@ pub fn run() {
             }
             log::info!(
                 "meet-assist {} started{}{}; data root {} ({:?})",
-                meet_core::VERSION,
+                diarist_core::VERSION,
                 if demo { " in demo mode" } else { "" },
                 if autostart { " at sign-in" } else { "" },
                 paths.root.display(),

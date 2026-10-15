@@ -1045,6 +1045,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "diarist"
+version = "0.1.0"
+dependencies = [
+ "diarist-core",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-log",
+ "tauri-plugin-notification",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "time",
+]
+
+[[package]]
+name = "diarist-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "diarist-core",
+ "hound",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "diarist-core"
+version = "0.1.0"
+dependencies = [
+ "flac-codec",
+ "futures-util",
+ "hound",
+ "nvml-wrapper",
+ "rtrb",
+ "rubato",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "symphonia",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tiny_http",
+ "tokio",
+ "tokio-tungstenite",
+ "ts-rs",
+ "ulid",
+ "ureq",
+ "wasapi",
+ "windows 0.61.3",
+ "zip 9.0.3",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2605,68 +2667,6 @@ name = "md5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
-
-[[package]]
-name = "meet-assist"
-version = "0.1.0"
-dependencies = [
- "log",
- "meet-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-log",
- "tauri-plugin-notification",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "time",
-]
-
-[[package]]
-name = "meet-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "ctrlc",
- "hound",
- "meet-core",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "meet-core"
-version = "0.1.0"
-dependencies = [
- "flac-codec",
- "futures-util",
- "hound",
- "nvml-wrapper",
- "rtrb",
- "rubato",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "symphonia",
- "tempfile",
- "thiserror 2.0.21",
- "tiny_http",
- "tokio",
- "tokio-tungstenite",
- "ts-rs",
- "ulid",
- "ureq",
- "wasapi",
- "windows 0.61.3",
- "zip 9.0.3",
-]
 
 [[package]]
 name = "memchr"

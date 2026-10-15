@@ -238,7 +238,7 @@ class AppState {
 
   // ---- Settings and theme --------------------------------------------------
 
-  /** A setting's value: stored, else its default from `meet_core::settings::DEFAULTS`. */
+  /** A setting's value: stored, else its default from `diarist_core::settings::DEFAULTS`. */
   setting(key: SettingKey): string {
     return this.settings[key] ?? SETTING_DEFAULTS[key];
   }

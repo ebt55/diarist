@@ -38,7 +38,7 @@
     pull: "pulled",
     user: "added by you",
   };
-  /** Capture switches; defaults come from `meet_core::settings::DEFAULTS`. */
+  /** Capture switches; defaults come from `diarist_core::settings::DEFAULTS`. */
   const CAPTURE_TOGGLES: { key: SettingKey; label: string; help: string }[] = [
     {
       key: "capture.loopback_agc",

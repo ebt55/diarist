@@ -1,6 +1,6 @@
-//! `meet-core`: everything in meet-assist that is not UI.
+//! `diarist-core`: everything in meet-assist that is not UI.
 //!
-//! The desktop app (`apps/desktop/src-tauri`) and the dev CLI (`crates/meet-cli`)
+//! The desktop app (`apps/desktop/src-tauri`) and the dev CLI (`crates/cli`)
 //! are thin shells over this crate. All logic lives here so it can be tested
 //! without a GUI (see `docs/01-architecture.md`, "Repository layout").
 //!
@@ -37,5 +37,5 @@ pub use types::{
     RunStatus, Segment, SegmentId, Source, Speaker, SpeakerId, TranscriptRun, Word, WordId,
 };
 
-/// Version of `meet-core` (and of the workspace; all crates share it).
+/// Version of `diarist-core` (and of the workspace; all crates share it).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

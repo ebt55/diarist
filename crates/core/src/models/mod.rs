@@ -97,7 +97,7 @@ pub fn resolve_selection(paths: &DataPaths, store: &dyn Store) -> Result<Resolve
     let need = |role: ModelRole| -> Result<ModelFile> {
         selected_file(store, role)?.ok_or_else(|| {
             CoreError::Models(format!(
-                "no {role} selected: install it from the setup screen, or put one under {} and press Refresh in Settings (CLI: `meet-cli {}`)",
+                "no {role} selected: install it from the setup screen, or put one under {} and press Refresh in Settings (CLI: `diarist-cli {}`)",
                 if role == ModelRole::Engine {
                     paths.engine().display().to_string()
                 } else {

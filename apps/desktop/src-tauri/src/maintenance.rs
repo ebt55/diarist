@@ -1,12 +1,12 @@
 //! Launch-time and periodic housekeeping: the startup report (what crash
 //! recovery and a data-folder move did, shown once by the UI) and audio
-//! retention (`meet_core::retention`) at launch and then once a day.
+//! retention (`diarist_core::retention`) at launch and then once a day.
 
 use std::time::Duration;
 
-use meet_core::retention;
-use meet_core::store::RunStore;
-use meet_core::views::{RecoveredItem, StartupReport};
+use diarist_core::retention;
+use diarist_core::store::RunStore;
+use diarist_core::views::{RecoveredItem, StartupReport};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{AppPaths, AppStore, Startup};
@@ -23,7 +23,7 @@ const RETENTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Imports a crash interrupted become `failed` (before any import is queued).
 pub(crate) fn recover_imports(store: &dyn RunStore, report: &mut StartupReport) {
-    match meet_core::pipeline::recover_interrupted_imports(store) {
+    match diarist_core::pipeline::recover_interrupted_imports(store) {
         Ok(list) => {
             for (id, title) in list {
                 log::warn!("import of meeting {id} ({title:?}) was interrupted; marked failed");

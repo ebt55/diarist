@@ -33,7 +33,7 @@ export function warningText(w: LiveWarning): string {
   }
 }
 
-/** `meet_core::views::default_speaker_name` for labels without a speaker row. */
+/** `diarist_core::views::default_speaker_name` for labels without a speaker row. */
 export function defaultSpeakerName(label: string): string {
   if (label === "me") return "Me";
   if (label === "spk_unknown") return "Unknown speaker";
@@ -44,7 +44,7 @@ export function defaultSpeakerName(label: string): string {
   return label;
 }
 
-/** `meet_core::views::default_speaker_color`. */
+/** `diarist_core::views::default_speaker_color`. */
 export function defaultSpeakerColor(label: string): string {
   if (label === "me") return ME_COLOR;
   const spk = /^spk_(\d+)$/.exec(label);

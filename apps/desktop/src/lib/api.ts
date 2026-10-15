@@ -1,6 +1,6 @@
 // Typed wrappers over the Tauri commands in src-tauri/src/{commands,live}.rs.
-// Types come from meet_core::views and meet_core::live via ts-rs
-// (`cargo test -p meet-core`); argument names are snake_case on the wire,
+// Types come from diarist_core::views and diarist_core::live via ts-rs
+// (`cargo test -p diarist-core`); argument names are snake_case on the wire,
 // like the command contract.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -43,7 +43,7 @@ import type { WordsUpdate } from "./generated/WordsUpdate";
 
 export type { Waveform };
 
-/** `meet_core::export::ExportFormat` on the wire (its file extension). */
+/** `diarist_core::export::ExportFormat` on the wire (its file extension). */
 export type ExportFormat = "md" | "txt" | "json" | "srt" | "vtt";
 
 /** Error text from a rejected command (commands reject with a string). */

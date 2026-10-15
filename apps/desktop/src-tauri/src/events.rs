@@ -1,5 +1,5 @@
 //! Event plumbing: backend-to-UI pushes. Names and payloads come from
-//! `meet_core::views` and `meet_core::live` so the TypeScript side uses the
+//! `diarist_core::views` and `diarist_core::live` so the TypeScript side uses the
 //! generated types.
 //!
 //! - `job:progress`, `job:done`, `job:error`, `job:cancelled`: [`JobEvent`]
@@ -8,7 +8,7 @@
 //!   `pull_model` runs (Settings, "Download recommended").
 //! - `live:*`: the recording's output, see `live.rs`.
 
-use meet_core::views::{DownloadProgress, JobEvent};
+use diarist_core::views::{DownloadProgress, JobEvent};
 use tauri::{AppHandle, Emitter};
 
 pub fn emit_job(app: &AppHandle, event: &JobEvent) {
