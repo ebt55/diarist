@@ -21,6 +21,30 @@ pub enum CoreError {
     #[error(transparent)]
     Store(#[from] StoreError),
 
+    /// No decoder could turn the input into 16 kHz mono PCM16.
+    #[error("decode failed: {0}")]
+    Decode(String),
+
+    /// The inference engine failed to start or reported an error.
+    #[error("engine error: {0}")]
+    Engine(String),
+
+    /// Model or engine management (scan, manifest, pull, download) failed.
+    #[error("models: {0}")]
+    Models(String),
+
+    /// The job was cancelled.
+    #[error("cancelled")]
+    Cancelled,
+
+    /// Not enough free disk space for the operation.
+    #[error("not enough free disk space in {path}: {free_mb} MB free, {needed_mb} MB needed")]
+    InsufficientSpace {
+        path: String,
+        free_mb: u64,
+        needed_mb: u64,
+    },
+
     /// Not enough bytes to decode a fixed-size header (`ffi-wire`).
     #[error("{what} too short: need {need} bytes, got {got}")]
     ShortBuffer {

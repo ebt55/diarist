@@ -10,10 +10,15 @@
 use std::sync::mpsc::Receiver;
 
 use crate::error::Result;
+
+pub mod nemo_cli;
+pub mod process;
+
 pub use crate::protocol::{
     DiarPreset, EngineEvent, EngineInfo, EngineWord, ErrorCode, FileJob, JobStats, LiveOpts,
 };
 use crate::types::{Channel, JobId};
+pub use nemo_cli::{DiarizeRunner, NemoCascadeEngine, NemoCliEngine};
 
 /// Whole-file transcription (and diarization).
 pub trait Engine: Send + Sync {

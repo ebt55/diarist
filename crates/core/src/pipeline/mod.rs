@@ -10,10 +10,16 @@ use std::thread::JoinHandle;
 
 use crate::audio::Decoder;
 use crate::engine::Engine;
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::store::Store;
 use crate::types::{JobId, MeetingId};
 use crate::views::JobEvent;
+
+mod import;
+
+pub use import::{
+    import_file_with, ImportOptions, MIN_FREE_BYTES, SETTING_KEEP_DIARIZATION, SETTING_KEEP_WAV,
+};
 
 /// What the user asked to import.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,23 +34,25 @@ pub struct ImportRequest {
     pub diarize: bool,
 }
 
-/// Imports one audio or video file as a new meeting. Phase 1 implements it;
-/// until then it returns [`CoreError::NotImplemented`].
+/// Imports one audio or video file as a new meeting, with default
+/// [`ImportOptions`] for the resolved data root and no cancellation (see
+/// [`import_file_with`]).
 ///
 /// Steps, each reported through `on_event` (`JobEvent::Progress` with the
 /// matching stage, then exactly one `Done` or `Error`):
-/// 1. `store.create_meeting` (source `file`, status `processing`), register
-///    the original file as the `playback` track (format `original`).
-/// 2. Decode to 16 kHz mono WAV in the meeting folder with `decoder`.
+/// 0. Refuse when the input is missing or under 2 GB are free on the data
+///    root's volume (no meeting is created).
+/// 1. `store.create_meeting` (source `file`, status `processing`).
+/// 2. Decode to `audio/<uid>/source.wav` (16 kHz mono) with `decoder`;
+///    register the original file as the `playback` track (format
+///    `original`); `finish_meeting` with the decoded duration.
 /// 3. `store.create_run(kind = file)`, then `engine.transcribe_file` and
-///    drain its events until `Done` or `Error`.
+///    drain its events until `Done` or `Error`; a set [`CancelToken`] is
+///    forwarded to `engine.cancel`. Optionally the standalone diarize pass.
 /// 4. Build speakers, segments (`transcript` module) and words;
 ///    `store.insert_transcript`, `finish_run(done)`, `set_current_run`,
-///    `finish_meeting`, status `done`; delete the 16 kHz intermediate.
+///    status `done`; delete the 16 kHz intermediate unless kept.
 /// 5. On any failure: `finish_run(failed)`, status `failed`, `JobEvent::Error`.
-///
-/// Runs on a [`JobQueue`] worker; it must poll the job's [`CancelToken`]
-/// (passed by the caller's closure) and call `engine.cancel` when set.
 pub fn import_file(
     store: &dyn Store,
     engine: &dyn Engine,
@@ -52,8 +60,16 @@ pub fn import_file(
     req: ImportRequest,
     on_event: &dyn Fn(JobEvent),
 ) -> Result<MeetingId> {
-    let _ = (store, engine, decoder, req, on_event);
-    Err(CoreError::NotImplemented("pipeline::import_file"))
+    let paths = crate::models::DataPaths::resolve()?;
+    import_file_with(
+        store,
+        engine,
+        decoder,
+        req,
+        &ImportOptions::new(paths.root),
+        None,
+        on_event,
+    )
 }
 
 /// Cooperative cancellation flag handed to each queued job.
@@ -314,42 +330,5 @@ mod tests {
         q.set_paused(false);
         q.wait_idle();
         assert_eq!(ran.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn import_file_is_a_documented_stub() {
-        struct NoEngine;
-        impl Engine for NoEngine {
-            fn transcribe_file(
-                &self,
-                _: crate::engine::FileJob,
-            ) -> Result<mpsc::Receiver<crate::engine::EngineEvent>> {
-                unreachable!()
-            }
-            fn cancel(&self, _: JobId) {}
-            fn info(&self) -> crate::engine::EngineInfo {
-                crate::engine::EngineInfo::default()
-            }
-        }
-        struct NoDecoder;
-        impl Decoder for NoDecoder {
-            fn decode_to_wav16k(
-                &self,
-                _: &std::path::Path,
-                _: &std::path::Path,
-            ) -> Result<crate::audio::DecodedInfo> {
-                unreachable!()
-            }
-        }
-        let store = crate::store::MemoryStore::new();
-        let req = ImportRequest {
-            job_id: JobId::new(),
-            path: "a.m4a".into(),
-            title: None,
-            language: "en".into(),
-            diarize: true,
-        };
-        let err = import_file(&store, &NoEngine, &NoDecoder, req, &|_| {}).unwrap_err();
-        assert!(matches!(err, CoreError::NotImplemented(_)));
     }
 }
