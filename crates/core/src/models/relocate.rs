@@ -409,6 +409,26 @@ fn remove_copy(to: &Path, created: bool) {
     }
 }
 
+/// Runs `op` again while a file is still held open (sharing violation or
+/// access denied), until `deadline`: after a move the previous instance may
+/// still be exiting when the new one cleans up.
+fn retry_while_held(
+    deadline: &std::time::Instant,
+    mut op: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    loop {
+        match op() {
+            Err(e)
+                if matches!(e.raw_os_error(), Some(5 | 32))
+                    && std::time::Instant::now() < *deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Deletes a file, a folder tree or a link (the link only, never its target).
 fn remove_item(p: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(p)?;
@@ -447,6 +467,8 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
         }
     };
     let old = marker.from.clone();
+    // Files the exiting previous instance holds are retried for a few seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut report = CleanupReport {
         from: old.clone(),
         ..Default::default()
@@ -481,7 +503,7 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
             ] {
                 let p = old.join(&name);
                 if p.exists() {
-                    match fs::remove_file(&p) {
+                    match retry_while_held(&deadline, || fs::remove_file(&p)) {
                         Ok(()) => report.removed.push(name),
                         Err(e) => report.kept.push(format!("{name}: {e}")),
                     }
@@ -503,14 +525,14 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
                 continue;
             }
         }
-        match remove_item(&src) {
+        match retry_while_held(&deadline, || remove_item(&src)) {
             Ok(()) => report.removed.push(item.clone()),
             Err(e) => report.kept.push(format!("{item}: {e}")),
         }
     }
     for name in BEST_EFFORT.iter().chain(RECREATED) {
         let p = old.join(name);
-        if p.exists() && remove_item(&p).is_ok() {
+        if p.exists() && retry_while_held(&deadline, || remove_item(&p)).is_ok() {
             report.removed.push((*name).to_owned());
         }
     }
