@@ -1,25 +1,46 @@
 //! Tauri shell for meet-assist. Only command wrappers and event plumbing live
-//! here; logic belongs in `meet-core` (docs/01-architecture.md).
+//! here; logic belongs in `meet-core` (docs/01-architecture.md). Commands call
+//! [`Store`] methods inside `spawn_blocking` and map errors to strings.
 
-mod fixtures;
-
+use std::sync::Arc;
 use std::time::Duration;
 
-use meet_core::Meeting;
-use tauri::Manager;
+use meet_core::store::{MemoryStore, Store};
+use meet_core::views::MeetingSummary;
+use tauri::{Manager, State};
 
 /// If the frontend never calls `show()` (crashed bundle, failed load), reveal
 /// the window anyway so the app is not an invisible process.
 const SHOW_FALLBACK: Duration = Duration::from_secs(3);
 
-/// All meetings, newest first. Phase 0: fixtures.
+/// The store behind every command. Until Phase 1 lands `SqliteStore`, this is
+/// the seeded in-memory mock; swapping it is a one-line change in [`run`].
+struct AppStore(Arc<dyn Store>);
+
+/// Runs a store call on the blocking pool.
+async fn with_store<T, F>(store: &State<'_, AppStore>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn Store) -> meet_core::store::StoreResult<T> + Send + 'static,
+{
+    let store = Arc::clone(&store.0);
+    tauri::async_runtime::spawn_blocking(move || f(store.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// All meetings, newest first.
 #[tauri::command]
-fn list_meetings() -> Vec<Meeting> {
-    fixtures::meetings()
+async fn list_meetings(store: State<'_, AppStore>) -> Result<Vec<MeetingSummary>, String> {
+    with_store(&store, |s| s.list_meetings()).await
 }
 
 pub fn run() {
+    let store: Arc<dyn Store> = Arc::new(MemoryStore::demo());
+
     tauri::Builder::default()
+        .manage(AppStore(store))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)

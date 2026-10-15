@@ -1,170 +1,52 @@
-//! Wire protocol between the app and an engine process (`docs/03-engine-protocol.md`).
+//! Wire format for an optional FFI sidecar process (`docs/03-engine-protocol.md`,
+//! appendix). Compiled only with the `ffi-wire` feature: the shipped adapters
+//! (CLI and WebSocket) do not use it.
 //!
-//! - **stdin (app to engine):** binary frames, `u8 type` + `u32 LE length` + payload.
+//! - **stdin (app to sidecar):** frames of `u8 type` + `u32 LE length` + payload.
 //!   [`FrameType::Control`] payloads are one UTF-8 JSON [`EngineCommand`];
 //!   [`FrameType::Audio`] payloads start with an [`AudioPayloadHeader`]
-//!   (`u8 channel_id` + `u64 LE pts_us`) followed by int16 LE mono PCM at 16 kHz.
-//! - **stdout (engine to app):** newline-delimited JSON, one [`EngineEvent`] per line.
-//!
-//! Only types and (de)serialization live here; the process supervisor and the
-//! adapters arrive with the `engine` module in Phase 1.
-
-use std::collections::BTreeMap;
+//!   (`u8 channel` + `u64 LE pts_us`) followed by int16 LE mono PCM at 16 kHz.
+//! - **stdout (sidecar to app):** newline-delimited JSON
+//!   [`EngineEvent`](super::EngineEvent)s (serde tag `ev`).
+//! - **stderr:** free-form logs.
 
 use serde::{Deserialize, Serialize};
 
+use super::{DiarPreset, FileJob, LiveOpts};
 use crate::error::{CoreError, Result};
-use crate::types::Channel;
+use crate::types::{Channel, JobId};
 
-// ---------------------------------------------------------------------------
-// Control messages (app to engine)
-// ---------------------------------------------------------------------------
-
-/// A control message, sent as the JSON payload of a [`FrameType::Control`] frame.
+/// A control message: the JSON payload of a [`FrameType::Control`] frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCommand {
-    /// Load models. Must be the first command; the engine answers [`EngineEvent::Ready`].
+    /// Load models; the sidecar answers `ready`.
     Init {
-        /// ASR model name, e.g. `parakeet-tdt-0.6b-v3`.
         asr: String,
-        /// Diarizer model name; omitted for sessions that never diarize (mic).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diarizer: Option<String>,
-        /// `cuda`, `cuda:0`, `cpu`, ...
         device: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_speakers: Option<u32>,
+        #[serde(default)]
+        diar_preset: DiarPreset,
     },
-    /// Transcribe (and optionally diarize) a whole file.
-    TranscribeFile {
-        job_id: String,
-        path: String,
-        diarize: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        language: Option<String>,
+    /// Start a file job (mirrors `Engine::transcribe_file`).
+    TranscribeFile(FileJob),
+    /// Open a live session for one channel (mirrors `LiveEngine::open`).
+    /// Audio for it arrives in frames whose `channel_id` is `channel_id`.
+    OpenSession {
+        job_id: JobId,
+        channel: Channel,
+        channel_id: u8,
+        #[serde(flatten)]
+        opts: LiveOpts,
     },
-    /// Open a live session; audio follows in [`FrameType::Audio`] frames.
-    StartStream {
-        job_id: String,
-        channels: Vec<StreamChannel>,
-    },
-    /// Flush and finalize everything for a live session.
-    StopStream { job_id: String },
+    /// Flush and finalize a live session (mirrors `LiveSession::close`).
+    CloseSession { job_id: JobId },
     /// Abort a job without finalizing.
-    Cancel { job_id: String },
-    /// Exit the engine process.
+    Cancel { job_id: JobId },
+    /// Exit the sidecar.
     Shutdown,
 }
-
-/// One input channel of a live session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StreamChannel {
-    /// `channel_id` used in audio frames and in events.
-    pub id: u8,
-    pub name: Channel,
-    pub diarize: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Events (engine to app)
-// ---------------------------------------------------------------------------
-
-/// One line of engine stdout.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "ev", rename_all = "snake_case")]
-pub enum EngineEvent {
-    /// Models loaded; the engine accepts jobs.
-    Ready {
-        /// Engine name and version, e.g. `meet-engine 0.1.0`.
-        engine: String,
-        /// Runtime name and version behind the engine.
-        runtime: String,
-        /// Loaded models by role; shape is runtime-defined.
-        #[serde(default)]
-        models: serde_json::Map<String, serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        vram_mb: Option<u64>,
-    },
-    /// Job progress in media time.
-    Progress {
-        job_id: String,
-        done_ms: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        total_ms: Option<u64>,
-    },
-    /// Recognized words. With `final: false` they may be superseded by later
-    /// words covering the same time range; the app keeps the latest.
-    Words {
-        job_id: String,
-        channel: u8,
-        #[serde(rename = "final")]
-        is_final: bool,
-        words: Vec<EngineWord>,
-    },
-    /// The diarizer re-mapped speaker labels within `[from_t, to_t)` seconds.
-    Relabel {
-        job_id: String,
-        channel: u8,
-        from_t: f64,
-        to_t: f64,
-        map: BTreeMap<String, String>,
-    },
-    /// Nothing before `up_to_t` seconds will change; safe to commit to the DB.
-    Finalized {
-        job_id: String,
-        channel: u8,
-        up_to_t: f64,
-    },
-    /// Job finished.
-    Done {
-        job_id: String,
-        #[serde(default)]
-        stats: JobStats,
-    },
-    /// Job- or engine-level failure. `job_id` is absent for engine-level errors.
-    Error {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        job_id: Option<String>,
-        /// Machine-readable code, e.g. `oom`.
-        code: String,
-        message: String,
-    },
-}
-
-/// A word as emitted by the engine. Times are seconds from the job's t=0.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EngineWord {
-    pub t0: f64,
-    pub t1: f64,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conf: Option<f32>,
-    /// Provisional speaker label (`spk_N`); absent when not diarized.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spk: Option<String>,
-}
-
-/// Summary statistics in [`EngineEvent::Done`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct JobStats {
-    /// Real-time factor (processing time / media time).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rtf: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speakers: Option<u32>,
-}
-
-impl EngineEvent {
-    /// Parses one stdout line (surrounding whitespace, including `\r\n`, is ignored).
-    pub fn from_line(line: &str) -> Result<Self> {
-        Ok(serde_json::from_str(line.trim())?)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Binary framing (stdin)
-// ---------------------------------------------------------------------------
 
 /// Kind of a stdin frame (first header byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -230,9 +112,9 @@ impl FrameHeader {
 /// Prefix of an [`FrameType::Audio`] payload: `u8 channel_id` + `u64 LE pts_us`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioPayloadHeader {
-    /// Matches [`StreamChannel::id`].
+    /// Matches `channel_id` of an [`EngineCommand::OpenSession`].
     pub channel_id: u8,
-    /// Presentation timestamp of the first sample, microseconds on the session timeline.
+    /// Channel-sample time of the first sample, microseconds.
     pub pts_us: u64,
 }
 
@@ -278,109 +160,24 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    /// Control examples from docs/03-engine-protocol.md, verbatim.
-    const COMMAND_EXAMPLES: &[&str] = &[
-        r#"{"cmd":"init","asr":"parakeet-tdt-0.6b-v3","diarizer":"nemotron-3-diarization","device":"cuda","max_speakers":8}"#,
-        r#"{"cmd":"transcribe_file","job_id":"...","path":"C:/...wav","diarize":true,"language":"en"}"#,
-        r#"{"cmd":"start_stream","job_id":"...","channels":[{"id":0,"name":"mic","diarize":false},{"id":1,"name":"loopback","diarize":true}]}"#,
-        r#"{"cmd":"stop_stream","job_id":"..."}"#,
-        r#"{"cmd":"cancel","job_id":"..."}"#,
+    const COMMANDS: &[&str] = &[
+        r#"{"cmd":"init","asr":"nemotron-speech-streaming-en-0.6b","diarizer":"nemotron-3-diarization","device":"cuda:0","diar_preset":"streaming"}"#,
+        r#"{"cmd":"transcribe_file","job_id":"j1","wav_path":"C:/a.wav","diarize":true,"language":"en","diar_preset":"streaming"}"#,
+        r#"{"cmd":"open_session","job_id":"j2","channel":"loopback","channel_id":1,"diarize":true,"language":"en"}"#,
+        r#"{"cmd":"close_session","job_id":"j2"}"#,
+        r#"{"cmd":"cancel","job_id":"j1"}"#,
         r#"{"cmd":"shutdown"}"#,
     ];
 
-    /// Event examples from docs/03-engine-protocol.md. The doc elides
-    /// `"models":{...}` and `"runtime":"..."`; concrete values stand in here.
-    const EVENT_EXAMPLES: &[&str] = &[
-        r#"{"ev":"ready","engine":"meet-engine 0.1.0","runtime":"nemo-speech 0.2.0","models":{"asr":"parakeet-tdt-0.6b-v3","diarizer":"nemotron-3-diarization"},"vram_mb":1234}"#,
-        r#"{"ev":"progress","job_id":"...","done_ms":120000,"total_ms":3600000}"#,
-        r#"{"ev":"words","job_id":"...","channel":1,"final":false,
-            "words":[{"t0":12.34,"t1":12.61,"text":"hello","conf":0.91,"spk":"spk_1"}]}"#,
-        r#"{"ev":"relabel","job_id":"...","channel":1,"from_t":10.0,"to_t":20.0,"map":{"spk_1":"spk_0"}}"#,
-        r#"{"ev":"finalized","job_id":"...","channel":1,"up_to_t":22.0}"#,
-        r#"{"ev":"done","job_id":"...","stats":{"rtf":0.08,"speakers":3}}"#,
-        r#"{"ev":"error","job_id":"...","code":"oom","message":"..."}"#,
-    ];
-
-    /// Parse into the typed enum, serialize back, and compare as JSON values,
-    /// so field order and whitespace do not matter but every field must survive.
-    fn round_trip<T>(src: &str) -> T
-    where
-        T: serde::de::DeserializeOwned + Serialize,
-    {
-        let typed: T = serde_json::from_str(src).unwrap_or_else(|e| panic!("parse {src}: {e}"));
-        let again = serde_json::to_string(&typed).unwrap();
-        let a: Value = serde_json::from_str(src).unwrap();
-        let b: Value = serde_json::from_str(&again).unwrap();
-        assert_eq!(a, b, "round trip changed {src}");
-        typed
-    }
-
     #[test]
     fn commands_round_trip() {
-        for src in COMMAND_EXAMPLES {
-            round_trip::<EngineCommand>(src);
+        for src in COMMANDS {
+            let cmd: EngineCommand =
+                serde_json::from_str(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            let a: Value = serde_json::from_str(src).unwrap();
+            let b: Value = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+            assert_eq!(a, b, "round trip changed {src}");
         }
-    }
-
-    #[test]
-    fn events_round_trip() {
-        for src in EVENT_EXAMPLES {
-            round_trip::<EngineEvent>(src);
-        }
-    }
-
-    #[test]
-    fn typed_fields_land_where_expected() {
-        let cmd: EngineCommand = round_trip(COMMAND_EXAMPLES[2]);
-        let EngineCommand::StartStream { channels, .. } = cmd else {
-            panic!("expected start_stream");
-        };
-        assert_eq!(channels[1].name, Channel::Loopback);
-        assert!(channels[1].diarize);
-
-        let ev: EngineEvent = round_trip(EVENT_EXAMPLES[2]);
-        let EngineEvent::Words {
-            channel,
-            is_final,
-            words,
-            ..
-        } = ev
-        else {
-            panic!("expected words");
-        };
-        assert_eq!(channel, 1);
-        assert!(!is_final);
-        assert_eq!(words[0].spk.as_deref(), Some("spk_1"));
-        assert_eq!(words[0].conf, Some(0.91));
-    }
-
-    #[test]
-    fn optional_fields_may_be_absent() {
-        let init: EngineCommand = serde_json::from_str(
-            r#"{"cmd":"init","asr":"nemotron-speech-streaming-en-0.6b","device":"cpu"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            init,
-            EngineCommand::Init {
-                asr: "nemotron-speech-streaming-en-0.6b".into(),
-                diarizer: None,
-                device: "cpu".into(),
-                max_speakers: None,
-            }
-        );
-        let err = EngineEvent::from_line(
-            "{\"ev\":\"error\",\"code\":\"model_missing\",\"message\":\"x\"}\r\n",
-        )
-        .unwrap();
-        assert!(matches!(err, EngineEvent::Error { job_id: None, .. }));
-    }
-
-    #[test]
-    fn unknown_tags_are_rejected() {
-        assert!(serde_json::from_str::<EngineCommand>(r#"{"cmd":"reboot"}"#).is_err());
-        assert!(EngineEvent::from_line(r#"{"ev":"party"}"#).is_err());
-        assert!(EngineEvent::from_line("not json").is_err());
     }
 
     #[test]

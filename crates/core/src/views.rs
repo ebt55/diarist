@@ -1,0 +1,493 @@
+//! View types: what the UI receives from Tauri commands and events.
+//!
+//! These are the frozen seam between `crates/core` and `apps/desktop` (Phase
+//! 0.5). Every type derives [`ts_rs::TS`] and is exported to
+//! `apps/desktop/src/lib/generated/<Type>.ts` by `cargo test`. Change them
+//! only with a note to the orchestrator: both stores and the UI depend on them.
+//!
+//! Speaker names and colours are resolved here, by [`default_speaker_name`]
+//! and [`default_speaker_color`], so every [`crate::store::Store`]
+//! implementation shows the same defaults.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::types::{
+    Channel, JobId, Meeting, MeetingId, MeetingStatus, ModelFile, ModelFileId, ModelRole,
+    SegmentId, Source, SpeakerId, TranscriptRun,
+};
+
+/// Default speaker palette (`#rrggbb`), readable on light and dark backgrounds.
+/// `spk_N` takes entry `N % len`.
+pub const SPEAKER_PALETTE: [&str; 10] = [
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+    "#9c755f", "#8cd17d",
+];
+
+/// Colour of the `me` (mic) speaker.
+pub const ME_COLOR: &str = "#64748b";
+
+/// Name shown when a speaker has no `display_name`: `me` is "Me",
+/// `spk_N` is "Speaker N+1", `spk_unknown` is "Unknown speaker", `user_N`
+/// is "Speaker N"; anything else is shown as is.
+pub fn default_speaker_name(engine_label: &str) -> String {
+    if engine_label == "me" {
+        return "Me".to_owned();
+    }
+    if engine_label == "spk_unknown" {
+        return "Unknown speaker".to_owned();
+    }
+    if let Some(n) = engine_label
+        .strip_prefix("spk_")
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        return format!("Speaker {}", n + 1);
+    }
+    if let Some(n) = engine_label
+        .strip_prefix("user_")
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        return format!("Speaker {n}");
+    }
+    engine_label.to_owned()
+}
+
+/// Colour used when a speaker has no `color`: deterministic by engine label.
+pub fn default_speaker_color(engine_label: &str) -> &'static str {
+    if engine_label == "me" {
+        return ME_COLOR;
+    }
+    let index = match engine_label
+        .strip_prefix("spk_")
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        Some(n) => n,
+        // FNV-1a: stable across runs and platforms.
+        None => engine_label.bytes().fold(0x811c_9dc5_u32, |h, b| {
+            (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+        }) as usize,
+    };
+    SPEAKER_PALETTE[index % SPEAKER_PALETTE.len()]
+}
+
+/// One row of the library list (`list_meetings`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MeetingSummary {
+    pub id: MeetingId,
+    pub uid: String,
+    pub title: String,
+    pub source: Source,
+    pub status: MeetingStatus,
+    /// Unix ms, wall clock.
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    /// Distinct speakers in the current run after merges.
+    pub speaker_count: u32,
+    /// First 200 characters of the current run's text ("" when there is none).
+    pub preview: String,
+    pub audio_keep: bool,
+}
+
+/// Everything the meeting view header and legend need (`get_meeting`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MeetingDetail {
+    pub meeting: Meeting,
+    /// The run the transcript shows; `None` before any run finished.
+    pub current_run: Option<TranscriptRun>,
+    /// Speakers of the current run, roots first by talk time, then merged ones.
+    pub speakers: Vec<SpeakerView>,
+}
+
+/// A speaker with name and colour resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SpeakerView {
+    pub id: SpeakerId,
+    pub channel: Channel,
+    pub engine_label: String,
+    /// The user-set name, if any.
+    pub display_name: Option<String>,
+    /// What to show: `display_name` or the default name.
+    pub name: String,
+    /// What to paint: the stored colour or the default palette entry.
+    pub color: String,
+    /// Root this speaker was merged into; its segments show the root's name.
+    pub merged_into: Option<SpeakerId>,
+    /// Show a "new label" badge.
+    pub needs_review: bool,
+    /// Segments resolved to this speaker. For a root this includes merged
+    /// speakers' segments; for a merged speaker it is its own contribution.
+    pub segment_count: u32,
+    /// Speech time in ms, counted like `segment_count`.
+    pub talk_ms: i64,
+}
+
+/// One transcript row (`get_segments`), speaker resolved through merges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SegmentView {
+    pub id: SegmentId,
+    pub seq: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    /// Resolved (root) speaker.
+    pub speaker_id: SpeakerId,
+    pub speaker_name: String,
+    pub speaker_color: String,
+    pub channel: Channel,
+    /// The resolved speaker needs review.
+    pub needs_review: bool,
+}
+
+/// A piece of a search snippet; `hit` pieces are rendered highlighted.
+/// Plain text, never HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SnippetPart {
+    pub text: String,
+    pub hit: bool,
+}
+
+/// A full-text search result (`search`), from current runs only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SearchHit {
+    pub meeting_id: MeetingId,
+    pub meeting_title: String,
+    pub meeting_started_at: i64,
+    pub segment_id: SegmentId,
+    pub start_ms: i64,
+    pub speaker_name: String,
+    /// Text around the match, split into plain and highlighted parts.
+    pub snippet: Vec<SnippetPart>,
+}
+
+/// All settings as key/value strings (`get_settings`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export)]
+pub struct Settings(pub BTreeMap<String, String>);
+
+/// A compute device the engine can use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeviceInfo {
+    /// e.g. "NVIDIA GeForce RTX 3080".
+    pub name: String,
+    pub vram_total_mb: Option<u32>,
+    pub vram_free_mb: Option<u32>,
+    pub driver_version: Option<String>,
+}
+
+/// A runtime folder found under `engine\`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EngineInstall {
+    /// The `model_files` row (role `engine`).
+    pub id: ModelFileId,
+    /// Relative to the data root.
+    pub path: String,
+    /// Runtime version reported by the engine, e.g. `0.2.0`.
+    pub version: String,
+    /// The version is one we tested; the UI shows a warning badge otherwise.
+    pub tested: bool,
+    pub missing: bool,
+}
+
+/// The selected file per role (stored in settings under [`selection_key`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelSelection {
+    pub engine: Option<ModelFileId>,
+    pub asr: Option<ModelFileId>,
+    pub diarizer: Option<ModelFileId>,
+}
+
+/// Settings key that stores the selected file for `role`:
+/// `selected_engine` for engines, `selected_model.<role>` otherwise. The value
+/// is the `model_files.id` as a decimal string.
+pub fn selection_key(role: ModelRole) -> String {
+    match role {
+        ModelRole::Engine => "selected_engine".to_owned(),
+        other => format!("selected_model.{}", other.as_str()),
+    }
+}
+
+/// Engines, models and GPU state for the Settings screen (`engine_status`).
+/// Filled by the Tauri layer from the `models` module, the store's
+/// `model_files` and settings, and NVML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EngineStatus {
+    pub data_root: String,
+    pub engines: Vec<EngineInstall>,
+    /// Every non-engine file the scanner found, grouped by role.
+    pub models_by_role: BTreeMap<ModelRole, Vec<ModelFile>>,
+    pub selected: ModelSelection,
+    pub free_vram_mb: Option<u32>,
+    pub gpu: Option<DeviceInfo>,
+}
+
+impl EngineStatus {
+    /// Assembles the status from the store's model files and settings.
+    /// Engines whose version is in `tested_versions` are marked tested.
+    /// Selections that do not parse or point at no file of that role are `None`.
+    pub fn from_parts(
+        data_root: String,
+        files: Vec<ModelFile>,
+        settings: &Settings,
+        tested_versions: &[&str],
+        free_vram_mb: Option<u32>,
+        gpu: Option<DeviceInfo>,
+    ) -> Self {
+        let selected_id = |role: ModelRole| {
+            settings
+                .0
+                .get(&selection_key(role))
+                .and_then(|v| v.parse::<i64>().ok())
+                .map(ModelFileId)
+                .filter(|id| files.iter().any(|f| f.id == *id && f.role == role))
+        };
+        let selected = ModelSelection {
+            engine: selected_id(ModelRole::Engine),
+            asr: selected_id(ModelRole::Asr),
+            diarizer: selected_id(ModelRole::Diarizer),
+        };
+        let mut engines = Vec::new();
+        let mut models_by_role: BTreeMap<ModelRole, Vec<ModelFile>> = BTreeMap::new();
+        for f in files {
+            if f.role == ModelRole::Engine {
+                let version = f.architecture.clone().unwrap_or_default();
+                engines.push(EngineInstall {
+                    id: f.id,
+                    path: f.path,
+                    tested: tested_versions.contains(&version.as_str()),
+                    version,
+                    missing: f.missing,
+                });
+            } else {
+                models_by_role.entry(f.role).or_default().push(f);
+            }
+        }
+        EngineStatus {
+            data_root,
+            engines,
+            models_by_role,
+            selected,
+            free_vram_mb,
+            gpu,
+        }
+    }
+}
+
+/// Coarse step of an import or post-pass job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum JobStage {
+    Queued,
+    Decoding,
+    Transcribing,
+    Diarizing,
+    Saving,
+}
+
+/// Job lifecycle events, emitted to the UI as `job:progress`, `job:done` and
+/// `job:error` (see [`JobEvent::event_name`]); the payload is the whole value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
+pub enum JobEvent {
+    Progress {
+        job_id: JobId,
+        stage: JobStage,
+        /// Media time processed so far.
+        done_ms: u64,
+        total_ms: Option<u64>,
+    },
+    Done {
+        job_id: JobId,
+        meeting_id: MeetingId,
+    },
+    Error {
+        job_id: JobId,
+        /// The meeting row, when one was created before the failure.
+        meeting_id: Option<MeetingId>,
+        message: String,
+    },
+}
+
+impl JobEvent {
+    pub const PROGRESS: &'static str = "job:progress";
+    pub const DONE: &'static str = "job:done";
+    pub const ERROR: &'static str = "job:error";
+
+    /// Tauri event name for this payload.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            JobEvent::Progress { .. } => Self::PROGRESS,
+            JobEvent::Done { .. } => Self::DONE,
+            JobEvent::Error { .. } => Self::ERROR,
+        }
+    }
+
+    pub fn job_id(&self) -> &JobId {
+        match self {
+            JobEvent::Progress { job_id, .. }
+            | JobEvent::Done { job_id, .. }
+            | JobEvent::Error { job_id, .. } => job_id,
+        }
+    }
+}
+
+/// A word in a live preview event. Times are meeting milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LiveWord {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    /// Provisional engine label (`spk_N`, `me`), if any.
+    pub speaker_label: Option<String>,
+}
+
+/// Payload of `transcript:words` (live mode, reserved: no producer yet).
+/// A later `rev` of the same (`channel`, `utt`) replaces the earlier one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LiveWordsEvent {
+    pub meeting_id: MeetingId,
+    pub channel: Channel,
+    pub utt: u32,
+    pub rev: u32,
+    /// Text may still change (not yet covered by `TextFinalUntil`).
+    pub tentative: bool,
+    pub words: Vec<LiveWord>,
+}
+
+impl LiveWordsEvent {
+    pub const NAME: &'static str = "transcript:words";
+}
+
+/// Payload of `transcript:relabel` (live mode, reserved: no producer yet).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LiveRelabelEvent {
+    pub meeting_id: MeetingId,
+    pub channel: Channel,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// Old label to new label.
+    pub map: BTreeMap<String, String>,
+}
+
+impl LiveRelabelEvent {
+    pub const NAME: &'static str = "transcript:relabel";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_names() {
+        assert_eq!(default_speaker_name("me"), "Me");
+        assert_eq!(default_speaker_name("spk_0"), "Speaker 1");
+        assert_eq!(default_speaker_name("spk_7"), "Speaker 8");
+        assert_eq!(default_speaker_name("spk_unknown"), "Unknown speaker");
+        assert_eq!(default_speaker_name("user_2"), "Speaker 2");
+        assert_eq!(default_speaker_name("odd"), "odd");
+    }
+
+    #[test]
+    fn default_colors_are_deterministic_palette_entries() {
+        assert_eq!(default_speaker_color("spk_0"), SPEAKER_PALETTE[0]);
+        assert_eq!(default_speaker_color("spk_11"), SPEAKER_PALETTE[1]);
+        assert_eq!(default_speaker_color("me"), ME_COLOR);
+        let c = default_speaker_color("user_3");
+        assert_eq!(c, default_speaker_color("user_3"));
+        assert!(SPEAKER_PALETTE.contains(&c));
+    }
+
+    #[test]
+    fn job_event_shape() {
+        let ev = JobEvent::Done {
+            job_id: JobId("j".into()),
+            meeting_id: MeetingId(4),
+        };
+        assert_eq!(ev.event_name(), "job:done");
+        assert_eq!(
+            serde_json::to_value(&ev).unwrap(),
+            serde_json::json!({"type": "done", "job_id": "j", "meeting_id": 4})
+        );
+    }
+
+    #[test]
+    fn engine_status_groups_files_and_resolves_selections() {
+        use crate::types::{ModelCapabilities, ModelSource};
+        let file = |id: i64, role: ModelRole, arch: Option<&str>| ModelFile {
+            id: ModelFileId(id),
+            path: format!("models/{id}"),
+            role,
+            architecture: arch.map(str::to_owned),
+            display_name: format!("file {id}"),
+            quant: None,
+            size_bytes: 1,
+            sha256: None,
+            source: ModelSource::User,
+            capabilities: ModelCapabilities::default(),
+            manifest_name: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            missing: false,
+        };
+        let files = vec![
+            file(1, ModelRole::Engine, Some("0.2.0")),
+            file(2, ModelRole::Engine, Some("0.3.0")),
+            file(3, ModelRole::Asr, None),
+            file(4, ModelRole::Diarizer, None),
+        ];
+        let mut settings = Settings::default();
+        settings.0.insert("selected_engine".into(), "1".into());
+        settings.0.insert("selected_model.asr".into(), "4".into()); // wrong role
+        settings
+            .0
+            .insert("selected_model.diarizer".into(), "4".into());
+        let st = EngineStatus::from_parts(
+            "D:/data".into(),
+            files,
+            &settings,
+            &["0.2.0"],
+            Some(8_000),
+            None,
+        );
+        assert_eq!(st.engines.len(), 2);
+        assert!(st.engines[0].tested && !st.engines[1].tested);
+        assert_eq!(st.models_by_role[&ModelRole::Asr].len(), 1);
+        assert_eq!(st.selected.engine, Some(ModelFileId(1)));
+        assert_eq!(st.selected.asr, None);
+        assert_eq!(st.selected.diarizer, Some(ModelFileId(4)));
+    }
+
+    #[test]
+    fn selection_keys() {
+        assert_eq!(selection_key(ModelRole::Asr), "selected_model.asr");
+        assert_eq!(
+            selection_key(ModelRole::Diarizer),
+            "selected_model.diarizer"
+        );
+        assert_eq!(selection_key(ModelRole::Engine), "selected_engine");
+    }
+
+    #[test]
+    fn settings_serialize_as_a_plain_object() {
+        let mut s = Settings::default();
+        s.0.insert("theme".into(), "dark".into());
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"theme":"dark"}"#);
+    }
+}
