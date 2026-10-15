@@ -1,0 +1,60 @@
+# Copy to sessions.toml (gitignored) and fill in the paths. Never commit real
+# recording paths or participant names: labels use the docs/05 shorthand.
+#
+# kind   zoom: audio = the Zoom *.m4a, vtt = the matching *.transcript.vtt
+#        ami:  audio = 16 kHz WAV, ref_rttm + ref_seglst (from ami_fetch.py)
+# group  tuning | heldout | control | overlap | stress  (report sections)
+# uem    optional scored region: "ref" (annotated span) or [start_s, end_s]
+# Relative paths are resolved from the repo root.
+
+[sessions.aug2]
+label = "Aug 2"
+kind = "zoom"
+group = "tuning"
+audio = 'C:\path\to\aug-archive\<session>\<recording>.m4a'
+vtt = 'C:\path\to\aug-archive\<session>\<recording>.transcript.vtt'
+
+[sessions.aug9]
+label = "Aug 9"
+kind = "zoom"
+group = "tuning"
+audio = 'C:\path\to\aug-archive\<session>\<recording>.m4a'
+vtt = 'C:\path\to\aug-archive\<session>\<recording>.transcript.vtt'
+
+[sessions.sep7]
+label = "Sep 7"
+kind = "zoom"
+group = "heldout"
+audio = 'C:\path\to\sep-meets\<session>\<recording>.m4a'
+vtt = 'C:\path\to\sep-meets\<session>\<recording>.transcript.vtt'
+
+[sessions.sep5]
+label = "Sep 5"
+kind = "zoom"
+group = "heldout"
+audio = 'C:\path\to\sep-meets\<session>\<recording>.m4a'
+vtt = 'C:\path\to\sep-meets\<session>\<recording>.transcript.vtt'
+
+[sessions.seplog]
+label = "Sep Logistics"
+kind = "zoom"
+group = "control"
+audio = 'C:\path\to\sep-meets\<session>\<recording>.m4a'
+vtt = 'C:\path\to\sep-meets\<session>\<recording>.transcript.vtt'
+
+[sessions.aug14]
+label = "Aug 14"
+kind = "zoom"
+group = "stress"
+note = "room devices: one Zoom label can hide several speakers; reference count is a lower bound"
+audio = 'C:\path\to\aug-archive\<session>\<recording>.m4a'
+vtt = 'C:\path\to\aug-archive\<session>\<recording>.transcript.vtt'
+
+[sessions.ami]
+label = "AMI ES2002a"
+kind = "ami"
+group = "overlap"
+audio = 'data\samples\ES2002a.Mix-Headset.wav'
+ref_rttm = 'data\samples\ES2002a.rttm'
+ref_seglst = 'data\samples\ami\ES2002a.ref.seglst.jsonl'
+uem = "ref"

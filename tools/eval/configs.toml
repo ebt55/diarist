@@ -1,0 +1,26 @@
+# Eval configurations for run.py. Each runs `meet-cli transcribe --rttm` with
+# its own scratch data root (.work/data/<config>), because the ASR model is a
+# selection stored in that root's database (`meet-cli models select asr`).
+#
+# asr / diarizer: manifest names from manifests/models.json.
+# language: passed as `transcribe --language` (`auto` lets Nemotron 3.5 detect).
+# skip: the config is listed but not runnable; run.py prints the reason.
+
+[nemotron35]
+description = "Default: Nemotron 3.5 streaming ASR + Nemotron 3 Diarization (v3-streaming preset), language en"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+
+[nemotron_en]
+description = "Fallback ASR: Nemotron EN streaming + Nemotron 3 Diarization, language en"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+
+[nemotron35_verbatim]
+description = "Nemotron 3.5 with the runtime's --verbatim flag (fillers kept)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+skip = "meet-cli transcribe has no way to pass --verbatim to nemo-speech (NemoCliEngine::args builds a fixed argument list)"
