@@ -132,15 +132,21 @@ def run_dir(config: str, sid: str) -> Path:
     return WORK / "runs" / config / sid
 
 
-def cached(config: str, sid: str) -> dict | None:
+def cached(config: str, sid: str, cfg: dict) -> dict | None:
+    """The finished run of (session, config), if its settings still match."""
     d = run_dir(config, sid)
     try:
         meta = json.loads((d / "run.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if meta.get("status") == "ok" and meta.get("schema") == RUN_SCHEMA and (d / "transcript.json").is_file():
-        return meta
-    return None
+    if meta.get("status") != "ok" or meta.get("schema") != RUN_SCHEMA or not (d / "transcript.json").is_file():
+        return None
+    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")):
+        log(f"[{sid}] cached run used different settings; transcribing again")
+        return None
+    if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
+        log(f"[{sid}] note: cached run was made by a different meet-cli build (use --force to redo)")
+    return meta
 
 
 def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
@@ -351,6 +357,38 @@ def table_rows(rows: list[dict]) -> list[str]:
     return out
 
 
+def section(rows: list[dict]) -> list[str]:
+    return [*table_rows(rows), ""] if rows else ["Not run in this report.", ""]
+
+
+def quality_bar(results: list[dict]) -> list[str]:
+    attr = [r for r in results if r["group"] in ("tuning", "heldout")]
+    out = []
+    if attr:
+        mn, mx = mean_max(attr, "wder")
+        ok = mn is not None and mn < 0.10 and mx < 0.20
+        out.append(
+            f"- WDER over the user meetings ({len(attr)}): mean {pct(mn)} %, max {pct(mx)} % "
+            f"(bar: mean < 10, max < 20): {'met' if ok else 'NOT met'}"
+        )
+        far = [r["label"] for r in attr if abs(r["count_error"]) > 1]
+        out.append(
+            "- Speaker count within one on the user meetings: "
+            + ("met" if not far else "NOT met (" + ", ".join(far) + ")")
+        )
+    for r in results:
+        if r["group"] == "control":
+            out.append(
+                f"- Single-speaker control ({r['label']}): transcript has {r['hyp_speakers']} speaker(s), "
+                f"diarizer pass {r.get('diar_hyp_speakers', '–')}: {'met' if r['hyp_speakers'] == 1 else 'NOT met'}"
+            )
+    out.append(
+        "- References are Zoom cue-level, not hand-labelled yet (docs/00 asks for hand-labelled meetings); "
+        "treat the verdicts as provisional until data/eval/refs holds corrected references."
+    )
+    return out
+
+
 def aggregate_rows(name: str, rows: list[dict]) -> list[str]:
     if not rows:
         return []
@@ -397,12 +435,27 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- GPU wall time for these runs: {total_wall / 60:.1f} min for {total_audio / 60:.0f} min of audio"
         f" ({total_audio / max(total_wall, 1e-9):.1f}x real time; includes the standalone diarize pass)",
         "",
+        "## Quality bar (docs/00)",
+        "",
+        *quality_bar(results),
+        "",
         "## Transcript attribution (app output)",
         "",
         "DER/JER from the exported transcript RTTM (one span per transcript segment). WDER near = words within 1 s of a reference speaker change.",
         "",
-        *table_rows(results),
+        "### User meetings (tuning and held-out)",
         "",
+        *section(attr),
+        "### Controls",
+        "",
+        *section([r for r in results if r["group"] in ("control", "overlap")]),
+        "### Stress: in-room multi-speaker (reported separately)",
+        "",
+        "Shared room devices carry several people under one Zoom label, so the reference undercounts speakers. "
+        "A diarizer that correctly splits those people is charged for it by DER, JER and WDER (the speaker map is one to one); "
+        "read this row for the speaker count and for regressions between configs, not against the bar.",
+        "",
+        *section([r for r in results if r["group"] == "stress"]),
         "## Aggregates",
         "",
         "| Set | Stat | | | | Count err | " + " | ".join(c for c, _ in ATTR_COLS) + " |",
@@ -444,7 +497,8 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Zoom references ({sum(r['ref_source'] == 'zoom-cue' for r in results)} sessions): {CUE_TIMING_NOTE}. Overlapping speech is serialised and short backchannels are often missing, so DER is approximate there; speaker identity per cue is near ground truth, which is what WDER uses.",
         "- The Zoom transcript is machine output: cpWER, tcpWER and ORC-WER against it mix ASR disagreement with attribution. Word accuracy is judged on AMI only; cpWER − DI-cpWER is the attribution share.",
         "- AMI ES2002a: word-level manual annotation (ami_public_manual_1.6.2) for the SegLST reference, pyannote AMI-diarization-setup only_words RTTM for DER.",
-        "- DER collar 0.25 = ±0.25 s around reference boundaries (pyannote `collar=0.5`). Overlap is scored. The scored region is the whole recording.",
+        "- DER collar 0.25 = ±0.25 s around reference boundaries (pyannote `collar=0.5`). Overlap is scored. The scored region is the whole recording, except AMI: its annotated span ±1 s, because the first 50 s of pre-meeting chatter is not transcribed (hypothesis words outside the span are dropped for the transcript metrics too).",
+        "- AMI WER here is on the Mix-Headset (far-field mix) channel with this harness's normaliser, so it is not directly comparable with published AMI figures (usually IHM). Use it to compare configs.",
         "- Count err = hypothesis speakers − reference speakers (transcript speakers for the first table, diarizer labels for the second). Zoom labels count people with their own audio stream; the stress session's room devices hide several people behind one label, so its reference count is a lower bound.",
         f"- tcpWER collar {M.TCP_COLLAR_S:.0f} s. DI-cpWER treats each hypothesis word as its own segment. Nemotron word times run about 0.3 s late (research/08 pitfall 11); nothing here shifts them.",
         "- Quality bar (docs/00): WDER average < 10 % and max < 20 % over the user's meetings, exact speaker count on the single-speaker control, within one elsewhere.",
@@ -458,10 +512,11 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
 def print_summary(results: list[dict]) -> None:
     print(f"{'session':<14}{'count':>6}{'DER25':>7}{'JER':>7}{'WDER':>7}{'near':>7}{'cpWER':>7}{'DIcp':>7}")
     for r in results:
-        print(
+        line = (
             f"{r['label']:<14}{signed(r['count_error']):>6}{pct(r['der_c025']):>7}{pct(r['jer']):>7}"
             f"{pct(r['wder']):>7}{pct(r['wder_near']):>7}{pct(r['cpwer']):>7}{pct(r['dicpwer']):>7}"
         )
+        print(line.replace("–", "-"))  # the Windows console code page has no en dash
 
 
 # --------------------------------------------------------------------------
@@ -514,7 +569,7 @@ def main() -> None:
     metas: dict[str, dict] = {}
     for sid in ids:
         s = sessions[sid]
-        meta = None if a.force else cached(a.config, sid)
+        meta = None if a.force else cached(a.config, sid, cfg)
         if meta is None and not a.metrics_only:
             if not CLI.is_file():
                 raise SystemExit(f"{CLI} missing: build meet-cli once and copy it there (README)")

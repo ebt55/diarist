@@ -100,13 +100,14 @@ A `ref.seglst.jsonl` under `data/eval/refs/<session>/` takes precedence over the
 
 ## WSL fallback
 
-Not needed on the reference machine (meeteval builds natively with the `CL` flag above), but if meeteval or pyannote.metrics ever fails to install on Windows, score under WSL Ubuntu with a separate environment. Transcription stays on Windows (it needs the CUDA runtime and meet-cli.exe); WSL only recomputes metrics from the cached runs. Windows paths in `sessions.toml` are translated to `/mnt/c/...` automatically.
+Not needed on the reference machine (meeteval builds natively with the `CL` flag above) and not exercised there, but if meeteval or pyannote.metrics ever fails to install on Windows, score under WSL Ubuntu with a separate environment. meeteval is source-only, so WSL needs a C++ compiler (`sudo apt install build-essential`; the reference machine's Ubuntu has uv and Python 3.12 but no compiler). Transcription stays on Windows (it needs the CUDA runtime and meet-cli.exe); WSL only recomputes metrics from the cached runs. Windows paths in `sessions.toml` are translated to `/mnt/c/...` automatically.
 
 ```sh
 # Windows: transcribe and cache
 uv run python -I run.py --config nemotron35 --sessions all --transcribe-only
 # WSL Ubuntu
-curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo apt install build-essential
+curl -LsSf https://astral.sh/uv/install.sh | sh     # if uv is missing
 cd /mnt/c/Users/<you>/claude-ground/meet-assist/tools/eval
 UV_PROJECT_ENVIRONMENT=.venv-wsl uv run python -I run.py --config nemotron35 --sessions all --metrics-only
 ```
