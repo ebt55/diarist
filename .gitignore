@@ -23,3 +23,6 @@ Thumbs.db
 scratch/
 # Tauri generated files
 apps/desktop/src-tauri/gen/schemas/
+
+# Agent worktrees created inside the repo
+.claude/worktrees/
