@@ -1,0 +1,5 @@
+# Prefer dependency versions whose declared rust-version is compatible with the
+# workspace `rust-version` (Cargo 1.84+). Without this, `cargo update` happily
+# picks releases that need a newer compiler than the one we build with.
+[resolver]
+incompatible-rust-versions = "fallback"
