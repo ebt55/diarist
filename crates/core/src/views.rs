@@ -271,7 +271,11 @@ impl EngineStatus {
                 .get(&selection_key(role))
                 .and_then(|v| v.parse::<i64>().ok())
                 .map(ModelFileId)
-                .filter(|id| files.iter().any(|f| f.id == *id && f.role == role))
+                .filter(|id| {
+                    files
+                        .iter()
+                        .any(|f| f.id == *id && (f.role == role || f.role == ModelRole::Unknown))
+                })
         };
         let selected = ModelSelection {
             engine: selected_id(ModelRole::Engine),
@@ -453,6 +457,10 @@ pub struct DownloadItem {
     /// The folder it lands in (absolute).
     pub dest: String,
     pub licence: String,
+    /// Runtime package: `cuda`, `vulkan` or `cpu` (`None` for models).
+    pub backend: Option<String>,
+    /// Tested by us (runtime packages; models are always `true`).
+    pub tested: bool,
 }
 
 /// One meeting the launch-time recovery finished (`recovery_report`).

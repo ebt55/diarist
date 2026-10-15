@@ -50,7 +50,7 @@ export class Player {
       }),
       on("seeked", () => this.#sync()),
       on("error", () => {
-        if (this.url) this.error = "The audio file could not be played";
+        if (this.url) this.error = "The audio file could not be played; it may have been moved, or deleted by audio retention";
       }),
     ];
     this.#cleanup = () => offs.forEach((off) => off());
@@ -80,7 +80,7 @@ export class Player {
     try {
       await el.play();
     } catch (e) {
-      this.error = `Playback failed: ${e instanceof Error ? e.message : String(e)}`;
+      this.error = `Playback failed (${e instanceof Error ? e.message : String(e)}); press Play again`;
     }
   }
 

@@ -46,6 +46,9 @@ pub const ENGINE_PRELOAD: &str = "engine.preload";
 /// Minutes without a recording after which the live server is stopped
 /// (frees its VRAM); `0` keeps it running.
 pub const ENGINE_IDLE_MINUTES: &str = "engine.idle_minutes";
+/// The user chose "Set up later" on the first-run screen: the app opens on
+/// the library and each action says what it misses.
+pub const SETUP_LATER: &str = "setup.later";
 /// Low-VRAM mode: file imports use Nemotron 3.5 when it is installed (it
 /// peaks at 1.8 GB against 2.6 GB for the EN model).
 pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
@@ -73,6 +76,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_PRELOAD, "false"),
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
+    (SETUP_LATER, "false"),
 ];
 
 /// The default of `key`, if it is a known key.

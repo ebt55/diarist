@@ -28,4 +28,12 @@ url: string, sha256: string,
 /**
  * The folder it lands in (absolute).
  */
-dest: string, licence: string, };
+dest: string, licence: string, 
+/**
+ * Runtime package: `cuda`, `vulkan` or `cpu` (`None` for models).
+ */
+backend: string | null, 
+/**
+ * Tested by us (runtime packages; models are always `true`).
+ */
+tested: boolean, };

@@ -106,15 +106,16 @@ pub fn command(engine_dir: &Path, models_dir: Option<&Path>) -> Command {
 /// Runs `cmd` to completion with stdout and stderr captured, killing it
 /// after `timeout`.
 pub fn run_with_timeout(cmd: Command, timeout: Duration) -> Result<Output> {
-    run_with_timeout_ticking(cmd, timeout, &mut || {})
+    run_with_timeout_ticking(cmd, timeout, &mut || None)
 }
 
 /// [`run_with_timeout`], calling `tick` about every 250 ms while the child
-/// runs (progress polling).
+/// runs (progress polling). When `tick` returns a reason, the child is
+/// killed and the reason becomes the error.
 pub fn run_with_timeout_ticking(
     mut cmd: Command,
     timeout: Duration,
-    tick: &mut dyn FnMut(),
+    tick: &mut dyn FnMut() -> Option<String>,
 ) -> Result<Output> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
@@ -130,7 +131,11 @@ pub fn run_with_timeout_ticking(
         }
         if last_tick.elapsed() >= Duration::from_millis(250) {
             last_tick = Instant::now();
-            tick();
+            if let Some(why) = tick() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CoreError::Engine(why));
+            }
         }
         if start.elapsed() > timeout {
             let _ = child.kill();

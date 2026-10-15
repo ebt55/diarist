@@ -208,13 +208,27 @@ class LiveStore {
 
   /** The Record / Stop button: open the start sheet, or stop (after confirming). */
   async toggle(): Promise<void> {
-    if (this.phase === "idle") this.sheetOpen = true;
+    if (this.phase === "idle") await this.#openSheet();
     else if (this.phase === "recording") await this.stop();
+  }
+
+  /** Opens the start sheet, or the panel naming what recording still needs. */
+  async #openSheet(): Promise<void> {
+    try {
+      const r = await api.checkReady("record");
+      if (!r.ok) {
+        app.readiness = { action: "record", missing: r.missing, pending: [] };
+        return;
+      }
+    } catch {
+      // Start reports what went wrong.
+    }
+    this.sheetOpen = true;
   }
 
   /** The R key: only ever starts (opens the start sheet); a running recording is left alone. */
   record(): void {
-    if (this.phase === "idle") this.sheetOpen = true;
+    if (this.phase === "idle") void this.#openSheet();
     else if (this.phase === "recording") app.toast("info", "Already recording. Ctrl+. or the Stop button ends it.");
   }
 
@@ -251,7 +265,7 @@ class LiveStore {
           : "Recording stopped. No issues, so the live transcript is kept.",
       );
     } catch (e) {
-      app.error(`Could not stop the recording: ${errorText(e)}`);
+      app.error(`Could not stop the recording (${errorText(e)}); press Ctrl+. again. The audio is safe: an interrupted recording is recovered at the next start`);
     }
   }
 
@@ -349,7 +363,13 @@ class LiveStore {
     } else if (t.action === "stopped") {
       app.toast("info", `Recording stopped from ${via}. Finalizing the transcript…`);
     } else {
-      app.error(`Recording (${via}): ${t.message ?? "failed"}`);
+      app.error(`Recording (${via}) did not start: ${t.message ?? "unknown error"}. The panel or Diagnostics says what to fix`);
+      void api
+        .checkReady("record")
+        .then((r) => {
+          if (!r.ok) app.readiness = { action: "record", missing: r.missing, pending: [] };
+        })
+        .catch(() => {});
     }
   }
 }

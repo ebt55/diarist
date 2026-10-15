@@ -886,6 +886,13 @@ fn models_list(ctx: &Ctx) -> CliResult {
 
 fn models_scan(ctx: &Ctx) -> CliResult {
     let manifest = Manifest::load(&ctx.paths.root)?;
+    // Runtime zips dropped into engine\ by hand: checked and extracted first.
+    for r in models::download::install_dropped_engines(&ctx.paths, &manifest) {
+        match r {
+            Ok(dir) => println!("installed the dropped runtime zip into {}", dir.display()),
+            Err(e) => println!("  problem: {e}"),
+        }
+    }
     let r = models::scan(&ctx.paths, &*ctx.store, &manifest)?;
     println!(
         "scanned {} and {}",
@@ -939,7 +946,19 @@ fn models_pull(ctx: &Ctx, names: &[String]) -> CliResult {
             eprintln!("note: {} is experimental", e.name);
         }
         eprintln!("pulling {} ({} MB)...", e.name, e.size_bytes >> 20);
-        let p = models::pull(&engine_dir, &ctx.paths.models(), e)?;
+        let p = match models::pull(&engine_dir, &ctx.paths.models(), e) {
+            Ok(p) => p,
+            Err(err) => {
+                manual_download_hint(
+                    &e.url,
+                    &e.sha256,
+                    e.size_bytes,
+                    &models::pull_dir(&ctx.paths.models(), e),
+                    "put the file in",
+                );
+                return Err(err.into());
+            }
+        };
         let how = if p.cached {
             "already present"
         } else {
@@ -982,6 +1001,16 @@ fn engine_list(ctx: &Ctx) -> CliResult {
     Ok(())
 }
 
+/// After a failed download: what to fetch by hand and where to put it.
+fn manual_download_hint(url: &str, sha256: &str, size: u64, dest: &Path, what: &str) {
+    eprintln!("download failed; to fetch it by hand:");
+    eprintln!("  url     {url}");
+    eprintln!("  sha256  {sha256}");
+    eprintln!("  size    {size} bytes");
+    eprintln!("  then {what} {}", dest.display());
+    eprintln!("  (a firewall such as simplewall may need to allow meet-cli.exe, or curl.exe for model pulls)");
+}
+
 fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
     let manifest = Manifest::load(&ctx.paths.root)?;
     let entry = match name {
@@ -1004,6 +1033,16 @@ fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
                 t >> 20
             );
         }
+    })
+    .inspect_err(|_| {
+        eprintln!();
+        manual_download_hint(
+            &entry.url,
+            &entry.sha256,
+            entry.size_bytes,
+            &ctx.paths.engine(),
+            "put the zip in (checked and extracted by `meet-cli models scan`)",
+        );
     })?;
     eprintln!();
     println!("installed {}", dir.display());

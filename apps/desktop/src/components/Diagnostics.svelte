@@ -2,6 +2,8 @@
   import { onMount, tick } from "svelte";
   import { api, errorText } from "../lib/api";
   import { formatClock, formatDuration } from "../lib/format";
+  import { downloads } from "../lib/downloads.svelte";
+  import type { HealthCheck } from "../lib/generated/HealthCheck";
   import type { LiveStatusView } from "../lib/generated/LiveStatusView";
   import type { ServeStatus } from "../lib/generated/ServeStatus";
   import { app } from "../lib/state.svelte";
@@ -15,6 +17,47 @@
   let pre: HTMLPreElement | undefined = $state();
   let liveStatus = $state.raw<LiveStatusView | null>(null);
   let liveError = $state<string | null>(null);
+  let checks = $state.raw<HealthCheck[] | null>(null);
+  let checking = $state(false);
+  let fixing = $state<string | null>(null);
+
+  async function runChecks() {
+    checking = true;
+    try {
+      checks = await api.healthCheck();
+    } catch (e) {
+      app.error(`The checks could not run (${errorText(e)}); restart meet-assist and try again`);
+    } finally {
+      checking = false;
+    }
+  }
+
+  /** The fix button of a check row. */
+  async function fix(c: HealthCheck) {
+    const action = c.fix ?? "";
+    fixing = c.id;
+    try {
+      if (action === "setup") app.route = "setup";
+      else if (action === "settings") app.route = "settings";
+      else if (action === "open_models") await api.openModelsFolder();
+      else if (action === "open_engine") await api.openEngineFolder();
+      else if (action === "sound_settings") await api.openSoundSettings();
+      else if (action === "start_engine") await api.prepareRecording();
+      else if (action === "rescan") await api.rescanModels();
+      else if (action.startsWith("download:")) {
+        const name = action.slice("download:".length);
+        const item = (await api.recommendedDownloads()).find((d) => d.name === name);
+        if (!item) throw new Error(`${name} is not in the download list`);
+        const failed = await downloads.install([item]);
+        if (failed > 0) app.error(`${name} did not download; the Setup screen has Retry and Copy link`);
+      }
+      if (app.route === "diagnostics") await runChecks();
+    } catch (e) {
+      app.error(`${c.fix_label ?? "The fix"} did not work: ${errorText(e)}. Copy diagnostics and report it`);
+    } finally {
+      fixing = null;
+    }
+  }
 
   const STATES: Record<ServeStatus["state"], string> = {
     stopped: "stopped",
@@ -35,6 +78,7 @@
 
   onMount(() => {
     void refresh();
+    void runChecks();
     void refreshLive();
     const tl = setInterval(() => void refreshLive(), 2000);
     void api.lastEngineStderr().then((s) => (stderr = s)).catch(() => {});
@@ -74,7 +118,7 @@
       await navigator.clipboard.writeText(text);
       app.toast("info", "Diagnostics copied: versions, GPU, data folder, models and the last engine errors (no transcripts)");
     } catch (e) {
-      app.error(`Could not copy diagnostics: ${errorText(e)}`);
+      app.error(`Could not copy diagnostics (${errorText(e)}); select the log below and copy it with Ctrl+C`);
     }
   }
 
@@ -83,7 +127,7 @@
       await navigator.clipboard.writeText(`${path}\n${text}`);
       app.toast("info", `Copied ${text.split("\n").length} log lines`);
     } catch (e) {
-      app.error(`Copy failed: ${errorText(e)}`);
+      app.error(`Copy failed (${errorText(e)}); select the log text and press Ctrl+C`);
     }
   }
 </script>
@@ -96,10 +140,32 @@
 
   <section class="actions">
     <button type="button" class="btn btn-primary" onclick={copyDiagnostics}><Icon name="copy" /> Copy diagnostics</button>
-    <button type="button" class="btn" onclick={() => api.openLogFolder().catch((e) => app.error(errorText(e)))}>
+    <button type="button" class="btn" onclick={() => api.openLogFolder().catch((e) => app.error(`${errorText(e)}; the log file path is shown above the log`))}>
       <Icon name="folder" /> Open log folder
     </button>
     <span class="hint">For a bug report: versions, GPU and driver, data folder, selected models with hashes and the last engine errors. No transcripts.</span>
+  </section>
+
+  <section class="checklist">
+    <div class="bar">
+      <h2>Why isn't it working?</h2>
+      <button type="button" class="btn" onclick={runChecks} disabled={checking}><Icon name="refresh" />{checking ? "Checking…" : "Check again"}</button>
+    </div>
+    {#if checks}
+      <ul>
+        {#each checks as c (c.id)}
+          <li class="check st-{c.status}">
+            <span class="mark" aria-hidden="true">{c.status === "pass" ? "✓" : c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "–"}</span>
+            <span class="what"><strong>{c.label}</strong> <span class="sr-only">{c.status}</span><span class="detail">{c.detail}</span></span>
+            {#if c.fix && c.status !== "pass"}
+              <button type="button" class="btn small" onclick={() => fix(c)} disabled={fixing !== null}>{fixing === c.id ? "…" : c.fix_label}</button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="placeholder">{checking ? "Checking the engine, GPU, models, disk and audio devices…" : "Press Check again."}</p>
+    {/if}
   </section>
 
   {#if app.startup && (app.startup.recovered.length > 0 || app.startup.moved_from || app.startup.recovery_error)}
@@ -230,6 +296,7 @@
     flex-direction: column;
     gap: 12px;
     height: 100%;
+    overflow-y: auto;
     padding: 16px 24px 16px;
   }
   .page-head {
@@ -254,7 +321,7 @@
     display: flex;
     flex: 1;
     flex-direction: column;
-    min-height: 0;
+    min-height: 280px;
   }
   .bar {
     display: flex;
@@ -315,6 +382,44 @@
   .engine h2,
   .recovered h2 {
     margin-bottom: 6px;
+  }
+  .checklist ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .check {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .check .mark {
+    font-weight: 700;
+    text-align: center;
+  }
+  .st-pass .mark {
+    color: var(--ok-fg);
+  }
+  .st-fail .mark {
+    color: var(--danger);
+  }
+  .st-warn .mark {
+    color: var(--warning-fg);
+  }
+  .st-skip .mark {
+    color: var(--fg-faint);
+  }
+  .check .detail {
+    display: block;
+    color: var(--fg-muted);
+    overflow-wrap: anywhere;
+  }
+  .btn.small {
+    padding: 2px 10px;
   }
   .actions {
     display: flex;

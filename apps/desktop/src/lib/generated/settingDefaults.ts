@@ -21,6 +21,7 @@ export const SETTING_DEFAULTS = {
   "engine.preload": "false",
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",
+  "setup.later": "false",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

@@ -79,18 +79,28 @@ pub fn scan(paths: &DataPaths, store: &dyn Store, manifest: &Manifest) -> Result
 }
 
 /// Depth-limited recursive walk calling `f` for every file.
+/// Whether a directory entry is a folder, following a junction or symlink
+/// (a model folder linked in from elsewhere is scanned like a real one; the
+/// walk depth bounds link cycles).
+fn entry_is_dir(e: &std::fs::DirEntry) -> bool {
+    match e.file_type() {
+        Ok(t) if t.is_symlink() => std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()),
+        Ok(t) => t.is_dir(),
+        Err(_) => false,
+    }
+}
+
 fn walk(dir: &Path, depth: u32, f: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
-        let Ok(ft) = e.file_type() else { continue };
-        if ft.is_dir() {
+        if entry_is_dir(&e) {
             if depth > 0 {
                 walk(&p, depth - 1, f);
             }
-        } else if ft.is_file() {
+        } else if std::fs::metadata(&p).is_ok_and(|m| m.is_file()) {
             f(&p);
         }
     }
@@ -109,7 +119,7 @@ pub fn engine_dirs(engine_root: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             let mut dirs: Vec<PathBuf> = entries
                 .flatten()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(entry_is_dir)
                 .map(|e| e.path())
                 .collect();
             dirs.sort();
@@ -153,6 +163,49 @@ fn verified_sha(path: &Path, size: u64) -> Option<String> {
     (vsize == Some(size)).then_some(sha).flatten()
 }
 
+/// `<file>.sha256`: our cached SHA-256 of a file the runtime did not verify
+/// (a hand-placed download). Trusted while it is not older than the file.
+fn sidecar_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".sha256");
+    PathBuf::from(s)
+}
+
+/// The file's SHA-256 from the `.sha256` cache, else computed (seconds for
+/// a model) and cached. `None` when the file cannot be read.
+fn own_sha(path: &Path) -> Option<String> {
+    let side = sidecar_path(path);
+    let fresh = match (std::fs::metadata(path), std::fs::metadata(&side)) {
+        (Ok(f), Ok(s)) => match (f.modified(), s.modified()) {
+            (Ok(fm), Ok(sm)) => sm >= fm,
+            _ => false,
+        },
+        _ => false,
+    };
+    if fresh {
+        if let Some(h) = std::fs::read_to_string(&side)
+            .ok()
+            .and_then(|t| t.split_whitespace().next().map(str::to_ascii_lowercase))
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Some(h);
+        }
+    }
+    let h = super::download::sha256_file(path).ok()?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let _ = std::fs::write(
+        &side,
+        format!(
+            "{h}  {name}
+"
+        ),
+    );
+    Some(h)
+}
+
 fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -191,10 +244,34 @@ fn scan_model(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let verified = verified_sha(path, size);
-    let entry = manifest
-        .match_file(&file_name, size)
-        .filter(|m| verified.as_deref().is_none_or(|v| v == m.sha256));
-    let sha256 = verified.clone().or_else(|| entry.map(|m| m.sha256.clone()));
+    let candidate = manifest.match_file(&file_name, size);
+    // A recommended file the runtime did not fetch (put there by hand): its
+    // hash must match the manifest before it counts as that model.
+    let own = match (&verified, candidate) {
+        (None, Some(_)) => own_sha(path),
+        _ => None,
+    };
+    let entry = candidate.filter(|m| {
+        let got = verified.as_deref().or(own.as_deref());
+        got.is_some_and(|h| h.eq_ignore_ascii_case(&m.sha256))
+    });
+    if let (Some(m), None) = (candidate, entry) {
+        problem = Some(format!(
+            "{}: same name and size as {} but SHA-256 {} instead of {}; not used as {}",
+            path.display(),
+            m.name,
+            verified
+                .as_deref()
+                .or(own.as_deref())
+                .unwrap_or("unreadable"),
+            m.sha256,
+            m.name
+        ));
+    }
+    let sha256 = verified
+        .clone()
+        .or(own)
+        .or_else(|| entry.map(|m| m.sha256.clone()));
     if let Some(m) = entry {
         if c.capabilities.vram_mb_measured.is_none() {
             c.capabilities.vram_mb_measured = m.vram_mb;
@@ -358,9 +435,12 @@ pub fn ensure_selections(
             .and_then(|v| v.parse::<i64>().ok())
             .map(ModelFileId);
         let valid = current.is_some_and(|id| {
-            files
-                .iter()
-                .any(|f| f.id == id && f.role == role && !f.missing)
+            files.iter().any(|f| {
+                f.id == id
+                    && (f.role == role
+                        || (f.role == ModelRole::Unknown && role != ModelRole::Engine))
+                    && !f.missing
+            })
         });
         if valid {
             continue;
@@ -412,6 +492,111 @@ mod tests {
             ("asr.head_type", s("rnnt")),
             ("asr.encoder.cache_supported", GgufValue::Bool(true)),
         ]
+    }
+
+    #[test]
+    fn hand_placed_files_are_hash_checked_and_linked_folders_followed() {
+        use crate::models::ModelEntry;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path().join("root"));
+        let store = MemoryStore::new();
+        // A tiny "recommended" model: a valid GGUF header is enough.
+        let good = dir.path().join("dl").join("tiny-asr.q8_0.gguf");
+        write_gguf(&good, &asr_kv());
+        let bytes = std::fs::read(&good).unwrap();
+        let entry = ModelEntry {
+            name: "tiny".into(),
+            label: None,
+            pull_name: "tiny".into(),
+            role: ModelRole::Asr,
+            required: true,
+            direct: false,
+            experimental: false,
+            recommended_for: None,
+            repo: "nvidia/tiny".into(),
+            revision: "abc".into(),
+            file: "tiny-asr.q8_0.gguf".into(),
+            url: "https://example.invalid/tiny".into(),
+            size_bytes: bytes.len() as u64,
+            sha256: crate::models::download::sha256_file(&good).unwrap(),
+            licence: "x".into(),
+            streaming: true,
+            languages: vec![],
+            vram_mb: Some(100),
+            vram_note: None,
+        };
+        let manifest = Manifest {
+            models: vec![entry],
+            engines: vec![],
+        };
+        // Put by hand into the models folder: recognised after a hash check.
+        let placed = paths.models().join("tiny-asr.q8_0.gguf");
+        std::fs::create_dir_all(paths.models()).unwrap();
+        std::fs::copy(&good, &placed).unwrap();
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = r
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("tiny-asr.q8_0.gguf"))
+            .unwrap();
+        assert_eq!(f.manifest_name.as_deref(), Some("tiny"), "{r:?}");
+        assert_eq!(f.source, ModelSource::Manifest);
+        assert!(sidecar_path(&placed).is_file(), "the hash is cached");
+
+        // Same name and size, other bytes: not the recommended model.
+        let mut evil = bytes.clone();
+        let last = evil.len() - 1;
+        evil[last] ^= 0x55;
+        std::fs::write(&placed, &evil).unwrap();
+        // Newer than the cached hash, so it is hashed again.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&placed)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = r
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("tiny-asr.q8_0.gguf"))
+            .unwrap();
+        assert_eq!(f.manifest_name, None);
+        assert!(
+            r.errors.iter().any(|e| e.contains("instead of")),
+            "{:?}",
+            r.errors
+        );
+
+        // A folder linked into models\ is scanned like a real one.
+        std::fs::remove_file(&placed).unwrap();
+        let _ = std::fs::remove_file(sidecar_path(&placed));
+        let link = paths.models().join("linked");
+        let made = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .arg("/c")
+                .arg("mklink")
+                .arg("/J")
+                .arg(&link)
+                .arg(good.parent().unwrap())
+                .output()
+                .is_ok_and(|o| o.status.success())
+        } else {
+            false
+        };
+        if made {
+            let r = scan(&paths, &store, &manifest).unwrap();
+            assert!(
+                r.files.iter().any(|f| !f.missing
+                    && f.path.ends_with("linked/tiny-asr.q8_0.gguf")
+                    && f.manifest_name.as_deref() == Some("tiny")),
+                "{:?}",
+                r.files
+            );
+            std::fs::remove_dir(&link).unwrap(); // the link only
+            assert!(good.is_file());
+        }
     }
 
     #[test]

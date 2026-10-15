@@ -55,11 +55,7 @@ pub fn pull(engine_dir: &Path, models_dir: &Path, entry: &ModelEntry) -> Result<
 /// Where `nemo-speech pull` puts `entry`: `<models>\<repo>\<revision>\`
 /// (`nvidia\Nemotron-3-Diarization\f667...\`).
 pub fn pull_dir(models_dir: &Path, entry: &ModelEntry) -> PathBuf {
-    entry
-        .repo
-        .split('/')
-        .fold(models_dir.to_path_buf(), |p, part| p.join(part))
-        .join(&entry.revision)
+    entry.dest_dir(models_dir)
 }
 
 /// Bytes of the files under `dir` (partial downloads included).
@@ -77,9 +73,13 @@ fn dir_bytes(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// No new bytes for this long and the pull counts as stalled.
+const PULL_STALL: Duration = Duration::from_secs(120);
+
 /// [`pull`], reporting the bytes in the model's folder about four times a
 /// second while the runtime downloads (it prints no progress itself; its
-/// downloader resumes a partial file on the next pull).
+/// downloader, System32 `curl.exe`, resumes a partial file on the next
+/// pull). A pull that brings no bytes for two minutes is stopped as stalled.
 pub fn pull_with_progress(
     engine_dir: &Path,
     models_dir: &Path,
@@ -90,9 +90,27 @@ pub fn pull_with_progress(
     let watch = pull_dir(models_dir, entry);
     let mut cmd = process::command(engine_dir, Some(models_dir));
     cmd.args(["--json", "pull", &entry.pull_name]);
-    progress(dir_bytes(&watch).min(entry.size_bytes));
+    let mut last = dir_bytes(&watch);
+    let mut last_change = std::time::Instant::now();
+    progress(last.min(entry.size_bytes));
     let out = process::run_with_timeout_ticking(cmd, Duration::from_secs(3_600), &mut || {
-        progress(dir_bytes(&watch).min(entry.size_bytes))
+        let now = dir_bytes(&watch);
+        if now != last {
+            last = now;
+            last_change = std::time::Instant::now();
+        } else if last_change.elapsed() >= PULL_STALL {
+            return Some(format!(
+                "nemo-speech pull {}: no data for {} s (stalled at {now} bytes); retrying resumes",
+                entry.pull_name,
+                PULL_STALL.as_secs()
+            ));
+        }
+        progress(now.min(entry.size_bytes));
+        None
+    })
+    .map_err(|e| match e {
+        CoreError::Engine(m) => CoreError::Models(m),
+        other => other,
     })?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {

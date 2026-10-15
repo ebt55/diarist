@@ -17,6 +17,8 @@ export interface ItemProgress {
   startedAt: number | null;
   /** Bytes already on disk when it started (a resumed download). */
   startBytes: number;
+  /** Date.now() of the last byte count change (stall display). */
+  changedAt: number;
 }
 
 /**
@@ -41,6 +43,7 @@ class Downloads {
       error: null,
       startedAt: null,
       startBytes: 0,
+      changedAt: Date.now(),
     };
     this.progress = { ...this.progress, [name]: { ...cur, ...patch } };
   }
@@ -54,6 +57,7 @@ class Downloads {
       // The first event carries what a resumed download already had.
       const first = cur.startedAt === null;
       this.#set(p.name, {
+        ...(p.done_bytes !== cur.done ? { changedAt: Date.now() } : {}),
         done: p.done_bytes,
         total: p.total_bytes,
         ...(first ? { startedAt: Date.now(), startBytes: p.done_bytes } : {}),
@@ -63,6 +67,12 @@ class Downloads {
 
   of(name: string): ItemProgress | null {
     return this.progress[name] ?? null;
+  }
+
+  /** Seconds a running item has gone without new bytes. */
+  idleSecs(name: string): number {
+    const p = this.progress[name];
+    return p && p.state === "running" ? Math.floor((Date.now() - p.changedAt) / 1000) : 0;
   }
 
   /** Bytes per second of a running item, once it has been running a while. */
@@ -91,7 +101,7 @@ class Downloads {
     try {
       for (let i = 0; i < todo.length; i++) {
         const d = todo[i]!;
-        this.#set(d.name, { state: "running", startedAt: null, startBytes: 0 });
+        this.#set(d.name, { state: "running", startedAt: null, startBytes: 0, changedAt: Date.now() });
         try {
           if (d.kind === "engine") await api.installEngine(d.name);
           else await api.pullModel(d.name);
@@ -114,6 +124,51 @@ class Downloads {
     }
     return failed;
   }
+
+  /**
+   * Runs one download that is not a manifest item (Add from URL, a runtime
+   * from the GitHub releases) under `name`, with the same row state.
+   * Resolves to the error text, or null on success.
+   */
+  async run(name: string, total: number | null, job: () => Promise<unknown>): Promise<string | null> {
+    this.#listen();
+    if (this.busy) return "Another download is running; wait for it to finish.";
+    this.busy = true;
+    this.#set(name, { state: "running", error: null, done: 0, total, startedAt: null, startBytes: 0, changedAt: Date.now() });
+    try {
+      await job();
+      const p = this.progress[name];
+      this.#set(name, { state: "done", done: p?.total ?? p?.done ?? 0 });
+      return null;
+    } catch (e) {
+      const msg = errorText(e);
+      this.#set(name, { state: "failed", error: msg });
+      void api.log("error", `download ${name} failed: ${msg}`);
+      return msg;
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
+/**
+ * What to try after a failed download, for the row (and the firewall case:
+ * per-app firewalls such as simplewall ask about meet-assist.exe for the
+ * engine and about curl.exe, the runtime's downloader, for models).
+ */
+export function failureHint(kind: "engine" | "model", error: string | null): string {
+  const e = (error ?? "").toLowerCase();
+  const net = /10013|10060|10061|dns|resolve|connect|timed out|timeout|revocation|certificate|stalled|network|unreachable/.test(e);
+  const who = kind === "engine" ? "meet-assist.exe" : "curl.exe (the engine's downloader)";
+  return net
+    ? `This looks like the network. If a firewall such as simplewall asked about ${who}, allow it and press Retry; a partial download resumes. Or use Copy link, download the file with a browser and put it into the folder Open folder shows, then Refresh.`
+    : "Press Retry (a partial download resumes), or use Copy link to download the file with a browser, put it into the folder Open folder shows, and press Refresh: the hash is checked there.";
+}
+
+/** Puts the addresses of `items` on the clipboard, one per line. */
+export async function copyLinks(items: DownloadItem[]): Promise<number> {
+  await navigator.clipboard.writeText(items.map((i) => `${i.url}\n`).join(""));
+  return items.length;
 }
 
 export const downloads = new Downloads();

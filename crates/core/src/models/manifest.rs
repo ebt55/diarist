@@ -12,6 +12,9 @@ use crate::types::ModelRole;
 const MODELS_JSON: &str = include_str!("../../../../manifests/models.json");
 const ENGINE_JSON: &str = include_str!("../../../../manifests/engine.json");
 
+/// User-level model list in the data root, merged over the shipped one.
+pub const USER_MODELS: &str = "models.user.json";
+
 /// Runtime versions whose CLI contract matches our fixtures (research/08).
 pub const TESTED_ENGINE_VERSIONS: &[&str] = &["0.2.0"];
 
@@ -23,11 +26,17 @@ pub struct ModelEntry {
     /// What the first-run screen and Settings show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Index name for `nemo-speech pull`.
+    /// Index name for `nemo-speech pull` ("" for [`ModelEntry::direct`] entries).
+    #[serde(default)]
     pub pull_name: String,
     pub role: ModelRole,
     /// Downloaded on first run.
+    #[serde(default)]
     pub required: bool,
+    /// Fetched from `url` by our own downloader into `modelsSer` instead of
+    /// with `nemo-speech pull` (entries of `models.user.json`).
+    #[serde(default)]
+    pub direct: bool,
     /// Offered only behind the experimental setting.
     #[serde(default)]
     pub experimental: bool,
@@ -35,12 +44,15 @@ pub struct ModelEntry {
     /// (Nemotron 3.5: other or mixed languages; the EN model is the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_for: Option<String>,
+    #[serde(default)]
     pub repo: String,
+    #[serde(default)]
     pub revision: String,
     pub file: String,
     pub url: String,
     pub size_bytes: u64,
     pub sha256: String,
+    #[serde(default)]
     pub licence: String,
     #[serde(default)]
     pub streaming: bool,
@@ -51,6 +63,21 @@ pub struct ModelEntry {
     pub vram_mb: Option<u32>,
     #[serde(default)]
     pub vram_note: Option<String>,
+}
+
+impl ModelEntry {
+    /// The folder the model lands in: `modelsSer` for direct downloads,
+    /// else where `nemo-speech pull` puts it (`<repo><revision>`).
+    pub fn dest_dir(&self, models_dir: &Path) -> std::path::PathBuf {
+        if self.direct {
+            models_dir.join("user")
+        } else {
+            self.repo
+                .split('/')
+                .fold(models_dir.to_path_buf(), |p, part| p.join(part))
+                .join(&self.revision)
+        }
+    }
 }
 
 /// One runtime zip.
@@ -84,19 +111,59 @@ impl Manifest {
         }
     }
 
-    /// `<root>/manifests/{models,engine}.json` when present, else the built-in lists.
+    /// The built-in lists, replaced by `<root>/manifests/{models,engine}.json`
+    /// when present, then `<root>/models.user.json` merged over the models:
+    /// an entry with a known name replaces it, a new one is added. User
+    /// entries are fetched from their `url` directly unless they set
+    /// `"direct": false` and a `pull_name`.
     pub fn load(data_root: &Path) -> Result<Self> {
         let mut m = Self::builtin();
         let dir = data_root.join("manifests");
         if let Ok(text) = std::fs::read_to_string(dir.join("models.json")) {
-            m.models = serde_json::from_str(&text)
+            m.models = serde_json::from_str(strip_bom(&text))
                 .map_err(|e| CoreError::Models(format!("manifests/models.json: {e}")))?;
         }
         if let Ok(text) = std::fs::read_to_string(dir.join("engine.json")) {
-            m.engines = serde_json::from_str(&text)
+            m.engines = serde_json::from_str(strip_bom(&text))
                 .map_err(|e| CoreError::Models(format!("manifests/engine.json: {e}")))?;
         }
+        if let Ok(text) = std::fs::read_to_string(data_root.join(USER_MODELS)) {
+            let raw: Vec<serde_json::Value> =
+                serde_json::from_str(strip_bom(&text)).map_err(|e| {
+                    CoreError::Models(format!("{USER_MODELS}: {e} (fix or remove the file)"))
+                })?;
+            for mut v in raw {
+                if let Some(o) = v.as_object_mut() {
+                    o.entry("direct").or_insert(serde_json::Value::Bool(true));
+                }
+                let e: ModelEntry = serde_json::from_value(v).map_err(|e| {
+                    CoreError::Models(format!(
+                        "{USER_MODELS}: {e} (each entry needs name, role, file, url, size_bytes, sha256)"
+                    ))
+                })?;
+                match m
+                    .models
+                    .iter_mut()
+                    .find(|x| x.name.eq_ignore_ascii_case(&e.name))
+                {
+                    Some(x) => *x = e,
+                    None => m.models.push(e),
+                }
+            }
+        }
         Ok(m)
+    }
+
+    /// The newest package for `backend` (`cuda`, `vulkan`, `cpu`), tested first.
+    pub fn engine_for_backend(&self, backend: &str) -> Option<&EngineEntry> {
+        let of = || {
+            self.engines
+                .iter()
+                .filter(|e| e.backend.eq_ignore_ascii_case(backend))
+        };
+        of().filter(|e| e.tested)
+            .max_by(|a, b| version_cmp(&a.version, &b.version))
+            .or_else(|| of().max_by(|a, b| version_cmp(&a.version, &b.version)))
     }
 
     /// A model by our name or its pull name (case-insensitive).
@@ -130,6 +197,12 @@ impl Manifest {
                     .max_by(|a, b| version_cmp(&a.version, &b.version))
             })
     }
+}
+
+/// Text without a leading UTF-8 byte-order mark (Windows editors and
+/// PowerShell 5 write one).
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 /// Compares dotted versions numerically (`0.10.0` > `0.9.1`).
@@ -184,11 +257,53 @@ mod tests {
     }
 
     #[test]
+    fn user_models_merge_over_the_shipped_list_and_backends_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(USER_MODELS),
+            r#"[
+              {"name": "my-asr", "role": "asr", "file": "my-asr.gguf",
+               "url": "https://example.com/my-asr.gguf", "size_bytes": 1234,
+               "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+              {"name": "nemotron-en", "role": "asr", "file": "nemotron-speech-streaming-en-0.6b.q8_0.gguf",
+               "url": "https://mirror.example/en.gguf", "size_bytes": 699872960, "required": true,
+               "sha256": "d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d"}
+            ]"#,
+        )
+        .unwrap();
+        let m = Manifest::load(dir.path()).unwrap();
+        let mine = m.model("my-asr").unwrap();
+        assert!(mine.direct && !mine.required);
+        assert_eq!(mine.dest_dir(Path::new("M")), Path::new("M").join("user"));
+        let en = m.model("nemotron-en").unwrap();
+        assert_eq!(en.url, "https://mirror.example/en.gguf", "replaced by name");
+        assert_eq!(m.models.len(), Manifest::builtin().models.len() + 1);
+        let shipped = Manifest::builtin();
+        let diar = shipped.model("nemotron-3-diarization").unwrap();
+        assert!(!diar.direct);
+        assert!(diar.dest_dir(Path::new("M")).ends_with(&diar.revision));
+
+        assert_eq!(m.engine_for_backend("cuda").unwrap().backend, "cuda");
+        assert_eq!(
+            m.engine_for_backend("VULKAN").unwrap().size_bytes,
+            19_302_464
+        );
+        assert_eq!(m.engine_for_backend("cpu").unwrap().version, "0.2.0");
+        assert!(m.engine_for_backend("metal").is_none());
+        assert_eq!(m.default_engine().unwrap().backend, "cuda");
+
+        std::fs::write(dir.path().join(USER_MODELS), r#"[{"name": "broken"}]"#).unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("each entry needs"), "{err}");
+    }
+
+    #[test]
     fn data_root_copy_overrides() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Manifest::load(dir.path()).unwrap(), Manifest::builtin());
         std::fs::create_dir_all(dir.path().join("manifests")).unwrap();
-        std::fs::write(dir.path().join("manifests/engine.json"), "[]").unwrap();
+        // With the BOM PowerShell 5 writes.
+        std::fs::write(dir.path().join("manifests/engine.json"), "\u{feff}[]").unwrap();
         assert!(Manifest::load(dir.path()).unwrap().engines.is_empty());
         std::fs::write(dir.path().join("manifests/models.json"), "{").unwrap();
         assert!(Manifest::load(dir.path()).is_err());

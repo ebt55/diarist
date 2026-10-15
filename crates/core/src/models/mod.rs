@@ -13,6 +13,8 @@
 //! - [`download`]: engine zip download (resume, SHA-256, atomic rename) and
 //!   extraction; [`pull`]: `nemo-speech pull` for models, verified against
 //!   the manifest; [`doctor`]: runtime version and GPU.
+//! - [`add`]: "Add from URL" and "Add from file" for models no manifest lists.
+//! - [`releases`]: newer runtimes from the NeMo-Speech.cpp GitHub releases.
 //! - [`setup`]: the first-run check (engine, models, GPU, disk) and the
 //!   download list with URLs and hashes.
 //! - [`status`] assembles the Settings screen's [`EngineStatus`];
@@ -20,6 +22,7 @@
 //!   [`select_engine`] builds the file engine from them (scanning first when
 //!   nothing usable is selected); [`select_by_id`] validates a pick.
 
+pub mod add;
 pub mod classify;
 pub mod doctor;
 pub mod download;
@@ -27,6 +30,7 @@ pub mod gguf;
 pub mod manifest;
 pub mod paths;
 pub mod pull;
+pub mod releases;
 pub mod relocate;
 pub mod scan;
 pub mod setup;
@@ -43,7 +47,7 @@ pub use manifest::{EngineEntry, Manifest, ModelEntry, TESTED_ENGINE_VERSIONS};
 pub use paths::{free_disk_bytes, DataPaths, DataRootSource};
 pub use pull::{pull, pull_dir, pull_with_progress, Pulled};
 pub use scan::{ensure_selections, recommended, scan, ScanReport};
-pub use setup::{download_items, setup_status, SetupStatus};
+pub use setup::{download_items, readiness, setup_status, MissingPart, Readiness, SetupStatus};
 
 use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
@@ -80,10 +84,11 @@ pub fn selected_file(store: &dyn Store, role: ModelRole) -> Result<Option<ModelF
     else {
         return Ok(None);
     };
+    // An unrecognised file the user chose for this role counts too.
     Ok(store
         .list_model_files()?
         .into_iter()
-        .find(|f| f.id == id && f.role == role && !f.missing))
+        .find(|f| f.id == id && (f.role == role || f.role == ModelRole::Unknown) && !f.missing))
 }
 
 /// Resolves the selected engine, ASR model and diarizer to paths. Errors
@@ -92,16 +97,16 @@ pub fn resolve_selection(paths: &DataPaths, store: &dyn Store) -> Result<Resolve
     let need = |role: ModelRole| -> Result<ModelFile> {
         selected_file(store, role)?.ok_or_else(|| {
             CoreError::Models(format!(
-                "no {role} selected: put one under {} and run `meet-cli models scan`{}",
+                "no {role} selected: install it from the setup screen, or put one under {} and press Refresh in Settings (CLI: `meet-cli {}`)",
                 if role == ModelRole::Engine {
                     paths.engine().display().to_string()
                 } else {
                     paths.models().display().to_string()
                 },
                 if role == ModelRole::Engine {
-                    String::new()
+                    "engine install"
                 } else {
-                    " (or `meet-cli models pull`)".to_owned()
+                    "models pull"
                 }
             ))
         })
@@ -171,7 +176,10 @@ pub fn select_engine_with(
         (sel.diarizer, sel.diarizer_file) = resolve_model(paths, store, ModelRole::Diarizer, q)?;
     }
     let models_dir = paths.models();
-    let experimental = !sel.asr_file.capabilities.streaming;
+    // A file the header did not identify is tried as a streaming model; the
+    // runtime's own error is shown if it is not one.
+    let experimental =
+        sel.asr_file.role != ModelRole::Unknown && !sel.asr_file.capabilities.streaming;
     let engine: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
@@ -308,20 +316,26 @@ pub fn is_multilingual(file: &ModelFile) -> bool {
 }
 
 /// Selects file `id` for `role` after checking it can be: a known role,
-/// a file of that role, present on disk. Returns the file.
+/// a file of that role (or an unrecognised one the user forces, which the
+/// runtime may refuse), present on disk. Returns the file.
 pub fn select_by_id(store: &dyn Store, role: ModelRole, id: ModelFileId) -> Result<ModelFile> {
     if role == ModelRole::Unknown {
-        return Err(StoreError::Invalid("unrecognised files cannot be selected".into()).into());
+        return Err(StoreError::Invalid(
+            "choose the role to use the file for (speech to text or speaker diarization)".into(),
+        )
+        .into());
     }
     let file = store
         .list_model_files()?
         .into_iter()
         .find(|f| f.id == id)
         .ok_or_else(|| StoreError::not_found("model file", id))?;
-    if file.role != role {
-        return Err(
-            StoreError::Invalid(format!("{} is not a {role} file", file.display_name)).into(),
-        );
+    if file.role != role && !(file.role == ModelRole::Unknown && role != ModelRole::Engine) {
+        return Err(StoreError::Invalid(format!(
+            "{} is a {} file, not {role}; pick it under its own role",
+            file.display_name, file.role
+        ))
+        .into());
     }
     if file.missing {
         return Err(

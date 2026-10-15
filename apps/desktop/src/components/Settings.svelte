@@ -3,7 +3,9 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { api, errorText, onEvent } from "../lib/api";
-  import { downloads, sizeMb } from "../lib/downloads.svelte";
+  import { copyLinks, downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
+  import DownloadRow from "./DownloadRow.svelte";
+  import RuntimeReleases from "./RuntimeReleases.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
   import type { DataRootInfo } from "../lib/generated/DataRootInfo";
@@ -74,6 +76,105 @@
   const required = $derived(items?.filter((d) => d.required) ?? []);
   const optional = $derived(items?.filter((d) => !d.required) ?? []);
   const missingRequired = $derived(required.filter((d) => !d.installed));
+  const engineItems = $derived(items?.filter((d) => d.kind === "engine") ?? []);
+  const missingAll = $derived(
+    (items ?? []).filter((d) => !d.installed && (d.kind === "model" || d.required)),
+  );
+
+  // Add from URL / file.
+  let addUrlText = $state("");
+  let addShaText = $state("");
+  let addLink = $state(false);
+  let urlRows = $state.raw<DownloadItem[]>([]);
+
+  async function addUrl(url: string, sha: string) {
+    const u = url.trim();
+    if (!u) return;
+    let name: string;
+    try {
+      name = decodeURIComponent(new URL(u).pathname.split("/").pop() || "");
+    } catch {
+      app.error("That is not a web address; paste the direct link to the .gguf file");
+      return;
+    }
+    if (!name) {
+      app.error("The link does not end in a file name; use the direct download link of the .gguf file");
+      return;
+    }
+    const row: DownloadItem = {
+      kind: "model",
+      name,
+      label: name,
+      size_bytes: 0,
+      installed: false,
+      required: false,
+      experimental: false,
+      url: u,
+      sha256: sha.trim(),
+      dest: `${status?.data_root ?? ""}\\models\\user`,
+      licence: "",
+      backend: null,
+      tested: true,
+    };
+    urlRows = [...urlRows.filter((r) => r.name !== name), row];
+    const err = await downloads.run(name, null, () => api.addModelUrl(u, sha.trim() || null));
+    if (err) {
+      app.error(`${name} was not added: ${err}. ${failureHint("engine", err)}`);
+    } else {
+      app.toast("success", `${name} added; select it below if it is not selected`);
+      addUrlText = "";
+      addShaText = "";
+      await loadStatus();
+    }
+  }
+
+  async function addFile() {
+    let picked: string | null;
+    try {
+      picked = (await openDialog({
+        title: "Add a model file",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "Models", extensions: ["gguf", "onnx"] },
+          { name: "All files", extensions: ["*"] },
+        ],
+      })) as string | null;
+    } catch (e) {
+      app.error(`Could not open the file dialog (${errorText(e)}); copy the file into the models folder instead`);
+      return;
+    }
+    if (!picked) return;
+    try {
+      const dest = await api.addModelFile(picked, addLink);
+      app.toast("success", `Added ${dest.split(/[\\/]/).pop()}; select it below if it is not selected`);
+      await loadStatus();
+    } catch (e) {
+      app.error(errorText(e));
+    }
+  }
+
+  async function copyAll() {
+    try {
+      const n = await copyLinks(missingAll);
+      app.toast("info", `${plural(n, "link")} copied. Put each file into the folder its row shows, then press Refresh.`);
+    } catch (e) {
+      app.error(`Could not copy the links (${errorText(e)}); copy them from each row`);
+    }
+  }
+
+  /** Uses an unrecognised file for a role anyway (the engine decides). */
+  async function forceRole(role: ModelRole, id: number, name: string) {
+    const ok = await app.confirm({
+      title: `Use ${name} for ${role === "asr" ? "speech to text" : "speaker diarization"}?`,
+      message:
+        "meet-assist does not recognise this file's architecture. It will try it; if the engine cannot run it, its own " +
+        "error message is shown and you can switch back here.",
+      confirmLabel: "Use it",
+      danger: false,
+    });
+    if (ok) await select(role, id, name);
+  }
 
   const mics = $derived(devices.filter((d) => d.flow === "capture"));
   const outputs = $derived(devices.filter((d) => d.flow === "render"));
@@ -112,7 +213,7 @@
     try {
       items = await api.recommendedDownloads();
     } catch (e) {
-      app.error(`Could not read the download list: ${errorText(e)}`);
+      app.error(`Could not read the download list (${errorText(e)}); press Refresh, and check models.user.json in the data folder if you made one`);
     }
   }
 
@@ -133,7 +234,7 @@
         | string
         | null;
     } catch (e) {
-      app.error(`Could not open the folder dialog: ${errorText(e)}`);
+      app.error(`Could not open the folder dialog (${errorText(e)}); restart meet-assist and try again`);
       return;
     }
     if (!picked) return;
@@ -153,7 +254,7 @@
       setTimeout(() => void api.restartApp(), 900);
     } catch (e) {
       moving = null;
-      app.error(`The data folder was not moved: ${errorText(e)}`);
+      app.error(`The data folder was not moved (${errorText(e)}). Nothing changed; choose an empty folder with enough free space and try again`);
     }
   }
 
@@ -174,7 +275,7 @@
       app.toast("info", `Freed ${formatBytes(r.bytes)} (${plural(r.files, "file")})`);
       await loadReclaim();
     } catch (e) {
-      app.error(`Could not delete old audio: ${errorText(e)}`);
+      app.error(`Could not delete old audio (${errorText(e)}); close programs using those files and press Free up now again`);
     } finally {
       freeing = false;
     }
@@ -186,7 +287,7 @@
       autostart = await api.setAutostart(el.checked);
     } catch (err) {
       el.checked = !el.checked;
-      app.error(`Could not change start with Windows: ${errorText(err)}`);
+      app.error(`Could not change start with Windows (${errorText(err)}); Windows Settings, Apps, Startup has the same switch`);
     }
   }
 
@@ -206,7 +307,7 @@
       if (!update.configured) app.toast("info", "This build has no update address; see the project page for new versions.");
       else if (!update.available) app.toast("info", `meet-assist ${update.current} is the newest version`);
     } catch (e) {
-      app.error(errorText(e));
+      app.error(`${errorText(e)}. Check the connection, or get the newest installer from the project page`);
     } finally {
       checkingUpdate = false;
     }
@@ -218,7 +319,7 @@
       await api.installUpdate();
     } catch (e) {
       installingUpdate = false;
-      app.error(errorText(e));
+      app.error(`${errorText(e)}. Download the installer from the project page and run it; your data is kept`);
     }
   }
 
@@ -238,7 +339,7 @@
       await loadStatus();
       app.toast("info", `Models folder scanned: ${plural(files.length, "file")}`);
     } catch (e) {
-      app.error(`Rescan failed: ${errorText(e)}`);
+      app.error(`Rescan failed (${errorText(e)}); check the folder with Open models folder and press Refresh again`);
     } finally {
       rescanning = false;
     }
@@ -262,7 +363,7 @@
       await loadStatus();
       app.toast("info", `${name} selected`);
     } catch (e) {
-      app.error(`Could not select ${name}: ${errorText(e)}`);
+      app.error(`Could not select ${name} (${errorText(e)}); press Refresh and pick it again`);
     }
   }
 
@@ -297,7 +398,7 @@
       await api.setAudioKeep(id, false);
       app.patchMeeting(id, { audio_keep: false });
     } catch (e) {
-      app.error(`Could not unpin: ${errorText(e)}`);
+      app.error(`Could not unpin (${errorText(e)}); try again with P in the meeting`);
     }
   }
 
@@ -335,11 +436,6 @@
     await download([d], d.label.split(":")[0] ?? d.name);
   }
 
-  function dlPct(d: DownloadItem): number {
-    const p = downloads.of(d.name);
-    const total = p?.total ?? d.size_bytes;
-    return p && total ? Math.min(100, Math.floor((p.done / total) * 100)) : 0;
-  }
 </script>
 
 <div class="page">
@@ -354,7 +450,7 @@
       <span class="label">Data directory</span>
       <div class="row">
         <code class="path" title={root?.root ?? status?.data_root}>{root?.root ?? status?.data_root ?? "…"}</code>
-        <button type="button" class="btn" onclick={() => api.openDataFolder().catch((e) => app.error(errorText(e)))}>
+        <button type="button" class="btn" onclick={() => api.openDataFolder().catch((e) => app.error(`${errorText(e)}; the folder is ${root?.root ?? status?.data_root}`))}>
           <Icon name="folder" /> Open folder
         </button>
         <button
@@ -540,7 +636,7 @@
       <p class="help">
         Preselected in the start sheet and used by Ctrl+Alt+R. System audio is recorded after the output's volume, so
         keep it at a normal level.
-        {#if devicesError}<span class="error">Could not list devices: {devicesError}</span>{/if}
+        {#if devicesError}<span class="error">Could not list devices: {devicesError}. Check the Windows sound settings, then Refresh devices.</span>{/if}
         <button type="button" class="link" onclick={loadDevices}>Refresh devices</button>
       </p>
     </div>
@@ -605,7 +701,7 @@
         <button type="button" class="btn" onclick={rescan} disabled={rescanning} title="Rescan the models folder (Ctrl+R)">
           <Icon name="refresh" />{rescanning ? "Scanning…" : "Refresh"}
         </button>
-        <button type="button" class="btn" onclick={() => api.openModelsFolder().catch((e) => app.error(errorText(e)))}>
+        <button type="button" class="btn" onclick={() => api.openModelsFolder().catch((e) => app.error(`${errorText(e)}; the models folder is under ${status?.data_root}`))}>
           <Icon name="folder" /> Open models folder
         </button>
         <button
@@ -620,51 +716,57 @@
       </div>
     </div>
     {#if items}
-      <ul class="downloads" aria-label="Downloads">
-        {#each [...required, ...optional] as d (d.name)}
-          {@const p = downloads.of(d.name)}
-          <li class:failed={p?.state === "failed"}>
-            <span class="dl-name">
-              {d.label}
-              <span class="help inline">
-                {d.required ? "recommended" : d.experimental ? "experimental, optional" : "optional"} · {d.licence}
-              </span>
-            </span>
-            <span class="mono dl-size">{sizeMb(d.size_bytes)}</span>
-            <span class="dl-state">
-              {#if p?.state === "running"}
-                <span class="dl-bar"><span class="dl-fill" style="width: {dlPct(d)}%"></span></span>
-                <span class="mono">{dlPct(d)}%{dlPct(d) === 100 ? " verifying" : ""}</span>
-              {:else if p?.state === "waiting"}
-                Waiting
-              {:else if p?.state === "failed"}
-                <span class="error" title={p.error ?? ""}>Failed: {p.error}</span>
-              {:else if p?.state === "done" || d.installed}
-                <span class="ok-text">Installed</span>
-              {:else if d.required}
-                Not installed
-              {:else}
-                <button type="button" class="link" onclick={() => downloadOptional(d)} disabled={downloads.busy}>
-                  Download
-                </button>
-              {/if}
-            </span>
-            {#if p?.state === "failed"}
-              <span class="dl-fetch help">
-                Fetch by hand: <code class="sel">{d.url}</code> (SHA-256 <code class="sel">{d.sha256}</code>) into
-                <code class="sel">{d.dest}</code>, then Refresh.
-              </span>
-            {/if}
-          </li>
+      <ul class="dl-list" aria-label="Downloads">
+        {#each [...required.filter((d) => d.kind === "model"), ...optional.filter((d) => d.kind === "model")] as d (d.name)}
+          <DownloadRow item={d} onretry={() => (d.required ? download([d], d.label) : downloadOptional(d))}>
+            {#snippet action()}
+              <button type="button" class="link" onclick={() => downloadOptional(d)} disabled={downloads.busy}>Download</button>
+            {/snippet}
+          </DownloadRow>
+        {/each}
+        {#each urlRows as d (d.name)}
+          <DownloadRow item={d} onretry={() => addUrl(d.url, d.sha256)} onopen={() => api.openModelsFolder().catch(() => {})} tidy={false} />
         {/each}
       </ul>
+      <div class="row link-row">
+        {#if missingAll.length > 0}
+          <button type="button" class="link" onclick={copyAll}>Copy all links ({missingAll.length})</button>
+        {/if}
+        <button type="button" class="link" onclick={() => (app.route = "setup")}>Open the first-run screen</button>
+      </div>
       <p class="help">
         English meetings: the EN model (default). Other or mixed languages: Nemotron 3.5 (40+ languages, less VRAM),
-        then select it below. The first-run screen is <button type="button" class="link" onclick={() => (app.route = "setup")}>here</button>.
+        then select it below. Power users can list more downloads in <code>models.user.json</code> in the data folder.
       </p>
+      <details class="add">
+        <summary>Add a model the app does not list</summary>
+        <form
+          class="add-form"
+          onsubmit={(e) => {
+            e.preventDefault();
+            void addUrl(addUrlText, addShaText);
+          }}
+        >
+          <label class="label" for="add-url">Direct link to a .gguf file</label>
+          <input id="add-url" type="url" placeholder="https://huggingface.co/…/resolve/…/model.gguf" bind:value={addUrlText} />
+          <label class="label" for="add-sha">SHA-256 (optional; checked when given, recorded either way)</label>
+          <input id="add-sha" type="text" spellcheck="false" placeholder="64 hexadecimal characters" bind:value={addShaText} />
+          <div class="row">
+            <button type="submit" class="btn" disabled={!addUrlText.trim() || downloads.busy}>
+              <Icon name="download" /> Add from URL
+            </button>
+            <button type="button" class="btn" onclick={addFile}><Icon name="folder" /> Add from file…</button>
+            <label class="radio"><input type="checkbox" bind:checked={addLink} /> Link instead of copy (same drive)</label>
+          </div>
+        </form>
+        <p class="help">
+          Files go to <code>models\user\</code>. The app reads the header to find the role; a file it does not recognise
+          is listed under Unrecognised and can still be used, and the engine says so if it cannot run it.
+        </p>
+      </details>
     {/if}
     {#if statusError}
-      <p class="help error">Could not read the engine status: {statusError}</p>
+      <p class="help error">Could not read the engine status: {statusError}. Press Refresh; Diagnostics shows what is wrong.</p>
     {:else if status}
       <p class="gpu">
         {#if status.gpu}
@@ -721,19 +823,19 @@
 
       {#if unknown.length > 0}
         <fieldset class="group unknown">
-          <legend><span class="group-title">Unrecognised</span> <span class="help inline">Not a speech architecture the runtime knows; add a .meet.json sidecar to force a role.</span></legend>
+          <legend><span class="group-title">Unrecognised</span> <span class="help inline">The header names no architecture the app knows. You can still use one; the engine says so if it cannot run it. A .meet.json sidecar sets the role for good.</span></legend>
           {#each unknown as f (f.id)}
+            {@const inUse = status.selected.asr === f.id ? "asr" : status.selected.diarizer === f.id ? "diarizer" : null}
             <div class="model">
-              <input type="radio" disabled aria-label="{f.display_name} cannot be selected" />
+              <span class="warn-mark" aria-hidden="true">!</span>
               <span class="model-main">
-                <span class="model-name">{f.display_name}</span>
+                <span class="model-name">{f.display_name}{inUse ? ` (in use for ${inUse === "asr" ? "speech to text" : "speakers"})` : ""}</span>
                 <span class="model-path mono">architecture "{f.architecture ?? "unknown"}" · {f.path}</span>
               </span>
               <span class="facts">
-                <span class="cell q mono">{f.quant ?? "–"}</span>
                 <span class="cell s mono">{formatBytes(f.size_bytes)}</span>
-                <span class="cell v">–</span>
-                <span class="fit unknown" aria-hidden="true">–</span>
+                <button type="button" class="link" onclick={() => forceRole("asr", f.id, f.display_name)} disabled={inUse === "asr"}>Use for speech to text</button>
+                <button type="button" class="link" onclick={() => forceRole("diarizer", f.id, f.display_name)} disabled={inUse === "diarizer"}>Use for speakers</button>
                 <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
               </span>
             </div>
@@ -766,8 +868,23 @@
             </span>
           </label>
         {:else}
-          <p class="help">No engine found. The first-run download installs one.</p>
+          <p class="help">No engine yet. Install one of the packages below, or put an extracted runtime (or its zip) into the engine folder and press Refresh.</p>
         {/each}
+        <ul class="dl-list" aria-label="Runtime packages">
+          {#each engineItems as d (d.name)}
+            <DownloadRow item={d} onretry={() => download([d], d.label)}>
+              {#snippet action()}
+                <button type="button" class="link" onclick={() => download([d], d.label)} disabled={downloads.busy}>
+                  Install{d.required ? " (recommended for this PC)" : ""}
+                </button>
+              {/snippet}
+            </DownloadRow>
+          {/each}
+        </ul>
+        <div class="row link-row">
+          <button type="button" class="link" onclick={() => api.openEngineFolder().catch((e) => app.error(`${errorText(e)}; the engine folder is under ${status?.data_root}`))}>Open engine folder</button>
+        </div>
+        <RuntimeReleases backend={engineItems.find((d) => d.required)?.backend ?? "cuda"} oninstalled={() => void Promise.all([loadStatus(), loadItems()])} />
       </fieldset>
     {:else}
       <p class="help">Reading models…</p>
@@ -1056,12 +1173,39 @@
     border-radius: var(--radius);
     list-style: none;
   }
-  .downloads li.failed {
-    background: var(--danger-bg);
+  .dl-list {
+    margin: 6px 0 4px;
+    padding: 0;
+    list-style: none;
   }
-  .dl-fetch {
-    grid-column: 1 / -1;
-    overflow-wrap: anywhere;
+  .link-row {
+    gap: 14px;
+    margin: 4px 0;
+  }
+  .add {
+    margin-top: 10px;
+  }
+  .add summary {
+    cursor: default;
+    font-weight: 600;
+  }
+  .add-form {
+    display: grid;
+    gap: 4px;
+    max-width: 640px;
+    margin-top: 6px;
+  }
+  .warn-mark {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--warning-bg);
+    color: var(--warning-fg);
+    font-weight: 700;
+    font-size: 12px;
   }
   .sel {
     user-select: all;
@@ -1077,31 +1221,6 @@
     overflow: auto;
     white-space: pre-wrap;
     font-size: 12px;
-  }
-  .downloads li {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 80px minmax(0, 1.2fr);
-    gap: 10px;
-    align-items: center;
-    padding: 6px 10px;
-    border-top: 1px solid var(--border);
-  }
-  .downloads li:first-child {
-    border-top: 0;
-  }
-  .dl-name {
-    font-weight: 600;
-  }
-  .dl-size {
-    color: var(--fg-muted);
-    font-size: 12px;
-    text-align: right;
-  }
-  .dl-state {
-    overflow: hidden;
-    font-size: 12px;
-    white-space: nowrap;
-    text-overflow: ellipsis;
   }
   .dl-bar {
     display: inline-block;

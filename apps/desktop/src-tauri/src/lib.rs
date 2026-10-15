@@ -151,6 +151,7 @@ pub fn run() {
         .manage(Jobs(Arc::new(JobQueue::new())))
         .manage(GpuCache::default())
         .manage(Startup::default())
+        .manage(commands::LastDownloadError::default())
         .manage(live::LiveHandle(Arc::new(live::LiveState::new())))
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -227,6 +228,7 @@ pub fn run() {
             commands::pull_model,
             commands::open_models_folder,
             commands::open_engine_folder,
+            commands::open_download_folder,
             commands::open_data_folder,
             commands::open_log_folder,
             commands::read_log_tail,
@@ -245,6 +247,13 @@ pub fn run() {
             commands::install_update,
             commands::diagnostics_report,
             commands::startup_report,
+            commands::runtime_releases,
+            commands::install_runtime,
+            commands::add_model_url,
+            commands::add_model_file,
+            commands::check_ready,
+            commands::health_check,
+            commands::open_sound_settings,
             live::list_audio_devices,
             live::prepare_recording,
             live::start_recording,

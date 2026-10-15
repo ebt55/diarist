@@ -46,7 +46,7 @@
           hitCursor = 0;
         }
       } catch (e) {
-        app.error(`Search failed: ${errorText(e)}`);
+        app.error(`Search failed (${errorText(e)}); try plainer words (no quotes or symbols needed)`);
       } finally {
         searching = false;
       }
@@ -116,7 +116,7 @@
       await app.refreshMeetings();
       app.toast("info", `Deleted "${m.title || "Untitled meeting"}"`);
     } catch (e) {
-      app.error(`Delete failed: ${errorText(e)}`);
+      app.error(`Delete failed (${errorText(e)}); close any program using its audio and try again`);
     }
   }
 
@@ -362,7 +362,7 @@
       {/each}
     </div>
   {:else if app.meetingsError}
-    <p class="empty error" role="alert">Could not load meetings: {app.meetingsError}</p>
+    <p class="empty error" role="alert">Could not load meetings: {app.meetingsError}. Restart meet-assist; if it keeps failing, Diagnostics shows the log.</p>
   {:else if app.meetingsLoaded && app.meetings.length === 0}
     <p class="empty">No meetings yet. Press R to record one, import a recording with Ctrl+O, or drop files here.</p>
   {:else}

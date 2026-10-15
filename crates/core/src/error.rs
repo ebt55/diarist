@@ -38,7 +38,7 @@ pub enum CoreError {
     Cancelled,
 
     /// Not enough free disk space for the operation.
-    #[error("not enough free disk space in {path}: {free_mb} MB free, {needed_mb} MB needed")]
+    #[error("not enough free disk space in {path}: {free_mb} MB free, {needed_mb} MB needed; free up old audio in Settings or move the data folder to a larger drive")]
     InsufficientSpace {
         path: String,
         free_mb: u64,

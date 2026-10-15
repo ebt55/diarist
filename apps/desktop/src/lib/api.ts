@@ -9,6 +9,7 @@ import type { DataRootInfo } from "./generated/DataRootInfo";
 import type { DownloadItem } from "./generated/DownloadItem";
 import type { EngineStatus } from "./generated/EngineStatus";
 import type { JobEvent } from "./generated/JobEvent";
+import type { HealthCheck } from "./generated/HealthCheck";
 import type { JobId } from "./generated/JobId";
 import type { LiveStateView } from "./generated/LiveStateView";
 import type { LiveStatusView } from "./generated/LiveStatusView";
@@ -19,8 +20,11 @@ import type { ModelFile } from "./generated/ModelFile";
 import type { ModelFileId } from "./generated/ModelFileId";
 import type { ModelRole } from "./generated/ModelRole";
 import type { MoveResult } from "./generated/MoveResult";
+import type { Readiness } from "./generated/Readiness";
 import type { RetentionPlan } from "./generated/RetentionPlan";
 import type { RetentionReport } from "./generated/RetentionReport";
+import type { RuntimePackage } from "./generated/RuntimePackage";
+import type { RuntimeRelease } from "./generated/RuntimeRelease";
 import type { SearchHit } from "./generated/SearchHit";
 import type { SegmentId } from "./generated/SegmentId";
 import type { SegmentView } from "./generated/SegmentView";
@@ -103,9 +107,17 @@ export const api = {
   recommendedDownloads: () => invoke<DownloadItem[]>("recommended_downloads"),
   openModelsFolder: () => invoke<void>("open_models_folder"),
   openEngineFolder: () => invoke<void>("open_engine_folder"),
+  openDownloadFolder: (name: string) => invoke<void>("open_download_folder", { name }),
   openDataFolder: () => invoke<void>("open_data_folder"),
   openLogFolder: () => invoke<void>("open_log_folder"),
   setupStatus: () => invoke<SetupStatus>("setup_status"),
+  checkReady: (action: "import" | "record") => invoke<Readiness>("check_ready", { action }),
+  runtimeReleases: () => invoke<RuntimeRelease[]>("runtime_releases"),
+  installRuntime: (pkg: RuntimePackage) => invoke<string>("install_runtime", { package: pkg }),
+  addModelUrl: (url: string, sha256: string | null) => invoke<string>("add_model_url", { url, sha256 }),
+  addModelFile: (path: string, link: boolean) => invoke<string>("add_model_file", { path, link }),
+  healthCheck: () => invoke<HealthCheck[]>("health_check"),
+  openSoundSettings: () => invoke<void>("open_sound_settings"),
 
   dataRootInfo: () => invoke<DataRootInfo>("data_root_info"),
   moveDataRoot: (to: string) => invoke<MoveResult>("move_data_root", { to }),

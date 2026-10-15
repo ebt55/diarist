@@ -6,6 +6,7 @@ import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
 import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
+import type { MissingPart } from "./generated/MissingPart";
 import type { PostPassView } from "./generated/PostPassView";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
@@ -102,6 +103,8 @@ class AppState {
   setupNeeded = $state<boolean | null>(null);
   /** What launch recovered (`startup_report`, `app:startup`). */
   startup = $state.raw<StartupReport | null>(null);
+  /** What Import or Record still needs (the inline panel), with the files waiting to import. */
+  readiness = $state.raw<{ action: string; missing: MissingPart[]; pending: string[] } | null>(null);
 
   #toastId = 0;
   #nonce = 0;
@@ -148,7 +151,11 @@ class AppState {
     try {
       const s = await api.setupStatus();
       this.setupNeeded = s.needs_setup;
-      if (s.needs_setup && this.route === "library" && this.openId === null) this.route = "setup";
+      // The first run opens on the setup screen once; after "Set up later" the
+      // library opens and Import and Record say what they miss.
+      if (s.needs_setup && !this.settingBool("setup.later") && this.route === "library" && this.openId === null) {
+        this.route = "setup";
+      }
     } catch (e) {
       void api.log("warn", `setup check failed: ${errorText(e)}`);
     }
@@ -254,7 +261,7 @@ class AppState {
       if (key === "theme") this.applyTheme(value as Theme);
       return true;
     } catch (e) {
-      this.error(`Could not save ${key}: ${errorText(e)}`);
+      this.error(`Could not save ${key} (${errorText(e)}); the change was not saved, try again`);
       return false;
     }
   }
@@ -302,12 +309,22 @@ class AppState {
   // ---- Import jobs ---------------------------------------------------------
 
   async importPaths(paths: string[]): Promise<void> {
+    // Checked at click time: what is missing shows inline with its fix.
+    try {
+      const r = await api.checkReady("import");
+      if (!r.ok) {
+        this.readiness = { action: "import", missing: r.missing, pending: paths };
+        return;
+      }
+    } catch {
+      // The import itself reports what went wrong.
+    }
     for (const path of paths) {
       try {
         const id = await api.importFile(path);
         this.#upsertJob(id, { name: baseName(path) });
       } catch (e) {
-        this.error(`Could not import ${baseName(path)}: ${errorText(e)}`);
+        this.error(`Could not import ${baseName(path)} (${errorText(e)}); check that it plays in a media player, then drop it again`);
       }
     }
   }

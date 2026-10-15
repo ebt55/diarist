@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meet_core::audio::{self, ChainDecoder};
-use meet_core::diagnostics::{self, DiagnosticsInput};
+use meet_core::diagnostics::{self, DiagnosticsInput, HealthCheck};
+use meet_core::engine::ServeStatus;
 use meet_core::export::{self, ExportDoc, ExportFormat};
 use meet_core::gpu;
+use meet_core::models::releases::{self, RuntimeRelease};
 use meet_core::models::{self, relocate, DataPaths, Manifest};
 use meet_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
 use meet_core::retention::{self, RetentionPlan, RetentionReport};
@@ -414,10 +416,13 @@ async fn playable_track(
         Ok::<_, meet_core::store::StoreError>((track, s.get_meeting(id)?.meeting.uid))
     })
     .await?;
-    let track = track.ok_or_else(|| "No audio file for this meeting".to_owned())?;
+    let track = track.ok_or_else(|| "No audio file for this meeting (audio retention may have deleted it; pin meetings with P to keep their audio)".to_owned())?;
     let file = paths.absolute(&track.path);
     if !file.is_file() {
-        return Err(format!("The audio file is missing: {}", file.display()));
+        return Err(format!(
+            "The audio file is missing: {} (it was moved or deleted; put it back there to play it)",
+            file.display()
+        ));
     }
     Ok((track, file, uid))
 }
@@ -553,7 +558,9 @@ pub async fn rescan_models(
     *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let data_paths = paths.paths.clone();
     with_store(&store, move |s| -> meet_core::Result<Vec<ModelFile>> {
-        let report = models::scan(&data_paths, s, &Manifest::load(&data_paths.root)?)?;
+        let manifest = Manifest::load(&data_paths.root)?;
+        install_dropped(&data_paths, &manifest);
+        let report = models::scan(&data_paths, s, &manifest)?;
         for n in &report.notes {
             log::info!("model scan: {n}");
         }
@@ -565,70 +572,158 @@ pub async fn rescan_models(
     .await
 }
 
-/// Downloads and extracts a runtime from the manifest (`name` or version;
-/// the default tested engine when absent), then rescans. Progress arrives as
-/// `models:progress`. Returns the installed folder.
+/// The last download that failed (for the firewall hint in the checklist):
+/// what it was, which process opened the connection, and the error.
+#[derive(Default)]
+pub(crate) struct LastDownloadError(pub(crate) std::sync::Mutex<Option<(String, String, String)>>);
+
+fn note_download(app: &AppHandle, what: &str, process: &str, result: &Result<(), String>) {
+    let state = app.state::<LastDownloadError>();
+    let mut slot = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = result
+        .as_ref()
+        .err()
+        .map(|e| (what.to_owned(), process.to_owned(), e.clone()));
+}
+
+/// Emits `models:progress` for one item.
+fn emit_progress(
+    app: &AppHandle,
+    kind: DownloadKind,
+    name: &str,
+    done: u64,
+    total: Option<u64>,
+    finished: bool,
+    error: Option<String>,
+) {
+    emit_download(
+        app,
+        &DownloadProgress {
+            kind,
+            name: name.to_owned(),
+            done_bytes: done,
+            total_bytes: total,
+            finished,
+            error,
+        },
+    );
+}
+
+/// Downloads, checks and extracts `entry`, rescans and selects it (the user
+/// chose this package). Progress arrives as `models:progress`.
+fn run_engine_install(
+    app: &AppHandle,
+    s: &dyn RunStore,
+    data_paths: &DataPaths,
+    manifest: &Manifest,
+    entry: &models::EngineEntry,
+) -> meet_core::Result<String> {
+    let mut last = Instant::now() - Duration::from_secs(1);
+    let size = Some(entry.size_bytes);
+    let result = models::install_engine(entry, data_paths, &mut |done, total| {
+        if last.elapsed() >= Duration::from_millis(250) {
+            last = Instant::now();
+            emit_progress(
+                app,
+                DownloadKind::Engine,
+                &entry.name,
+                done,
+                total,
+                false,
+                None,
+            );
+        }
+    })
+    .and_then(|dir| {
+        models::scan(data_paths, s, manifest)?;
+        let rel = data_paths.relative(&dir);
+        if let Ok(f) = models::select(s, ModelRole::Engine, &rel) {
+            log::info!("selected engine {} ({})", f.display_name, f.path);
+        }
+        Ok(dir)
+    });
+    match &result {
+        Ok(dir) => {
+            log::info!("installed engine {}", dir.display());
+            emit_progress(
+                app,
+                DownloadKind::Engine,
+                &entry.name,
+                entry.size_bytes,
+                size,
+                true,
+                None,
+            );
+        }
+        Err(e) => {
+            log::error!("engine install {} failed: {e}", entry.name);
+            emit_progress(
+                app,
+                DownloadKind::Engine,
+                &entry.name,
+                0,
+                size,
+                true,
+                Some(e.to_string()),
+            );
+        }
+    }
+    note_download(
+        app,
+        &entry.name,
+        "meet-assist.exe",
+        &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+    );
+    result.map(|d| d.display().to_string())
+}
+
+/// Downloads and extracts a runtime package from the manifest (`name` or
+/// version; the recommended package for this GPU when absent), then rescans
+/// and selects it. Progress arrives as `models:progress`. Returns the folder.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn install_engine(
     app: AppHandle,
     store: State<'_, AppStore>,
     paths: State<'_, AppPaths>,
+    gpu: State<'_, GpuCache>,
     name: Option<String>,
 ) -> CmdResult<String> {
+    *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let data_paths = paths.paths.clone();
     with_store(&store, move |s| -> meet_core::Result<String> {
         let manifest = Manifest::load(&data_paths.root)?;
+        let backend = recommended_backend_now();
         let entry = match name.as_deref() {
             Some(n) => manifest
                 .engines
                 .iter()
                 .find(|e| e.name == n || e.version == n),
-            None => manifest.default_engine(),
+            None => manifest
+                .engine_for_backend(backend)
+                .or_else(|| manifest.default_engine()),
         }
-        .ok_or_else(|| CoreError::Models("no such engine in the manifest".into()))?
-        .clone();
-        let progress = |done: u64, total: Option<u64>, finished: bool, error: Option<String>| {
-            emit_download(
-                &app,
-                &DownloadProgress {
-                    kind: DownloadKind::Engine,
-                    name: entry.name.clone(),
-                    done_bytes: done,
-                    total_bytes: total,
-                    finished,
-                    error,
-                },
+        .ok_or_else(|| {
+            CoreError::Models(
+                "no such runtime in the manifest; use Check for newer runtime, or put an extracted \
+                 runtime into the engine folder"
+                    .into(),
             )
-        };
-        let mut last = Instant::now() - Duration::from_secs(1);
-        let result = models::install_engine(&entry, &data_paths, &mut |done, total| {
-            if last.elapsed() >= Duration::from_millis(250) {
-                last = Instant::now();
-                progress(done, total, false, None);
-            }
-        })
-        .and_then(|dir| {
-            models::scan(&data_paths, s, &manifest)?;
-            Ok(dir)
-        });
-        let size = Some(entry.size_bytes);
-        match &result {
-            Ok(dir) => {
-                log::info!("installed engine {}", dir.display());
-                progress(entry.size_bytes, size, true, None);
-            }
-            Err(e) => {
-                log::error!("engine install {} failed: {e}", entry.name);
-                progress(0, size, true, Some(e.to_string()))
-            }
-        }
-        result.map(|d| d.display().to_string())
+        })?
+        .clone();
+        run_engine_install(&app, s, &data_paths, &manifest, &entry)
     })
     .await
 }
 
-/// Pulls a manifest model (`name` or its pull name) with the selected
-/// runtime's `nemo-speech pull`, verifies it, then rescans. Returns the file.
+/// The runtime package this machine should use (NVML, then DXGI).
+fn recommended_backend_now() -> &'static str {
+    gpu::recommended_backend(gpu::gpu_info(0).as_ref(), &gpu::adapters())
+}
+
+/// Fetches a manifest model and verifies it, then rescans. Shipped models go
+/// through the selected runtime's `nemo-speech pull` (its downloader is
+/// System32 `curl.exe`); `models.user.json` entries are downloaded from their
+/// URL directly. Returns the file.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn pull_model(
     app: AppHandle,
@@ -641,58 +736,257 @@ pub async fn pull_model(
         let manifest = Manifest::load(&data_paths.root)?;
         let entry = manifest
             .model(&name)
-            .ok_or_else(|| CoreError::Models(format!("no model {name:?} in the manifest")))?
+            .ok_or_else(|| {
+                CoreError::Models(format!(
+                    "no model {name:?} in the manifest; press Refresh, or add it with Add from URL"
+                ))
+            })?
             .clone();
-        let engine = match models::selected_file(s, ModelRole::Engine)? {
-            Some(e) => e,
-            None => {
-                models::scan(&data_paths, s, &manifest)?;
-                models::selected_file(s, ModelRole::Engine)?.ok_or_else(|| {
-                    CoreError::Models("no engine installed; install one first".into())
-                })?
-            }
-        };
+        let total = Some(entry.size_bytes);
         let progress = |done: u64, finished: bool, error: Option<String>| {
-            emit_download(
+            emit_progress(
                 &app,
-                &DownloadProgress {
-                    kind: DownloadKind::Model,
-                    name: entry.name.clone(),
-                    done_bytes: done,
-                    total_bytes: Some(entry.size_bytes),
-                    finished,
-                    error,
-                },
+                DownloadKind::Model,
+                &entry.name,
+                done,
+                total,
+                finished,
+                error,
             )
         };
         progress(0, false, None);
         let mut last_done = u64::MAX;
-        let result = models::pull_with_progress(
-            &data_paths.absolute(&engine.path),
-            &data_paths.models(),
-            &entry,
-            &mut |done| {
-                if done != last_done {
-                    last_done = done;
-                    progress(done, false, None);
+        let mut tick = |done: u64| {
+            if done != last_done {
+                last_done = done;
+                progress(done, false, None);
+            }
+        };
+        let (process, result) = if entry.direct {
+            let dest = entry.dest_dir(&data_paths.models()).join(&entry.file);
+            let r =
+                models::download_file(&entry.url, &dest, &entry.sha256, total, &mut |d, _| tick(d))
+                    .map(|()| dest);
+            ("meet-assist.exe", r)
+        } else {
+            let engine = match models::selected_file(s, ModelRole::Engine)? {
+                Some(e) => e,
+                None => {
+                    models::scan(&data_paths, s, &manifest)?;
+                    models::selected_file(s, ModelRole::Engine)?.ok_or_else(|| {
+                        CoreError::Models(
+                            "the models are fetched by the speech engine, which is not installed; \
+                             install the engine first"
+                                .into(),
+                        )
+                    })?
                 }
-            },
-        )
-        .and_then(|p| {
+            };
+            let r = models::pull_with_progress(
+                &data_paths.absolute(&engine.path),
+                &data_paths.models(),
+                &entry,
+                &mut tick,
+            )
+            .map(|p| p.path);
+            ("curl.exe (started by nemo-speech.exe)", r)
+        };
+        let result = result.and_then(|p| {
             models::scan(&data_paths, s, &manifest)?;
             Ok(p)
         });
         match &result {
             Ok(p) => {
-                log::info!("pulled {} to {}", entry.name, p.path.display());
+                log::info!("fetched {} to {}", entry.name, p.display());
                 progress(entry.size_bytes, true, None);
             }
             Err(e) => {
-                log::error!("pull {} failed: {e}", entry.name);
+                log::error!("fetching {} failed: {e}", entry.name);
                 progress(0, true, Some(e.to_string()))
             }
         }
-        result.map(|p| p.path.display().to_string())
+        note_download(
+            &app,
+            &entry.name,
+            process,
+            &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+        );
+        result.map(|p| p.display().to_string())
+    })
+    .await
+}
+
+/// Runtime releases on GitHub with their Windows packages ("Check for
+/// newer runtime"); packages already under `engine\` are marked installed.
+#[tauri::command]
+pub async fn runtime_releases(paths: State<'_, AppPaths>) -> CmdResult<Vec<RuntimeRelease>> {
+    let engine_root = paths.paths.engine();
+    blocking(move || {
+        let mut list = releases::fetch_releases().map_err(|e| e.to_string())?;
+        for r in &mut list {
+            for p in &mut r.packages {
+                p.installed = engine_root.join(&p.name).join("bin").is_dir();
+            }
+        }
+        Ok(list)
+    })
+    .await
+}
+
+/// Installs a package from the GitHub releases into `engine\<name>\`,
+/// checked against the release's `.sha256`, and selects it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn install_runtime(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    gpu: State<'_, GpuCache>,
+    package: releases::RuntimePackage,
+) -> CmdResult<String> {
+    *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let sha_url = package.sha_url.clone().ok_or_else(|| {
+            CoreError::Models(format!(
+                "{} has no published SHA-256; download it by hand from {} and put the zip into the \
+                 engine folder",
+                package.name,
+                releases::RELEASES_PAGE
+            ))
+        })?;
+        let sha = releases::fetch_sha(&sha_url)?;
+        let entry = releases::package_entry(&package, sha);
+        let manifest = Manifest::load(&data_paths.root)?;
+        run_engine_install(&app, s, &data_paths, &manifest, &entry)
+    })
+    .await
+}
+
+/// "Add from URL": downloads a model no manifest lists into `models\user\`
+/// (resumable; checked against `sha256` when given), then rescans. Progress
+/// arrives as `models:progress` under the file name. Returns the file.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn add_model_url(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    url: String,
+    sha256: Option<String>,
+) -> CmdResult<String> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let name = models::add::file_name_from_url(url.trim())?;
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let result = models::add::add_from_url(
+            &data_paths,
+            url.trim(),
+            sha256.as_deref(),
+            &mut |done, total| {
+                if last.elapsed() >= Duration::from_millis(250) {
+                    last = Instant::now();
+                    emit_progress(&app, DownloadKind::Model, &name, done, total, false, None);
+                }
+            },
+        )
+        .and_then(|p| {
+            let manifest = Manifest::load(&data_paths.root)?;
+            models::scan(&data_paths, s, &manifest)?;
+            Ok(p)
+        });
+        match &result {
+            Ok(p) => {
+                log::info!("added {} from {url}", p.display());
+                let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                emit_progress(
+                    &app,
+                    DownloadKind::Model,
+                    &name,
+                    size,
+                    Some(size),
+                    true,
+                    None,
+                );
+            }
+            Err(e) => {
+                log::error!("adding {url} failed: {e}");
+                emit_progress(
+                    &app,
+                    DownloadKind::Model,
+                    &name,
+                    0,
+                    None,
+                    true,
+                    Some(e.to_string()),
+                );
+            }
+        }
+        note_download(
+            &app,
+            &name,
+            "meet-assist.exe",
+            &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+        );
+        result.map(|p| p.display().to_string())
+    })
+    .await
+}
+
+/// "Add from file": copies (or with `link`, hard-links) a model file into
+/// `models\user\`, then rescans. Returns the new file.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn add_model_file(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    path: String,
+    link: bool,
+) -> CmdResult<String> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let dest = models::add::add_from_file(&data_paths, Path::new(&path), link)?;
+        let manifest = Manifest::load(&data_paths.root)?;
+        models::scan(&data_paths, s, &manifest)?;
+        log::info!(
+            "added {} ({}) from {path}",
+            dest.display(),
+            if link { "linked" } else { "copied" }
+        );
+        Ok(dest.display().to_string())
+    })
+    .await
+}
+
+/// Whether Import or Record (`action`) can run now; each missing part comes
+/// with its fix (`meet_core::models::readiness`).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_ready(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    action: String,
+) -> CmdResult<models::Readiness> {
+    let data_paths = paths.paths.clone();
+    let demo = paths.demo;
+    with_store(&store, move |s| -> meet_core::Result<models::Readiness> {
+        let manifest = Manifest::load(&data_paths.root)?;
+        if demo {
+            return Ok(models::Readiness {
+                action,
+                ok: true,
+                missing: Vec::new(),
+            });
+        }
+        // Only when something is not selected: a scan picks up files dropped in.
+        if models::resolve_selection(&data_paths, s).is_err() {
+            install_dropped(&data_paths, &manifest);
+            models::scan(&data_paths, s, &manifest)?;
+        }
+        models::readiness(
+            &data_paths,
+            s,
+            &manifest,
+            gpu::gpu_info(0).as_ref(),
+            &gpu::adapters(),
+            &action,
+        )
     })
     .await
 }
@@ -711,6 +1005,7 @@ pub async fn recommended_downloads(
             &data_paths,
             &manifest,
             &s.list_model_files()?,
+            recommended_backend_now(),
         ))
     })
     .await
@@ -812,6 +1107,7 @@ pub async fn setup_status(
         let files = if demo {
             s.list_model_files()?
         } else {
+            install_dropped(&data_paths, &manifest);
             let report = models::scan(&data_paths, s, &manifest)?;
             for e in &report.errors {
                 log::warn!("model scan: {e}");
@@ -823,6 +1119,7 @@ pub async fn setup_status(
             &manifest,
             &files,
             gpu::gpu_info(0),
+            gpu::adapters(),
         ))
     })
     .await
@@ -831,6 +1128,31 @@ pub async fn setup_status(
 #[tauri::command]
 pub async fn open_engine_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
     open_folder(&paths.paths.engine())
+}
+
+/// Runtime zips put into `engine` by hand are checked and extracted.
+fn install_dropped(paths: &DataPaths, manifest: &Manifest) {
+    for r in models::download::install_dropped_engines(paths, manifest) {
+        match r {
+            Ok(dir) => log::info!("installed a runtime zip put in by hand: {}", dir.display()),
+            Err(e) => log::warn!("runtime zip put in by hand not installed: {e}"),
+        }
+    }
+}
+
+/// Opens the folder a download item goes to, so a file fetched by hand can
+/// be dropped there: `engine` for a runtime zip, the model's pull folder
+/// for a model.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_download_folder(paths: State<'_, AppPaths>, name: String) -> CmdResult<()> {
+    let manifest = Manifest::load(&paths.paths.root).map_err(|e| e.to_string())?;
+    if manifest.engines.iter().any(|e| e.name == name) {
+        return open_folder(&paths.paths.engine());
+    }
+    let entry = manifest
+        .model(&name)
+        .ok_or_else(|| format!("no download named {name:?}"))?;
+    open_folder(&models::pull_dir(&paths.paths.models(), entry))
 }
 
 #[tauri::command]
@@ -1130,6 +1452,7 @@ pub async fn diagnostics_report(
             ],
             engine_stderr,
             stderr_lines: 40,
+            checks: health_checks(&app, s, &data_paths),
         };
         Ok(diagnostics::report(&data_paths, s, &input))
     })
@@ -1140,4 +1463,436 @@ pub async fn diagnostics_report(
 #[tauri::command]
 pub async fn startup_report(startup: State<'_, Startup>) -> CmdResult<StartupReport> {
     Ok(startup.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+// ---- "Why isn't it working?" ------------------------------------------------------------
+
+/// The download hosts a firewall must allow, by the process that connects.
+fn hosts_for(process: &str) -> &'static str {
+    if process.starts_with("curl") {
+        "huggingface.co and its download servers (cdn-lfs.huggingface.co, cas-bridge.xethub.hf.co)"
+    } else {
+        "github.com, objects.githubusercontent.com and huggingface.co"
+    }
+}
+
+/// An error that looks like the network, a firewall or a proxy, not the file.
+fn connection_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    [
+        "10013",
+        "10060",
+        "10061",
+        "10065",
+        "dns",
+        "resolve",
+        "connect",
+        "timed out",
+        "timeout",
+        "revocation",
+        "certificate",
+        "stalled",
+        "network",
+        "unreachable",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
+}
+
+/// The checklist (Diagnostics, Copy diagnostics). Runs the engine's
+/// `doctor` (a second or two) and lists audio devices.
+fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Vec<HealthCheck> {
+    use meet_core::types::ModelFile;
+    let mut out = Vec::new();
+    let manifest = Manifest::load(&paths.root).ok();
+    let gpu_info = gpu::gpu_info(0);
+    let adapters = gpu::adapters();
+
+    // 1. Runtime present and runnable.
+    let engine = models::selected_file(store, ModelRole::Engine)
+        .ok()
+        .flatten();
+    let doctor = engine
+        .as_ref()
+        .map(|e| models::doctor(&paths.absolute(&e.path)));
+    out.push(match (&engine, &doctor) {
+        (None, _) => HealthCheck::new(
+            "runtime",
+            "Speech engine",
+            "fail",
+            "Not installed. Install it, or put an extracted runtime into the engine folder and \
+             press Refresh.",
+        )
+        .fix("setup", "Install engine"),
+        (Some(e), Some(Ok(r))) => HealthCheck::new(
+            "runtime",
+            "Speech engine",
+            "pass",
+            format!(
+                "{} runs (nemo-speech {} answered doctor)",
+                e.display_name, r.version
+            ),
+        ),
+        (Some(e), Some(Err(err))) => HealthCheck::new(
+            "runtime",
+            "Speech engine",
+            "fail",
+            format!(
+                "{} does not run: {err}. Windows Smart App Control or an antivirus may block the \
+                 unsigned runtime; reinstall it or allow nemo-speech.exe.",
+                e.display_name
+            ),
+        )
+        .fix("open_engine", "Open engine folder"),
+        (Some(_), None) => unreachable!(),
+    });
+
+    // 2. GPU and driver.
+    let backend = engine
+        .as_ref()
+        .and_then(|e| e.quant.clone())
+        .unwrap_or_else(|| gpu::recommended_backend(gpu_info.as_ref(), &adapters).to_owned());
+    out.push(match &gpu_info {
+        Some(g) if g.cuda_ok => HealthCheck::new(
+            "gpu",
+            "GPU and driver",
+            "pass",
+            format!(
+                "{}, {} MB, driver {}, CUDA {}",
+                g.name,
+                g.vram_total_mb,
+                g.driver_version,
+                g.cuda_version.as_deref().unwrap_or("?")
+            ),
+        ),
+        Some(g) => HealthCheck::new(
+            "gpu",
+            "GPU and driver",
+            if backend == "cuda" { "fail" } else { "warn" },
+            format!(
+                "{} with driver {} supports CUDA {}; the CUDA engine needs CUDA 13 (R580 or newer). \
+                 Update the driver from nvidia.com, or install the Vulkan runtime.",
+                g.name,
+                g.driver_version,
+                g.cuda_version.as_deref().unwrap_or("?")
+            ),
+        )
+        .fix("setup", "Choose a runtime"),
+        None if !adapters.is_empty() => HealthCheck::new(
+            "gpu",
+            "GPU and driver",
+            if backend == "cuda" { "fail" } else { "warn" },
+            format!(
+                "No NVIDIA GPU; found {}. Use the Vulkan runtime (untested by us) or the CPU \
+                 runtime (slow).",
+                adapters[0].name
+            ),
+        )
+        .fix("setup", "Choose a runtime"),
+        None => HealthCheck::new(
+            "gpu",
+            "GPU and driver",
+            "warn",
+            "No GPU found. Only the CPU runtime works, much slower than real time.",
+        )
+        .fix("setup", "Choose a runtime"),
+    });
+
+    // 3 and 4. Selected models present, hashes as published.
+    let model_check = |role: ModelRole, id: &str, label: &str| -> HealthCheck {
+        let required = manifest
+            .as_ref()
+            .and_then(|m| m.models.iter().find(|e| e.required && e.role == role))
+            .map(|e| e.name.clone());
+        match models::selected_file(store, role).ok().flatten() {
+            None => {
+                let c = HealthCheck::new(
+                    id,
+                    label,
+                    "fail",
+                    "None selected or the file is gone. Download the recommended one, or put a \
+                     .gguf into the models folder and press Refresh.",
+                );
+                match required {
+                    Some(n) => c.fix(format!("download:{n}"), "Download"),
+                    None => c.fix("open_models", "Open models folder"),
+                }
+            }
+            Some(f) => file_check(&f, manifest.as_ref(), id, label),
+        }
+    };
+    fn file_check(
+        f: &ModelFile,
+        manifest: Option<&Manifest>,
+        id: &str,
+        label: &str,
+    ) -> HealthCheck {
+        let published = manifest
+            .zip(f.manifest_name.as_deref())
+            .and_then(|(m, n)| m.model(n))
+            .map(|e| e.sha256.clone());
+        match (published, &f.sha256) {
+            (Some(want), Some(got)) if want.eq_ignore_ascii_case(got) => HealthCheck::new(
+                id,
+                label,
+                "pass",
+                format!("{}: SHA-256 matches the published one", f.display_name),
+            ),
+            (Some(_), _) => HealthCheck::new(
+                id,
+                label,
+                "fail",
+                format!(
+                    "{}: the SHA-256 does not match the published one; delete it and download it again",
+                    f.display_name
+                ),
+            )
+            .fix("open_models", "Open models folder"),
+            (None, _) if f.role == ModelRole::Unknown => HealthCheck::new(
+                id,
+                label,
+                "warn",
+                format!(
+                    "{}: not recognised from its header; the runtime decides whether it can run it",
+                    f.display_name
+                ),
+            ),
+            (None, _) => HealthCheck::new(
+                id,
+                label,
+                "pass",
+                format!("{}: added by you (no published hash to compare)", f.display_name),
+            ),
+        }
+    }
+    out.push(model_check(ModelRole::Asr, "asr", "Speech-to-text model"));
+    out.push(model_check(
+        ModelRole::Diarizer,
+        "diarizer",
+        "Speaker model",
+    ));
+
+    // 5 and 6. Free VRAM for live and for file mode.
+    match gpu::nvml_vram(0) {
+        Some(r) => {
+            out.push(if r.free_mb >= meet_core::live::MIN_FREE_VRAM_MB {
+                HealthCheck::new(
+                    "vram_live",
+                    "GPU memory for live",
+                    "pass",
+                    format!(
+                        "{} MB free, live needs {} MB",
+                        r.free_mb,
+                        meet_core::live::MIN_FREE_VRAM_MB
+                    ),
+                )
+            } else {
+                HealthCheck::new(
+                    "vram_live",
+                    "GPU memory for live",
+                    "warn",
+                    format!(
+                        "{} MB free, live needs {} MB. Close GPU-heavy apps (games, video editors, \
+                         other AI tools) before recording.",
+                        r.free_mb,
+                        meet_core::live::MIN_FREE_VRAM_MB
+                    ),
+                )
+            });
+            let need = models::selected_file(store, ModelRole::Asr)
+                .ok()
+                .flatten()
+                .and_then(|f| {
+                    f.capabilities
+                        .vram_mb_measured
+                        .or(f.capabilities.vram_mb_estimate)
+                });
+            out.push(match need {
+                Some(n) if r.free_mb >= n => HealthCheck::new(
+                    "vram_file",
+                    "GPU memory for files",
+                    "pass",
+                    format!("{} MB free, the selected model peaks at about {n} MB", r.free_mb),
+                ),
+                Some(n) => HealthCheck::new(
+                    "vram_file",
+                    "GPU memory for files",
+                    "warn",
+                    format!(
+                        "{} MB free, the selected model peaks at about {n} MB. Close GPU-heavy apps \
+                         or turn on low-VRAM mode.",
+                        r.free_mb
+                    ),
+                )
+                .fix("settings", "Low-VRAM mode"),
+                None => HealthCheck::new(
+                    "vram_file",
+                    "GPU memory for files",
+                    "skip",
+                    format!("{} MB free; the selected model's need is unknown", r.free_mb),
+                ),
+            });
+        }
+        None => out.push(HealthCheck::new(
+            "vram_live",
+            "GPU memory",
+            "skip",
+            "Free GPU memory is only known on NVIDIA GPUs.",
+        )),
+    }
+
+    // 7. Free disk.
+    out.push(match models::free_disk_bytes(&paths.root) {
+        Some(free) if free >= pipeline::MIN_FREE_BYTES => HealthCheck::new(
+            "disk",
+            "Free disk",
+            "pass",
+            format!("{} MB free in {}", free >> 20, paths.root.display()),
+        ),
+        Some(free) => HealthCheck::new(
+            "disk",
+            "Free disk",
+            "fail",
+            format!(
+                "Only {} MB free in {}; recording and import need {} MB. Free up old audio or move \
+                 the data folder in Settings.",
+                free >> 20,
+                paths.root.display(),
+                pipeline::MIN_FREE_BYTES >> 20
+            ),
+        )
+        .fix("settings", "Open Settings"),
+        None => HealthCheck::new("disk", "Free disk", "skip", "Free space unknown."),
+    });
+
+    // 8. Audio devices.
+    out.push(match audio::capture::list_devices() {
+        Ok(devs) => {
+            use audio::capture::DeviceFlow;
+            let mics = devs.iter().filter(|d| d.flow == DeviceFlow::Capture).count();
+            let outs = devs.iter().filter(|d| d.flow == DeviceFlow::Render).count();
+            if mics > 0 && outs > 0 {
+                HealthCheck::new(
+                    "audio",
+                    "Microphone and system audio",
+                    "pass",
+                    format!("{mics} microphones, {outs} outputs to record from"),
+                )
+            } else {
+                HealthCheck::new(
+                    "audio",
+                    "Microphone and system audio",
+                    "fail",
+                    format!(
+                        "{mics} microphones and {outs} outputs found. Connect or enable a device in \
+                         the Windows sound settings, then check again."
+                    ),
+                )
+                .fix("sound_settings", "Sound settings")
+            }
+        }
+        Err(e) => HealthCheck::new(
+            "audio",
+            "Microphone and system audio",
+            "fail",
+            format!("Cannot list audio devices: {e}. Open the Windows sound settings and check again."),
+        )
+        .fix("sound_settings", "Sound settings"),
+    });
+
+    // 9. Live server reachable when it should be.
+    let live = crate::live::status(app);
+    let ready = live
+        .server
+        .as_ref()
+        .is_some_and(|s| matches!(s.server.status, ServeStatus::Ready { .. }));
+    let should = live.state.phase != meet_core::live::LivePhase::Idle
+        || settings::effective(store)
+            .map(|s| settings::get_bool(&s, settings::ENGINE_PRELOAD))
+            .unwrap_or(false);
+    out.push(match (should, ready, &live.server) {
+        (_, true, _) => HealthCheck::new("server", "Live engine", "pass", "Running and answering"),
+        (true, false, Some(s)) => HealthCheck::new(
+            "server",
+            "Live engine",
+            "fail",
+            format!(
+                "Should be running but is {:?}. Its log is in {}; start it again.",
+                s.server.status,
+                s.log_path.as_deref().unwrap_or("the logs folder")
+            ),
+        )
+        .fix("start_engine", "Start engine"),
+        (true, false, None) => HealthCheck::new(
+            "server",
+            "Live engine",
+            "warn",
+            "Not started yet; start it to check that it loads.",
+        )
+        .fix("start_engine", "Start engine"),
+        (false, false, _) => HealthCheck::new(
+            "server",
+            "Live engine",
+            "skip",
+            "Starts when you open the record sheet; not needed until then.",
+        ),
+    });
+
+    // 10. Downloads and the firewall.
+    let last = app
+        .state::<LastDownloadError>()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    out.push(match last {
+        Some((what, process, err)) if connection_error(&err) => HealthCheck::new(
+            "network",
+            "Downloads",
+            "fail",
+            format!(
+                "Downloading {what} failed: {err}. If a firewall such as simplewall asked about \
+                 {process}, allow it (it connects to {}) and press Retry; or use Copy link to \
+                 fetch the file with a browser and put it into the folder Open folder shows.",
+                hosts_for(&process)
+            ),
+        )
+        .fix("setup", "Open downloads"),
+        Some((what, _, err)) => HealthCheck::new(
+            "network",
+            "Downloads",
+            "warn",
+            format!("Downloading {what} failed: {err}. Retry, or fetch it by hand with Copy link."),
+        )
+        .fix("setup", "Open downloads"),
+        None => HealthCheck::new(
+            "network",
+            "Downloads",
+            "pass",
+            "No failed download in this session.",
+        ),
+    });
+    out
+}
+
+/// "Why isn't it working?": the checklist with a fix per failing row.
+#[tauri::command]
+pub async fn health_check(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<Vec<HealthCheck>> {
+    let data_paths = paths.paths.clone();
+    let store = Arc::clone(&store.0);
+    blocking(move || Ok(health_checks(&app, &*store, &data_paths))).await
+}
+
+/// Opens the Windows sound settings (a fix in the checklist).
+#[tauri::command]
+pub async fn open_sound_settings() -> CmdResult<()> {
+    std::process::Command::new("explorer")
+        .arg("ms-settings:sound")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Cannot open the sound settings ({e}); open Settings, System, Sound"))
 }

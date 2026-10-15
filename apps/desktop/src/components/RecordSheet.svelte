@@ -156,7 +156,7 @@
     </label>
 
     {#if devicesError}
-      <p class="error" role="alert">Could not list audio devices: {devicesError}</p>
+      <p class="error" role="alert">Could not list audio devices: {devicesError}. The Windows defaults are used; check the sound settings.</p>
     {/if}
     {#if error}
       <div class="error box" role="alert">

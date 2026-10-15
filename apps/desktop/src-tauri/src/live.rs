@@ -732,7 +732,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
                 free_mb,
                 needed_mb,
             } => format!(
-                "Not enough disk space: {free_mb} MB free on {path}, recording needs {needed_mb} MB."
+                "Not enough disk space: {free_mb} MB free on {path}, recording needs {needed_mb} MB. Free up old audio in Settings (Keep audio for) or move the data folder to a larger drive."
             ),
             other => other.to_string(),
         })
@@ -809,7 +809,7 @@ pub(crate) fn stop(app: &AppHandle) -> CmdResult<StopSummary> {
                 Ok(o.summary())
             }
             Err(e) => {
-                let msg = format!("Stopping failed: {e}");
+                let msg = format!("Stopping failed: {e}. Press Stop again; if the app is closed instead, the recording is recovered at the next start");
                 slot.error = Some(msg.clone());
                 Err(msg)
             }

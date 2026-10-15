@@ -10,6 +10,41 @@ use crate::models::{selected_file, DataPaths, DataRootSource};
 use crate::store::Store;
 use crate::types::ModelRole;
 
+/// One row of "Why isn't it working?" (Diagnostics), also in the copied report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct HealthCheck {
+    pub id: String,
+    pub label: String,
+    /// `pass`, `warn`, `fail` or `skip` (not needed right now).
+    pub status: String,
+    /// What was found, and the next step when it is not a pass.
+    pub detail: String,
+    /// A UI action that fixes it: `setup`, `download:<name>`, `open_models`,
+    /// `open_engine`, `settings`, `sound_settings`, `start_engine`, `rescan`.
+    pub fix: Option<String>,
+    pub fix_label: Option<String>,
+}
+
+impl HealthCheck {
+    pub fn new(id: &str, label: &str, status: &str, detail: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            status: status.into(),
+            detail: detail.into(),
+            fix: None,
+            fix_label: None,
+        }
+    }
+
+    pub fn fix(mut self, action: impl Into<String>, label: &str) -> Self {
+        self.fix = Some(action.into());
+        self.fix_label = Some(label.into());
+        self
+    }
+}
+
 /// Everything the report needs that `meet-core` cannot look up itself.
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticsInput {
@@ -24,6 +59,8 @@ pub struct DiagnosticsInput {
     pub engine_stderr: Option<String>,
     /// Lines of `engine_stderr` to keep from its end.
     pub stderr_lines: usize,
+    /// The "Why isn't it working?" checklist.
+    pub checks: Vec<HealthCheck>,
 }
 
 /// "Windows 11 (build 26200, 25H2)" from the registry; "" elsewhere.
@@ -157,6 +194,12 @@ pub fn report(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) ->
     for (k, v) in &input.extra {
         let _ = writeln!(out, "{k}: {v}");
     }
+    if !input.checks.is_empty() {
+        let _ = writeln!(out, "checks:");
+        for c in &input.checks {
+            let _ = writeln!(out, "  [{}] {}: {}", c.status, c.label, c.detail);
+        }
+    }
     match &input.engine_stderr {
         Some(s) => {
             let lines: Vec<&str> = s.lines().collect();
@@ -232,6 +275,7 @@ mod tests {
             extra: vec![("live server".into(), "stopped".into())],
             engine_stderr: Some("C:/x/engine.log\nline 1\nline 2\nline 3".into()),
             stderr_lines: 2,
+            checks: vec![HealthCheck::new("disk", "Free disk", "pass", "80 GB free")],
         };
         let text = report(&DataPaths::at("D:/data"), &store, &input);
         for want in [
@@ -242,6 +286,7 @@ mod tests {
             "asr: en.gguf | models/en.gguf | 42 bytes | sha256 abc123",
             "diarizer: none selected",
             "live server: stopped",
+            "checks:\n  [pass] Free disk: 80 GB free",
             "last engine stderr (C:/x/engine.log, last 2 lines):\n  line 2\n  line 3",
         ] {
             assert!(text.contains(want), "{want:?} missing from:\n{text}");

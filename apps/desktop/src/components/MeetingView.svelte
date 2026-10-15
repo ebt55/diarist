@@ -238,7 +238,7 @@
       detail = d;
       segments = segs;
     } catch (e) {
-      app.error(`Could not reload the meeting: ${errorText(e)}`);
+      app.error(`Could not reload the meeting (${errorText(e)}); press F5 to try again`);
     }
   }
 
@@ -260,7 +260,7 @@
         void loadAudio(meetingId);
       }
     } catch (e) {
-      app.error(`Could not reload the meeting: ${errorText(e)}`);
+      app.error(`Could not reload the meeting (${errorText(e)}); press F5 to try again`);
     }
   }
 
@@ -271,7 +271,7 @@
       app.trackPostPass(job, meetingId, meeting?.title ?? "");
       await refreshAll(transcript?.anchorMs() ?? null);
     } catch (e) {
-      app.error(`Retry failed: ${errorText(e)}`);
+      app.error(`Retry failed (${errorText(e)}); Diagnostics, Why isn't it working, shows what is missing`);
     } finally {
       retrying = false;
     }
@@ -300,7 +300,7 @@
       app.patchMeeting(meeting.id, { title });
     } catch (e) {
       titleEl.value = meeting.title;
-      app.error(`Could not rename the meeting: ${errorText(e)}`);
+      app.error(`Could not rename the meeting (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
     }
   }
 
@@ -313,7 +313,7 @@
       app.patchMeeting(meeting.id, { audio_keep: keep });
       app.toast("info", keep ? "Audio pinned: kept regardless of retention" : "Audio unpinned");
     } catch (e) {
-      app.error(`Could not change the pin: ${errorText(e)}`);
+      app.error(`Could not change the pin (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
     }
   }
 
@@ -333,7 +333,7 @@
       await app.refreshMeetings();
       app.toast("info", `Deleted "${m.title || "Untitled meeting"}"`);
     } catch (e) {
-      app.error(`Delete failed: ${errorText(e)}`);
+      app.error(`Delete failed (${errorText(e)}); close any program using its audio and try again`);
     }
   }
 
@@ -343,7 +343,7 @@
       const path = await api.exportMeeting(meeting.id, format);
       if (path) app.toast("success", `Exported to ${path}`);
     } catch (e) {
-      app.error(`Export failed: ${errorText(e)}`);
+      app.error(`Export failed (${errorText(e)}); choose a folder you can write to and try again`);
     }
   }
 
@@ -388,7 +388,7 @@
       }
       await reload(r.anchor ?? undefined);
     } catch (e) {
-      app.error(`Rename failed: ${errorText(e)}`);
+      app.error(`Rename failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
     }
     refocus(r.anchor);
   }
@@ -403,7 +403,7 @@
       await fn();
       await reload();
     } catch (e) {
-      app.error(`${what} failed: ${errorText(e)}`);
+      app.error(`${what} failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
     }
   }
 
@@ -509,7 +509,7 @@
 
 <section class="meeting" aria-label={meeting?.title || "Meeting"}>
   {#if loadError}
-    <p class="state error" role="alert">Could not open this meeting: {loadError}</p>
+    <p class="state error" role="alert">Could not open this meeting: {loadError}. Press F5 to try again.</p>
   {:else if !loaded || !meeting}
     <p class="state">Loading…</p>
   {:else}

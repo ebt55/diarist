@@ -11,6 +11,7 @@
   import Library from "./components/Library.svelte";
   import MeetingView from "./components/MeetingView.svelte";
   import Overlays from "./components/Overlays.svelte";
+  import ReadinessPanel from "./components/ReadinessPanel.svelte";
   import RecordSheet from "./components/RecordSheet.svelte";
 
   // Settings, Diagnostics and the first-run screen are split into their own chunks.
@@ -127,7 +128,7 @@
       });
       if (picked && picked.length > 0) await app.importPaths(picked);
     } catch (e) {
-      app.error(`Could not open the file dialog: ${errorText(e)}`);
+      app.error(`Could not open the file dialog (${errorText(e)}); drop the files onto the window instead`);
     }
   }
 
@@ -240,6 +241,7 @@
         {#if setupPage}{@const Page = setupPage}<Page />{/if}
       </div>
     {/if}
+    <ReadinessPanel />
   </main>
 </div>
 

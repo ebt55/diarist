@@ -138,6 +138,75 @@ pub fn gpu_info(index: u32) -> Option<GpuInfo> {
     })
 }
 
+/// A display adapter as Windows lists it (DXGI), for choosing the runtime
+/// package before any runtime is installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct GpuAdapter {
+    pub name: String,
+    /// `nvidia`, `amd`, `intel` or `other`.
+    pub vendor: String,
+    pub vram_mb: u32,
+}
+
+/// Hardware display adapters, largest dedicated memory first (software
+/// adapters such as the Basic Render Driver are skipped).
+pub fn adapters() -> Vec<GpuAdapter> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+        const SOFTWARE: u32 = 2; // DXGI_ADAPTER_FLAG_SOFTWARE
+        let mut out = Vec::new();
+        let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+            return out;
+        };
+        for i in 0..16 {
+            let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else {
+                break;
+            };
+            let Ok(d) = (unsafe { adapter.GetDesc1() }) else {
+                continue;
+            };
+            if d.Flags & SOFTWARE != 0 || d.VendorId == 0x1414 {
+                continue; // Microsoft Basic Render Driver
+            }
+            let len = d.Description.iter().position(|&c| c == 0).unwrap_or(128);
+            out.push(GpuAdapter {
+                name: String::from_utf16_lossy(&d.Description[..len])
+                    .trim()
+                    .to_owned(),
+                vendor: match d.VendorId {
+                    0x10DE => "nvidia",
+                    0x1002 | 0x1022 => "amd",
+                    0x8086 => "intel",
+                    _ => "other",
+                }
+                .to_owned(),
+                vram_mb: (d.DedicatedVideoMemory >> 20) as u32,
+            });
+        }
+        out.sort_by_key(|a| std::cmp::Reverse(a.vram_mb));
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// The runtime package for this machine: `cuda` with an NVIDIA GPU whose
+/// driver supports CUDA 13, `vulkan` with another GPU (or an older NVIDIA
+/// driver), else `cpu`.
+pub fn recommended_backend(gpu: Option<&GpuInfo>, adapters: &[GpuAdapter]) -> &'static str {
+    if gpu.is_some_and(|g| g.cuda_ok) {
+        "cuda"
+    } else if !adapters.is_empty() || gpu.is_some() {
+        "vulkan"
+    } else {
+        "cpu"
+    }
+}
+
 /// Free memory from NVML, else from `nemo-speech doctor` in `engine_dir`
 /// (`None` when neither can tell).
 pub fn free_vram(index: u32, engine_dir: Option<&Path>) -> Option<VramReading> {
@@ -199,6 +268,19 @@ mod tests {
             assert!(g.name.contains("NVIDIA") || !g.name.is_empty(), "{g:?}");
             assert!(!g.driver_version.is_empty(), "{g:?}");
             assert_eq!(g.vram_total_mb, total);
+            let a = adapters();
+            assert!(a.iter().any(|x| x.vendor == "nvidia"), "{a:?}");
+            assert_eq!(
+                recommended_backend(Some(&g), &a),
+                if g.cuda_ok { "cuda" } else { "vulkan" }
+            );
         }
+        assert_eq!(recommended_backend(None, &[]), "cpu");
+        let amd = GpuAdapter {
+            name: "AMD Radeon".into(),
+            vendor: "amd".into(),
+            vram_mb: 8_000,
+        };
+        assert_eq!(recommended_backend(None, &[amd]), "vulkan");
     }
 }
