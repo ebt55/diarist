@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use meet_core::audio::{find_on_path, ChainDecoder};
+use meet_core::engine::NemoCliEngine;
 use meet_core::export::{render, ExportDoc, ExportFormat};
 use meet_core::models::{self, DataPaths, DoctorReport, Manifest};
 use meet_core::pipeline::{import_file, ImportOptions, ImportRequest, JobQueue};
@@ -69,6 +70,20 @@ enum Command {
         /// Export format: md, txt, json, srt, vtt, rttm.
         #[arg(long)]
         format: Option<String>,
+        /// Print a machine-readable result on stdout (the summary goes to stderr).
+        #[arg(long)]
+        json: bool,
+        /// ASR model for this run only: a .gguf path or a name/id/path from
+        /// `models list` (the stored selection is unchanged).
+        #[arg(long, value_name = "NAME_OR_PATH")]
+        asr_model: Option<String>,
+        /// Diarizer for this run only (like --asr-model).
+        #[arg(long, value_name = "NAME_OR_PATH")]
+        diar_model: Option<String>,
+        /// A flag passed verbatim to `nemo-speech transcribe` (repeatable),
+        /// e.g. `--engine-arg=--verbatim`.
+        #[arg(long = "engine-arg", value_name = "FLAG", allow_hyphen_values = true)]
+        engine_args: Vec<String>,
     },
     /// List meetings, newest first.
     List,
@@ -184,7 +199,7 @@ struct Ctx {
 impl Ctx {
     fn open(cli: &Cli) -> CliResult<Self> {
         let mut paths = match &cli.data_dir {
-            Some(d) => DataPaths::at(d),
+            Some(d) => DataPaths::at(d.components().collect::<PathBuf>()),
             None => DataPaths::resolve()?,
         };
         if let Some(m) = &cli.models_dir {
@@ -244,8 +259,17 @@ fn run(cli: &Cli) -> CliResult {
             device,
             out,
             format,
+            json,
+            asr_model,
+            diar_model,
+            engine_args,
         } => {
             let export = export_target(format.as_deref(), out.as_deref(), true)?;
+            let overrides = models::EngineOverrides {
+                asr: asr_model.clone(),
+                diarizer: diar_model.clone(),
+                extra_args: engine_args.clone(),
+            };
             transcribe(
                 &ctx,
                 file,
@@ -256,6 +280,8 @@ fn run(cli: &Cli) -> CliResult {
                 *keep_wav,
                 device,
                 export,
+                &overrides,
+                *json,
             )
         }
         Command::List => list(&ctx),
@@ -389,6 +415,8 @@ fn transcribe(
     keep_wav: bool,
     device: &str,
     export_to: Option<(ExportFormat, Option<PathBuf>)>,
+    overrides: &models::EngineOverrides,
+    json: bool,
 ) -> CliResult {
     if !file.is_file() {
         return Err(CliError::Failed(format!(
@@ -396,7 +424,7 @@ fn transcribe(
             file.display()
         )));
     }
-    let built = models::select_engine(&ctx.paths, &*ctx.store, device)?;
+    let built = models::select_engine_with(&ctx.paths, &*ctx.store, device, overrides)?;
     let sel = built.selection;
     if built.experimental {
         eprintln!(
@@ -418,10 +446,15 @@ fn transcribe(
         diarize,
     };
     eprintln!(
-        "engine {} | asr {} | diarizer {}",
+        "engine {} | asr {} | diarizer {}{}",
         sel.engine_version.as_deref().unwrap_or("?"),
         sel.asr_file.display_name,
-        sel.diarizer_file.display_name
+        sel.diarizer_file.display_name,
+        if overrides.extra_args.is_empty() {
+            String::new()
+        } else {
+            format!(" | engine args {}", overrides.extra_args.join(" "))
+        }
     );
     let decoder = Arc::new(ChainDecoder::new());
     let queue = JobQueue::new();
@@ -451,21 +484,75 @@ fn transcribe(
         .iter()
         .filter(|s| s.merged_into.is_none())
         .count();
-    println!("meeting {} ({})", id, detail.meeting.uid);
-    println!("  title     {}", detail.meeting.title);
-    println!("  duration  {}", hms(duration_ms));
-    println!("  decoded   with {}", decoder.last_decoder().unwrap_or("?"));
-    println!("  speakers  {speakers}");
-    println!("  segments  {segments}");
-    println!("  words     {words}");
-    println!(
-        "  wall      {wall:.1} s ({:.1}x real time, RTF {:.4})",
-        duration_ms as f64 / 1_000.0 / wall.max(1e-9),
-        wall / (duration_ms as f64 / 1_000.0).max(1e-9)
-    );
+    // The meeting folder keeps the engine's words JSON and, with --rttm, the
+    // standalone diarization (pipeline::import_file, NemoCliEngine).
+    let folder = ctx.paths.audio().join(&detail.meeting.uid);
+    let words_json = NemoCliEngine::output_path(&folder.join("source.wav"));
+    let words_json = words_json.is_file().then_some(words_json);
+    let rttm_path = folder.join("diarization.rttm");
+    let rttm_path = (rttm && rttm_path.is_file()).then_some(rttm_path);
+    let mut lines = vec![
+        format!("meeting {} ({})", id, detail.meeting.uid),
+        format!("  title     {}", detail.meeting.title),
+        format!("  duration  {}", hms(duration_ms)),
+        format!("  decoded   with {}", decoder.last_decoder().unwrap_or("?")),
+        format!("  speakers  {speakers}"),
+        format!("  segments  {segments}"),
+        format!("  words     {words}"),
+        format!(
+            "  wall      {wall:.1} s ({:.1}x real time, RTF {:.4})",
+            duration_ms as f64 / 1_000.0 / wall.max(1e-9),
+            wall / (duration_ms as f64 / 1_000.0).max(1e-9)
+        ),
+    ];
+    if let Some(p) = &words_json {
+        lines.push(format!("  words json {}", p.display()));
+    }
+    if rttm {
+        lines.push(match (&rttm_path, diarize) {
+            (Some(p), _) => format!("  rttm      {}", p.display()),
+            (None, false) => "  rttm      not written (--no-diarize)".to_owned(),
+            (None, true) => format!(
+                "  rttm      not written (expected {})",
+                folder.join("diarization.rttm").display()
+            ),
+        });
+    }
+    let mut exported = None;
     if let Some((fmt, Some(out))) = export_to {
         export(ctx, id, fmt, Some(&out))?;
-        println!("  exported  {}", out.display());
+        lines.push(format!("  exported  {}", out.display()));
+        exported = Some(out);
+    }
+    for l in &lines {
+        if json {
+            eprintln!("{l}");
+        } else {
+            println!("{l}");
+        }
+    }
+    if json {
+        let result = serde_json::json!({
+            "meeting_id": id.0,
+            "uid": detail.meeting.uid,
+            "run_id": detail.current_run.as_ref().map(|r| r.id.0),
+            "title": detail.meeting.title,
+            "duration_ms": duration_ms,
+            "speakers": speakers,
+            "segments": segments,
+            "words": words,
+            "wall_s": (wall * 1_000.0).round() / 1_000.0,
+            "decoder": decoder.last_decoder(),
+            "engine_version": sel.engine_version,
+            "asr_model": sel.asr.display().to_string(),
+            "diar_model": sel.diarizer.display().to_string(),
+            "language": language,
+            "words_json": words_json.map(|p| p.display().to_string()),
+            "rttm": rttm_path.map(|p| p.display().to_string()),
+            "meeting_dir": folder.display().to_string(),
+            "exported": exported.map(|p| p.display().to_string()),
+        });
+        println!("{result}");
     }
     Ok(())
 }
@@ -906,6 +993,35 @@ mod tests {
             cli.command,
             Command::Transcribe { rttm: true, .. }
         ));
+        let cli = Cli::try_parse_from([
+            "meet-cli",
+            "transcribe",
+            "a.wav",
+            "--json",
+            "--asr-model",
+            "nemotron-3.5",
+            "--diar-model",
+            "D:/m/diar.gguf",
+            "--engine-arg",
+            "--verbatim",
+            "--engine-arg=--foo=1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Transcribe {
+                json,
+                asr_model,
+                diar_model,
+                engine_args,
+                ..
+            } => {
+                assert!(json);
+                assert_eq!(asr_model.as_deref(), Some("nemotron-3.5"));
+                assert_eq!(diar_model.as_deref(), Some("D:/m/diar.gguf"));
+                assert_eq!(engine_args, ["--verbatim", "--foo=1"]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

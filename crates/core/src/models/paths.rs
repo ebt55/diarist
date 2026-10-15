@@ -55,15 +55,18 @@ impl DataPaths {
         }
     }
 
-    /// Uses `dir` instead of `<root>\models`.
+    /// Uses `dir` instead of `<root>\models`. A relative `dir` is made
+    /// absolute (from the current directory) so files found there are stored
+    /// with paths that resolve the same way later.
     pub fn with_models_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.models_override = Some(dir.into());
+        self.models_override = Some(absolute_or_same(dir.into()));
         self
     }
 
-    /// Uses `dir` instead of `<root>\engine` (a folder of runtimes, or one runtime).
+    /// Uses `dir` instead of `<root>\engine` (a folder of runtimes, or one
+    /// runtime); made absolute like [`DataPaths::with_models_dir`].
     pub fn with_engine_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.engine_override = Some(dir.into());
+        self.engine_override = Some(absolute_or_same(dir.into()));
         self
     }
 
@@ -156,6 +159,14 @@ impl DataPaths {
             rel.split('/')
                 .fold(self.root.clone(), |acc, part| acc.join(part))
         }
+    }
+}
+
+fn absolute_or_same(p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        std::path::absolute(&p).unwrap_or(p)
     }
 }
 
@@ -265,6 +276,13 @@ mod tests {
         assert_eq!(
             p.relative(Path::new("E:/elsewhere/y.gguf")),
             "E:/elsewhere/y.gguf"
+        );
+        // Relative overrides become absolute, so stored paths resolve later.
+        let p = DataPaths::at("D:/data").with_models_dir("models");
+        assert!(p.models().is_absolute());
+        assert_eq!(
+            p.absolute(&p.relative(&p.models().join("a.gguf"))),
+            p.models().join("a.gguf")
         );
     }
 

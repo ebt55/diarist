@@ -26,7 +26,7 @@ pub mod paths;
 pub mod pull;
 pub mod scan;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,7 +42,7 @@ pub use scan::{ensure_selections, recommended, scan, ScanReport};
 use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
 use crate::store::{Store, StoreError};
-use crate::types::{ModelFile, ModelFileId, ModelRole};
+use crate::types::{ModelFile, ModelFileId, ModelRole, ModelSource};
 use crate::views::{selection_key, EngineStatus};
 
 pub(crate) fn now_ms() -> i64 {
@@ -124,12 +124,33 @@ pub struct SelectedEngine {
     pub experimental: bool,
 }
 
+/// Per-invocation changes to the stored selection (the CLI's `--asr-model`,
+/// `--diar-model`, `--engine-arg`). Models are a file path or anything
+/// [`find_file`] accepts; nothing is persisted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineOverrides {
+    pub asr: Option<String>,
+    pub diarizer: Option<String>,
+    /// Flags appended verbatim to `nemo-speech transcribe`.
+    pub extra_args: Vec<String>,
+}
+
 /// Builds the engine for the selected runtime, ASR model and diarizer on
 /// `device` (`cuda:0`, `cpu`). When nothing usable is selected, scans the
 /// models and engine folders first (which also picks the recommended
-/// files: Nemotron 3.5 and Nemotron 3 Diarization).
+/// files: the EN model and Nemotron 3 Diarization).
 pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Result<SelectedEngine> {
-    let sel = match resolve_selection(paths, store) {
+    select_engine_with(paths, store, device, &EngineOverrides::default())
+}
+
+/// [`select_engine`] with per-invocation overrides.
+pub fn select_engine_with(
+    paths: &DataPaths,
+    store: &dyn Store,
+    device: &str,
+    overrides: &EngineOverrides,
+) -> Result<SelectedEngine> {
+    let mut sel = match resolve_selection(paths, store) {
         Ok(s) => s,
         Err(_) => {
             let manifest = Manifest::load(&paths.root)?;
@@ -137,12 +158,19 @@ pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Resu
             resolve_selection(paths, store)?
         }
     };
+    if let Some(q) = &overrides.asr {
+        (sel.asr, sel.asr_file) = resolve_model(paths, store, ModelRole::Asr, q)?;
+    }
+    if let Some(q) = &overrides.diarizer {
+        (sel.diarizer, sel.diarizer_file) = resolve_model(paths, store, ModelRole::Diarizer, q)?;
+    }
     let models_dir = paths.models();
     let experimental = !sel.asr_file.capabilities.streaming;
     let engine: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
         e.version = sel.engine_version.clone();
+        e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     } else {
         let mut e = NemoCliEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
@@ -151,6 +179,7 @@ pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Resu
         // `--language` only for multilingual models (Nemotron 3.5); the EN
         // model ignores it. The meeting keeps its language either way.
         e.pass_language = is_multilingual(&sel.asr_file);
+        e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     };
     let mut diarize_runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
@@ -161,6 +190,69 @@ pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Resu
         selection: sel,
         experimental,
     })
+}
+
+/// A model given as a path (scanned or not) or a [`find_file`] query, as an
+/// absolute path and its `model_files` row (a synthetic one, id 0, for an
+/// unscanned file, classified from its GGUF header).
+pub fn resolve_model(
+    paths: &DataPaths,
+    store: &dyn Store,
+    role: ModelRole,
+    query: &str,
+) -> Result<(PathBuf, ModelFile)> {
+    let p = Path::new(query.trim());
+    if !p.is_file() {
+        let f = find_file(store, role, query)?;
+        return Ok((paths.absolute(&f.path), f));
+    }
+    let abs = std::path::absolute(p)?;
+    let rel = paths.relative(&abs);
+    if let Some(f) = store
+        .list_model_files()?
+        .into_iter()
+        .find(|f| f.path == rel)
+    {
+        if f.role != role {
+            return Err(CoreError::Models(format!(
+                "{query} is a {} model, not {role}",
+                f.role
+            )));
+        }
+        return Ok((abs, f));
+    }
+    let size = std::fs::metadata(&abs)?.len();
+    let c = read_header(&abs).map(|h| classify(&h, size)).ok();
+    let file_role = c.as_ref().map_or(ModelRole::Unknown, |c| c.role);
+    if file_role != role && file_role != ModelRole::Unknown {
+        return Err(CoreError::Models(format!(
+            "{query} is a {file_role} model, not {role}"
+        )));
+    }
+    let stem = abs
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let file = ModelFile {
+        id: ModelFileId(0),
+        path: rel,
+        role,
+        architecture: c.as_ref().and_then(|c| c.architecture.clone()),
+        display_name: c
+            .as_ref()
+            .and_then(|c| c.display_name.clone())
+            .unwrap_or(stem),
+        quant: c.as_ref().and_then(|c| c.quant.clone()),
+        size_bytes: size as i64,
+        sha256: None,
+        source: ModelSource::User,
+        capabilities: c.map(|c| c.capabilities).unwrap_or_default(),
+        manifest_name: None,
+        first_seen_at: 0,
+        last_seen_at: 0,
+        missing: false,
+    };
+    Ok((abs, file))
 }
 
 /// A model that understands more than one language (its header or sidecar
@@ -195,8 +287,16 @@ pub fn select_by_id(store: &dyn Store, role: ModelRole, id: ModelFileId) -> Resu
 }
 
 /// Selects a file for `role` by id, path (or path suffix), manifest name,
-/// display name or file name. Returns the selected file.
+/// display name or file name (see [`find_file`]). Returns the selected file.
 pub fn select(store: &dyn Store, role: ModelRole, query: &str) -> Result<ModelFile> {
+    let hit = find_file(store, role, query)?;
+    store.set_setting(&selection_key(role), &hit.id.to_string())?;
+    Ok(hit)
+}
+
+/// The present file of `role` matching `query`: its id, path (or path
+/// suffix), manifest name, display name, file name, or (engines) version.
+pub fn find_file(store: &dyn Store, role: ModelRole, query: &str) -> Result<ModelFile> {
     let q = query.trim();
     let files: Vec<ModelFile> = store
         .list_model_files()?
@@ -243,7 +343,6 @@ pub fn select(store: &dyn Store, role: ModelRole, query: &str) -> Result<ModelFi
                     .join(", ")
             ))
         })?;
-    store.set_setting(&selection_key(role), &hit.id.to_string())?;
     Ok(hit)
 }
 
@@ -359,5 +458,39 @@ mod tests {
         assert!(!built.experimental);
         assert_eq!(built.diarize_runner.device, "cpu");
         assert!(built.engine.info().runtime.contains("0.2.0"));
+
+        // Per-invocation overrides: by name, or a file that was never scanned.
+        let dir = tempfile::tempdir().unwrap();
+        let loose = dir.path().join("loose-asr.gguf");
+        std::fs::write(&loose, b"not a gguf").unwrap();
+        let ov = EngineOverrides {
+            asr: Some(loose.display().to_string()),
+            diarizer: Some("diar".into()),
+            extra_args: vec!["--verbatim".into()],
+        };
+        let built = select_engine_with(&paths, &store, "cpu", &ov).unwrap();
+        assert_eq!(built.selection.asr, loose);
+        assert_eq!(built.selection.asr_file.id, ModelFileId(0));
+        assert_eq!(built.selection.asr_file.display_name, "loose-asr");
+        assert_eq!(built.selection.diarizer_file.display_name, "diar");
+        assert!(
+            built.experimental,
+            "an unclassified file is not known to stream"
+        );
+        assert!(select_engine_with(
+            &paths,
+            &store,
+            "cpu",
+            &EngineOverrides {
+                asr: Some("diar".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        // The stored selection did not change.
+        assert_eq!(
+            selected_file(&store, ModelRole::Asr).unwrap().unwrap().id,
+            one
+        );
     }
 }

@@ -763,6 +763,8 @@ pub struct NemoCascadeEngine {
     pub asr_model: PathBuf,
     pub diar_model: PathBuf,
     pub version: Option<String>,
+    /// Extra flags appended verbatim to `transcribe`.
+    pub extra_args: Vec<String>,
     running: Running,
 }
 
@@ -780,6 +782,7 @@ impl NemoCascadeEngine {
             asr_model: asr_model.into(),
             diar_model: diar_model.into(),
             version: None,
+            extra_args: Vec::new(),
             running: Running::default(),
         }
     }
@@ -811,7 +814,8 @@ impl Engine for NemoCascadeEngine {
             .arg(process::path_arg(&self.asr_model))
             .args(["--device", &self.device, "--json", "--output"])
             .arg(process::path_arg(&output))
-            .arg("--force");
+            .arg("--force")
+            .args(&self.extra_args);
         let diarizer = DiarizeRunner {
             engine_dir: self.engine_dir.clone(),
             models_dir: self.models_dir.clone(),
