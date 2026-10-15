@@ -44,6 +44,10 @@ toolkit is needed; the GPU driver is the only prerequisite.
    (770 MB)**. Every file is checked against its published SHA-256.
 3. Press **Ctrl+O** to import a recording, or **R** to record a meeting.
 
+Using a coding agent (Claude Code, Codex or similar)? Point it at
+[docs/SETUP-WITH-AN-AGENT.md](docs/SETUP-WITH-AN-AGENT.md): it checks your PC,
+picks the package and models, installs and verifies.
+
 You can skip the setup ("Set up later"): Import and Record tell you exactly
 what is missing when you use them, with a one-click fix. If a download does
 not work on your network, every item shows its address, hash and folder, so

@@ -20,6 +20,9 @@ it; the app downloads them on first use.
 
 ## 2. First start: engine and models
 
+A coding agent can do this step for you from a terminal, with hash checks:
+see [SETUP-WITH-AN-AGENT.md](SETUP-WITH-AN-AGENT.md).
+
 The setup screen checks:
 
 - **GPU**: name, memory, driver and the CUDA version the driver supports. The
