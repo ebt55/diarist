@@ -1484,6 +1484,15 @@ impl RunStore for MemoryStore {
             .ok_or_else(|| StoreError::not_found("audio track", track))
     }
 
+    fn set_run_engine_info(&self, run: RunId, engine_info: serde_json::Value) -> StoreResult<()> {
+        self.lock()?
+            .runs
+            .get_mut(&run)
+            .ok_or_else(|| StoreError::not_found("run", run))?
+            .engine_info = engine_info;
+        Ok(())
+    }
+
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
         let mut st = self.lock()?;
         for a in anchors {

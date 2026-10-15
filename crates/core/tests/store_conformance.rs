@@ -769,6 +769,17 @@ fn runs_list_get_delete(store: &dyn RunStore) {
         vec![current, other.id]
     );
     assert_eq!(store.get_run(other.id).unwrap().engine_info["n"], 2);
+    store
+        .set_run_engine_info(other.id, serde_json::json!({"n": 3, "note": "x"}))
+        .unwrap();
+    let info = store.get_run(other.id).unwrap().engine_info;
+    assert_eq!(
+        (info["n"].as_i64(), info["note"].as_str()),
+        (Some(3), Some("x"))
+    );
+    assert!(is_not_found(
+        store.set_run_engine_info(RunId(424_242), serde_json::json!({}))
+    ));
     assert_eq!(store.run_speakers(other.id).unwrap().len(), 3);
     // Deleting a non-current run leaves the transcript alone.
     store.delete_run(other.id).unwrap();

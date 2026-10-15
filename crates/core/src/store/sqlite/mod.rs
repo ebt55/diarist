@@ -264,6 +264,14 @@ impl RunStore for SqliteStore {
         Ok(())
     }
 
+    fn set_run_engine_info(&self, run: RunId, engine_info: serde_json::Value) -> StoreResult<()> {
+        let n = self.lock()?.execute(
+            "UPDATE transcript_runs SET engine_info = ?2 WHERE id = ?1",
+            params![run.0, to_json(&engine_info)?],
+        )?;
+        not_found_if_zero(n, "run", run.0)
+    }
+
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;

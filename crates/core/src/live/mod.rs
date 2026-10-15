@@ -34,7 +34,7 @@ pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
-pub use recover::{recover, RecoveredMeeting};
+pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
 pub use rerun::rerun_post_pass;
 pub use snapshot::snapshot;
 pub use views::{

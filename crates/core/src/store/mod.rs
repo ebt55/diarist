@@ -374,6 +374,9 @@ pub trait RunStore: Store {
     /// the per-channel WAVs once the stereo FLAC replaced them.
     fn delete_audio_track(&self, track: TrackId) -> StoreResult<()>;
 
+    /// Replaces a run's `engine_info` (e.g. a note from crash recovery).
+    fn set_run_engine_info(&self, run: RunId, engine_info: serde_json::Value) -> StoreResult<()>;
+
     /// Inserts (or replaces) clock anchors.
     fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()>;
 

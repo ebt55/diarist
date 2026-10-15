@@ -914,15 +914,24 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
         .list_meetings()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|m| m.status == MeetingStatus::Recording && m.source == Source::Live)
+        .filter(|m| {
+            m.source == Source::Live
+                && matches!(
+                    m.status,
+                    MeetingStatus::Recording | MeetingStatus::Processing
+                )
+        })
         .collect();
     if pending.is_empty() {
         return Ok(());
     }
     log::warn!(
-        "recovering {} interrupted recording(s): {:?}",
+        "recovering {} interrupted recording(s) or post-pass(es): {:?}",
         pending.len(),
-        pending.iter().map(|m| m.id.0).collect::<Vec<_>>()
+        pending
+            .iter()
+            .map(|m| format!("{} ({})", m.id, m.status))
+            .collect::<Vec<_>>()
     );
     let ctx = offline_context(app, Arc::new(Mutex::new(None))).map_err(|e| {
         format!(
@@ -939,13 +948,15 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
             .map(|m| m.title.clone())
             .unwrap_or_default();
         log::info!(
-            "recovered meeting {}: mic {} / loopback {} frames, post-pass {}",
+            "recovered meeting {} (was {}): {:?}; mic {} / loopback {} frames, post-pass {}",
             r.meeting_id,
+            r.was,
+            r.action,
             r.mic_frames,
             r.loopback_frames,
             r.post_pass
                 .as_ref()
-                .map_or("none (no audio)".to_owned(), |p| p.job_id.to_string())
+                .map_or("none".to_owned(), |p| p.job_id.to_string())
         );
         if let Some(pp) = &r.post_pass {
             live.register_post_pass(&pp.job_id, Some(r.meeting_id), &title);

@@ -683,3 +683,140 @@ fn recovers_a_crashed_recording() {
     // Nothing left to recover.
     assert!(recover(&ctx).unwrap().is_empty());
 }
+
+/// A live meeting whose post-pass was interrupted: status `processing`, a
+/// materialised live run (current) and, optionally, both WAVs (3 s).
+fn interrupted_meeting(
+    store: &SqliteStore,
+    dir: &Path,
+    title: &str,
+    wavs: bool,
+) -> (Meeting, RunId) {
+    let meeting = store
+        .create_meeting(NewMeeting {
+            title: title.into(),
+            source: Source::Live,
+            source_path: None,
+            language: "en".into(),
+            diarize_mic: false,
+            started_at: 1_791_000_000_000,
+            status: MeetingStatus::Processing,
+        })
+        .unwrap();
+    store
+        .finish_meeting(meeting.id, meeting.started_at + 3_000, 3_000)
+        .unwrap();
+    let run = store
+        .create_run(
+            meeting.id,
+            RunKind::Live,
+            serde_json::json!({"runtime": "fake live"}),
+        )
+        .unwrap();
+    store
+        .append_live_utterance(
+            run.id,
+            Channel::Loopback,
+            0,
+            0,
+            &[EngineWord {
+                t0_us: 500_000,
+                t1_us: 900_000,
+                text: "hello".into(),
+                conf: None,
+                spk: Some("spk_0".into()),
+            }],
+        )
+        .unwrap();
+    store
+        .materialise_live_run(run.id, &SegmentOptions::default())
+        .unwrap();
+    store.finish_run(run.id, RunStatus::Done).unwrap();
+    store.set_current_run(meeting.id, run.id).unwrap();
+    if wavs {
+        let folder = dir.join("audio").join(&meeting.uid);
+        for ch in ["mic", "loopback"] {
+            let mut w =
+                crate::audio::wav::WavSink::create(&folder.join(format!("{ch}.wav"))).unwrap();
+            w.write(&vec![100i16; 48_000]).unwrap();
+            w.finalize().unwrap();
+        }
+    }
+    (meeting, run.id)
+}
+
+#[test]
+fn recovers_interrupted_post_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    // A: the WAVs are there and the post-pass left a half-written run.
+    let (a, a_live) = interrupted_meeting(&store, dir.path(), "A", true);
+    let stale = store
+        .create_run(a.id, RunKind::PostPass, serde_json::json!({}))
+        .unwrap()
+        .id;
+    // B: the WAVs are gone, the live run is all there is (plus a stale run).
+    let (b, b_live) = interrupted_meeting(&store, dir.path(), "B", false);
+    let b_stale = store
+        .create_run(b.id, RunKind::PostPass, serde_json::json!({}))
+        .unwrap()
+        .id;
+    // C: the post-pass run was written and made current, then the WAVs went.
+    let (c, c_live) = interrupted_meeting(&store, dir.path(), "C", false);
+    let c_post = store
+        .create_run(c.id, RunKind::PostPass, serde_json::json!({}))
+        .unwrap()
+        .id;
+    store.finish_run(c_post, RunStatus::Done).unwrap();
+    store.set_current_run(c.id, c_post).unwrap();
+
+    let recovered = recover(&ctx).unwrap();
+    assert_eq!(recovered.len(), 3);
+    let of = |id: MeetingId| recovered.iter().find(|r| r.meeting_id == id).unwrap();
+    assert!(recovered.iter().all(|r| r.was == MeetingStatus::Processing));
+
+    // A: queued again; the stale run is gone, the new post-pass run is current.
+    let ra = of(a.id);
+    assert_eq!(ra.action, RecoveryAction::PostPassQueued);
+    assert_eq!((ra.mic_frames, ra.loopback_frames), (48_000, 48_000));
+    let report = ra
+        .post_pass
+        .as_ref()
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert_eq!(file.jobs.lock().unwrap().len(), 2);
+    assert!(store.get_run(stale).is_err());
+    assert!(store.get_run(a_live).is_err(), "live run replaced");
+    let d = store.get_meeting(a.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert_eq!(d.current_run.unwrap().id, report.current_run);
+    let tracks = store.list_audio_tracks(a.id).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].channel, TrackChannel::Playback);
+
+    // B: the live run is promoted, with a note.
+    let rb = of(b.id);
+    assert_eq!(rb.action, RecoveryAction::PromotedLive);
+    assert!(rb.post_pass.is_none());
+    let d = store.get_meeting(b.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    let cur = d.current_run.unwrap();
+    assert_eq!(cur.id, b_live);
+    assert_eq!(cur.engine_info["recovery"], PROMOTED_NOTE);
+    assert_eq!(cur.engine_info["runtime"], "fake live");
+    assert!(store.get_run(b_stale).is_err());
+    assert_eq!(store.get_segments(b.id, 0, 10).unwrap()[0].text, "hello");
+
+    // C: finished as it was; the live run goes (keep_live_runs is off).
+    let rc = of(c.id);
+    assert_eq!(rc.action, RecoveryAction::Finished);
+    let d = store.get_meeting(c.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert_eq!(d.current_run.unwrap().id, c_post);
+    assert!(store.get_run(c_live).is_err());
+
+    // Nothing left to recover.
+    assert!(recover(&ctx).unwrap().is_empty());
+}

@@ -270,9 +270,15 @@ pub fn run_post_pass(
         job.live_run
     };
 
-    // The playback track: stereo FLAC, then the WAVs go.
+    // The playback track: stereo FLAC, then the WAVs go. A post-pass that
+    // was interrupted after registering its FLAC left a row to replace.
     let flac = job.flac();
     let info = encode_stereo(&mic, &lb, &flac)?;
+    for t in store.list_audio_tracks(job.meeting)? {
+        if t.channel == TrackChannel::Playback {
+            store.delete_audio_track(t.id)?;
+        }
+    }
     let rel = |p: &Path| -> String {
         p.strip_prefix(&job.data_root)
             .map(|r| r.to_string_lossy().replace('\\', "/"))
