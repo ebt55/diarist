@@ -104,13 +104,21 @@ Other requirements:
 - Disk: 1.6 GB for engine and models; recordings about 90 MB per hour as stereo FLAC with 30-day retention by default; the transcript database is small (a year of daily meetings is tens of MB).
 - The engine binaries are unsigned by NVIDIA; Windows Smart App Control, when enabled, may block them until the app is signed (planned).
 
-## 5. Languages
+## 5. Adding or updating models and the engine yourself (ComfyUI-style)
+
+- Open Settings, Models, "Open models folder". Drop any GGUF the runtime supports anywhere in that folder (subfolders are fine; `asr\` and `diarization\` exist for tidiness). Press Refresh. The app reads the file's header, lists it under the right role with its size and a VRAM estimate, and you can select it. Nothing else to configure.
+- If a file is listed as "unrecognised", the runtime does not know its architecture, or it is not a speech model. You can still force it with a `<file>.meet.json` sidecar (`{"role":"asr","streaming":true}`), and the runtime's own error is shown if it cannot load it.
+- New runtime versions: extract the zip into a new folder under `engine\`, press Refresh, select it. The app warns when a version is newer than the ones it has been tested against.
+- "Download recommended" fetches the models in this guide into the same folders with hash verification. Offline machines can copy the files in by hand.
+- Selections are per role; the app remembers them and falls back to the recommended model with a notice if a selected file disappears.
+
+## 6. Languages
 
 - Diarization is language-independent.
 - Live and file mode: Nemotron 3.5 covers 40+ locales. Set the meeting's language when you know it; automatic detection works but loses about a second of the first utterance. The optional EN model is English only.
 - Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language.
 
-## 6. Honest caveats
+## 7. Honest caveats
 
 - Speaker labels in the live view are provisional; the runtime never revises them. The post-pass after Stop produces the stored transcript.
 - Word confidence is not available from the runtime (always 1.0), so the UI cannot flag uncertain words yet.

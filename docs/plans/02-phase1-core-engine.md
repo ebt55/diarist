@@ -19,11 +19,14 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 - Search filters `segments.run_id = meetings.current_run_id`.
 - Tests on `:memory:`: the Phase 0.5 conformance suite passes; migration applies twice idempotently; FTS finds a word with diacritics stripped; merge chain stays one level; carry-over on a synthetic two-run meeting copies names and flags an unmatched speaker; delete cascades and FTS has no orphans.
 
-### `models`
-- Parse `manifests/engine.json` and `manifests/models.json` (serde). Compute the install layout under a configurable data dir (default `%LOCALAPPDATA%\meet-assist`, or the exe folder in portable mode when `portable.txt` exists).
-- `download(entry, dest, progress_cb)`: HTTP with resume (Range), SHA-256 verify (`sha2`), atomic rename. Use `ureq` (sync, small) with rustls. Engine zip is extracted with the `zip` crate into `engine\<name>-<version>\`.
-- `status() -> EngineStatus { engine_installed, models: Vec<(name, installed)>, engine_dir, models_dir }`.
-- Tests: manifest parsing; sha mismatch rejected; resume logic on a local file served from a test HTTP server (`tiny_http` dev-dependency) or skipped if too costly.
+### `models` (ComfyUI-style drop-in, see docs/01 "Model management")
+- `paths`: data root resolution (portable marker, registry key, `app_local_data_dir`), `models\` and `engine\` under it; `NEMO_SPEECH_MODEL_DIR` = `models\`.
+- `gguf::read_header(path) -> GgufHeader { architecture, name, quant, tensor_count, kv: Map }`: parse only the header (magic, version 2/3, tensor and kv counts, kv pairs; never read tensors). Tests on hand-built minimal GGUF files and on the real downloaded models when `MEET_ASSIST_MODELS_DIR` is set.
+- `classify(header, size) -> (Role, Capabilities)` from a small architecture table (Nemotron streaming ASR, Parakeet TDT, Nemotron 3 / Sortformer diarization, plus `unknown`); `<file>.meet.json` sidecar overrides when present. VRAM: measured values from the manifest when the sha matches, else an estimate from file size (flagged as estimate).
+- `scan(data_root) -> Vec<ModelFile>`: recursive over `models\` (GGUF, ONNX) and `engine\` (folders containing `bin\nemo-speech.exe`; version via `--json doctor`), upserts `model_files`, marks missing files, keeps selections valid (falls back to the recommended model with a note when the selected file vanished).
+- `download(entry, dest, progress_cb)` for the engine zip: HTTP with resume (Range), SHA-256 verify (`sha2`), atomic rename, `ureq` with `rustls-platform-verifier`; extracted with the `zip` crate into `engine\<name>-<version>\`. Models go through `nemo-speech pull` (JSON output parsed for the final path) with our manifest's sha and size verified afterwards; optional models by name.
+- `status() -> EngineStatus { engines: Vec<EngineInfo>, selected_engine, models_by_role, selected: {asr, diarizer}, free_vram_mb, data_root }`.
+- Tests: manifest parsing; GGUF header round-trip; classification table; scan picks up a dropped file and marks a removed one missing; sha mismatch rejected; resume logic on a local file served from a test HTTP server (`tiny_http` dev-dependency).
 
 ### `audio::decode`
 - `trait Decoder { fn decode_to_wav16k(&self, input, output) -> Result<DecodedInfo> }` with a chain: `SymphoniaDecoder` (features: aac, isomp4, mp3, flac, wav, ogg, vorbis) to f32, downmix to mono, resample with rubato `Fft` (integer ratio) or `Async` sinc to 16 kHz, write PCM16 WAV with `hound`; then `MediaFoundationDecoder` (`IMFSourceReader` via the `windows` crate, requesting PCM output); then `FfmpegDecoder` if `ffmpeg` is on PATH; then an error whose message contains the ffmpeg command the user could run. Report duration, source rate, channels and which decoder succeeded.
@@ -60,7 +63,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 
 ### `meet-cli`
 - `transcribe <file> [--db <path>] [--data-dir <dir>] [--no-diarize] [--title <s>] [--out <path> --format md|txt|json|srt|vtt|rttm]`: decode, run engine, segment, store, print a summary (duration, speakers, segments, RTF).
-- `list`, `show <meeting_id>`, `search <query>`, `export <meeting_id> --format ... --out ...`, `rename <speaker_id> <name>`, `models status`, `models pull` (downloads what is missing with a progress bar), `doctor` (data dir, engine present, models present, `nvidia-smi` reachable).
+- `list`, `show <meeting_id>`, `search <query>`, `export <meeting_id> --format ... --out ...`, `rename <speaker_id> <name>`, `models list` (what the scanner found, by role, with fit marks), `models scan`, `models select <role> <path-or-name>`, `models pull [name]` (required models by default, optional by name, progress bar), `engine list` / `engine select <version>`, `doctor` (data root, selected engine and models, GPU and free VRAM via the engine's `doctor`).
 - Exit codes: 0 ok, 1 error, 2 usage.
 
 ## Verification

@@ -172,15 +172,26 @@ CREATE TABLE speaker_embeddings (                -- v3
   vector        BLOB NOT NULL                    -- float32 LE
 );
 
-CREATE TABLE models (
-  name          TEXT PRIMARY KEY,
-  kind          TEXT NOT NULL,                   -- engine | asr_offline | asr_streaming | diarizer | embedder
-  version       TEXT NOT NULL,
-  path          TEXT NOT NULL,
-  sha256        TEXT NOT NULL,
+-- Everything the scanner found under models\ and engine\ (ComfyUI-style drop-in).
+CREATE TABLE model_files (
+  id            INTEGER PRIMARY KEY,
+  path          TEXT NOT NULL UNIQUE,            -- relative to the data root
+  role          TEXT NOT NULL CHECK (role IN ('asr','diarizer','embedder','punctuation','llm','engine','unknown')),
+  architecture  TEXT,                            -- GGUF general.architecture, or runtime version for engines
+  display_name  TEXT NOT NULL,                   -- GGUF general.name, or file stem
+  quant         TEXT,                            -- e.g. Q8_0
   size_bytes    INTEGER NOT NULL,
-  downloaded_at INTEGER NOT NULL
+  sha256        TEXT,                            -- computed lazily or taken from the manifest / .verified sidecar
+  source        TEXT NOT NULL CHECK (source IN ('manifest','pull','user')),
+  capabilities  TEXT NOT NULL,                   -- JSON: {streaming, diarize, languages[], vram_mb_measured?, vram_mb_estimate?}
+  manifest_name TEXT,                            -- set when the file matches a manifests/models.json entry
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  missing       INTEGER NOT NULL DEFAULT 0       -- 1 when the file disappeared since the last scan
 );
+CREATE INDEX model_files_role ON model_files(role);
+
+-- Selection per role lives in settings: selected_model.asr, selected_model.diarizer, selected_engine.
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
