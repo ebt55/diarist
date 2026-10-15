@@ -114,7 +114,7 @@ Other requirements:
 
 ## 5. Adding or updating models and the engine yourself (ComfyUI-style)
 
-- Open Settings, Models, "Open models folder". Drop any GGUF the runtime supports anywhere in that folder (subfolders are fine; `asr\` and `diarization\` exist for tidiness). Press Refresh. The app reads the file's header, lists it under the right role with its size and a VRAM estimate, and you can select it. Nothing else to configure.
+- Open Settings, Models, "Open models folder". Drop any GGUF the runtime supports anywhere in that folder (any subfolder is scanned; the app's own downloads land in `models\<publisher>\<model>\<revision>\`). Press Refresh. The app reads the file's header, lists it under the right role with its size and a VRAM estimate, and you can select it. Nothing else to configure.
 - If a file is listed as "unrecognised", the runtime does not know its architecture, or it is not a speech model. You can still force it with a `<file>.meet.json` sidecar (`{"role":"asr","streaming":true}`), and the runtime's own error is shown if it cannot load it.
 - If a file is unrecognised but you know what it is, Settings offers "Use for speech to text" and "Use for speakers" on it, with a warning.
 - New runtime versions: Settings, Models, "Check for newer runtime" lists the NeMo-Speech.cpp releases on GitHub and installs a package next to the others. Or put the zip (checked against the manifest and extracted on Refresh) or the extracted folder under `engine\`, press Refresh, select it. The app warns when a version is newer than the ones it has been tested against.
