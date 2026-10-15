@@ -1,0 +1,17 @@
+[package]
+name = "meet-cli"
+description = "meet-assist dev CLI: transcribe a file, dump JSON, run the post-pass (no UI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "meet-cli"
+path = "src/main.rs"
+
+[dependencies]
+meet-core.workspace = true
+clap.workspace = true
