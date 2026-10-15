@@ -1,6 +1,6 @@
 # Architecture decision record
 
-Status: v0.2, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/`. Items marked PENDING wait on the runtime spike (research/03) or the diarization report (research/04).
+Status: v0.3, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/`. Items marked PENDING wait on the runtime spike (research/03).
 
 ## Decisions at a glance
 
@@ -23,8 +23,10 @@ Status: v0.2, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/
 | Recording storage | 16 kHz mono WAV per channel during recording; optional FLAC afterwards | Crash-safe append; needed for the post-pass and the eval set |
 | Install model | 10 MB installer; first run downloads engine zip and models into `%LOCALAPPDATA%\meet-assist` with SHA-256 checks; portable mode via marker file | ComfyUI-style: no Python, no torch, no CUDA toolkit; engine and models update independently |
 | Licence | MIT for our code | Runtime Apache-2.0; models OpenMDW / NVIDIA Open Model Licence / CC-BY-4.0, downloaded by the user at first run |
-| Word-to-speaker fusion | Runtime does it for the loopback channel; we interleave channels by time | PENDING research/04 for boundary-word refinement |
-| Cross-meeting identity | v3. Speaker embedding model PENDING research/04 | Not needed for the transcript itself |
+| Word-to-speaker fusion | v1: runtime's start-anchored argmax. v1.5: our own fusion (per-word speaker score vector, margin and overlap flags, Viterbi smoothing with cheaper switches at pauses and punctuation), measured against v1 on the eval set | NeMo-Speech.cpp uses mean probability over [start, start+160 ms] argmax; boundary words and 1 to 2 word islands are the known failure; smoothing is cheap and testable |
+| Diarizer config | Post-pass and file mode: `v3-offline` preset (30.4 s context). Live: 1.04 s low-latency preset. Retune onset/offset/min-duration on our eval set (defaults are V2 CALLHOME-tuned) | Offline context is strictly more accurate; live only needs to be readable |
+| Cross-meeting identity | v3. TitaNet-L (CC-BY-4.0, EER 0.66) via sherpa-onnx CPU; A/B WeSpeaker ResNet293-LM. Voiceprint = mean of embeddings from 2 to 6 s single-speaker crops; cosine match; user confirms | Not needed for the transcript itself; CPU inference keeps VRAM for ASR |
+| Research upgrade path | Diarization-conditioned ASR (NVIDIA SSA-v2, cpWER 15.9 vs cascade 42.3) when released or ported; DiCoW v3.3 as offline ceiling | Cascades lose about 2x cpWER to conditioned ASR on overlap and boundaries; nothing shippable today on a GGUF runtime |
 
 ## Process model
 
@@ -99,6 +101,14 @@ meet-assist/
 ```
 
 Rule: `apps/desktop/src-tauri` holds only Tauri command wrappers and event plumbing. All logic is in `crates/core` and is testable without a GUI.
+
+## Where the "implement a research paper" ambition lands
+
+The streaming Sortformer paper (arXiv 2507.18446) is already implemented in the runtime as Nemotron 3 Diarization, and it tops the only independent cross-system benchmark (VoiceArena, DER 14.7 vs 19 to 31 for everything else open). Re-implementing it would not improve anything. The places where our own work moves quality are, in order:
+
+1. **Fusion (v1.5).** Replace argmax-per-word with a sequence model over words (Viterbi with pause- and punctuation-aware switch costs, overlap flags). Needs speaker activity at better than segment granularity; the spike checks whether the C ABI or a CLI flag exposes 10 ms probabilities, otherwise we work from RTTM segments.
+2. **Eval (Phase 4).** Hand-labelled meetings of the user's own, WDER near speaker changes as the headline number. Everything above is tuned on this.
+3. **Conditioned ASR (later).** When NVIDIA releases SSA-v2 or a GGUF port exists, swap the loopback ASR for it. The engine trait makes that a new adapter, not a rewrite.
 
 ## Testing strategy
 
