@@ -3,12 +3,13 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listMeetings } from "./lib/api";
   import { formatDate, formatDuration } from "./lib/format";
-  import type { Meeting } from "./lib/types";
+  import type { MeetingId } from "./lib/generated/MeetingId";
+  import type { MeetingSummary } from "./lib/generated/MeetingSummary";
 
-  let meetings = $state<Meeting[]>([]);
+  let meetings = $state<MeetingSummary[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let selectedId = $state<string | null>(null);
+  let selectedId = $state<MeetingId | null>(null);
 
   const selected = $derived(meetings.find((m) => m.id === selectedId) ?? null);
 
@@ -56,6 +57,8 @@
                 </time>
                 <span aria-hidden="true">·</span>
                 <span>{formatDuration(meeting.duration_ms)}</span>
+                <span aria-hidden="true">·</span>
+                <span>{meeting.speaker_count} {meeting.speaker_count === 1 ? "speaker" : "speakers"}</span>
                 {#if meeting.status !== "done"}
                   <span class="status status-{meeting.status}">{meeting.status}</span>
                 {/if}
@@ -70,6 +73,7 @@
   <main class="content">
     {#if selected}
       <h2>{selected.title || "Untitled meeting"}</h2>
+      <p class="preview">{selected.preview || "No transcript yet."}</p>
       <p class="placeholder">Transcript view arrives in Phase 2.</p>
     {:else}
       <p class="placeholder">Select a meeting</p>
