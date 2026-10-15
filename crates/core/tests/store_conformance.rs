@@ -1,22 +1,15 @@
 //! Conformance suite for `meet_core::store::Store` implementations.
 //!
 //! Every case is a function over `&dyn Store` that starts from an empty store
-//! and creates its own data. `MemoryStore` runs it below; Phase 1 adds the
-//! same one-line test for `SqliteStore` (an in-memory SQLite database):
-//!
-//! ```ignore
-//! #[test]
-//! fn sqlite_store_conforms() {
-//!     run_all(|| Box::new(SqliteStore::open_in_memory().unwrap()));
-//! }
-//! ```
+//! and creates its own data. `MemoryStore` and `SqliteStore` (an in-memory
+//! SQLite database) both run it below.
 //!
 //! Cases assert behaviour the UI relies on, not implementation details: no
 //! assumptions about id values, search ranking or snippet window size.
 
 use meet_core::store::{
     MemoryStore, NewAudioTrack, NewMeeting, NewSegment, NewSpeaker, NewTranscript, NewWord,
-    ScannedModelFile, Store, StoreError,
+    ScannedModelFile, SqliteStore, Store, StoreError,
 };
 use meet_core::types::{
     AudioFormat, Channel, MeetingId, MeetingStatus, ModelCapabilities, ModelRole, ModelSource,
@@ -70,6 +63,11 @@ fn run_all(make: impl Fn() -> Box<dyn Store>) {
 #[test]
 fn memory_store_conforms() {
     run_all(|| Box::new(MemoryStore::new()));
+}
+
+#[test]
+fn sqlite_store_conforms() {
+    run_all(|| Box::new(SqliteStore::open_in_memory().unwrap()));
 }
 
 // ---- fixtures --------------------------------------------------------------

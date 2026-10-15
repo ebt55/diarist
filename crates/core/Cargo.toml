@@ -1,6 +1,6 @@
 [package]
 name = "meet-core"
-description = "meet-assist core: domain types, engine protocol, and (later) db, audio, engine, models, transcript"
+description = "meet-assist core: domain types, engine protocol, store, audio decode, engine adapters, models, transcript, export"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
 ts-rs.workspace = true
+# SQLite with FTS5 compiled in (bundled build); backup API for `SqliteStore::backup`.
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 # Binary stdin framing for an optional FFI sidecar (docs/03 appendix).

@@ -19,9 +19,11 @@
 
 mod memory;
 mod seed;
+mod sqlite;
 
 pub use memory::MemoryStore;
 pub use seed::SeedOptions;
+pub use sqlite::{CarryOverReport, SqliteStore};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
