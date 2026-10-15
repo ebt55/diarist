@@ -8,6 +8,8 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+
+mod record;
 use meet_core::audio::capture::{self, DeviceFlow};
 use meet_core::audio::{find_on_path, ChainDecoder};
 use meet_core::engine::NemoCliEngine;
@@ -148,6 +150,31 @@ enum Command {
         device: Option<String>,
         wav: PathBuf,
     },
+    /// Record the mic and the system audio with live words; Ctrl-C (or
+    /// --seconds) stops and runs the post-pass.
+    Record {
+        /// Stop after this many seconds.
+        #[arg(long)]
+        seconds: Option<u64>,
+        #[arg(long)]
+        title: Option<String>,
+        /// Meeting language (BCP-47) or `auto` (default: setting default_language).
+        #[arg(long)]
+        language: Option<String>,
+        /// Diarize the mic too (several people in the room).
+        #[arg(long)]
+        diarize_mic: bool,
+        /// Capture endpoint id or name (default: the default communications mic).
+        #[arg(long)]
+        mic: Option<String>,
+        /// Render endpoint id or name to loop back (default: the default
+        /// output, following the endpoint meeting apps play to).
+        #[arg(long)]
+        loopback: Option<String>,
+        /// Compute device for the engine.
+        #[arg(long, default_value = "cuda:0")]
+        device: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -260,7 +287,18 @@ fn run(cli: &Cli) -> CliResult {
         Command::Devices => return devices(),
         Command::Play { device, wav } => {
             let stop = std::sync::atomic::AtomicBool::new(false);
-            capture::play_wav(device.as_deref(), wav, &stop)?;
+            let r = capture::play_wav(device.as_deref(), wav, &stop)?;
+            println!(
+                "played {} frames on {} from qpc {}{}",
+                r.frames,
+                r.device_name,
+                r.start_qpc_100ns,
+                if r.from_device_clock {
+                    " (device clock)"
+                } else {
+                    ""
+                }
+            );
             return Ok(());
         }
         _ => {}
@@ -371,6 +409,26 @@ fn run(cli: &Cli) -> CliResult {
             EngineCommand::Install { name } => engine_install(&ctx, name.as_deref()),
         },
         Command::Doctor => doctor(&ctx),
+        Command::Record {
+            seconds,
+            title,
+            language,
+            diarize_mic,
+            mic,
+            loopback,
+            device,
+        } => record::record(
+            &ctx,
+            record::RecordArgs {
+                seconds: *seconds,
+                title: title.clone(),
+                language: language.clone(),
+                diarize_mic: *diarize_mic,
+                mic: mic.clone(),
+                loopback: loopback.clone(),
+                device: device.clone(),
+            },
+        ),
     }
 }
 
@@ -1095,9 +1153,55 @@ mod tests {
             vec!["meet-cli", "engine", "list"],
             vec!["meet-cli", "engine", "select", "0.2.0"],
             vec!["meet-cli", "doctor"],
+            vec!["meet-cli", "devices"],
+            vec!["meet-cli", "play", "--device", "CABLE Input", "a.wav"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
         }
+    }
+
+    #[test]
+    fn parses_record() {
+        let cli = Cli::try_parse_from([
+            "meet-cli",
+            "record",
+            "--seconds",
+            "60",
+            "--title",
+            "Standup",
+            "--language",
+            "de",
+            "--diarize-mic",
+            "--mic",
+            "CABLE Output",
+            "--loopback",
+            "Speakers",
+        ])
+        .unwrap();
+        let Command::Record {
+            seconds,
+            title,
+            language,
+            diarize_mic,
+            mic,
+            loopback,
+            device,
+        } = cli.command
+        else {
+            panic!("expected record");
+        };
+        assert_eq!(seconds, Some(60));
+        assert_eq!(title.as_deref(), Some("Standup"));
+        assert_eq!(language.as_deref(), Some("de"));
+        assert!(diarize_mic);
+        assert_eq!(mic.as_deref(), Some("CABLE Output"));
+        assert_eq!(loopback.as_deref(), Some("Speakers"));
+        assert_eq!(device, "cuda:0");
+        let bare = Cli::try_parse_from(["meet-cli", "record"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Command::Record { seconds: None, .. }
+        ));
     }
 
     #[test]
