@@ -1,82 +1,224 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, type Component } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { listMeetings } from "./lib/api";
-  import { formatDate, formatDuration } from "./lib/format";
-  import type { MeetingId } from "./lib/generated/MeetingId";
-  import type { MeetingSummary } from "./lib/generated/MeetingSummary";
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { api, errorText } from "./lib/api";
+  import { AUDIO_EXTENSIONS, app, isTyping } from "./lib/state.svelte";
+  import Library from "./components/Library.svelte";
+  import MeetingView from "./components/MeetingView.svelte";
+  import Overlays from "./components/Overlays.svelte";
 
-  let meetings = $state<MeetingSummary[]>([]);
-  let loading = $state(true);
-  let error = $state<string | null>(null);
-  let selectedId = $state<MeetingId | null>(null);
+  // Settings and Diagnostics are split into their own chunks.
+  let settingsPage = $state.raw<Component | null>(null);
+  let diagnosticsPage = $state.raw<Component | null>(null);
 
-  const selected = $derived(meetings.find((m) => m.id === selectedId) ?? null);
+  $effect(() => {
+    if (app.route === "settings" && !settingsPage) {
+      void import("./components/Settings.svelte").then((m) => (settingsPage = m.default));
+    } else if (app.route === "diagnostics" && !diagnosticsPage) {
+      void import("./components/Diagnostics.svelte").then((m) => (diagnosticsPage = m.default));
+    }
+  });
 
   onMount(() => {
-    // The window starts hidden (tauri.conf.json) so the user never sees an
-    // unstyled white frame; reveal it now that the styled shell is in the DOM.
-    // Not via requestAnimationFrame: a hidden WebView2 never fires it.
-    getCurrentWindow()
-      .show()
-      .catch((e: unknown) => console.error("window.show failed", e));
-
-    listMeetings()
-      .then((list) => (meetings = list))
-      .catch((e: unknown) => (error = String(e)))
-      .finally(() => (loading = false));
+    let unlistenDrop: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        const p = e.payload;
+        if (p.type === "enter" || p.type === "over") app.dragging = true;
+        else if (p.type === "leave") app.dragging = false;
+        else if (p.type === "drop") {
+          app.dragging = false;
+          if (p.paths.length > 0) void app.importPaths(p.paths);
+        }
+      })
+      .then((u) => (unlistenDrop = u))
+      .catch(() => {});
+    void reveal();
+    return () => unlistenDrop?.();
   });
+
+  /**
+   * Shows the window once the library has rendered (the window starts hidden
+   * so the user never sees an empty frame), then logs startup timing. Waits
+   * at most 600 ms for data so a slow store cannot keep the window hidden.
+   */
+  async function reveal() {
+    await Promise.race([app.ready, new Promise((r) => setTimeout(r, 600))]);
+    await tick();
+    const tShow = performance.now();
+    try {
+      await getCurrentWindow().show();
+    } catch (e) {
+      console.error("window.show failed", e);
+    }
+    document.getElementById("meeting-list")?.focus();
+    // First frame after show; rAF never fires while the window is hidden.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+      setTimeout(resolve, 250);
+    });
+    const tInteractive = performance.now();
+    const boot = (window as unknown as { __boot?: number }).__boot ?? 0;
+    void api.log(
+      "info",
+      `startup: show()->interactive ${(tInteractive - tShow).toFixed(1)} ms; ` +
+        `script ${boot.toFixed(0)} ms, show() at ${tShow.toFixed(0)} ms, interactive at ${tInteractive.toFixed(0)} ms ` +
+        `after navigation start; ${app.meetings.length} meetings`,
+    );
+  }
+
+  async function importDialog() {
+    try {
+      const picked = await open({
+        title: "Import recordings",
+        multiple: true,
+        directory: false,
+        filters: [
+          { name: "Audio and video", extensions: AUDIO_EXTENSIONS },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (picked && picked.length > 0) await app.importPaths(picked);
+    } catch (e) {
+      app.error(`Could not open the file dialog: ${errorText(e)}`);
+    }
+  }
+
+  function focusSearch() {
+    app.route = "library";
+    void tick().then(() => {
+      const el = document.getElementById("search-input") as HTMLInputElement | null;
+      el?.focus();
+      el?.select();
+    });
+  }
+
+  function onkeydown(e: KeyboardEvent) {
+    if (app.confirmRequest) return;
+    const k = e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && !e.altKey) {
+      const lower = k.toLowerCase();
+      if (!e.shiftKey && (lower === "k" || lower === "f")) focusSearch();
+      else if (!e.shiftKey && lower === "o") void importDialog();
+      else if (!e.shiftKey && k === ",") app.route = app.route === "settings" ? "library" : "settings";
+      else if (e.shiftKey && lower === "d") app.route = app.route === "diagnostics" ? "library" : "diagnostics";
+      else if (e.shiftKey && lower === "c" && app.route === "diagnostics") window.dispatchEvent(new Event("app:copy"));
+      else if (!e.shiftKey && k === "1") {
+        app.route = "library";
+        void tick().then(() => document.getElementById("meeting-list")?.focus());
+      } else if (lower === "r") refreshView();
+      else if (lower === "p" || lower === "u" || lower === "s" || lower === "g") {
+        // Keep WebView2's print, view-source, save and find bars out of the app.
+      } else return;
+      e.preventDefault();
+      return;
+    }
+    if (k === "F5") {
+      refreshView();
+      e.preventDefault();
+      return;
+    }
+    if (isTyping(e) || e.altKey) return;
+    if (k === "F1" || k === "?") {
+      app.helpOpen = !app.helpOpen;
+      e.preventDefault();
+    } else if (k === "Escape" && !e.defaultPrevented && app.route !== "library") {
+      app.route = "library";
+      e.preventDefault();
+    }
+  }
+
+  function refreshView() {
+    if (app.route === "library") {
+      void app.refreshMeetings().then(() => app.toast("info", "Library refreshed"));
+    } else {
+      window.dispatchEvent(new Event("app:refresh"));
+    }
+  }
 </script>
 
+<svelte:window {onkeydown} />
+
 <div class="shell">
-  <aside class="sidebar" aria-label="Meetings">
-    <header class="sidebar-header">
-      <h1>Meetings</h1>
-    </header>
-
-    {#if loading}
-      <p class="sidebar-note">Loading…</p>
-    {:else if error}
-      <p class="sidebar-note error" role="alert">Could not load meetings: {error}</p>
-    {:else if meetings.length === 0}
-      <p class="sidebar-note">No meetings yet.</p>
-    {:else}
-      <ul class="meeting-list">
-        {#each meetings as meeting (meeting.id)}
-          <li>
-            <button
-              type="button"
-              class="meeting"
-              aria-current={meeting.id === selectedId ? "true" : undefined}
-              onclick={() => (selectedId = meeting.id)}
-            >
-              <span class="meeting-title">{meeting.title || "Untitled meeting"}</span>
-              <span class="meeting-meta">
-                <time datetime={new Date(meeting.started_at).toISOString()}>
-                  {formatDate(meeting.started_at)}
-                </time>
-                <span aria-hidden="true">·</span>
-                <span>{formatDuration(meeting.duration_ms)}</span>
-                <span aria-hidden="true">·</span>
-                <span>{meeting.speaker_count} {meeting.speaker_count === 1 ? "speaker" : "speakers"}</span>
-                {#if meeting.status !== "done"}
-                  <span class="status status-{meeting.status}">{meeting.status}</span>
-                {/if}
-              </span>
-            </button>
-          </li>
-        {/each}
-      </ul>
+  <Library onimport={importDialog} />
+  <main class="main">
+    {#if app.openId !== null}
+      {#key app.openId}
+        <div class="pane" class:hidden={app.route !== "library"}>
+          <MeetingView meetingId={app.openId} active={app.route === "library"} />
+        </div>
+      {/key}
+    {:else if app.route === "library"}
+      <div class="welcome">
+        <h1>Your meetings, searchable</h1>
+        <p>
+          {app.meetings.length.toLocaleString()} meetings on this computer. Everything runs locally; nothing leaves
+          the machine.
+        </p>
+        <ul class="keys">
+          <li><kbd>↑</kbd> <kbd>↓</kbd> <kbd>Enter</kbd> open a meeting</li>
+          <li><kbd>Ctrl K</kbd> search every transcript</li>
+          <li><kbd>Ctrl O</kbd> import a recording, or drop files anywhere</li>
+          <li><kbd>?</kbd> all keyboard shortcuts</li>
+        </ul>
+      </div>
     {/if}
-  </aside>
-
-  <main class="content">
-    {#if selected}
-      <h2>{selected.title || "Untitled meeting"}</h2>
-      <p class="preview">{selected.preview || "No transcript yet."}</p>
-      <p class="placeholder">Transcript view arrives in Phase 2.</p>
-    {:else}
-      <p class="placeholder">Select a meeting</p>
+    {#if app.route === "settings"}
+      <div class="pane">
+        {#if settingsPage}{@const Page = settingsPage}<Page />{/if}
+      </div>
+    {:else if app.route === "diagnostics"}
+      <div class="pane">
+        {#if diagnosticsPage}{@const Page = diagnosticsPage}<Page />{/if}
+      </div>
     {/if}
   </main>
 </div>
+
+<Overlays />
+
+<style>
+  .shell {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    height: 100%;
+  }
+  .main {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+  }
+  .pane {
+    position: absolute;
+    inset: 0;
+    background: var(--bg);
+  }
+  .pane.hidden {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .welcome {
+    max-width: 520px;
+    margin: 12vh auto 0;
+    padding: 0 24px;
+  }
+  .welcome h1 {
+    margin: 0 0 8px;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+  }
+  .welcome p {
+    margin: 0 0 16px;
+    color: var(--fg-muted);
+  }
+  .keys {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+</style>
