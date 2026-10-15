@@ -1,6 +1,8 @@
 # Roadmap and delegation plan
 
-Status: v0.1, 15 Oct 2026. Each phase gets its own plan file in this folder with acceptance criteria, file boundaries and verification steps. Opus 5.5 agents implement; Fable reviews between chunks.
+Status: v0.2, 15 Oct 2026. Each phase gets its own plan file in this folder with acceptance criteria, file boundaries and verification steps. Opus 5.5 agents implement; Fable reviews between chunks.
+
+Delivered on 15 Oct 2026: Phases 0, 0.5, 1, 2, 1.5, 3a, 3b and 4. In progress: 3.5 (live follow-ups). Next: 5 (ship). The app imports and records live end to end on the development machine; see docs/eval for the measured baseline.
 
 | Phase | Deliverable | Depends on | Parallel with |
 |---|---|---|---|
