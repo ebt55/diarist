@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0-beta.1",
+  "notes": "First public beta of Diarist: local meeting transcription with speaker labels. See CHANGELOG.md.",
+  "pub_date": "2026-10-15T11:21:21Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTOFJqekN5RnhTOTQxUTNlY2ttNVdnRTB1cE1QRmFCTkZKeUpZZzNobmVQb093K1MvWUN3R0JCRGgvdklMRXRYTGFicm9rTWRyaUpsTjVKQ0V1SFBhbVJXSm83WGNpeHdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDYzMjE5CWZpbGU6RGlhcmlzdF8wLjEuMC1iZXRhLjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wLWJldGEuMQo3L0dGdTZSbWoxWWZaZml2RGt1RDBOYzlWRjJ6MUt1VXdMMmtnOGFwVXdnL01pSWc5a2FwelcwbVhuYVdGTmJzVGJXenFCc25EWndpVkN4blJOSjBCZz09Cg==",
+      "url": "https://github.com/ebt55/diarist/releases/download/v0.1.0-beta.1/Diarist_0.1.0-beta.1_x64-setup.exe"
+    }
+  }
+}
