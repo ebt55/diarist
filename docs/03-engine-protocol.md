@@ -46,7 +46,7 @@ pub enum EngineEvent {
 }
 
 pub struct EngineWord { pub t0_us: u64, pub t1_us: u64, pub text: String, pub conf: Option<f32>, pub spk: Option<String> }
-pub enum ErrorCode { Oom, Crash, BadInput, ModelMissing, Timeout, Other }
+pub enum ErrorCode { Oom, Crash, BadInput, ModelMissing, Timeout, Cancelled, Other }
 ```
 
 Rules:
