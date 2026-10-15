@@ -1,12 +1,12 @@
 # Privacy
 
-meet-assist is built so that your meetings never leave your computer.
+Diarist is built so that your meetings never leave your computer.
 
 ## What stays on your computer
 
 Everything the app records or produces: microphone and system audio,
 imported files, transcripts, speaker names, edits, settings and logs. They are
-stored in the data folder (`%LOCALAPPDATA%\app.meetassist.desktop`, or the
+stored in the data folder (`%LOCALAPPDATA%\app.diarist.desktop`, or the
 folder you moved it to) and nowhere else. Speech recognition and speaker
 detection run on your own GPU or CPU. There is no account, no cloud service,
 no analytics, no crash reporting and no telemetry of any kind.
@@ -20,7 +20,7 @@ Only when you ask it to, and only to fetch files or version lists:
 | Install engine, or a runtime in Check for newer runtime | `github.com` and GitHub's download servers | an ordinary file download request |
 | Install or Download a model | `huggingface.co` and its download servers (through Windows' `curl.exe`) | an ordinary file download request |
 | Add from URL | the address you typed | an ordinary file download request |
-| Check for newer runtime | `api.github.com` | a request for the NeMo-Speech.cpp release list, with the user agent `meet-assist/<version>` |
+| Check for newer runtime | `api.github.com` | a request for the NeMo-Speech.cpp release list, with the user agent `diarist/<version>` |
 | Check for updates | `github.com` (the release's `latest.json`) | an ordinary file request |
 
 Like any download, these requests reveal your IP address to the server
@@ -30,7 +30,7 @@ updates or new runtimes by itself.
 
 ## Recording other people
 
-meet-assist records whatever your microphone and your computer's audio carry,
+Diarist records whatever your microphone and your computer's audio carry,
 including other people in a call. Recording laws differ between countries and
 workplaces; many require telling or asking the other participants. That is
 your responsibility.

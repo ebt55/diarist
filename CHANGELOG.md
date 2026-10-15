@@ -1,10 +1,25 @@
 # Changelog
 
-All notable changes to meet-assist. Versions follow semantic versioning.
+All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [0.1.0] - unreleased
 
 The first public release.
+
+### Renamed to Diarist
+
+- The project was called meet-assist until 15 Oct 2026 and is now Diarist:
+  app `diarist.exe` (installer `Diarist_<version>_x64-setup.exe`), data
+  folder `%LOCALAPPDATA%\app.diarist.desktop`, database `diarist.db`,
+  registry key `HKCU\Software\Diarist\DataRoot`, CLI `diarist-cli`, crates
+  `diarist-core` and `diarist-cli`, environment variables `DIARIST_*`
+  (`MEET_ASSIST_CIMC_WAV` is now `DIARIST_LONGFILE_WAV`), repository
+  `ebt55/diarist`.
+- The first start under the new name offers once to move existing
+  meet-assist data (`%LOCALAPPDATA%\app.meetassist.desktop`, or the folder
+  named by `HKCU\Software\meet-assist\DataRoot`) into Diarist's data folder,
+  with the same copy, check and cleanup as Move data folder, or to start
+  fresh.
 
 ### Transcription
 
@@ -27,7 +42,7 @@ The first public release.
   JSON, SRT and VTT.
 - Recordings kept as lossless FLAC; audio retention (30 days by default,
   pinned meetings exempt, transcripts never deleted), at launch and daily,
-  with the reclaimable space in Settings; `meet-cli retention`.
+  with the reclaimable space in Settings; `diarist-cli retention`.
 
 ### Setup and models
 

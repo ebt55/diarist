@@ -1,4 +1,6 @@
-# meet-assist
+# Diarist
+
+![Diarist: local meeting transcription with speaker labels](branding/social.png)
 
 A meeting transcriber for Windows that runs entirely on your own PC. It records
 your microphone and the sound your computer plays (Teams, Zoom, Meet, a
@@ -33,9 +35,10 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `meet-assist_0.1.0_x64-setup.exe` from the releases page and run
+1. Download `Diarist_0.1.0_x64-setup.exe` from the
+   [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
-   `%LOCALAPPDATA%\meet-assist`.
+   `%LOCALAPPDATA%\Diarist`.
 2. The first start shows a setup screen: it checks your GPU, driver and free
    space, then **Install engine (98 MB)** and **Install recommended models
    (770 MB)**. Every file is checked against its published SHA-256.
@@ -144,7 +147,7 @@ be wrong or missing; on far-field room recordings about one in 9.
 ## You own the folders
 
 Like ComfyUI, models and runtimes are plain files in plain folders under the
-data folder (`%LOCALAPPDATA%\app.meetassist.desktop` unless you move it in
+data folder (`%LOCALAPPDATA%\app.diarist.desktop` unless you move it in
 Settings):
 
 - Drop any GGUF the runtime supports anywhere under `models\` and press
@@ -184,4 +187,6 @@ Rust, bun and the VS Build Tools: see [docs/DEV.md](docs/DEV.md) and
 MIT for the code in this repository ([LICENSE](LICENSE)). The runtime
 (Apache-2.0) and the models (OpenMDW-1.1, NVIDIA Open Model License,
 CC-BY-4.0) are not part of the installer; you download them at first run under
-their own licences. Third-party notices: [LICENSES.md](LICENSES.md).
+their own licences. The logo and wordmark in `branding/` are CC-BY-4.0
+([branding/README.md](branding/README.md)). Third-party notices:
+[LICENSES.md](LICENSES.md).

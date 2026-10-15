@@ -7,9 +7,8 @@
 #                                       (generated with `bunx tauri signer generate`)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password ("" if it has none)
 # The matching public key is in apps/desktop/src-tauri/tauri.conf.json
-# (plugins.updater.pubkey), and plugins.updater.endpoints must name this
-# repository instead of the REPLACE_WITH_GITHUB_OWNER/REPLACE_WITH_GITHUB_REPO
-# placeholder before the first release.
+# (plugins.updater.pubkey); plugins.updater.endpoints names ebt55/diarist
+# (change it if the repository moves).
 
 name: release
 
@@ -69,11 +68,11 @@ jobs:
           tauriScript: bun run tauri
           args: --bundles nsis
           tagName: ${{ github.ref_name }}
-          releaseName: "meet-assist ${{ github.ref_name }}"
+          releaseName: "Diarist ${{ github.ref_name }}"
           releaseBody: "See CHANGELOG.md. The installer is not code-signed yet; SmartScreen asks once."
           releaseDraft: true
           prerelease: false
-          # Uploads meet-assist_<version>_x64-setup.exe, its .sig and latest.json
+          # Uploads Diarist_<version>_x64-setup.exe, its .sig and latest.json
           # (the file the in-app updater reads).
           includeUpdaterJson: true
           updaterJsonPreferNsis: true

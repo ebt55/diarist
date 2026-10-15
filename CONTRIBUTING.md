@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for looking. meet-assist is a small project with a few firm rules.
+Thanks for looking. Diarist is a small project with a few firm rules.
 
 ## The rules
 
@@ -40,16 +40,16 @@ Run the app against a scratch data folder so you never touch your real
 transcripts:
 
 ```sh
-set MEET_ASSIST_DATA_DIR=%TEMP%\ma-dev
+set DIARIST_DATA_DIR=%TEMP%\diarist-dev
 bun run tauri build --debug --no-bundle
-target\debug\meet-assist.exe
+target\debug\diarist.exe
 ```
 
 ## Changing types the UI sees
 
 TypeScript types in `apps/desktop/src/lib/generated/` are generated from Rust
-by ts-rs when the `meet-core` tests run. Change the Rust type, run
-`cargo test -p meet-core`, commit both. Never edit the generated files.
+by ts-rs when the `diarist-core` tests run. Change the Rust type, run
+`cargo test -p diarist-core`, commit both. Never edit the generated files.
 
 ## Pull requests
 

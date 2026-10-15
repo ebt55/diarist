@@ -1,6 +1,6 @@
 # Licences
 
-## meet-assist
+## Diarist
 
 The code in this repository is MIT licensed ([LICENSE](LICENSE)).
 
@@ -55,7 +55,7 @@ To regenerate the list, run from the repository root:
 cargo metadata --format-version 1 --filter-platform x86_64-pc-windows-msvc
 ```
 
-and group the `license` field of the packages reachable from `meet-assist`
+and group the `license` field of the packages reachable from `diarist`
 (normal and build dependencies); `cargo license` or `cargo about` give the
 same data if installed.
 
