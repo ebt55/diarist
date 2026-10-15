@@ -1,11 +1,11 @@
 # Installing Diarist
 
-Version 0.1.0. For which GPU and which models, see "Choosing your package and
+Version 0.1.0-beta.1 (a beta pre-release). For which GPU and which models, see "Choosing your package and
 models" in the [README](../README.md#choosing-your-package-and-models).
 
 ## 1. Install
 
-1. Download `Diarist_0.1.0_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.1_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases).
 2. Run it. Windows SmartScreen warns because the installer is not code-signed
    yet: choose "More info", then "Run anyway". It installs for your user only,
@@ -126,10 +126,12 @@ Re-processing a meeting needs its audio.
 
 ## 6. Updating
 
-Settings, About, **Check for updates** asks GitHub for a newer release and
-installs it after you confirm (updates are signed; the app checks the
-signature). Your data folder is not touched. You can also run a newer
-installer over the old one.
+Settings, About, **Check for updates** reads
+`https://raw.githubusercontent.com/ebt55/diarist/main/updater/latest.json`
+(the newest release, beta pre-releases included), downloads the installer it
+names from GitHub and installs it after you confirm (updates are signed; the
+app checks the signature). Your data folder is not touched. You can also run
+a newer installer over the old one.
 
 **Coming from meet-assist (now Diarist).** Diarist installs next to the
 version with the earlier name rather than over it. Its first start offers

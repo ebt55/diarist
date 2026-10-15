@@ -32,7 +32,7 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0"
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.1"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
 cargo run -p diarist-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
@@ -202,11 +202,28 @@ repository. Its public
 half is `plugins.updater.pubkey` in `tauri.conf.json`. Losing the private key
 means installed copies can no longer verify updates: back it up, and give it
 to CI as the `TAURI_SIGNING_PRIVATE_KEY` secret (`.github/workflows/release.yml`,
-not run yet). The update endpoint in `tauri.conf.json` is
-`https://github.com/ebt55/diarist/releases/latest/download/latest.json`; it
-answers once a release with `latest.json` is published there. The
-repository's social preview (Settings, General, Social preview) is
-`branding/social.png`.
+not run yet). The repository's social preview (Settings, General, Social
+preview) is `branding/social.png`.
+
+**Update endpoint.** `plugins.updater.endpoints` in `tauri.conf.json` is
+`https://raw.githubusercontent.com/ebt55/diarist/main/updater/latest.json`,
+not GitHub's `releases/latest/download/latest.json`: "latest" skips
+pre-releases, so it would never serve a beta. `updater/latest.json` names the
+version, the notes, the publication time and, for `windows-x86_64`, the
+contents of the installer's `.sig` and the release asset URL
+(`https://github.com/ebt55/diarist/releases/download/v<version>/Diarist_<version>_x64-setup.exe`).
+It must match the published asset: a tag push `v*` runs the release workflow,
+which builds the installer and `.sig`, attaches them to a draft pre-release
+and opens a pull request that updates `updater/latest.json`; merge it only
+after the draft is published.
+
+**Versioning.** Releases are `0.1.0-beta.N` pre-releases while the app is
+tried on other machines, then `0.x.y` while the database schema, the data
+layout and the updater format may still change; 1.0 comes after a few
+releases have upgraded installed copies without loss. The version lives in
+the workspace `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`
+(Cargo.lock follows through cargo). NSIS accepts pre-release versions; MSI
+would not, and is not built.
 
 The Tauri CLI downloads NSIS into its cache on the first bundle. If that
 download is blocked, add `--no-bundle` to get just the exe.

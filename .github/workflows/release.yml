@@ -1,14 +1,19 @@
-# Builds the Windows installer and the updater artifacts for a version tag
-# and attaches them to a draft GitHub release. Nothing is published until a
-# maintainer reviews the draft and publishes it.
+# Builds the Windows installer and its updater signature for a version tag
+# (v0.1.0-beta.1, v0.1.0, ...), attaches both to a draft GitHub pre-release
+# and opens a pull request that points updater/latest.json at the new
+# installer. Nothing is published until a maintainer reviews the draft,
+# publishes it (clearing the pre-release flag for a stable version), and
+# then merges the pull request.
 #
 # Needs two repository secrets (Settings, Secrets and variables, Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the updater private key
 #                                       (generated with `bunx tauri signer generate`)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password ("" if it has none)
+# and "Allow GitHub Actions to create and approve pull requests" (Settings,
+# Actions, General) for the updater pull request.
 # The matching public key is in apps/desktop/src-tauri/tauri.conf.json
-# (plugins.updater.pubkey); plugins.updater.endpoints names ebt55/diarist
-# (change it if the repository moves).
+# (plugins.updater.pubkey); plugins.updater.endpoints reads
+# updater/latest.json on main (GitHub's "latest release" skips pre-releases).
 
 name: release
 
@@ -16,10 +21,10 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   windows:
@@ -50,6 +55,15 @@ jobs:
         working-directory: apps/desktop
         run: bun install --frozen-lockfile
 
+      - name: Tag matches the app version
+        shell: bash
+        run: |
+          version="$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${version}" >&2
+            exit 1
+          fi
+
       - name: Check
         run: |
           cargo fmt --all -- --check
@@ -57,7 +71,7 @@ jobs:
           cargo test --workspace
         shell: bash
 
-      - name: Build installer and updater artifacts
+      - name: Build installer and attach it to a draft pre-release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,8 +85,49 @@ jobs:
           releaseName: "Diarist ${{ github.ref_name }}"
           releaseBody: "See CHANGELOG.md. The installer is not code-signed yet; SmartScreen asks once."
           releaseDraft: true
-          prerelease: false
-          # Uploads Diarist_<version>_x64-setup.exe, its .sig and latest.json
-          # (the file the in-app updater reads).
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          prerelease: true
+          # Uploads Diarist_<version>_x64-setup.exe and its .sig. The updater
+          # reads updater/latest.json from main instead of a release asset.
+          includeUpdaterJson: false
+
+      - name: Write updater/latest.json
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sig="target/release/bundle/nsis/Diarist_${version}_x64-setup.exe.sig"
+          test -s "$sig"
+          node -e '
+            const fs = require("fs");
+            const [version, tag, repo, sigPath] = process.argv.slice(1);
+            const manifest = {
+              version,
+              notes: `Diarist ${version}: see CHANGELOG.md`,
+              pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+              platforms: {
+                "windows-x86_64": {
+                  signature: fs.readFileSync(sigPath, "utf8").trim(),
+                  url: `https://github.com/${repo}/releases/download/${tag}/Diarist_${version}_x64-setup.exe`,
+                },
+              },
+            };
+            fs.writeFileSync("updater/latest.json", JSON.stringify(manifest, null, 2) + "\n");
+          ' "$version" "$GITHUB_REF_NAME" "$REPO" "$sig"
+          cat updater/latest.json
+
+      - name: Open a pull request for updater/latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="updater/${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add updater/latest.json
+          git commit -m "updater: latest.json for ${GITHUB_REF_NAME}"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "updater: offer ${GITHUB_REF_NAME}" \
+            --body "Points installed copies at ${GITHUB_REF_NAME}. Merge only after the draft release ${GITHUB_REF_NAME} is published, so the installer URL in updater/latest.json answers."

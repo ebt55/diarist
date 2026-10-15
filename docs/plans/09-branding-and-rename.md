@@ -21,7 +21,7 @@ The project was renamed from meet-assist (now Diarist; decision in `docs/researc
 - Bundle identifier: `app.diarist.desktop`, so the default data root is `%LOCALAPPDATA%\app.diarist.desktop` (see migration).
 - Executable `diarist.exe`; CLI `diarist-cli` (crate `diarist-cli` in `crates/cli`); core crate `diarist-core` (lib `diarist_core`); Tauri package `diarist` (lib `diarist_lib`).
 - Registry key for a moved data root: `HKCU\Software\Diarist\DataRoot`.
-- Repository `ebt55/diarist` on the owner's account (an org can take it over later; GitHub redirects). Updater endpoint `https://github.com/ebt55/diarist/releases/latest/download/latest.json`; the release workflow names releases "Diarist <tag>" and uploads `Diarist_<version>_x64-setup.exe`.
+- Repository `ebt55/diarist` on the owner's account (an org can take it over later; GitHub redirects). Updater endpoint `https://raw.githubusercontent.com/ebt55/diarist/main/updater/latest.json` (GitHub's "latest" release skips pre-releases); the release workflow names releases "Diarist <tag>", uploads `Diarist_<version>_x64-setup.exe` and its `.sig` to a draft pre-release and opens a pull request for `updater/latest.json`.
 - Environment variables `DIARIST_*` (the long-file acceptance WAV is `DIARIST_LONGFILE_WAV`); the eval harness uses `DIARIST_EVAL_*`.
 - Database `diarist.db`; log file `logs\diarist.log` (logs folder unchanged).
 - Docs: README, INSTALL, PRIVACY, CONTRIBUTING, CHANGELOG, LICENSES, docs/00 to 05, DEV and docs/plans carry the new name; docs/research and docs/eval stay as historical records with a note at the top.
