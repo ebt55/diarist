@@ -82,8 +82,8 @@
       <pre tabindex="0">{stderr}</pre>
     {:else}
       <p class="placeholder">
-        No engine job has run in this session. When the runtime is wired up (Phase 1), the stderr of the last
-        transcription job appears here verbatim, including the runtime's own JSON error object.
+        No engine job has run on this data root yet. The stderr of the last transcription job appears here
+        verbatim, including the runtime's own JSON error object.
       </p>
     {/if}
   </section>

@@ -20,21 +20,13 @@ import type { SegmentView } from "./generated/SegmentView";
 import type { Settings } from "./generated/Settings";
 import type { SpeakerId } from "./generated/SpeakerId";
 import type { TrackChannel } from "./generated/TrackChannel";
+import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
 
-/**
- * Peak envelope of the playback track (`get_waveform`). Not generated: it is
- * a src-tauri type until core grows `views::Waveform` (Phase 2 report).
- */
-export interface Waveform {
-  channels: number;
-  sample_rate: number;
-  duration_ms: number;
-  /** peaks[channel][bucket], 0..255. */
-  peaks: number[][];
-}
+export type { Waveform };
 
+/** `meet_core::export::ExportFormat` on the wire (its file extension). */
 export type ExportFormat = "md" | "txt" | "json" | "srt" | "vtt";
 
 /** Error text from a rejected command (commands reject with a string). */
@@ -64,6 +56,7 @@ export const api = {
   mergeSpeakers: (from: SpeakerId, into: SpeakerId) =>
     invoke<void>("merge_speakers", { from, into }),
   unmergeSpeaker: (speaker_id: SpeakerId) => invoke<void>("unmerge_speaker", { speaker_id }),
+  markReviewed: (speaker_id: SpeakerId) => invoke<void>("mark_reviewed", { speaker_id }),
   reassignSegment: (segment_id: SegmentId, speaker_id: SpeakerId) =>
     invoke<void>("reassign_segment", { segment_id, speaker_id }),
   splitSegment: (segment_id: SegmentId, word_id: WordId) =>
@@ -74,6 +67,8 @@ export const api = {
   deleteMeeting: (id: MeetingId) => invoke<void>("delete_meeting", { id }),
   exportMeeting: (id: MeetingId, format: ExportFormat) =>
     invoke<string | null>("export_meeting", { id, format }),
+  exportMeetingTo: (id: MeetingId, format: ExportFormat, path: string) =>
+    invoke<string>("export_meeting_to", { id, format, path }),
 
   getAudioUrl: (id: MeetingId, channel: TrackChannel | null = null) =>
     invoke<string>("get_audio_url", { id, channel }),
@@ -82,10 +77,13 @@ export const api = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
+  removeSetting: (key: string) => invoke<void>("remove_setting", { key }),
   engineStatus: () => invoke<EngineStatus>("engine_status"),
   listModelFiles: () => invoke<ModelFile[]>("list_model_files"),
   selectModel: (role: ModelRole, id: ModelFileId) => invoke<void>("select_model", { role, id }),
   rescanModels: () => invoke<ModelFile[]>("rescan_models"),
+  installEngine: (name: string | null = null) => invoke<string>("install_engine", { name }),
+  pullModel: (name: string) => invoke<string>("pull_model", { name }),
   openModelsFolder: () => invoke<void>("open_models_folder"),
   openDataFolder: () => invoke<void>("open_data_folder"),
 
@@ -95,9 +93,9 @@ export const api = {
     invoke<void>("ui_log", { level, message }).catch(() => {}),
 };
 
-/** Subscribes to job:progress, job:done and job:error. */
+/** Subscribes to job:progress, job:done, job:error and job:cancelled. */
 export async function onJobEvent(cb: (event: JobEvent) => void): Promise<UnlistenFn> {
-  const names = ["job:progress", "job:done", "job:error"] as const;
+  const names = ["job:progress", "job:done", "job:error", "job:cancelled"] as const;
   const unlisten = await Promise.all(names.map((n) => listen<JobEvent>(n, (e) => cb(e.payload))));
   return () => unlisten.forEach((u) => u());
 }

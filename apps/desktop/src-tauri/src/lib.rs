@@ -1,22 +1,25 @@
 //! Tauri shell for meet-assist. Only command wrappers and event plumbing live
 //! here; logic belongs in `meet-core` (docs/01-architecture.md). Commands call
-//! [`Store`] methods inside `spawn_blocking` and map errors to strings.
+//! [`RunStore`] methods (and `meet_core` functions) on the blocking pool and
+//! map errors to strings.
 //!
-//! Mock-only pieces (import timer, demo audio, GPU numbers) are confined to
-//! `mock.rs` and written against the `Store` trait.
+//! The data root comes from `meet_core::models::paths` (`MEET_ASSIST_DATA_DIR`,
+//! `portable.txt`, `HKCU\Software\meet-assist\DataRoot`, then
+//! `app_local_data_dir`); the store is `SqliteStore` there. `--demo` runs on
+//! the seeded `MemoryStore::demo()` with a scratch data root instead (for
+//! screenshots; see `demo.rs`).
 
-mod audio;
+mod asset;
 mod commands;
+mod demo;
 pub mod events;
-mod export;
-mod mock;
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use meet_core::models::{DataPaths, DataRootSource, DoctorReport};
 use meet_core::pipeline::JobQueue;
-use meet_core::store::{MemoryStore, Store};
+use meet_core::store::{MemoryStore, RunStore, SqliteStore};
 use tauri::Manager;
 use tauri_plugin_log::{RotationStrategy, TimezoneStrategy};
 
@@ -24,26 +27,58 @@ use tauri_plugin_log::{RotationStrategy, TimezoneStrategy};
 /// the window anyway so the app is not an invisible process.
 const SHOW_FALLBACK: Duration = Duration::from_secs(3);
 
-/// The store behind every command. Until Phase 1 lands `SqliteStore`, this is
-/// the seeded in-memory mock; swapping it is a one-line change in [`run`].
-pub(crate) struct AppStore(pub(crate) Arc<dyn Store>);
+/// The store behind every command.
+pub(crate) struct AppStore(pub(crate) Arc<dyn RunStore>);
 
-/// One GPU job at a time (imports now, post-passes later).
+/// One GPU job at a time (imports now, post-passes later), process-wide.
 pub(crate) struct Jobs(pub(crate) JobQueue);
 
 /// Resolved locations under the data root.
 pub(crate) struct AppPaths {
-    pub(crate) data_root: PathBuf,
+    pub(crate) paths: DataPaths,
+    /// Running on `MemoryStore::demo()`.
+    pub(crate) demo: bool,
+}
+
+/// `nemo-speech doctor` takes a second or two (CUDA init): its report is
+/// reused for a short while by `engine_status`.
+#[derive(Default)]
+pub(crate) struct GpuCache(pub(crate) Arc<Mutex<DoctorSlot>>);
+
+/// When the report was taken, and the report (`None`: no engine or doctor failed).
+pub(crate) type DoctorSlot = Option<(Instant, Option<DoctorReport>)>;
+
+/// The data root, the store on it, and whether this is the demo.
+fn open_store(app: &tauri::App, demo: bool) -> Result<(DataPaths, Arc<dyn RunStore>), String> {
+    if demo {
+        let paths = DataPaths::at(std::env::temp_dir().join("meet-assist-demo"));
+        return Ok((paths, Arc::new(MemoryStore::demo())));
+    }
+    let mut paths = DataPaths::resolve().map_err(|e| e.to_string())?;
+    if paths.source == DataRootSource::Default {
+        // Same folder as `resolve` computes, but from Tauri's own path API so
+        // the installer, the asset scope and the store always agree.
+        if let Ok(dir) = app.path().app_local_data_dir() {
+            paths = DataPaths {
+                source: DataRootSource::Default,
+                ..DataPaths::at(dir)
+            };
+        }
+    }
+    std::fs::create_dir_all(&paths.root)
+        .map_err(|e| format!("cannot create {}: {e}", paths.root.display()))?;
+    let store = SqliteStore::open(paths.db())
+        .map_err(|e| format!("cannot open {}: {e}", paths.db().display()))?
+        .with_audio_root(paths.audio());
+    Ok((paths, Arc::new(store)))
 }
 
 pub fn run() {
-    // The one line to change when SqliteStore lands.
-    let store: Arc<dyn Store> = Arc::new(MemoryStore::demo());
-    let setup_store = Arc::clone(&store);
+    let demo = std::env::args().any(|a| a == "--demo");
 
     tauri::Builder::default()
-        .manage(AppStore(store))
         .manage(Jobs(JobQueue::new()))
+        .manage(GpuCache::default())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
@@ -66,20 +101,25 @@ pub fn run() {
             commands::set_speaker_color,
             commands::merge_speakers,
             commands::unmerge_speaker,
+            commands::mark_reviewed,
             commands::reassign_segment,
             commands::split_segment,
             commands::set_meeting_title,
             commands::set_audio_keep,
             commands::delete_meeting,
             commands::export_meeting,
+            commands::export_meeting_to,
             commands::get_audio_url,
             commands::get_waveform,
             commands::get_settings,
             commands::set_setting,
+            commands::remove_setting,
             commands::engine_status,
             commands::list_model_files,
             commands::select_model,
             commands::rescan_models,
+            commands::install_engine,
+            commands::pull_model,
             commands::open_models_folder,
             commands::open_data_folder,
             commands::read_log_tail,
@@ -87,20 +127,24 @@ pub fn run() {
             commands::ui_log,
         ])
         .setup(move |app| {
-            let data_root = app.path().app_local_data_dir()?;
-            std::fs::create_dir_all(&data_root)?;
+            let (paths, store) = open_store(app, demo)?;
+            std::fs::create_dir_all(&paths.root)?;
             // Playback reads stored audio through the asset protocol; the
             // scope starts at the data root (imports add their file on demand).
             app.asset_protocol_scope()
-                .allow_directory(&data_root, true)?;
-            commands::apply_default_settings(setup_store.as_ref());
-            mock::attach_demo_audio(setup_store.as_ref(), &data_root);
+                .allow_directory(&paths.root, true)?;
+            if demo {
+                demo::attach_demo_audio(store.as_ref(), &paths.root);
+            }
             log::info!(
-                "meet-assist {} started; data root {}",
+                "meet-assist {} started{}; data root {} ({:?})",
                 meet_core::VERSION,
-                data_root.display()
+                if demo { " in demo mode" } else { "" },
+                paths.root.display(),
+                paths.source
             );
-            app.manage(AppPaths { data_root });
+            app.manage(AppStore(store));
+            app.manage(AppPaths { paths, demo });
 
             if let Some(window) = app.get_webview_window("main") {
                 std::thread::spawn(move || {

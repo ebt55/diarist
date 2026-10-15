@@ -1,52 +1,54 @@
-//! Tauri commands: thin wrappers that run one `Store` call (or a few) on the
-//! blocking pool and map errors to strings. Argument names are snake_case on
-//! the wire, matching `docs/plans/03-phase2-desktop-ui.md`.
+//! Tauri commands: thin wrappers that run one `meet_core` call (or a few) on
+//! the blocking pool and map errors to strings. Argument names are
+//! snake_case on the wire, matching `docs/plans/03-phase2-desktop-ui.md`.
 
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use meet_core::pipeline::{CancelOutcome, ImportRequest};
-use meet_core::store::{ScannedModelFile, Store, StoreError, StoreResult};
+use meet_core::audio::{self, ChainDecoder};
+use meet_core::export::{self, ExportDoc, ExportFormat};
+use meet_core::models::{self, DataPaths, Manifest};
+use meet_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
+use meet_core::settings;
+use meet_core::store::RunStore;
 use meet_core::types::{
-    AudioFormat, AudioTrack, JobId, MeetingId, ModelFile, ModelFileId, ModelRole, SegmentId,
-    SpeakerId, TrackChannel, Word, WordId,
+    AudioTrack, JobId, MeetingId, ModelFile, ModelFileId, ModelRole, SegmentId, SpeakerId,
+    TrackChannel, Word, WordId,
 };
 use meet_core::views::{
-    selection_key, EngineStatus, JobEvent, MeetingDetail, MeetingSummary, SearchHit, SegmentView,
-    Settings,
+    EngineStatus, JobEvent, MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings,
+    Waveform,
 };
+use meet_core::CoreError;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::audio::{self, Waveform};
-use crate::events::emit_job;
-use crate::export::{self, ExportFormat};
-use crate::{mock, AppPaths, AppStore, Jobs};
+use crate::asset::asset_url;
+use crate::events::{emit_download, emit_job, DownloadProgress};
+use crate::{demo, AppPaths, AppStore, GpuCache, Jobs};
 
-/// Engine versions with recorded fixtures; others get an "untested" badge.
-const TESTED_ENGINE_VERSIONS: &[&str] = &["0.2.0"];
-
-/// Settings the UI reads, with their defaults (written at startup when absent).
-pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
-    ("audio_retention_days", "30"),
-    ("theme", "system"),
-    ("default_language", "en"),
-    ("post_pass_mode", "always"),
-];
+/// Where imports run.
+const DEVICE: &str = "cuda:0";
+/// How long a `nemo-speech doctor` report (GPU, free VRAM) is reused.
+const DOCTOR_TTL: Duration = Duration::from_secs(20);
+/// Bytes of the last engine log shown in Diagnostics.
+const ENGINE_LOG_TAIL: usize = 8_192;
 
 type CmdResult<T> = Result<T, String>;
 
 /// Runs a store call on the blocking pool.
-pub(crate) async fn with_store<T, F>(store: &State<'_, AppStore>, f: F) -> CmdResult<T>
+pub(crate) async fn with_store<T, E, F>(store: &State<'_, AppStore>, f: F) -> CmdResult<T>
 where
     T: Send + 'static,
-    F: FnOnce(&dyn Store) -> StoreResult<T> + Send + 'static,
+    E: Display,
+    F: FnOnce(&dyn RunStore) -> Result<T, E> + Send + 'static,
 {
     let store = Arc::clone(&store.0);
-    tauri::async_runtime::spawn_blocking(move || f(store.as_ref()))
+    tauri::async_runtime::spawn_blocking(move || f(store.as_ref()).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
 }
 
 /// Runs any blocking closure on the blocking pool.
@@ -58,17 +60,6 @@ where
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|e| e.to_string())?
-}
-
-pub fn apply_default_settings(store: &dyn Store) {
-    let current = store.get_settings().unwrap_or_default();
-    for (key, value) in DEFAULT_SETTINGS {
-        if !current.0.contains_key(*key) {
-            if let Err(e) = store.set_setting(key, value) {
-                log::warn!("default setting {key}: {e}");
-            }
-        }
-    }
 }
 
 // ---- Library and meeting view ----------------------------------------------
@@ -114,10 +105,13 @@ pub async fn search(
 
 // ---- Import jobs -------------------------------------------------------------
 
+/// Queues an import on the process-wide [`Jobs`] queue. Progress, `job:done`,
+/// `job:error` and `job:cancelled` arrive as events.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn import_file(
     app: AppHandle,
     store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
     jobs: State<'_, Jobs>,
     path: String,
     title: Option<String>,
@@ -131,25 +125,85 @@ pub async fn import_file(
     };
     log::info!("import queued: {path} (job {job_id})");
     let store = Arc::clone(&store.0);
-    // Phase 1: `pipeline::import_file(store, engine, decoder, req, &|ev| emit_job(&app, &ev))`.
+    let data_paths = paths.paths.clone();
     jobs.0.submit(job_id.clone(), move |token| {
-        mock::run_import(store.as_ref(), &app, req, token)
+        run_import(&app, store.as_ref(), &data_paths, req, token)
     });
     Ok(job_id)
+}
+
+/// The job body: the selected engine and models, the current settings, the
+/// decoder chain, then `pipeline::import_file`.
+fn run_import(
+    app: &AppHandle,
+    store: &dyn RunStore,
+    paths: &DataPaths,
+    req: ImportRequest,
+    token: &CancelToken,
+) {
+    let job_id = req.job_id.clone();
+    let source = req.path.display().to_string();
+    let fail = |message: String| {
+        log::error!("import failed: {source}: {message}");
+        emit_job(
+            app,
+            &JobEvent::Error {
+                job_id: job_id.clone(),
+                meeting_id: None,
+                message,
+            },
+        );
+    };
+    let settings = match settings::effective(store) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let built = match models::select_engine(paths, store, DEVICE) {
+        Ok(b) => b,
+        Err(e) => return fail(e.to_string()),
+    };
+    log::info!(
+        "import {job_id}: engine {} | asr {} | diarizer {}{}",
+        built.selection.engine_version.as_deref().unwrap_or("?"),
+        built.selection.asr_file.display_name,
+        built.selection.diarizer_file.display_name,
+        if built.experimental {
+            " (experimental cascade)"
+        } else {
+            ""
+        }
+    );
+    let mut opts = ImportOptions::new(&paths.root, &settings);
+    opts.diarize_runner = Some(built.diarize_runner);
+    let started = Instant::now();
+    let result = pipeline::import_file(
+        store,
+        &*built.engine,
+        &ChainDecoder::new(),
+        req,
+        &opts,
+        token,
+        &|ev| emit_job(app, &ev),
+    );
+    let secs = started.elapsed().as_secs_f64();
+    match result {
+        Ok(id) => log::info!("import done: {source} -> meeting {id} in {secs:.1} s"),
+        Err(CoreError::Cancelled) => log::info!("import cancelled: {source} after {secs:.1} s"),
+        Err(e) => log::error!("import failed: {source}: {e}"),
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn cancel_job(app: AppHandle, jobs: State<'_, Jobs>, job_id: JobId) -> CmdResult<()> {
     match jobs.0.cancel(&job_id) {
-        // The running job notices its token and emits job:error itself.
+        // The running job notices its token and emits job:cancelled itself.
         CancelOutcome::Signalled => Ok(()),
         CancelOutcome::Dequeued => {
             emit_job(
                 &app,
-                &JobEvent::Error {
+                &JobEvent::Cancelled {
                     job_id,
                     meeting_id: None,
-                    message: mock::CANCELLED.into(),
                 },
             );
             Ok(())
@@ -196,6 +250,12 @@ pub async fn unmerge_speaker(store: State<'_, AppStore>, speaker_id: SpeakerId) 
     with_store(&store, move |s| s.unmerge_speaker(speaker_id)).await
 }
 
+/// Clears the "new label" badge.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mark_reviewed(store: State<'_, AppStore>, speaker_id: SpeakerId) -> CmdResult<()> {
+    with_store(&store, move |s| s.mark_reviewed(speaker_id)).await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn reassign_segment(
     store: State<'_, AppStore>,
@@ -240,6 +300,34 @@ pub async fn delete_meeting(store: State<'_, AppStore>, id: MeetingId) -> CmdRes
     Ok(())
 }
 
+// ---- Export ------------------------------------------------------------------------
+
+/// The meeting rendered as `format` (`meet_core::export`) and its file name.
+async fn render_export(
+    store: &State<'_, AppStore>,
+    id: MeetingId,
+    format: ExportFormat,
+) -> CmdResult<(String, String)> {
+    with_store(store, move |s| -> meet_core::Result<(String, String)> {
+        let doc = ExportDoc::from_store(s, id)?;
+        Ok((
+            export::file_name(&doc.meeting.title, format),
+            export::render(&doc, format),
+        ))
+    })
+    .await
+}
+
+fn write_export(id: MeetingId, format: ExportFormat, path: &Path, text: &str) -> CmdResult<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+    log::info!("exported meeting {id} as {format:?} to {}", path.display());
+    Ok(())
+}
+
 /// Asks for a location with the save dialog and writes the transcript there.
 /// Returns the written path, or `None` when the user cancelled.
 #[tauri::command(rename_all = "snake_case")]
@@ -249,11 +337,7 @@ pub async fn export_meeting(
     id: MeetingId,
     format: ExportFormat,
 ) -> CmdResult<Option<String>> {
-    let (detail, segments) = with_store(&store, move |s| {
-        Ok((s.get_meeting(id)?, s.get_segments(id, 0, u32::MAX)?))
-    })
-    .await?;
-    let name = export::file_name(&detail.meeting.title, format);
+    let (name, text) = render_export(&store, id, format).await?;
     blocking(move || {
         let Some(target) = app
             .dialog()
@@ -266,47 +350,61 @@ pub async fn export_meeting(
             return Ok(None);
         };
         let path = target.into_path().map_err(|e| e.to_string())?;
-        std::fs::write(&path, export::render(format, &detail, &segments))
-            .map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
-        log::info!(
-            "exported meeting {id} as {:?} to {}",
-            format,
-            path.display()
-        );
+        write_export(id, format, &path, &text)?;
         Ok(Some(path.display().to_string()))
+    })
+    .await
+}
+
+/// Writes the transcript to `path` without a dialog (automation, tests).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn export_meeting_to(
+    store: State<'_, AppStore>,
+    id: MeetingId,
+    format: ExportFormat,
+    path: String,
+) -> CmdResult<String> {
+    let (_, text) = render_export(&store, id, format).await?;
+    blocking(move || {
+        let path = PathBuf::from(path);
+        write_export(id, format, &path, &text)?;
+        Ok(path.display().to_string())
     })
     .await
 }
 
 // ---- Audio --------------------------------------------------------------------
 
-/// The newest track of `channel` whose file exists, resolved against the data root.
+/// The track to play (`Store::playback_track`, or the newest of `channel`),
+/// its file resolved against the data root, and the meeting's uid.
 async fn playable_track(
     store: &State<'_, AppStore>,
-    data_root: &Path,
+    paths: &DataPaths,
     id: MeetingId,
-    channel: TrackChannel,
-) -> CmdResult<(AudioTrack, PathBuf)> {
-    let mut tracks = with_store(store, move |s| s.list_audio_tracks(id)).await?;
-    tracks.retain(|t| t.channel == channel);
-    tracks.sort_by_key(|t| std::cmp::Reverse(t.id));
-    tracks
-        .into_iter()
-        .map(|t| {
-            let p = Path::new(&t.path);
-            let path = if t.format == AudioFormat::Original || p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                data_root.join(p)
-            };
-            (t, path)
-        })
-        .find(|(_, p)| p.is_file())
-        .ok_or_else(|| "No audio file for this meeting".to_owned())
+    channel: Option<TrackChannel>,
+) -> CmdResult<(AudioTrack, PathBuf, String)> {
+    let (track, uid) = with_store(store, move |s| {
+        let track = match channel {
+            None | Some(TrackChannel::Playback) => s.playback_track(id)?,
+            Some(c) => s
+                .list_audio_tracks(id)?
+                .into_iter()
+                .filter(|t| t.channel == c)
+                .max_by_key(|t| t.id),
+        };
+        Ok::<_, meet_core::store::StoreError>((track, s.get_meeting(id)?.meeting.uid))
+    })
+    .await?;
+    let track = track.ok_or_else(|| "No audio file for this meeting".to_owned())?;
+    let file = paths.absolute(&track.path);
+    if !file.is_file() {
+        return Err(format!("The audio file is missing: {}", file.display()));
+    }
+    Ok((track, file, uid))
 }
 
-/// Asset-protocol URL of the meeting's audio (`playback` by default). The
-/// file is added to the asset scope on demand (imports live outside the data root).
+/// Asset-protocol URL of the meeting's audio. The file is added to the asset
+/// scope on demand (imports live outside the data root).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_audio_url(
     app: AppHandle,
@@ -315,15 +413,15 @@ pub async fn get_audio_url(
     id: MeetingId,
     channel: Option<TrackChannel>,
 ) -> CmdResult<String> {
-    let channel = channel.unwrap_or(TrackChannel::Playback);
-    let (_, path) = playable_track(&store, &paths.data_root, id, channel).await?;
+    let (_, file, _) = playable_track(&store, &paths.paths, id, channel).await?;
     app.asset_protocol_scope()
-        .allow_file(&path)
+        .allow_file(&file)
         .map_err(|e| e.to_string())?;
-    Ok(audio::asset_url(&path))
+    Ok(asset_url(&file))
 }
 
-/// Peak envelope of the playback track, computed in Rust.
+/// Peak envelope of the playback track (`meet_core::audio::peaks`), cached
+/// next to stored audio or in the meeting folder for an import's original.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_waveform(
     store: State<'_, AppStore>,
@@ -331,15 +429,22 @@ pub async fn get_waveform(
     id: MeetingId,
     buckets: u32,
 ) -> CmdResult<Waveform> {
-    let (_, path) = playable_track(&store, &paths.data_root, id, TrackChannel::Playback).await?;
-    blocking(move || audio::wav_peaks(&path, buckets as usize).map_err(|e| e.to_string())).await
+    let (track, file, uid) = playable_track(&store, &paths.paths, id, None).await?;
+    let root = paths.paths.root.clone();
+    blocking(move || {
+        let cache = audio::peaks::cache_path(&root, &uid, &track, &file);
+        audio::peaks_cached(&file, buckets as usize, &cache, &ChainDecoder::new())
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 // ---- Settings, models, engine -------------------------------------------------
 
+/// Stored settings laid over `meet_core::settings::DEFAULTS`.
 #[tauri::command]
 pub async fn get_settings(store: State<'_, AppStore>) -> CmdResult<Settings> {
-    with_store(&store, |s| s.get_settings()).await
+    with_store(&store, |s| settings::effective(s)).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -347,23 +452,52 @@ pub async fn set_setting(store: State<'_, AppStore>, key: String, value: String)
     with_store(&store, move |s| s.set_setting(&key, &value)).await
 }
 
+/// Restores a setting's default.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_setting(store: State<'_, AppStore>, key: String) -> CmdResult<()> {
+    with_store(&store, move |s| s.remove_setting(&key)).await
+}
+
 #[tauri::command]
 pub async fn engine_status(
     store: State<'_, AppStore>,
     paths: State<'_, AppPaths>,
+    gpu: State<'_, GpuCache>,
 ) -> CmdResult<EngineStatus> {
-    let data_root = paths.data_root.display().to_string();
-    let (files, settings) =
-        with_store(&store, |s| Ok((s.list_model_files()?, s.get_settings()?))).await?;
-    let (free_vram_mb, gpu) = mock::gpu();
-    Ok(EngineStatus::from_parts(
-        data_root,
-        files,
-        &settings,
-        TESTED_ENGINE_VERSIONS,
-        free_vram_mb,
-        gpu,
-    ))
+    let data_paths = paths.paths.clone();
+    if paths.demo {
+        return with_store(&store, move |s| -> meet_core::Result<EngineStatus> {
+            let (free, device) = demo::gpu();
+            Ok(EngineStatus::from_parts(
+                data_paths.root.display().to_string(),
+                s.list_model_files()?,
+                &s.get_settings()?,
+                models::TESTED_ENGINE_VERSIONS,
+                free,
+                device,
+            ))
+        })
+        .await;
+    }
+    let cache = Arc::clone(&gpu.0);
+    with_store(&store, move |s| {
+        let doctor = {
+            let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            match c.as_ref() {
+                Some((at, report)) if at.elapsed() < DOCTOR_TTL => report.clone(),
+                _ => {
+                    let report = models::selected_file(s, ModelRole::Engine)
+                        .ok()
+                        .flatten()
+                        .and_then(|e| models::doctor(&data_paths.absolute(&e.path)).ok());
+                    *c = Some((Instant::now(), report.clone()));
+                    report
+                }
+            }
+        };
+        models::status(&data_paths, s, doctor.as_ref())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -374,60 +508,159 @@ pub async fn list_model_files(store: State<'_, AppStore>) -> CmdResult<Vec<Model
 #[tauri::command(rename_all = "snake_case")]
 pub async fn select_model(
     store: State<'_, AppStore>,
+    gpu: State<'_, GpuCache>,
     role: ModelRole,
     id: ModelFileId,
 ) -> CmdResult<()> {
-    with_store(&store, move |s| {
-        if role == ModelRole::Unknown {
-            return Err(StoreError::Invalid(
-                "unrecognised files cannot be selected".into(),
-            ));
+    let file = with_store(&store, move |s| models::select_by_id(s, role, id)).await?;
+    if role == ModelRole::Engine {
+        *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    log::info!("selected {role}: {} ({})", file.display_name, file.path);
+    Ok(())
+}
+
+/// Scans `models\` and `engine\` (`meet_core::models::scan`), keeping the
+/// selections valid. The demo has no folders to scan.
+#[tauri::command]
+pub async fn rescan_models(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    gpu: State<'_, GpuCache>,
+) -> CmdResult<Vec<ModelFile>> {
+    if paths.demo {
+        return with_store(&store, |s| s.list_model_files()).await;
+    }
+    *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<Vec<ModelFile>> {
+        let report = models::scan(&data_paths, s, &Manifest::load(&data_paths.root)?)?;
+        for n in &report.notes {
+            log::info!("model scan: {n}");
         }
-        let files = s.list_model_files()?;
-        let file = files
-            .iter()
-            .find(|f| f.id == id)
-            .ok_or_else(|| StoreError::not_found("model file", id))?;
-        if file.role != role {
-            return Err(StoreError::Invalid(format!(
-                "{} is not a {} file",
-                file.display_name, role
-            )));
+        for e in &report.errors {
+            log::warn!("model scan: {e}");
         }
-        if file.missing {
-            return Err(StoreError::Invalid(format!(
-                "{} is missing from disk",
-                file.display_name
-            )));
-        }
-        s.set_setting(&selection_key(role), &id.to_string())
+        Ok(report.files)
     })
     .await
 }
 
-/// Mock rescan: re-syncs the known files. Phase 1's `models::scan` walks
-/// `models\` and `engine\` and passes what it finds to `sync_model_files`.
-#[tauri::command]
-pub async fn rescan_models(store: State<'_, AppStore>) -> CmdResult<Vec<ModelFile>> {
-    with_store(&store, |s| {
-        let found: Vec<ScannedModelFile> = s
-            .list_model_files()?
-            .into_iter()
-            .filter(|f| !f.missing)
-            .map(|f| ScannedModelFile {
-                path: f.path,
-                role: f.role,
-                architecture: f.architecture,
-                display_name: f.display_name,
-                quant: f.quant,
-                size_bytes: f.size_bytes,
-                sha256: f.sha256,
-                source: f.source,
-                capabilities: f.capabilities,
-                manifest_name: f.manifest_name,
-            })
-            .collect();
-        s.sync_model_files(&found, mock::now_ms())
+/// Downloads and extracts a runtime from the manifest (`name` or version;
+/// the default tested engine when absent), then rescans. Progress arrives as
+/// `models:progress`. Returns the installed folder.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn install_engine(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    name: Option<String>,
+) -> CmdResult<String> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let manifest = Manifest::load(&data_paths.root)?;
+        let entry = match name.as_deref() {
+            Some(n) => manifest
+                .engines
+                .iter()
+                .find(|e| e.name == n || e.version == n),
+            None => manifest.default_engine(),
+        }
+        .ok_or_else(|| CoreError::Models("no such engine in the manifest".into()))?
+        .clone();
+        let progress = |done: u64, total: Option<u64>, finished: bool, error: Option<String>| {
+            emit_download(
+                &app,
+                &DownloadProgress {
+                    kind: "engine",
+                    name: entry.name.clone(),
+                    done_bytes: done,
+                    total_bytes: total,
+                    finished,
+                    error,
+                },
+            )
+        };
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let result = models::install_engine(&entry, &data_paths, &mut |done, total| {
+            if last.elapsed() >= Duration::from_millis(250) {
+                last = Instant::now();
+                progress(done, total, false, None);
+            }
+        })
+        .and_then(|dir| {
+            models::scan(&data_paths, s, &manifest)?;
+            Ok(dir)
+        });
+        let size = Some(entry.size_bytes);
+        match &result {
+            Ok(dir) => {
+                log::info!("installed engine {}", dir.display());
+                progress(entry.size_bytes, size, true, None);
+            }
+            Err(e) => progress(0, size, true, Some(e.to_string())),
+        }
+        result.map(|d| d.display().to_string())
+    })
+    .await
+}
+
+/// Pulls a manifest model (`name` or its pull name) with the selected
+/// runtime's `nemo-speech pull`, verifies it, then rescans. Returns the file.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pull_model(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    name: String,
+) -> CmdResult<String> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> meet_core::Result<String> {
+        let manifest = Manifest::load(&data_paths.root)?;
+        let entry = manifest
+            .model(&name)
+            .ok_or_else(|| CoreError::Models(format!("no model {name:?} in the manifest")))?
+            .clone();
+        let engine = match models::selected_file(s, ModelRole::Engine)? {
+            Some(e) => e,
+            None => {
+                models::scan(&data_paths, s, &manifest)?;
+                models::selected_file(s, ModelRole::Engine)?.ok_or_else(|| {
+                    CoreError::Models("no engine installed; install one first".into())
+                })?
+            }
+        };
+        let progress = |done: u64, finished: bool, error: Option<String>| {
+            emit_download(
+                &app,
+                &DownloadProgress {
+                    kind: "model",
+                    name: entry.name.clone(),
+                    done_bytes: done,
+                    total_bytes: Some(entry.size_bytes),
+                    finished,
+                    error,
+                },
+            )
+        };
+        progress(0, false, None);
+        let result = models::pull(
+            &data_paths.absolute(&engine.path),
+            &data_paths.models(),
+            &entry,
+        )
+        .and_then(|p| {
+            models::scan(&data_paths, s, &manifest)?;
+            Ok(p)
+        });
+        match &result {
+            Ok(p) => {
+                log::info!("pulled {} to {}", entry.name, p.path.display());
+                progress(entry.size_bytes, true, None);
+            }
+            Err(e) => progress(0, true, Some(e.to_string())),
+        }
+        result.map(|p| p.path.display().to_string())
     })
     .await
 }
@@ -450,12 +683,12 @@ fn open_folder(path: &Path) -> CmdResult<()> {
 
 #[tauri::command]
 pub async fn open_models_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
-    open_folder(&paths.data_root.join("models"))
+    open_folder(&paths.paths.models())
 }
 
 #[tauri::command]
 pub async fn open_data_folder(paths: State<'_, AppPaths>) -> CmdResult<()> {
-    open_folder(&paths.data_root)
+    open_folder(&paths.paths.root)
 }
 
 // ---- Diagnostics ----------------------------------------------------------------
@@ -484,10 +717,16 @@ pub async fn read_log_tail(app: AppHandle, max_lines: u32) -> CmdResult<String> 
     .await
 }
 
-/// Stderr of the last engine job. No engine runs in the mock.
+/// The runtime's stderr from the most recent engine job (its `engine.log` in
+/// the meeting folder), or `None` when no job has run on this data root.
 #[tauri::command]
-pub async fn last_engine_stderr() -> CmdResult<Option<String>> {
-    Ok(None)
+pub async fn last_engine_stderr(paths: State<'_, AppPaths>) -> CmdResult<Option<String>> {
+    let audio_root = paths.paths.audio();
+    blocking(move || {
+        Ok(pipeline::last_engine_log(&audio_root, ENGINE_LOG_TAIL)
+            .map(|(path, tail)| format!("{}\n{tail}", path.display())))
+    })
+    .await
 }
 
 /// Lets the UI write to the app log (startup timing, unexpected errors).

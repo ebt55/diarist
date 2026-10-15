@@ -8,6 +8,7 @@
   import type { SegmentView } from "../lib/generated/SegmentView";
   import type { SpeakerId } from "../lib/generated/SpeakerId";
   import type { SpeakerView } from "../lib/generated/SpeakerView";
+  import { SPEAKER_PALETTE as PALETTE } from "../lib/generated/palette";
   import { Player } from "../lib/player.svelte";
   import { app, isTyping } from "../lib/state.svelte";
   import AudioBar from "./AudioBar.svelte";
@@ -23,11 +24,6 @@
   }
   let { meetingId, active }: Props = $props();
 
-  // Default speaker palette, same as meet_core::views::SPEAKER_PALETTE.
-  const PALETTE = [
-    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
-    "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#8cd17d",
-  ] as const;
   const FIRST_PAGE = 300;
   const PAGE = 2000;
   const EXPORTS: { format: ExportFormat; label: string }[] = [
@@ -101,7 +97,7 @@
     try {
       waveform = await api.getWaveform(id, 1600);
     } catch {
-      waveform = null; // Not a WAV (imports): play without peaks.
+      waveform = null; // Undecodable here: play without peaks.
     }
   }
 
@@ -239,10 +235,17 @@
     }
   }
 
+  function markReviewed(sp: SpeakerView) {
+    void edit("Mark reviewed", () => api.markReviewed(sp.id));
+  }
+
   function speakerMenu(sp: SpeakerView, x: number, y: number) {
     const others = roots.filter((r) => r.id !== sp.id);
     const items: MenuItem[] = [
       { kind: "item", label: `Rename ${sp.name}…`, hint: "R", run: () => startRename(sp.id, null) },
+      ...(sp.needs_review
+        ? [{ kind: "item", label: "Mark reviewed", run: () => markReviewed(sp) } as MenuItem]
+        : []),
       {
         kind: "swatches",
         label: "Colour",
@@ -399,6 +402,7 @@
       onstartrename={(id) => startRename(id, null)}
       onmenu={speakerMenu}
       onunmerge={(sp) => void edit("Unmerge", () => api.unmergeSpeaker(sp.id))}
+      onreviewed={markReviewed}
     />
 
     <Transcript

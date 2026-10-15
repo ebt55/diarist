@@ -13,8 +13,10 @@
     onstartrename: (id: SpeakerId) => void;
     onmenu: (speaker: SpeakerView, x: number, y: number) => void;
     onunmerge: (speaker: SpeakerView) => void;
+    /** "Mark reviewed" on the new-label badge. */
+    onreviewed: (speaker: SpeakerView) => void;
   }
-  let { speakers, renaming, oncommit, oncancel, onstartrename, onmenu, onunmerge }: Props = $props();
+  let { speakers, renaming, oncommit, oncancel, onstartrename, onmenu, onunmerge, onreviewed }: Props = $props();
 
   const roots = $derived(speakers.filter((s) => s.merged_into === null));
   const merged = $derived(speakers.filter((s) => s.merged_into !== null));
@@ -95,8 +97,16 @@
           <span class="dot"></span>
           <span class="name">{sp.name}</span>
           <span class="stat mono">{formatClock(sp.talk_ms)}</span>
-          {#if sp.needs_review}<span class="chip badge-new">new label</span>{/if}
         </button>
+        {#if sp.needs_review}
+          <button
+            type="button"
+            class="chip badge-new"
+            title="New label: check who this is. Click to mark it reviewed."
+            aria-label="Mark {sp.name} reviewed"
+            onclick={() => onreviewed(sp)}>new label</button
+          >
+        {/if}
         <button
           type="button"
           class="more"

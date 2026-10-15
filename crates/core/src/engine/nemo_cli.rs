@@ -493,9 +493,10 @@ impl NemoCliEngine {
 
     /// The exact argument list of a job (after the executable).
     pub fn args(&self, job: &FileJob, output: &Path) -> Vec<std::ffi::OsString> {
-        let mut a: Vec<std::ffi::OsString> = vec!["transcribe".into(), job.wav_path.clone().into()];
+        let mut a: Vec<std::ffi::OsString> =
+            vec!["transcribe".into(), process::path_arg(&job.wav_path)];
         a.push("--model".into());
-        a.push(self.asr_model.clone().into());
+        a.push(process::path_arg(&self.asr_model));
         let lang = job.language.trim();
         if !lang.is_empty() && !lang.eq_ignore_ascii_case("auto") {
             a.push("--language".into());
@@ -506,12 +507,12 @@ impl NemoCliEngine {
         if job.diarize {
             a.push("--diarize".into());
             a.push("--diar-model".into());
-            a.push(self.diar_model.clone().into());
+            a.push(process::path_arg(&self.diar_model));
         }
         for s in ["--device", &self.device, "--json", "--output"] {
             a.push(s.into());
         }
-        a.push(output.into());
+        a.push(process::path_arg(output));
         a.push("--force".into());
         a
     }
@@ -665,9 +666,9 @@ impl DiarizeRunner {
     pub fn args(&self, wav: &Path, rttm: &Path) -> Vec<std::ffi::OsString> {
         let mut a: Vec<std::ffi::OsString> = vec![
             "diarize".into(),
-            wav.into(),
+            process::path_arg(wav),
             "--model".into(),
-            self.diar_model.clone().into(),
+            process::path_arg(&self.diar_model),
             "--device".into(),
             self.device.clone().into(),
         ];
@@ -677,7 +678,7 @@ impl DiarizeRunner {
         for s in ["--format", "rttm", "--output"] {
             a.push(s.into());
         }
-        a.push(rttm.into());
+        a.push(process::path_arg(rttm));
         a.push("--force".into());
         a
     }
@@ -795,11 +796,11 @@ impl Engine for NemoCascadeEngine {
         let log = dir.join("engine.log");
         let mut cmd = process::command(&self.engine_dir, Some(&self.models_dir));
         cmd.arg("transcribe")
-            .arg(&job.wav_path)
+            .arg(process::path_arg(&job.wav_path))
             .arg("--model")
-            .arg(&self.asr_model)
+            .arg(process::path_arg(&self.asr_model))
             .args(["--device", &self.device, "--json", "--output"])
-            .arg(&output)
+            .arg(process::path_arg(&output))
             .arg("--force");
         let diarizer = DiarizeRunner {
             engine_dir: self.engine_dir.clone(),

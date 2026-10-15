@@ -29,3 +29,9 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 codegen-units = 1
 lto = true
 strip = true
+
+# Debug builds optimise dependencies (symphonia, rubato, rusqlite, ...) so a
+# debug desktop build decodes an hour of AAC in seconds, not minutes; our own
+# crates stay at opt-level 0 for fast incremental builds.
+[profile.dev.package."*"]
+opt-level = 2

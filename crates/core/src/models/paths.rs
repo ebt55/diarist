@@ -71,7 +71,10 @@ impl DataPaths {
     /// registry, default).
     pub fn resolve() -> Result<Self> {
         if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
-            return Ok(Self::at(dir));
+            // Native separators, so paths built under the root are uniform.
+            return Ok(Self::at(
+                PathBuf::from(dir).components().collect::<PathBuf>(),
+            ));
         }
         let exe_dir = std::env::current_exe()
             .ok()

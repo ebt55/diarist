@@ -240,7 +240,7 @@ class AppState {
       return;
     }
     void this.refreshMeetings();
-    if (e.message === "Import cancelled") {
+    if (e.type === "cancelled") {
       this.toast("info", `Import of ${name} cancelled`);
     } else {
       this.error(`Import of ${name} failed: ${e.message}`);

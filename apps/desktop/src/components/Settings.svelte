@@ -6,6 +6,7 @@
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
+  import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
   import { app, type Theme } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -162,7 +163,7 @@
           min="0"
           max="3650"
           class="num-input"
-          value={app.settings.audio_retention_days ?? "30"}
+          value={app.settings.audio_retention_days ?? SETTING_DEFAULTS.audio_retention_days}
           onchange={saveRetention}
         />
         <span>days</span>
@@ -212,7 +213,7 @@
       <label class="label" for="language">Default language</label>
       <select
         id="language"
-        value={app.settings.default_language ?? "en"}
+        value={app.settings.default_language ?? SETTING_DEFAULTS.default_language}
         onchange={(e) => app.setSetting("default_language", (e.currentTarget as HTMLSelectElement).value)}
       >
         {#each LANGUAGES as [code, name] (code)}<option value={code}>{name}{code === "auto" ? "" : ` (${code})`}</option>{/each}
@@ -225,7 +226,7 @@
         <input
           type="radio"
           name="post_pass"
-          checked={(app.settings.post_pass_mode ?? "always") === "always"}
+          checked={(app.settings.post_pass_mode ?? SETTING_DEFAULTS.post_pass_mode) === "always"}
           onchange={() => app.setSetting("post_pass_mode", "always")}
         />
         <span><strong>Always</strong> re-run the models over the recorded channels when you stop (default)</span>
@@ -344,11 +345,11 @@
               name="engine"
               checked={status.selected.engine === eng.id}
               disabled={eng.missing}
-              onchange={() => select("engine", eng.id, `nemo-speech ${eng.version}`)}
+              onchange={() => select("engine", eng.id, eng.display_name)}
             />
             <span class="model-main">
-              <span class="model-name">nemo-speech {eng.version}</span>
-              <span class="model-path mono">{eng.path}</span>
+              <span class="model-name">{eng.display_name}</span>
+              <span class="model-path mono">version {eng.version || "unknown"} · {eng.path}</span>
             </span>
             <span class="facts">
               {#if eng.tested}

@@ -28,6 +28,46 @@ pub fn is_engine_dir(dir: &Path) -> bool {
     exe_path(dir).is_file()
 }
 
+/// Paths at least this long get the `\\?\` prefix in [`path_arg`].
+const LONG_PATH: usize = 240;
+
+/// A file path as a runtime argument. nemo-speech 0.2.0 cannot open paths of
+/// `MAX_PATH` (260) characters or more ("model file does not exist"), but
+/// accepts the extended-length form, so long absolute paths are passed as
+/// `\\?\C:\...` (normalised: backslashes, no `.` or `..`). Short paths, UNC
+/// paths and other platforms pass through unchanged.
+pub fn path_arg(path: &Path) -> OsString {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if path.as_os_str().len() >= LONG_PATH {
+            if let Ok(abs) = std::path::absolute(path) {
+                let mut comps = abs.components();
+                if let Some(Component::Prefix(p)) = comps.next() {
+                    if matches!(p.kind(), Prefix::Disk(_)) {
+                        let mut out = OsString::from(r"\\?\");
+                        out.push(p.as_os_str());
+                        for c in comps {
+                            match c {
+                                Component::Normal(n) => {
+                                    out.push("\\");
+                                    out.push(n);
+                                }
+                                Component::RootDir | Component::CurDir => {}
+                                Component::ParentDir | Component::Prefix(_) => {
+                                    return path.as_os_str().to_owned()
+                                }
+                            }
+                        }
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    path.as_os_str().to_owned()
+}
+
 /// `<engine>\bin;%SystemRoot%\System32;%SystemRoot%`.
 pub fn reduced_path(engine_dir: &Path) -> OsString {
     let mut parts = vec![engine_dir.join("bin")];
@@ -132,6 +172,20 @@ pub fn tail(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_paths_get_the_extended_prefix() {
+        let short = Path::new(r"C:\data\models\a.gguf");
+        assert_eq!(path_arg(short), short.as_os_str());
+        if cfg!(windows) {
+            // `..` is resolved (GetFullPathNameW) before the prefix is added.
+            let long = format!(r"C:/data/{}/x/../model.gguf", "d".repeat(250));
+            let arg = path_arg(Path::new(&long)).to_string_lossy().into_owned();
+            assert!(arg.starts_with(r"\\?\C:\data\"), "{arg}");
+            assert!(arg.ends_with(r"\model.gguf") && !arg.contains('/'), "{arg}");
+            assert!(!arg.contains(r"\x\"), "{arg}");
+        }
+    }
 
     #[test]
     fn reduced_path_puts_the_engine_first() {
