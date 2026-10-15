@@ -3,13 +3,14 @@ target/
 # Node
 node_modules/
 dist/
-# Models and runtime binaries (downloaded on first run)
-models/
-engine/
+# Models and runtime binaries (downloaded on first run). Anchored to the repo
+# root so source modules named engine/ or models/ are not ignored.
+/models/
+/engine/
 *.gguf
 *.onnx
 # Local data
-data/
+/data/
 *.db
 *.db-wal
 *.db-shm
@@ -20,3 +21,5 @@ Thumbs.db
 .idea/
 # Scratch
 scratch/
+# Tauri generated files
+apps/desktop/src-tauri/gen/schemas/
