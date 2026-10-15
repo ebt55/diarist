@@ -35,3 +35,6 @@ tools/eval/.venv/
 tools/eval/.venv-wsl/
 tools/eval/sessions.toml
 tools/eval/__pycache__/
+
+# Private notes that never leave this PC (handoff, market research, naming)
+/local_docs/

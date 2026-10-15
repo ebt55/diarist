@@ -1,6 +1,6 @@
 # Branding and rename plan
 
-Status: done, 15 Oct 2026. The name is Diarist (`docs/research/09-naming.md`); the logo outcome and the rename are recorded below.
+Status: done, 15 Oct 2026. The name is Diarist (naming notes kept locally, outside the repository); the logo outcome and the rename are recorded below.
 
 ## Logo and app icon (brief for an Opus agent)
 
