@@ -270,11 +270,27 @@ pub fn start_capture(
     }
 }
 
+/// What [`play_wav`] played.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayReport {
+    pub device_name: String,
+    /// Frames written.
+    pub frames: u64,
+    /// QPC (100 ns) at which the first frame was played: from the device
+    /// clock when it reported a position, else when the stream started.
+    pub start_qpc_100ns: i64,
+    pub from_device_clock: bool,
+}
+
 /// Plays a 16-bit PCM WAV to the render endpoint matching `device` (id or
 /// name; `None` = default) in shared mode, blocking until it has played or
 /// `stop` is set. A developer helper for deterministic tests (e.g. a WAV
-/// into `CABLE Input` is captured from `CABLE Output`).
-pub fn play_wav(device: Option<&str>, wav: &std::path::Path, stop: &AtomicBool) -> Result<()> {
+/// into the VB-Audio cable's render side is captured from `CABLE Output`).
+pub fn play_wav(
+    device: Option<&str>,
+    wav: &std::path::Path,
+    stop: &AtomicBool,
+) -> Result<PlayReport> {
     #[cfg(windows)]
     {
         wasapi_impl::play_wav(device, wav, stop)

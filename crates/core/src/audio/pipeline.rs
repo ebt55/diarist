@@ -168,6 +168,10 @@ pub struct ChannelPipeline {
     pending_break: bool,
     /// The next gap is a suspend: anchor it, do not fill it.
     no_fill_next: bool,
+    /// The previous packet was synthesized silence: the capture stays
+    /// 100 ms behind real time while idle, so the step to the first real
+    /// packet is filled but is not a lost-audio gap.
+    after_synthetic: bool,
     mix: Option<MixResampler>,
     stats: PipelineStats,
 }
@@ -184,6 +188,7 @@ impl ChannelPipeline {
             frame_start: 0,
             pending_break: false,
             no_fill_next: false,
+            after_synthetic: false,
             mix: None,
             stats: PipelineStats::default(),
         }
@@ -252,7 +257,7 @@ impl ChannelPipeline {
                 if flags.discontinuity {
                     self.stats.discontinuities += 1;
                 }
-                match data {
+                let result = match data {
                     PacketData::Pcm16(samples) => {
                         self.place(qpc_100ns, samples, flags, out);
                         Ok(())
@@ -279,7 +284,9 @@ impl ChannelPipeline {
                         }
                         Ok(())
                     }
-                }
+                };
+                self.after_synthetic = flags.synthetic;
+                result
             }
         }
     }
@@ -310,6 +317,8 @@ impl ChannelPipeline {
                 if fill > 0 {
                     if !first {
                         out.anchors.push((self.position, expected));
+                    }
+                    if !first && !self.after_synthetic {
                         self.stats.gaps += 1;
                         self.stats.gap_samples += fill;
                         out.events.push(PipelineEvent::Gap {
@@ -856,6 +865,32 @@ mod tests {
         // A word in the second packet is an hour later in meeting time.
         assert_eq!(map.meeting_ms(150), 3_600_150);
         assert_eq!(map.meeting_ms(50), 50);
+    }
+
+    #[test]
+    fn leaving_synthesized_silence_is_not_a_gap() {
+        let mut p = ChannelPipeline::new(Channel::Loopback, ORIGIN);
+        let out = run(
+            &mut p,
+            vec![
+                Packet::Audio {
+                    qpc_100ns: ORIGIN,
+                    flags: PacketFlags {
+                        silent: true,
+                        synthetic: true,
+                        ..Default::default()
+                    },
+                    data: PacketData::Pcm16(vec![0; 3_200]),
+                },
+                // Playback starts: the first real packet is 100 ms past the
+                // synthesized silence.
+                pcm(ORIGIN + 3_000_000, 160, 4),
+            ],
+        );
+        assert_eq!(out.samples.len(), 4_800 + 160);
+        assert!(out.events.is_empty(), "{:?}", out.events);
+        assert_eq!(p.stats().gaps, 0);
+        assert_eq!(p.stats().synthetic_packets, 1);
     }
 
     #[test]

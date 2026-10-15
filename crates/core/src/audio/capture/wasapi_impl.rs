@@ -18,7 +18,7 @@ use wasapi::{
 use super::{
     audio_err, choose_loopback_endpoint, qpc_now_100ns, CaptureConfig, CaptureStatus, ChangeReason,
     Control, DeviceFlow, DeviceInfo, EndpointActivity, EndpointFollower, Packet, PacketData,
-    PacketFlags, PacketSource, SharedCaptureState, CAPTURE_RATE, FOLLOW_INTERVAL_MS,
+    PacketFlags, PacketSource, PlayReport, SharedCaptureState, CAPTURE_RATE, FOLLOW_INTERVAL_MS,
 };
 use crate::error::Result;
 use crate::types::Channel;
@@ -672,7 +672,7 @@ fn find_render_device(en: &DeviceEnumerator, query: Option<&str>) -> Result<Devi
         .map_err(|e| werr("open render device", e))
 }
 
-pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> Result<()> {
+pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> Result<PlayReport> {
     let mut reader = hound::WavReader::open(wav)
         .map_err(|e| audio_err(format!("open {}: {e}", wav.display())))?;
     let spec = reader.spec();
@@ -688,10 +688,11 @@ pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> R
     let thread_stop = Arc::clone(&stop_flag);
     let handle = std::thread::Builder::new()
         .name("play-wav".into())
-        .spawn(move || -> Result<()> {
+        .spawn(move || -> Result<PlayReport> {
             let _ = initialize_mta();
             let en = DeviceEnumerator::new().map_err(|e| werr("device enumerator", e))?;
             let dev = find_render_device(&en, device.as_deref())?;
+            let device_name = dev.get_friendlyname().unwrap_or_default();
             let mut client = dev
                 .get_iaudioclient()
                 .map_err(|e| werr("audio client", e))?;
@@ -723,6 +724,13 @@ pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> R
             let total_frames = bytes.len() / frame_bytes;
             let mut pos = 0usize;
             let mut started = false;
+            let mut start_qpc = 0i64;
+            let mut clock_start: Option<i64> = None;
+            let clock = client.get_audioclock().ok();
+            let freq = clock
+                .as_ref()
+                .and_then(|c| c.get_frequency().ok())
+                .unwrap_or(0);
             while pos < total_frames && !thread_stop.load(Ordering::SeqCst) {
                 let space = client
                     .get_available_space_in_frames()
@@ -740,7 +748,19 @@ pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> R
                 }
                 if !started {
                     client.start_stream().map_err(|e| werr("start", e))?;
+                    start_qpc = qpc_now_100ns();
                     started = true;
+                }
+                // Where position 0 was played, from the device clock (once
+                // it has advanced a little).
+                if clock_start.is_none() && freq > 0 {
+                    if let Some(Ok((dev_pos, qpc))) = clock.as_ref().map(|c| c.get_position()) {
+                        if dev_pos > 0 && qpc > 0 {
+                            let played =
+                                (i128::from(dev_pos) * 10_000_000 / i128::from(freq)) as i64;
+                            clock_start = Some(qpc as i64 - played);
+                        }
+                    }
                 }
                 let _ = event.wait_for_event(1_000);
             }
@@ -753,7 +773,12 @@ pub(super) fn play_wav(device: Option<&str>, wav: &Path, stop: &AtomicBool) -> R
                 }
             }
             let _ = client.stop_stream();
-            Ok(())
+            Ok(PlayReport {
+                device_name,
+                frames: pos as u64,
+                start_qpc_100ns: clock_start.unwrap_or(start_qpc),
+                from_device_clock: clock_start.is_some(),
+            })
         })
         .map_err(|e| audio_err(format!("spawn: {e}")))?;
     while !handle.is_finished() {

@@ -277,8 +277,12 @@ pub struct StopOutcome {
     pub meeting_id: MeetingId,
     pub live_run: RunId,
     pub duration_ms: i64,
+    /// Samples in each (equal-length) WAV.
     pub mic_samples: u64,
     pub loopback_samples: u64,
+    /// Samples each pipeline had placed on the timeline before the shorter
+    /// WAV was padded to the longer one.
+    pub timeline_samples: BTreeMap<String, u64>,
     pub issues: LiveIssues,
     /// Frames each channel's feed did not send to the engine.
     pub feed_dropped: BTreeMap<String, u64>,
@@ -654,9 +658,11 @@ impl Recorder {
             .unwrap_or(0);
         let mut samples: BTreeMap<Channel, u64> = BTreeMap::new();
         let mut feed_dropped = BTreeMap::new();
+        let mut timeline_samples = BTreeMap::new();
         let mut tail = Vec::new();
         for (ch, mut r) in results {
             let before = r.wav.samples();
+            timeline_samples.insert(ch.to_string(), before);
             r.wav.pad_to(len)?;
             if len > before {
                 let end = r.pipeline.end_qpc() + (len - before) as i64 * 625;
@@ -734,6 +740,7 @@ impl Recorder {
             duration_ms,
             mic_samples: samples.get(&Channel::Mic).copied().unwrap_or(0),
             loopback_samples: samples.get(&Channel::Loopback).copied().unwrap_or(0),
+            timeline_samples,
             issues,
             feed_dropped,
             feed_reports,
