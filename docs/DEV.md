@@ -39,6 +39,9 @@ cargo run -p meet-cli -- models pull                 # required models via `nemo
 cargo run -p meet-cli -- engine install              # runtime zip from manifests/engine.json
 cargo run --release -p meet-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
 cargo run -p meet-cli -- list | show <id> | search <words> | export <id> --format srt
+cargo run -p meet-cli -- devices                     # audio endpoints with ids, default and comms marks
+cargo run -p meet-cli -- play --device "Speakers (2- VB-Audio" x.wav   # render a WAV to an output endpoint
+cargo run --release -p meet-cli -- record [--seconds 60] [--title t] [--language en] [--diarize-mic] [--mic <id|name>] [--loopback <id|name>]
 ```
 
 `transcribe` extras: `--json` prints one machine-readable result object on
@@ -62,7 +65,43 @@ models and a runtime from elsewhere, e.g. the repo's local copies:
 cargo run --release -p meet-cli -- --data-dir %TEMP%\ma --models-dir models --engine-dir engine transcribe data\samples\ES2002a.Mix-Headset.wav
 ```
 
-Gated tests (skipped unless the variables are set):
+### Live recording (`record`, Phase 3a)
+
+`record` checks free VRAM (2.5 GB, from `doctor`), starts `nemo-speech
+serve` with the selected ASR model and diarizer (log: `<data
+root>\logs\serve.log`), captures the microphone (default: the default
+communications capture endpoint) and the system loopback (default: the
+default output, following the endpoint other apps actually play to), and
+prints live words per channel with provisional labels and the levels once a
+second. Ctrl-C or `--seconds` stops it; it then waits for the post-pass and
+prints the run ids, speakers, FLAC size and wall time. Devices are given by
+id or by (a prefix of) the name `meet-cli devices` prints. It never changes
+the system's default devices or volumes.
+
+`play --device <render id|name> <16-bit wav>` renders a WAV to an output
+endpoint and prints the QPC time its first frame played (for capture
+tests). On the reference machine the VB-Audio cable's render side is called
+`Speakers (2- VB-Audio Virtual Cable)`, not `CABLE Input`; whatever is played
+there comes out of the `CABLE Output (2- VB-Audio Virtual Cable)` capture
+endpoint, which makes a deterministic mic:
+
+```sh
+meet-cli play --device "Speakers (2- VB-Audio" talk.wav &
+meet-cli record --seconds 30 --mic "CABLE Output"
+```
+
+Setting `capture.autoconvert` (default true; not in the settings defaults
+table) set to `false` opens the captures at the mix format and resamples
+with rubato instead of Windows' 16 kHz converter.
+
+Loopback audio comes after the output's software volume: on an endpoint
+without hardware volume (S/PDIF, "Realtek Digital Output" here) at a few
+percent, speech arrives 40 dB down (peaks around -70 dBFS, about 3 bits of
+PCM16) and is barely transcribed. Record from an output at a normal volume.
+
+### Gated tests
+
+Skipped unless the variables are set:
 
 | Variable | Tests |
 |---|---|
@@ -71,6 +110,9 @@ Gated tests (skipped unless the variables are set):
 | `MEET_ASSIST_ENGINE_DIR` + `MEET_ASSIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
 | `MEET_ASSIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
 | `MEET_ASSIST_CIMC_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
+| engine + models | `-p meet-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency, VRAM |
+| `MEET_ASSIST_AUDIO_TEST=1` (VB-Audio Cable) | `-p meet-core --test capture_device`: a tone played into the cable is captured from `CABLE Output` at 16 kHz |
+| `MEET_ASSIST_LIVE_TEST=1` + engine + models (VB-Audio Cable) | `-p meet-cli --test live_record` (about 80 s, one minute audible on the loopback output): cable as the mic, a second AMI cut on the default output (`MEET_ASSIST_LOOPBACK_RENDER` picks another output; `MEET_ASSIST_CABLE_RENDER` / `MEET_ASSIST_CABLE_CAPTURE` override the cable); WAV lengths, cross-correlation offsets, live latency, post-pass run, FLAC, rename carry-over |
 
 `UPDATE_GOLDEN=1 cargo test -p meet-core golden` rewrites the export golden
 files in `crates/core/tests/golden/`.
@@ -98,7 +140,7 @@ versions that support the workspace `rust-version` (1.90) when they exist.
   `.cargo/config.toml` sets `TS_RS_EXPORT_DIR` and `TS_RS_LARGE_INT=number`
   (ids and timestamps are `i64` but stay below 2^53).
 - **Store conformance:** `crates/core/tests/store_conformance.rs` runs every
-  `Store` and `RunStore` case (runs, live utterances, anchors, carry-over)
+  `Store` and `RunStore` case (runs, live utterances and live speakers, anchors, carry-over, track deletion)
   against `MemoryStore` and `SqliteStore` (in-memory); a new implementation
   adds one test that calls `run_all` with its own factory.
 - **FFI sidecar wire format** (not on the main path):
