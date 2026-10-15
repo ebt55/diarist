@@ -13,7 +13,7 @@ use diarist_core::engine::ServeStatus;
 use diarist_core::export::{self, ExportDoc, ExportFormat};
 use diarist_core::gpu;
 use diarist_core::models::releases::{self, RuntimeRelease};
-use diarist_core::models::{self, relocate, DataPaths, Manifest};
+use diarist_core::models::{self, legacy, relocate, DataPaths, Manifest};
 use diarist_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
 use diarist_core::retention::{self, RetentionPlan, RetentionReport};
 use diarist_core::settings;
@@ -33,7 +33,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::asset::asset_url;
 use crate::events::{emit_download, emit_job};
-use crate::{demo, AppPaths, AppStore, GpuCache, Jobs, Startup};
+use crate::{demo, AppPaths, AppStore, GpuCache, Jobs, Legacy, Startup};
 
 /// Where imports run.
 const DEVICE: &str = "cuda:0";
@@ -965,29 +965,32 @@ pub async fn check_ready(
 ) -> CmdResult<models::Readiness> {
     let data_paths = paths.paths.clone();
     let demo = paths.demo;
-    with_store(&store, move |s| -> diarist_core::Result<models::Readiness> {
-        let manifest = Manifest::load(&data_paths.root)?;
-        if demo {
-            return Ok(models::Readiness {
-                action,
-                ok: true,
-                missing: Vec::new(),
-            });
-        }
-        // Only when something is not selected: a scan picks up files dropped in.
-        if models::resolve_selection(&data_paths, s).is_err() {
-            install_dropped(&data_paths, &manifest);
-            models::scan(&data_paths, s, &manifest)?;
-        }
-        models::readiness(
-            &data_paths,
-            s,
-            &manifest,
-            gpu::gpu_info(0).as_ref(),
-            &gpu::adapters(),
-            &action,
-        )
-    })
+    with_store(
+        &store,
+        move |s| -> diarist_core::Result<models::Readiness> {
+            let manifest = Manifest::load(&data_paths.root)?;
+            if demo {
+                return Ok(models::Readiness {
+                    action,
+                    ok: true,
+                    missing: Vec::new(),
+                });
+            }
+            // Only when something is not selected: a scan picks up files dropped in.
+            if models::resolve_selection(&data_paths, s).is_err() {
+                install_dropped(&data_paths, &manifest);
+                models::scan(&data_paths, s, &manifest)?;
+            }
+            models::readiness(
+                &data_paths,
+                s,
+                &manifest,
+                gpu::gpu_info(0).as_ref(),
+                &gpu::adapters(),
+                &action,
+            )
+        },
+    )
     .await
 }
 
@@ -999,15 +1002,18 @@ pub async fn recommended_downloads(
     paths: State<'_, AppPaths>,
 ) -> CmdResult<Vec<DownloadItem>> {
     let data_paths = paths.paths.clone();
-    with_store(&store, move |s| -> diarist_core::Result<Vec<DownloadItem>> {
-        let manifest = Manifest::load(&data_paths.root)?;
-        Ok(models::download_items(
-            &data_paths,
-            &manifest,
-            &s.list_model_files()?,
-            recommended_backend_now(),
-        ))
-    })
+    with_store(
+        &store,
+        move |s| -> diarist_core::Result<Vec<DownloadItem>> {
+            let manifest = Manifest::load(&data_paths.root)?;
+            Ok(models::download_items(
+                &data_paths,
+                &manifest,
+                &s.list_model_files()?,
+                recommended_backend_now(),
+            ))
+        },
+    )
     .await
 }
 
@@ -1102,26 +1108,29 @@ pub async fn setup_status(
     if !demo {
         *gpu.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
-    with_store(&store, move |s| -> diarist_core::Result<models::SetupStatus> {
-        let manifest = Manifest::load(&data_paths.root)?;
-        let files = if demo {
-            s.list_model_files()?
-        } else {
-            install_dropped(&data_paths, &manifest);
-            let report = models::scan(&data_paths, s, &manifest)?;
-            for e in &report.errors {
-                log::warn!("model scan: {e}");
-            }
-            report.files
-        };
-        Ok(models::setup_status(
-            &data_paths,
-            &manifest,
-            &files,
-            gpu::gpu_info(0),
-            gpu::adapters(),
-        ))
-    })
+    with_store(
+        &store,
+        move |s| -> diarist_core::Result<models::SetupStatus> {
+            let manifest = Manifest::load(&data_paths.root)?;
+            let files = if demo {
+                s.list_model_files()?
+            } else {
+                install_dropped(&data_paths, &manifest);
+                let report = models::scan(&data_paths, s, &manifest)?;
+                for e in &report.errors {
+                    log::warn!("model scan: {e}");
+                }
+                report.files
+            };
+            Ok(models::setup_status(
+                &data_paths,
+                &manifest,
+                &files,
+                gpu::gpu_info(0),
+                gpu::adapters(),
+            ))
+        },
+    )
     .await
 }
 
@@ -1220,23 +1229,11 @@ pub async fn move_data_root(
             }
             Ok(())
         };
-        let mut last = Instant::now() - Duration::from_secs(1);
-        let report = relocate::copy_data(&plan, &backup, &mut |done, total| {
-            if last.elapsed() >= Duration::from_millis(200) || done == total {
-                last = Instant::now();
-                let _ = app.emit(
-                    MoveProgress::EVENT,
-                    MoveProgress {
-                        done_bytes: done,
-                        total_bytes: total,
-                    },
-                );
-            }
-        })
-        .map_err(|e| {
-            log::error!("moving the data folder failed: {e}");
-            e.to_string()
-        })?;
+        let report =
+            relocate::copy_data(&plan, &backup, &mut move_progress(&app)).map_err(|e| {
+                log::error!("moving the data folder failed: {e}");
+                e.to_string()
+            })?;
         // Back to the default folder: clear the key instead of naming it.
         let is_default = DataPaths::default_root().is_ok_and(|d| {
             d.to_string_lossy()
@@ -1256,6 +1253,91 @@ pub async fn move_data_root(
             files: report.files,
             bytes: report.bytes,
         })
+    })
+    .await
+}
+
+/// Emits `data:move_progress` at most every 200 ms (and at the end).
+fn move_progress(app: &AppHandle) -> impl FnMut(u64, u64) + '_ {
+    let mut last = Instant::now() - Duration::from_secs(1);
+    move |done, total| {
+        if last.elapsed() >= Duration::from_millis(200) || done == total {
+            last = Instant::now();
+            let _ = app.emit(
+                MoveProgress::EVENT,
+                MoveProgress {
+                    done_bytes: done,
+                    total_bytes: total,
+                },
+            );
+        }
+    }
+}
+
+/// First launch after the rename, "Move": copies the pre-rename data root
+/// (`diarist_core::models::legacy`) into this one with the data-folder move
+/// and verifies it; the UI then restarts the app, and the next launch
+/// deletes the old copy. Progress arrives as `data:move_progress`.
+#[tauri::command]
+pub async fn migrate_legacy_data(
+    app: AppHandle,
+    paths: State<'_, AppPaths>,
+    legacy: State<'_, Legacy>,
+) -> CmdResult<MoveResult> {
+    let Some(old) = legacy.0.clone() else {
+        return Err("There is no earlier data to move.".into());
+    };
+    let to = paths.paths.root.clone();
+    blocking(move || {
+        let plan = legacy::plan_legacy_move(&old.root, &to).map_err(|e| e.to_string())?;
+        log::info!(
+            "moving pre-rename data {} -> {}: {} files, {} MB",
+            old.root.display(),
+            to.display(),
+            plan.files,
+            plan.bytes >> 20
+        );
+        crate::live::handle(&app).stop_server();
+        let src = old.root.join(legacy::LEGACY_DB_FILE);
+        let backup = |dest: &Path| legacy::copy_legacy_database(&src, dest);
+        let report =
+            relocate::copy_data(&plan, &backup, &mut move_progress(&app)).map_err(|e| {
+                log::error!("moving the pre-rename data failed: {e}");
+                e.to_string()
+            })?;
+        log::info!(
+            "pre-rename data copied to {} ({} files, {} MB, {} links); restart to use it",
+            to.display(),
+            report.files,
+            report.bytes >> 20,
+            report.links
+        );
+        Ok(MoveResult {
+            to: to.display().to_string(),
+            files: report.files,
+            bytes: report.bytes,
+        })
+    })
+    .await
+}
+
+/// First launch after the rename, "Start fresh": creates the new database
+/// (so the question is not asked again) and leaves the old folder alone;
+/// the UI then restarts the app.
+#[tauri::command]
+pub async fn start_fresh(paths: State<'_, AppPaths>, legacy: State<'_, Legacy>) -> CmdResult<()> {
+    let Some(old) = legacy.0.clone() else {
+        return Ok(());
+    };
+    let db = paths.paths.db();
+    blocking(move || {
+        diarist_core::store::SqliteStore::open(&db).map_err(|e| e.to_string())?;
+        log::info!(
+            "starting fresh in {}; the earlier data in {} is left as it is",
+            db.display(),
+            old.root.display()
+        );
+        Ok(())
     })
     .await
 }

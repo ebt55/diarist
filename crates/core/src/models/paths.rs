@@ -215,12 +215,17 @@ fn portable_root(exe_dir: &Path) -> Option<PathBuf> {
     })
 }
 
-#[cfg(windows)]
 fn registry_root() -> Option<PathBuf> {
+    read_registry_path(REGISTRY_KEY)
+}
+
+/// The `DataRoot` value under `HKCU\<key_path>`, if set and not empty.
+#[cfg(windows)]
+pub(super) fn read_registry_path(key_path: &str) -> Option<PathBuf> {
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
 
-    let key = HSTRING::from(REGISTRY_KEY);
+    let key = HSTRING::from(key_path);
     let value = HSTRING::from(REGISTRY_VALUE);
     let mut size = 0u32;
     let rc = unsafe {
@@ -259,7 +264,7 @@ fn registry_root() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn registry_root() -> Option<PathBuf> {
+pub(super) fn read_registry_path(_key_path: &str) -> Option<PathBuf> {
     None
 }
 
@@ -272,8 +277,14 @@ pub fn registry_data_root() -> Option<PathBuf> {
 /// Points `HKCU\Software\Diarist\DataRoot` at `root`, or removes the
 /// value (and the key when it is empty) for `None`, so the default root is
 /// used again. The uninstaller reads the same value.
-#[cfg(windows)]
 pub fn set_registry_root(root: Option<&Path>) -> Result<()> {
+    write_registry_path(REGISTRY_KEY, root)
+}
+
+/// Sets the `DataRoot` value under `HKCU\<key_path>`, or removes it (and
+/// the key when that leaves it empty) for `None`.
+#[cfg(windows)]
+pub(super) fn write_registry_path(key_path: &str, root: Option<&Path>) -> Result<()> {
     use windows::core::HSTRING;
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, WIN32_ERROR};
     use windows::Win32::System::Registry::{
@@ -281,11 +292,11 @@ pub fn set_registry_root(root: Option<&Path>) -> Result<()> {
         HKEY_CURRENT_USER, REG_SZ,
     };
 
-    let key_name = HSTRING::from(REGISTRY_KEY);
+    let key_name = HSTRING::from(key_path);
     let value = HSTRING::from(REGISTRY_VALUE);
     let fail = |what: &str, rc: WIN32_ERROR| {
         CoreError::Models(format!(
-            "cannot {what} HKCU\\{REGISTRY_KEY}\\{REGISTRY_VALUE}: {}",
+            "cannot {what} HKCU\\{key_path}\\{REGISTRY_VALUE}: {}",
             rc.to_hresult().message()
         ))
     };
@@ -326,7 +337,7 @@ pub fn set_registry_root(root: Option<&Path>) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-pub fn set_registry_root(_root: Option<&Path>) -> Result<()> {
+pub(super) fn write_registry_path(_key_path: &str, _root: Option<&Path>) -> Result<()> {
     Err(CoreError::Models(
         "a relocated data root is stored in the Windows registry".into(),
     ))

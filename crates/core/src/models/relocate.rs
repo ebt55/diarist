@@ -53,6 +53,10 @@ fn err(msg: impl Into<String>) -> CoreError {
 pub struct MovePlan {
     pub from: PathBuf,
     pub to: PathBuf,
+    /// The database file name under `from`: [`DB_FILE`], or the old name
+    /// when a pre-rename data root is moved in ([`super::legacy`]). It is
+    /// always written to `to` as [`DB_FILE`].
+    pub db_file: String,
     /// Files (the database counts as one).
     pub files: u64,
     pub bytes: u64,
@@ -90,6 +94,9 @@ struct Marker {
     #[serde(default)]
     stats: Vec<(String, u64, u64)>,
     at_ms: i64,
+    /// The database's name in the old root when it is not [`DB_FILE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_file: Option<String>,
 }
 
 fn is_link(p: &Path) -> bool {
@@ -127,6 +134,16 @@ fn is_within(inner: &Path, outer: &Path) -> bool {
     i == o || i.starts_with(&format!("{o}\\"))
 }
 
+/// `a` and `b` are the same folder or one holds the other.
+pub(super) fn overlaps(a: &Path, b: &Path) -> bool {
+    is_within(a, b) || is_within(b, a)
+}
+
+/// `a` and `b` name the same folder (case-insensitive).
+pub(super) fn same_folder(a: &Path, b: &Path) -> bool {
+    is_within(a, b) && is_within(b, a)
+}
+
 /// File count and bytes under `dir`, links counted as one file of size 0
 /// and never followed. A missing folder is (0, 0).
 pub fn tree_stats(dir: &Path) -> (u64, u64) {
@@ -162,6 +179,19 @@ fn item_stats(p: &Path) -> (u64, u64) {
 
 /// Checks that `to` can take the data root at `from` and measures the copy.
 pub fn plan_move(from: &Path, to: &Path) -> Result<MovePlan> {
+    check_paths(from, to)?;
+    if to.exists() && fs::read_dir(to)?.next().is_some() {
+        return Err(err(format!(
+            "{} is not empty; choose an empty or new folder",
+            to.display()
+        )));
+    }
+    measure(from, DB_FILE, to)
+}
+
+/// `to` is absolute, a folder (or not there yet), and neither inside `from`
+/// nor around it.
+pub(super) fn check_paths(from: &Path, to: &Path) -> Result<()> {
     if !to.is_absolute() {
         return Err(err(format!("{} is not an absolute path", to.display())));
     }
@@ -178,19 +208,17 @@ pub fn plan_move(from: &Path, to: &Path) -> Result<MovePlan> {
             to.display()
         )));
     }
-    if to.exists() {
-        if !to.is_dir() {
-            return Err(err(format!("{} is a file, not a folder", to.display())));
-        }
-        if fs::read_dir(to)?.next().is_some() {
-            return Err(err(format!(
-                "{} is not empty; choose an empty or new folder",
-                to.display()
-            )));
-        }
+    if to.exists() && !to.is_dir() {
+        return Err(err(format!("{} is a file, not a folder", to.display())));
     }
+    Ok(())
+}
+
+/// Measures what [`copy_data`] will copy from `from` (whose database is
+/// `db_file`) and checks the free space at `to`.
+pub(super) fn measure(from: &Path, db_file: &str, to: &Path) -> Result<MovePlan> {
     let mut files = 1;
-    let mut bytes = fs::metadata(from.join(DB_FILE))
+    let mut bytes = fs::metadata(from.join(db_file))
         .map(|m| m.len())
         .unwrap_or(0);
     for d in MOVED_DIRS {
@@ -211,6 +239,7 @@ pub fn plan_move(from: &Path, to: &Path) -> Result<MovePlan> {
     Ok(MovePlan {
         from: from.to_path_buf(),
         to: to.to_path_buf(),
+        db_file: db_file.to_owned(),
         files,
         bytes,
         free_bytes,
@@ -317,6 +346,13 @@ pub fn copy_data(
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<MoveReport> {
     let created = !plan.to.exists();
+    // A pre-rename root moves into a root this launch already uses (logs,
+    // WebView profile): what was there before stays if the copy fails.
+    let existing: Vec<&str> = BEST_EFFORT
+        .iter()
+        .copied()
+        .filter(|n| plan.to.join(n).exists())
+        .collect();
     let result = (|| -> Result<MoveReport> {
         fs::create_dir_all(&plan.to)?;
         let mut report = MoveReport::default();
@@ -325,15 +361,14 @@ pub fn copy_data(
         let total = plan.bytes;
         let mut done = 0u64;
         progress(0, total);
-        if plan.from.join(DB_FILE).is_file() {
+        let db = plan.from.join(&plan.db_file);
+        if db.is_file() {
             backup_db(&plan.to.join(DB_FILE))?;
-            let n = fs::metadata(plan.from.join(DB_FILE))
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let n = fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
             done += n;
             report.files += 1;
             report.bytes += n;
-            items.push(DB_FILE.to_owned());
+            items.push(plan.db_file.clone());
             progress(done, total);
         }
         for d in MOVED_DIRS {
@@ -383,6 +418,7 @@ pub fn copy_data(
             items,
             stats,
             at_ms: super::now_ms(),
+            db_file: (plan.db_file != DB_FILE).then(|| plan.db_file.clone()),
         };
         fs::write(
             plan.to.join(MOVE_MARKER),
@@ -391,18 +427,21 @@ pub fn copy_data(
         Ok(report)
     })();
     if result.is_err() {
-        remove_copy(&plan.to, created);
+        remove_copy(&plan.to, created, &existing);
     }
     result
 }
 
-/// Removes what [`copy_data`] wrote into `to` (and `to` when it created it).
-fn remove_copy(to: &Path, created: bool) {
+/// Removes what [`copy_data`] wrote into `to` (and `to` when it created it),
+/// except the `keep` items that were there before.
+fn remove_copy(to: &Path, created: bool, keep: &[&str]) {
     for name in [DB_FILE, "diarist.db.tmp", MOVE_MARKER] {
         let _ = fs::remove_file(to.join(name));
     }
     for d in MOVED_DIRS.iter().chain(BEST_EFFORT) {
-        let _ = remove_item(&to.join(d));
+        if !keep.contains(d) {
+            let _ = remove_item(&to.join(d));
+        }
     }
     if created {
         let _ = fs::remove_dir(to);
@@ -484,23 +523,20 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
         let _ = fs::remove_file(&marker_path);
         return Some(report);
     }
+    let old_db = marker.db_file.as_deref().unwrap_or(DB_FILE);
     for item in &marker.items {
         let (src, dest) = (old.join(item), root.join(item));
         if !src.exists() && !is_link(&src) {
             continue;
         }
-        if item == DB_FILE {
-            if !dest.is_file() {
+        if item == old_db {
+            if !root.join(DB_FILE).is_file() {
                 report
                     .kept
                     .push(format!("{item}: missing from the new folder"));
                 continue;
             }
-            for name in [
-                DB_FILE.to_owned(),
-                format!("{DB_FILE}-wal"),
-                format!("{DB_FILE}-shm"),
-            ] {
+            for name in [item.clone(), format!("{item}-wal"), format!("{item}-shm")] {
                 let p = old.join(&name);
                 if p.exists() {
                     match retry_while_held(&deadline, || fs::remove_file(&p)) {
@@ -614,10 +650,7 @@ mod tests {
         assert!(!new.join(MOVE_MARKER).exists());
         assert!(finish_pending_move(&new).is_none());
         // The new copy is intact.
-        assert_eq!(
-            fs::read(new.join("logs/diarist.log")).unwrap(),
-            b"line\n"
-        );
+        assert_eq!(fs::read(new.join("logs/diarist.log")).unwrap(), b"line\n");
     }
 
     #[test]

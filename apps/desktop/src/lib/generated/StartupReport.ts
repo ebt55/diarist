@@ -23,6 +23,12 @@ moved_from: string | null,
  */
 move_kept: Array<string>, 
 /**
+ * A data root from before the rename to Diarist, offered for moving in;
+ * the app runs on an empty in-memory store until the user answers
+ * (`models::legacy`).
+ */
+legacy_root: string | null, 
+/**
  * Launched by Windows at sign-in (autostart): the window stays in the tray.
  */
 autostart: boolean, };

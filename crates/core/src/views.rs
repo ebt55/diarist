@@ -490,6 +490,10 @@ pub struct StartupReport {
     pub moved_from: Option<String>,
     /// Items of the old folder left in place after the move, with reasons.
     pub move_kept: Vec<String>,
+    /// A data root from before the rename to Diarist, offered for moving in;
+    /// the app runs on an empty in-memory store until the user answers
+    /// (`models::legacy`).
+    pub legacy_root: Option<String>,
     /// Launched by Windows at sign-in (autostart): the window stays in the tray.
     pub autostart: bool,
 }

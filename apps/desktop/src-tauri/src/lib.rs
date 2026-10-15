@@ -9,7 +9,11 @@
 //! `app_local_data_dir`). It is resolved before the app is built, so the app
 //! log (`<root>\logs`), the WebView2 profile (`<root>\EBWebView`) and the
 //! window state follow it; the store is `SqliteStore` there. A data-folder
-//! move left by the previous run is finished first (`relocate`). `--demo`
+//! move left by the previous run is finished first (`relocate`). When the
+//! new root is fresh and a pre-rename meet-assist data root exists, the app
+//! runs on an empty `MemoryStore` and asks once whether to move that data in
+//! (`diarist_core::models::legacy`, the `migrate_legacy_data` and
+//! `start_fresh` commands). `--demo`
 //! runs on the seeded `MemoryStore::demo()` with a scratch data root
 //! instead (for screenshots; see `demo.rs`).
 //!
@@ -36,6 +40,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use diarist_core::models::legacy::{self, LegacyRoot};
 use diarist_core::models::relocate::{self, CleanupReport};
 use diarist_core::models::{DataPaths, DoctorReport};
 use diarist_core::pipeline::JobQueue;
@@ -79,6 +84,10 @@ pub(crate) type DoctorSlot = Option<(Instant, Option<DoctorReport>)>;
 #[derive(Default)]
 pub(crate) struct Startup(pub(crate) Mutex<StartupReport>);
 
+/// The pre-rename data root offered at this launch (the store is then an
+/// empty `MemoryStore` until the user answers and the app restarts).
+pub(crate) struct Legacy(pub(crate) Option<LegacyRoot>);
+
 /// The data root for this run: the demo's scratch folder, or the resolved one.
 fn resolve_paths(demo: bool) -> Result<DataPaths, String> {
     if demo {
@@ -87,10 +96,18 @@ fn resolve_paths(demo: bool) -> Result<DataPaths, String> {
     DataPaths::resolve().map_err(|e| e.to_string())
 }
 
-/// The store on the data root (or the demo's).
-fn open_store(paths: &DataPaths, demo: bool) -> Result<Arc<dyn RunStore>, String> {
+/// The store on the data root (or the demo's, or an empty one while the
+/// move of a pre-rename data root is being offered: no database is created).
+fn open_store(
+    paths: &DataPaths,
+    demo: bool,
+    legacy: Option<&LegacyRoot>,
+) -> Result<Arc<dyn RunStore>, String> {
     if demo {
         return Ok(Arc::new(MemoryStore::demo()));
+    }
+    if legacy.is_some() {
+        return Ok(Arc::new(MemoryStore::new()));
     }
     let store = SqliteStore::open(paths.db())
         .map_err(|e| format!("cannot open {}: {e}", paths.db().display()))?
@@ -139,6 +156,17 @@ pub fn run() {
     } else {
         relocate::finish_pending_move(&paths.root)
     };
+    // A moved-in pre-rename root: its registry value goes with its data.
+    let legacy_key_removed = moved
+        .as_ref()
+        .map(legacy::forget_legacy_registry)
+        .transpose();
+    // First launch under the new name with old data around: ask first.
+    let legacy: Option<LegacyRoot> = if demo {
+        None
+    } else {
+        legacy::pending_legacy(&paths)
+    };
     let window_state_file: PathBuf = paths.root.join(".window-state.json");
     // A saved size and position replace the first-launch sizing in the UI.
     let window_state_saved = window_state_file.is_file();
@@ -151,6 +179,7 @@ pub fn run() {
         .manage(Jobs(Arc::new(JobQueue::new())))
         .manage(GpuCache::default())
         .manage(Startup::default())
+        .manage(Legacy(legacy.clone()))
         .manage(commands::LastDownloadError::default())
         .manage(live::LiveHandle(Arc::new(live::LiveState::new())))
         .plugin(
@@ -239,6 +268,8 @@ pub fn run() {
             commands::data_root_info,
             commands::move_data_root,
             commands::restart_app,
+            commands::migrate_legacy_data,
+            commands::start_fresh,
             commands::retention_preview,
             commands::apply_retention,
             commands::get_autostart,
@@ -263,7 +294,7 @@ pub fn run() {
             live::rerun_post_pass,
         ])
         .setup(move |app| {
-            let store = open_store(&paths, demo)?;
+            let store = open_store(&paths, demo, legacy.as_ref())?;
             // Playback reads stored audio through the asset protocol; the
             // scope starts at the data root (imports add their file on demand).
             app.asset_protocol_scope()
@@ -293,6 +324,22 @@ pub fn run() {
                     );
                     report.moved_from = Some(m.from.display().to_string());
                     report.move_kept = m.kept.clone();
+                }
+                match &legacy_key_removed {
+                    Ok(Some(true)) => log::info!(
+                        "removed HKCU\\{}\\DataRoot (its data moved in)",
+                        legacy::LEGACY_REGISTRY_KEY
+                    ),
+                    Err(e) => log::warn!("old registry value not removed: {e}"),
+                    _ => {}
+                }
+                if let Some(l) = &legacy {
+                    log::info!(
+                        "pre-rename data found in {}{}; asking whether to move it in",
+                        l.root.display(),
+                        if l.from_registry { " (old registry value)" } else { "" }
+                    );
+                    report.legacy_root = Some(l.root.display().to_string());
                 }
                 // Before the first import can be queued: imports a crash
                 // interrupted stop showing as busy.

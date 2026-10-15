@@ -27,6 +27,7 @@ pub mod classify;
 pub mod doctor;
 pub mod download;
 pub mod gguf;
+pub mod legacy;
 pub mod manifest;
 pub mod paths;
 pub mod pull;

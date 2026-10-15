@@ -151,6 +151,8 @@ class AppState {
     try {
       const s = await api.setupStatus();
       this.setupNeeded = s.needs_setup;
+      // The data move from before the rename is being offered (an empty store).
+      if (this.startup?.legacy_root) return;
       // The first run opens on the setup screen once; after "Set up later" the
       // library opens and Import and Record say what they miss.
       if (s.needs_setup && !this.settingBool("setup.later") && this.route === "library" && this.openId === null) {

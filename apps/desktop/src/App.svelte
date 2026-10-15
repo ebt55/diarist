@@ -8,6 +8,7 @@
   import { plural } from "./lib/format";
   import { live } from "./lib/live.svelte";
   import { AUDIO_EXTENSIONS, app, isTyping, startupFlags } from "./lib/state.svelte";
+  import LegacyMove from "./components/LegacyMove.svelte";
   import Library from "./components/Library.svelte";
   import MeetingView from "./components/MeetingView.svelte";
   import Overlays from "./components/Overlays.svelte";
@@ -142,7 +143,7 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (app.confirmRequest || live.sheetOpen) return;
+    if (app.confirmRequest || live.sheetOpen || app.startup?.legacy_root) return;
     const k = e.key;
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && !e.altKey) {
@@ -247,6 +248,7 @@
 
 <Overlays />
 <RecordSheet />
+<LegacyMove />
 
 <style>
   .shell {
