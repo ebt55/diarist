@@ -32,7 +32,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use meet_core::audio::capture::{self, find_device, DeviceFlow, DeviceInfo as AudioDevice};
-use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeSupervisor};
+use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeStatus, ServeSupervisor};
 use meet_core::gpu::{self, VramReading, VramSource};
 pub use meet_core::live::LivePhase as Phase;
 use meet_core::live::{
@@ -437,8 +437,12 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
     let mut serve = lock(&live.serve);
     if let Some(s) = serve.as_mut() {
         if s.key == key {
-            if !s.supervisor.status().is_ready() {
+            if matches!(
+                s.supervisor.status().status,
+                ServeStatus::Stopped | ServeStatus::Failed { .. }
+            ) {
                 // Stopped after the idle timeout (or failed): launch again.
+                // (Starting or restarting: the launch already has a watcher.)
                 s.supervisor.start();
                 watch_ready(app, key, s.supervisor.clone(), None);
             }
