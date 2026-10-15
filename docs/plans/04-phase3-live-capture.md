@@ -1,6 +1,6 @@
 # Phase 3: live capture and live transcription
 
-Status: draft. Chunk 3c (live engine adapter) waits on the runtime spike. Everything else rests on docs/research/02-ui-audio-stack.md.
+Status: 3a to 3e delivered 15 Oct 2026 (core and CLI, including endpoint following and crash recovery); loopback auto gain added as a follow-up; 3f echo deferred. Measured in the integration test: channels aligned within 3 ms, first live word under 1 s after playback start on both channels, post-pass 8 s from Stop to done on a one-minute recording, FLAC at 26 percent of PCM, rename carried over. The UI half is Phase 3b (apps/desktop).
 
 ## Goal
 
