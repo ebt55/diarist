@@ -4,8 +4,10 @@ import type { JobStage } from "./JobStage";
 import type { MeetingId } from "./MeetingId";
 
 /**
- * Job lifecycle events, emitted to the UI as `job:progress`, `job:done` and
- * `job:error` (see [`JobEvent::event_name`]); the payload is the whole value.
+ * Job lifecycle events, emitted to the UI as `job:progress`, `job:done`,
+ * `job:error` and `job:cancelled` (see [`JobEvent::event_name`]); the
+ * payload is the whole value. A job ends with exactly one of `Done`,
+ * `Error` or `Cancelled`.
  */
 export type JobEvent = { "type": "progress", job_id: JobId, stage: JobStage, 
 /**
@@ -15,4 +17,9 @@ done_ms: number, total_ms: number | null, } | { "type": "done", job_id: JobId, m
 /**
  * The meeting row, when one was created before the failure.
  */
-meeting_id: MeetingId | null, message: string, };
+meeting_id: MeetingId | null, message: string, } | { "type": "cancelled", job_id: JobId, 
+/**
+ * A meeting row left behind (status `failed`); `None` when the
+ * job created none or removed it.
+ */
+meeting_id: MeetingId | null, };

@@ -175,6 +175,8 @@ pub enum ErrorCode {
     BadInput,
     ModelMissing,
     Timeout,
+    /// The job was cancelled on request (`Engine::cancel`).
+    Cancelled,
     Other,
 }
 

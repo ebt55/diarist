@@ -10,57 +10,57 @@ use crate::audio::Decoder;
 use crate::engine::{DiarPreset, DiarizeRunner, Engine, EngineEvent, EngineWord, FileJob};
 use crate::error::{CoreError, Result};
 use crate::models::free_disk_bytes;
+use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, Store};
 use crate::transcript::{build_transcript, words_from_engine, SegmentOptions, UNKNOWN_LABEL};
 use crate::types::{
     AudioFormat, Channel, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source, TrackChannel,
 };
-use crate::views::{JobEvent, JobStage};
+use crate::views::{JobEvent, JobStage, Settings};
 
 /// Free space required before an import starts.
 pub const MIN_FREE_BYTES: u64 = 2 << 30;
 
-/// Settings keys read by the import.
-pub const SETTING_KEEP_WAV: &str = "keep_intermediate_wav";
-pub const SETTING_KEEP_DIARIZATION: &str = "keep_diarization_segments";
-
-/// How an import runs.
+/// How an import runs: where, in which language, what to keep. Built from
+/// the effective settings with [`ImportOptions::new`]; fields can be
+/// overridden afterwards (the CLI's `--language`, `--keep-wav`, `--rttm`).
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     /// The data root: the 16 kHz WAV, the engine JSON and logs go to
     /// `<root>/audio/<meeting uid>/`.
     pub data_root: PathBuf,
-    /// Keep `source.wav` (also on when the `keep_intermediate_wav` setting is `1`/`true`).
+    /// The settings the options were derived from (stored over defaults).
+    pub settings: Settings,
+    /// BCP-47 tag or `auto` (setting `default_language`).
+    pub language: String,
+    /// Keep and register `source.wav` (setting `keep_intermediate_wav`).
     pub keep_intermediate: bool,
     /// Refuse to start with less free space than this.
     pub min_free_bytes: u64,
-    /// Run the standalone diarization pass and keep `diarization.rttm`/`.json`
-    /// in the meeting folder (also when `keep_diarization_segments` is set,
-    /// provided a runner is given).
+    /// Runs the standalone diarization pass when [`Self::run_diarize_pass`].
     pub diarize_runner: Option<DiarizeRunner>,
+    /// Run the standalone pass and keep `diarization.rttm`/`.json` in the
+    /// meeting folder (setting `keep_diarization_segments`; needs a runner).
     pub run_diarize_pass: bool,
     pub segment: SegmentOptions,
 }
 
 impl ImportOptions {
-    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+    /// Options for `data_root` from `settings` (stored values; defaults are
+    /// filled in here).
+    pub fn new(data_root: impl Into<PathBuf>, settings: &Settings) -> Self {
+        let settings = settings::with_defaults(settings.clone());
         Self {
             data_root: data_root.into(),
-            keep_intermediate: false,
+            language: settings::default_language(&settings),
+            keep_intermediate: settings::get_bool(&settings, settings::KEEP_INTERMEDIATE_WAV),
+            run_diarize_pass: settings::get_bool(&settings, settings::KEEP_DIARIZATION_SEGMENTS),
+            settings,
             min_free_bytes: MIN_FREE_BYTES,
             diarize_runner: None,
-            run_diarize_pass: false,
             segment: SegmentOptions::default(),
         }
     }
-}
-
-fn setting_on(store: &dyn Store, key: &str) -> bool {
-    store
-        .get_settings()
-        .ok()
-        .and_then(|s| s.0.get(key).cloned())
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
 }
 
 fn now_ms() -> i64 {
@@ -75,14 +75,37 @@ fn mtime_ms(path: &Path) -> Option<i64> {
     Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as i64)
 }
 
-/// [`super::import_file`] with explicit options and cancellation.
-pub fn import_file_with(
+/// Imports one audio or video file as a new meeting.
+///
+/// Steps, each reported through `on_event` (`JobEvent::Progress` with the
+/// matching stage, then exactly one `Done`, `Error` or `Cancelled`):
+/// 0. Refuse when the input is missing or under `opts.min_free_bytes` are
+///    free on the data root's volume (no meeting is created).
+/// 1. `store.create_meeting` (source `file`, status `processing`, language
+///    `opts.language`).
+/// 2. Decode to `audio/<uid>/source.wav` (16 kHz mono) with `decoder`;
+///    register the original file as the `playback` track (format
+///    `original`); `finish_meeting` with the decoded duration.
+/// 3. `store.create_run(kind = file)` (engine, models, decoder and options
+///    in `engine_info`), then `engine.transcribe_file` and drain its events
+///    until `Done` or `Error`; a set `cancel` token (from the [`JobQueue`])
+///    is forwarded to `engine.cancel`. Optionally the standalone diarize pass.
+/// 4. Build speakers, segments (`transcript` module) and words;
+///    `store.insert_transcript`, `finish_run(done)`, `set_current_run`,
+///    status `done`; delete the 16 kHz intermediate unless kept.
+/// 5. On failure: `finish_run(failed)`, status `failed`, `JobEvent::Error`.
+///    On cancellation: the meeting is deleted (folder included) and
+///    `JobEvent::Cancelled` is sent (with the meeting id only if the delete
+///    failed and a `failed` row is left).
+///
+/// [`JobQueue`]: super::JobQueue
+pub fn import_file(
     store: &dyn Store,
     engine: &dyn Engine,
     decoder: &dyn Decoder,
     req: ImportRequest,
     opts: &ImportOptions,
-    cancel: Option<&CancelToken>,
+    cancel: &CancelToken,
     on_event: &dyn Fn(JobEvent),
 ) -> Result<MeetingId> {
     let job_id = req.job_id.clone();
@@ -125,7 +148,7 @@ pub fn import_file_with(
         title,
         source: Source::File,
         source_path: Some(source.display().to_string()),
-        language: req.language.clone(),
+        language: opts.language.clone(),
         diarize_mic: false,
         started_at,
         status: MeetingStatus::Processing,
@@ -135,7 +158,7 @@ pub fn import_file_with(
     };
     let dir = opts.data_root.join("audio").join(&meeting.uid);
     let wav = dir.join("source.wav");
-    let keep_wav = opts.keep_intermediate || setting_on(store, SETTING_KEEP_WAV);
+    let keep_wav = opts.keep_intermediate;
     let mut run: Option<RunId> = None;
     let result = run_import(
         store,
@@ -169,11 +192,21 @@ pub fn import_file_with(
                 let _ = store.finish_run(run, RunStatus::Failed);
             }
             let _ = store.set_meeting_status(meeting.id, MeetingStatus::Failed);
-            on_event(JobEvent::Error {
-                job_id,
-                meeting_id: Some(meeting.id),
-                message: e.to_string(),
-            });
+            if matches!(e, CoreError::Cancelled) {
+                // The user did not want this meeting; keep a failed row only
+                // when it cannot be removed.
+                let left = store.delete_meeting(meeting.id).is_err();
+                on_event(JobEvent::Cancelled {
+                    job_id,
+                    meeting_id: left.then_some(meeting.id),
+                });
+            } else {
+                on_event(JobEvent::Error {
+                    job_id,
+                    meeting_id: Some(meeting.id),
+                    message: e.to_string(),
+                });
+            }
             Err(e)
         }
     }
@@ -186,7 +219,7 @@ fn run_import(
     decoder: &dyn Decoder,
     req: &ImportRequest,
     opts: &ImportOptions,
-    cancel: Option<&CancelToken>,
+    cancel: &CancelToken,
     on_event: &dyn Fn(JobEvent),
     uid: &str,
     meeting: MeetingId,
@@ -197,7 +230,7 @@ fn run_import(
     run_out: &mut Option<RunId>,
 ) -> Result<()> {
     let job_id = req.job_id.clone();
-    let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+    let cancelled = || cancel.is_cancelled();
     let progress = |stage: JobStage, done_ms: u64, total_ms: Option<u64>| {
         on_event(JobEvent::Progress {
             job_id: job_id.clone(),
@@ -211,6 +244,9 @@ fn run_import(
     progress(JobStage::Decoding, 0, None);
     if let Some(dir) = wav.parent() {
         std::fs::create_dir_all(dir)?;
+    }
+    if cancelled() {
+        return Err(CoreError::Cancelled);
     }
     let info = decoder.decode_to_wav16k(source, wav)?;
     if cancelled() {
@@ -251,8 +287,9 @@ fn run_import(
             "runtime": engine_info.runtime,
             "models": engine_info.models,
             "device": engine_info.device,
-            "language": req.language,
+            "language": opts.language,
             "diarize": req.diarize,
+            "decoder": info.decoder.as_str(),
             "source_sample_rate": info.source_sample_rate,
             "source_channels": info.source_channels,
             "segmentation": {
@@ -268,7 +305,7 @@ fn run_import(
         job_id: job_id.clone(),
         wav_path: wav.to_path_buf(),
         diarize: req.diarize,
-        language: req.language.clone(),
+        language: opts.language.clone(),
         diar_preset: DiarPreset::Streaming,
     })?;
     let mut utterances: BTreeMap<(Channel, u32), (u32, Vec<EngineWord>)> = BTreeMap::new();
@@ -294,7 +331,7 @@ fn run_import(
             }
             Ok(EngineEvent::Done { .. }) => break,
             Ok(EngineEvent::Error { code, message, .. }) => {
-                if cancel_sent {
+                if cancel_sent || code == crate::engine::ErrorCode::Cancelled {
                     return Err(CoreError::Cancelled);
                 }
                 return Err(CoreError::Engine(format!("{code:?}: {message}")));
@@ -315,8 +352,7 @@ fn run_import(
     }
 
     // 3. Optional standalone diarization pass, kept for the eval harness.
-    let want_pass = opts.run_diarize_pass || setting_on(store, SETTING_KEEP_DIARIZATION);
-    if let (true, true, Some(runner)) = (want_pass, req.diarize, &opts.diarize_runner) {
+    if let (true, true, Some(runner)) = (opts.run_diarize_pass, req.diarize, &opts.diarize_runner) {
         if cancelled() {
             return Err(CoreError::Cancelled);
         }
@@ -336,6 +372,13 @@ fn run_import(
     for ((channel, _), (_, ws)) in &utterances {
         words.extend(words_from_engine(*channel, ws, default_label));
     }
+    // Nemotron's last word can end after the audio does (research/08
+    // pitfall 11): clamp to the decoded duration.
+    let end = info.duration_ms.max(0);
+    for w in &mut words {
+        w.start_ms = w.start_ms.min(end);
+        w.end_ms = w.end_ms.clamp(w.start_ms, end.max(w.start_ms));
+    }
     words.sort_by_key(|w| w.start_ms);
     let transcript = build_transcript(&words, &opts.segment);
     store.insert_transcript(run.id, &transcript)?;
@@ -349,9 +392,10 @@ fn run_import(
 mod tests {
     use super::*;
     use crate::audio::DecodedInfo;
+    use crate::audio::DecoderKind;
     use crate::engine::nemo_cli::{engine_words, file_events, parse_transcribe_json};
     use crate::engine::{EngineInfo, ErrorCode};
-    use crate::store::SqliteStore;
+    use crate::store::{RunStore, SqliteStore};
     use crate::types::JobId;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{channel, Receiver};
@@ -376,6 +420,7 @@ mod tests {
                 duration_ms: 300_032,
                 source_sample_rate: 48_000,
                 source_channels: 2,
+                decoder: DecoderKind::Other,
             })
         }
     }
@@ -470,7 +515,6 @@ mod tests {
             job_id: JobId("job".into()),
             path: path.to_path_buf(),
             title: None,
-            language: "en".into(),
             diarize: true,
         }
     }
@@ -490,15 +534,15 @@ mod tests {
         let events = Mutex::new(Vec::new());
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path())
+            ..ImportOptions::new(dir.path(), &Settings::default())
         };
-        let id = import_file_with(
+        let id = import_file(
             &store,
             &engine,
             &FakeDecoder,
             request(&src),
             &opts,
-            None,
+            &CancelToken::default(),
             &|e| events.lock().unwrap().push(e),
         )
         .unwrap();
@@ -507,7 +551,10 @@ mod tests {
         assert_eq!(d.meeting.status, MeetingStatus::Done);
         assert_eq!(d.meeting.duration_ms, Some(300_032));
         assert_eq!(d.current_run.as_ref().unwrap().status, RunStatus::Done);
-        assert_eq!(d.current_run.unwrap().engine_info["runtime"], "fake 1.0");
+        let info = d.current_run.unwrap().engine_info;
+        assert_eq!(info["runtime"], "fake 1.0");
+        assert_eq!(info["decoder"], "other");
+        assert_eq!(info["language"], "en");
         assert_eq!(d.speakers.len(), 4);
         assert_eq!(store.get_words(id, 0, i64::MAX).unwrap().len(), 464);
         let segs = store.get_segments(id, 0, 10_000).unwrap();
@@ -548,20 +595,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
         let src = input(dir.path());
-        store.set_setting(SETTING_KEEP_WAV, "1").unwrap();
+        store
+            .set_setting(crate::settings::KEEP_INTERMEDIATE_WAV, "1")
+            .unwrap();
         let engine = FakeEngine::new(Mode::Fail);
         let events = Mutex::new(Vec::new());
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path())
+            ..ImportOptions::new(dir.path(), &store.get_settings().unwrap())
         };
-        let err = import_file_with(
+        assert!(opts.keep_intermediate);
+        let err = import_file(
             &store,
             &engine,
             &FakeDecoder,
             request(&src),
             &opts,
-            None,
+            &CancelToken::default(),
             &|e| events.lock().unwrap().push(e),
         )
         .unwrap_err();
@@ -598,23 +648,29 @@ mod tests {
         });
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path())
+            ..ImportOptions::new(dir.path(), &Settings::default())
         };
-        let err = import_file_with(
+        let events = Mutex::new(Vec::new());
+        let err = import_file(
             &store,
             &engine,
             &FakeDecoder,
             request(&src),
             &opts,
-            Some(&token),
-            &|_| {},
+            &token,
+            &|e| events.lock().unwrap().push(e),
         )
         .unwrap_err();
         assert!(matches!(err, CoreError::Cancelled));
-        assert_eq!(
-            store.list_meetings().unwrap()[0].status,
-            MeetingStatus::Failed
-        );
+        // A cancelled import leaves no meeting and ends with `Cancelled`.
+        assert!(store.list_meetings().unwrap().is_empty());
+        assert!(matches!(
+            events.into_inner().unwrap().last(),
+            Some(JobEvent::Cancelled {
+                meeting_id: None,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -625,16 +681,16 @@ mod tests {
         let engine = FakeEngine::new(Mode::Fixture);
         let opts = ImportOptions {
             min_free_bytes: u64::MAX,
-            ..ImportOptions::new(dir.path())
+            ..ImportOptions::new(dir.path(), &Settings::default())
         };
         let events = Mutex::new(Vec::new());
-        let err = import_file_with(
+        let err = import_file(
             &store,
             &engine,
             &FakeDecoder,
             request(&src),
             &opts,
-            None,
+            &CancelToken::default(),
             &|e| events.lock().unwrap().push(e),
         )
         .unwrap_err();
@@ -650,13 +706,13 @@ mod tests {
             ));
         }
         let missing = dir.path().join("nope.m4a");
-        assert!(import_file_with(
+        assert!(import_file(
             &store,
             &engine,
             &FakeDecoder,
             request(&missing),
-            &ImportOptions::new(dir.path()),
-            None,
+            &ImportOptions::new(dir.path(), &Settings::default()),
+            &CancelToken::default(),
             &|_| {}
         )
         .is_err());

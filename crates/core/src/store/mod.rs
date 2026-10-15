@@ -1,9 +1,8 @@
-//! The persistence seam: the [`Store`] trait, its error type, and the
-//! in-memory implementation [`MemoryStore`].
-//!
-//! The UI (through thin Tauri commands) and the pipeline only ever see
-//! `&dyn Store`. Phase 1 adds `SqliteStore` (`docs/02-data-model.md`), which
-//! must pass the same conformance suite as `MemoryStore`
+//! The persistence seam: the [`Store`] trait (what the UI and the import
+//! pipeline need), [`RunStore`] (run-level operations for the live path and
+//! the post-pass), their error type, and both implementations:
+//! [`MemoryStore`] (UI mock, reference) and [`SqliteStore`]
+//! (`docs/02-data-model.md`). Both pass the same conformance suite
 //! (`crates/core/tests/store_conformance.rs`). Methods are synchronous; the
 //! Tauri layer calls them inside `spawn_blocking`.
 //!
@@ -17,21 +16,28 @@
 //!   [`StoreError::Invalid`]; writes that would break an invariant (a second
 //!   transcript into the same run) are [`StoreError::Conflict`].
 
+mod carry_over;
+mod live;
 mod memory;
 mod seed;
 mod sqlite;
 
+pub use carry_over::CarryOverReport;
 pub use memory::MemoryStore;
 pub use seed::SeedOptions;
-pub use sqlite::{CarryOverReport, SqliteStore};
+pub use sqlite::SqliteStore;
+
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::protocol::EngineWord;
+use crate::transcript::SegmentOptions;
 use crate::types::{
-    AudioFormat, AudioTrack, Channel, Meeting, MeetingId, MeetingStatus, ModelCapabilities,
-    ModelFile, ModelRole, ModelSource, RunId, RunKind, RunStatus, SegmentId, Source, SpeakerId,
-    TrackChannel, TranscriptRun, Word, WordId,
+    AudioFormat, AudioTrack, Channel, ClockAnchor, Edit, LiveUtterance, Meeting, MeetingId,
+    MeetingStatus, ModelCapabilities, ModelFile, ModelRole, ModelSource, RunId, RunKind, RunStatus,
+    SegmentId, Source, Speaker, SpeakerId, TrackChannel, TranscriptRun, Word, WordId,
 };
 use crate::views::{MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings};
 
@@ -174,8 +180,14 @@ pub trait Store: Send + Sync {
     /// returns nothing. Ranking is implementation-defined.
     fn search(&self, query: &str, limit: u32) -> StoreResult<Vec<SearchHit>>;
 
-    /// Audio files of a meeting (the UI plays the `playback` track).
+    /// Audio files of a meeting, by id.
     fn list_audio_tracks(&self, id: MeetingId) -> StoreResult<Vec<AudioTrack>>;
+
+    /// The track the UI plays (see [`pick_playback_track`]): the newest
+    /// `playback` track of a live meeting, the newest `original` of an
+    /// import, otherwise the newest track. `None` when the meeting has no
+    /// tracks. Whether the file still exists is the caller's business.
+    fn playback_track(&self, id: MeetingId) -> StoreResult<Option<AudioTrack>>;
 
     // ---- User edits -----------------------------------------------------
 
@@ -201,6 +213,9 @@ pub trait Store: Send + Sync {
     /// Clears `merged_into`; a no-op for a root.
     fn unmerge_speaker(&self, id: SpeakerId) -> StoreResult<()>;
 
+    /// Clears `needs_review` (the "new label" badge) on one speaker row.
+    fn mark_reviewed(&self, id: SpeakerId) -> StoreResult<()>;
+
     /// Gives the whole segment to `to` (a speaker of the same run) and records
     /// a time-ranged `reassign` edit so the change survives new runs.
     fn reassign_segment(&self, segment: SegmentId, to: SpeakerId) -> StoreResult<()>;
@@ -225,6 +240,9 @@ pub trait Store: Send + Sync {
     fn get_settings(&self) -> StoreResult<Settings>;
 
     fn set_setting(&self, key: &str, value: &str) -> StoreResult<()>;
+
+    /// Deletes a setting so its default applies again; a no-op when absent.
+    fn remove_setting(&self, key: &str) -> StoreResult<()>;
 
     // ---- Model files (ComfyUI-style drop-in) -----------------------------
 
@@ -273,6 +291,82 @@ pub trait Store: Send + Sync {
 
     /// Makes `run` (which must belong to `meeting`) the one the UI shows.
     fn set_current_run(&self, meeting: MeetingId, run: RunId) -> StoreResult<()>;
+}
+
+/// Run-level operations beyond [`Store`]: runs, live utterances and their
+/// materialisation, carry-over between runs, clock anchors, uid lookup and
+/// backups. The live recorder, the post-pass and the desktop app take
+/// `&dyn RunStore` (which upcasts to `&dyn Store`).
+pub trait RunStore: Store {
+    fn get_run(&self, run: RunId) -> StoreResult<TranscriptRun>;
+
+    /// Runs of a meeting, oldest first.
+    fn list_runs(&self, meeting: MeetingId) -> StoreResult<Vec<TranscriptRun>>;
+
+    /// Deletes a run and its speakers, segments, words and live utterances.
+    /// The meeting's `current_run_id` is cleared if it pointed there.
+    fn delete_run(&self, run: RunId) -> StoreResult<()>;
+
+    /// Every speaker row of a run, by id.
+    fn run_speakers(&self, run: RunId) -> StoreResult<Vec<Speaker>>;
+
+    /// Time-ranged user edits of a meeting in replay order (`created_at`, id).
+    fn list_edits(&self, meeting: MeetingId) -> StoreResult<Vec<Edit>>;
+
+    /// Carries display names, colours, global ids and `reassign` edits from
+    /// `from_run` (normally the meeting's current run) to `to_run` (a newer
+    /// run of the same meeting), atomically. Does not change the current run.
+    /// Rules: `docs/02-data-model.md`, "Carry-over from the previous current run".
+    fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport>;
+
+    /// Appends one revision of a live utterance (append-only; a later `rev`
+    /// of the same `(channel, utt)` supersedes earlier ones). Word times are
+    /// stored in whole milliseconds. Returns the row id. A repeated
+    /// `(run, channel, utt, rev)` is a `Conflict`.
+    fn append_live_utterance(
+        &self,
+        run: RunId,
+        channel: Channel,
+        utt: u32,
+        rev: u32,
+        words: &[EngineWord],
+    ) -> StoreResult<i64>;
+
+    /// Every stored revision of a run's live utterances, in insertion order.
+    fn list_live_utterances(&self, run: RunId) -> StoreResult<Vec<LiveUtterance>>;
+
+    /// Turns the latest revision of every live utterance of `run` into the
+    /// run's speakers, segments and words (one transaction). Mic words
+    /// without a speaker become `me`; other untagged words `spk_unknown`.
+    /// `Conflict` if the run already has a transcript.
+    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()>;
+
+    /// Inserts (or replaces) clock anchors.
+    fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()>;
+
+    /// Anchors of one channel by sample index.
+    fn clock_anchors(&self, meeting: MeetingId, channel: Channel) -> StoreResult<Vec<ClockAnchor>>;
+
+    /// Looks a meeting up by its ULID.
+    fn meeting_id_by_uid(&self, uid: &str) -> StoreResult<Option<MeetingId>>;
+
+    /// Writes a consistent copy of the database to `dest` (temp file, then
+    /// rename). `MemoryStore` has nothing to back up and returns `Invalid`.
+    fn backup(&self, dest: &Path) -> StoreResult<()>;
+}
+
+/// The track to play for a meeting of `source`: a live meeting's newest
+/// `playback` track (the stereo FLAC), an import's newest `original` (the
+/// user's file), otherwise the newest track of any kind (e.g. the per-channel
+/// WAVs while a post-pass has not encoded the FLAC yet).
+pub fn pick_playback_track(source: Source, tracks: &[AudioTrack]) -> Option<AudioTrack> {
+    let newest =
+        |f: &dyn Fn(&AudioTrack) -> bool| tracks.iter().filter(|t| f(t)).max_by_key(|t| t.id);
+    let preferred = match source {
+        Source::Live => newest(&|t| t.channel == TrackChannel::Playback),
+        Source::File => newest(&|t| t.format == AudioFormat::Original),
+    };
+    preferred.or_else(|| newest(&|_| true)).cloned()
 }
 
 /// Validates a `#rrggbb` colour.

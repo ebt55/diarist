@@ -418,7 +418,7 @@ fn run_child(
 
 fn send_failure(tx: &Sender<EngineEvent>, job_id: &JobId, f: RunFailure) {
     let (code, message) = match f {
-        RunFailure::Cancelled => (ErrorCode::Other, "cancelled".to_owned()),
+        RunFailure::Cancelled => (ErrorCode::Cancelled, "cancelled".to_owned()),
         RunFailure::Failed(c, m) => (c, m),
     };
     let _ = tx.send(EngineEvent::Error {
@@ -819,7 +819,7 @@ impl Engine for NemoCascadeEngine {
                 let started = Instant::now();
                 let result = run_child(cmd, &id, &running_job, &tx, &log, total, (0.0, 0.6), 85.0)
                     .map_err(|f| match f {
-                        RunFailure::Cancelled => (ErrorCode::Other, "cancelled".to_owned()),
+                        RunFailure::Cancelled => (ErrorCode::Cancelled, "cancelled".to_owned()),
                         RunFailure::Failed(c, m) => (c, m),
                     })
                     .and_then(|()| {

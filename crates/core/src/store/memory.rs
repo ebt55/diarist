@@ -1,18 +1,27 @@
-//! In-memory [`Store`]: the UI mock for Phase 2 and a reference implementation
-//! for the conformance suite. Not persistent; one mutex around all state.
+//! In-memory [`Store`] and [`RunStore`]: the UI mock (`--demo`) and a
+//! reference implementation for the conformance suite. Not persistent; one
+//! mutex around all state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{
-    is_hex_color, NewAudioTrack, NewMeeting, NewTranscript, ScannedModelFile, Store, StoreError,
-    StoreResult,
+use super::carry_over::{
+    carry_over, group_bounds, CarryBackend, CarryOverReport, OwnedWord, SpeakerUpdate,
 };
+use super::live::{latest_revisions, live_row, transcript_from_live};
+use super::{
+    is_hex_color, pick_playback_track, NewAudioTrack, NewMeeting, NewTranscript, RunStore,
+    ScannedModelFile, Store, StoreError, StoreResult,
+};
+use crate::protocol::EngineWord;
+use crate::transcript::{join_text, SegmentOptions};
 use crate::types::{
-    new_id, AudioTrack, Edit, EditKind, Meeting, MeetingId, MeetingStatus, ModelFile, ModelFileId,
-    ReassignTarget, RunId, RunKind, RunStatus, Segment, SegmentId, Speaker, SpeakerId, TrackId,
-    TranscriptRun, Word, WordId,
+    new_id, AudioTrack, Channel, ClockAnchor, Edit, EditKind, LiveUtterance, Meeting, MeetingId,
+    MeetingStatus, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind, RunStatus, Segment,
+    SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -81,6 +90,10 @@ pub(super) struct State {
     pub edits: Vec<Edit>,
     pub settings: BTreeMap<String, String>,
     pub model_files: BTreeMap<ModelFileId, ModelFile>,
+    /// Live utterance revisions in insertion order.
+    pub live: Vec<LiveUtterance>,
+    /// `(meeting, channel, sample_index) -> qpc_100ns`.
+    pub anchors: BTreeMap<(MeetingId, Channel, i64), i64>,
 }
 
 impl State {
@@ -305,13 +318,35 @@ impl State {
         );
     }
 
-    /// Removes a run and everything hanging off it.
+    /// Removes a run and everything hanging off it; clears `current_run_id`
+    /// where it pointed there.
     fn remove_run(&mut self, run: RunId) {
         self.runs.remove(&run);
         for sid in self.run_segments.remove(&run).unwrap_or_default() {
             self.segments.remove(&sid);
         }
         self.speakers.retain(|_, s| s.run_id != run);
+        self.live.retain(|u| u.run_id != run);
+        for m in self.meetings.values_mut() {
+            if m.current_run_id == Some(run) {
+                m.current_run_id = None;
+            }
+        }
+    }
+
+    /// Words of a segment in `(start, id)` order.
+    fn sorted_words(&self, row: &SegRow) -> Vec<Word> {
+        let mut words = self.words_of(row);
+        words.sort_by_key(|w| (w.start_ms, w.id));
+        words
+    }
+
+    /// The channel a segment's words are on (its speaker's).
+    fn segment_channel(&self, seg: &Segment) -> Channel {
+        self.speakers
+            .get(&seg.speaker_id)
+            .map(|s| s.channel)
+            .unwrap_or(Channel::Source)
     }
 }
 
@@ -350,6 +385,207 @@ pub(super) fn synthesize_words(seg: &Segment, first_id: i64) -> Vec<Word> {
             }
         })
         .collect()
+}
+
+impl CarryBackend for State {
+    fn run(&mut self, run: RunId) -> StoreResult<TranscriptRun> {
+        State::run(self, run).cloned()
+    }
+
+    fn speakers(&mut self, run: RunId) -> StoreResult<Vec<Speaker>> {
+        Ok(self
+            .speakers
+            .values()
+            .filter(|s| s.run_id == run)
+            .cloned()
+            .collect())
+    }
+
+    fn words(&mut self, run: RunId) -> StoreResult<BTreeMap<Channel, Vec<OwnedWord>>> {
+        let mut all: Vec<(Channel, i64, WordId, OwnedWord)> = Vec::new();
+        for sid in self
+            .run_segments
+            .get(&run)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            let Some(row) = self.segments.get(sid) else {
+                continue;
+            };
+            let channel = self.segment_channel(&row.seg);
+            for w in self.words_of(row) {
+                all.push((
+                    channel,
+                    w.start_ms,
+                    w.id,
+                    OwnedWord {
+                        start: w.start_ms,
+                        end: w.end_ms.max(w.start_ms),
+                        speaker: row.seg.speaker_id,
+                    },
+                ));
+            }
+        }
+        all.sort_by_key(|(_, start, id, _)| (*start, *id));
+        let mut out: BTreeMap<Channel, Vec<OwnedWord>> = BTreeMap::new();
+        for (channel, _, _, w) in all {
+            out.entry(channel).or_default().push(w);
+        }
+        Ok(out)
+    }
+
+    fn update_speaker(&mut self, id: SpeakerId, u: &SpeakerUpdate) -> StoreResult<()> {
+        let sp = self
+            .speakers
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found("speaker", id))?;
+        if let Some(name) = &u.name {
+            sp.display_name = Some(name.clone());
+        }
+        if let Some((a0, a1)) = u.anchor {
+            sp.name_anchor_start_ms = Some(a0);
+            sp.name_anchor_end_ms = Some(a1);
+        }
+        if let Some(c) = &u.color {
+            sp.color = Some(c.clone());
+        }
+        if let Some(g) = u.global_id {
+            sp.global_id = Some(g);
+        }
+        sp.needs_review = u.review;
+        Ok(())
+    }
+
+    fn edits(&mut self, meeting: MeetingId) -> StoreResult<Vec<Edit>> {
+        let mut edits: Vec<Edit> = self
+            .edits
+            .iter()
+            .filter(|e| e.meeting_id == meeting)
+            .cloned()
+            .collect();
+        edits.sort_by_key(|e| (e.created_at, e.id));
+        Ok(edits)
+    }
+
+    fn covered_words(
+        &mut self,
+        run: RunId,
+        channel: Channel,
+        start: i64,
+        end: i64,
+    ) -> StoreResult<Vec<(i64, i64)>> {
+        let mut out = Vec::new();
+        for sid in self
+            .run_segments
+            .get(&run)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            let Some(row) = self.segments.get(sid) else {
+                continue;
+            };
+            if self.segment_channel(&row.seg) != channel {
+                continue;
+            }
+            for w in self.words_of(row) {
+                let mid2 = w.start_ms + w.end_ms;
+                if mid2 >= 2 * start && mid2 < 2 * end {
+                    out.push((w.id.0, sid.0));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn segment_words(&mut self, segment: i64) -> StoreResult<(SpeakerId, Vec<i64>)> {
+        let row = self.segment(SegmentId(segment))?;
+        let ids = self.sorted_words(row).iter().map(|w| w.id.0).collect();
+        Ok((row.seg.speaker_id, ids))
+    }
+
+    fn regroup(&mut self, segment: i64, groups: &[(Range<usize>, SpeakerId)]) -> StoreResult<()> {
+        let seg_id = SegmentId(segment);
+        let row = self.segment(seg_id)?;
+        let seg = row.seg.clone();
+        let words = self.sorted_words(row);
+        let n = groups.len();
+        let mut rows: Vec<SegRow> = Vec::with_capacity(n);
+        for (i, (range, speaker)) in groups.iter().enumerate() {
+            let id = if i == 0 {
+                seg_id
+            } else {
+                SegmentId(self.alloc())
+            };
+            let mut ws: Vec<Word> = words[range.clone()].to_vec();
+            for w in &mut ws {
+                w.segment_id = id;
+            }
+            let spans: Vec<(i64, i64)> = ws.iter().map(|w| (w.start_ms, w.end_ms)).collect();
+            let (start_ms, end_ms) = group_bounds(i, n, seg.start_ms, seg.end_ms, &spans);
+            rows.push(SegRow {
+                seg: Segment {
+                    id,
+                    run_id: seg.run_id,
+                    meeting_id: seg.meeting_id,
+                    speaker_id: *speaker,
+                    start_ms,
+                    end_ms,
+                    text: join_text(ws.iter().map(|w| w.text.as_str())),
+                    seq: seg.seq,
+                },
+                words: Words::Stored(ws),
+            });
+        }
+        let ids: Vec<SegmentId> = rows.iter().map(|r| r.seg.id).collect();
+        for r in rows {
+            self.segments.insert(r.seg.id, r);
+        }
+        let State {
+            run_segments,
+            segments,
+            ..
+        } = self;
+        let list = run_segments.entry(seg.run_id).or_default();
+        let pos = list.iter().position(|s| *s == seg_id).unwrap_or(list.len());
+        for (k, id) in ids.iter().enumerate().skip(1) {
+            list.insert(pos + k, *id);
+        }
+        for (i, sid) in list.iter().enumerate().skip(pos) {
+            if let Some(row) = segments.get_mut(sid) {
+                row.seg.seq = i as i64;
+            }
+        }
+        Ok(())
+    }
+
+    fn create_speaker(
+        &mut self,
+        run: RunId,
+        channel: Channel,
+        engine_label: &str,
+        display_name: Option<&str>,
+    ) -> StoreResult<SpeakerId> {
+        let meeting_id = State::run(self, run)?.meeting_id;
+        let id = SpeakerId(self.alloc());
+        self.speakers.insert(
+            id,
+            Speaker {
+                id,
+                run_id: run,
+                meeting_id,
+                channel,
+                engine_label: engine_label.to_owned(),
+                display_name: display_name.map(str::to_owned),
+                color: None,
+                global_id: None,
+                merged_into: None,
+                needs_review: true,
+                name_anchor_start_ms: None,
+                name_anchor_end_ms: None,
+            },
+        );
+        Ok(id)
+    }
 }
 
 fn join_words(words: &[Word]) -> String {
@@ -550,6 +786,11 @@ impl Store for MemoryStore {
             .collect())
     }
 
+    fn playback_track(&self, id: MeetingId) -> StoreResult<Option<AudioTrack>> {
+        let source = self.lock()?.meeting(id)?.source;
+        Ok(pick_playback_track(source, &self.list_audio_tracks(id)?))
+    }
+
     fn rename_speaker(
         &self,
         id: SpeakerId,
@@ -632,6 +873,15 @@ impl Store for MemoryStore {
             .get_mut(&id)
             .ok_or_else(|| StoreError::not_found("speaker", id))?;
         sp.merged_into = None;
+        Ok(())
+    }
+
+    fn mark_reviewed(&self, id: SpeakerId) -> StoreResult<()> {
+        let mut st = self.lock()?;
+        st.speakers
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found("speaker", id))?
+            .needs_review = false;
         Ok(())
     }
 
@@ -758,6 +1008,7 @@ impl Store for MemoryStore {
         st.speakers.retain(|_, s| s.meeting_id != id);
         st.tracks.retain(|_, t| t.meeting_id != id);
         st.edits.retain(|e| e.meeting_id != id);
+        st.anchors.retain(|(m, _, _), _| *m != id);
         Ok(())
     }
 
@@ -772,6 +1023,14 @@ impl Store for MemoryStore {
         self.lock()?
             .settings
             .insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn remove_setting(&self, key: &str) -> StoreResult<()> {
+        if key.trim().is_empty() {
+            return Err(StoreError::Invalid("setting key must not be empty".into()));
+        }
+        self.lock()?.settings.remove(key);
         Ok(())
     }
 
@@ -1014,6 +1273,155 @@ impl Store for MemoryStore {
         m.current_run_id = Some(run);
         m.updated_at = now_ms();
         Ok(())
+    }
+}
+
+impl RunStore for MemoryStore {
+    fn get_run(&self, run: RunId) -> StoreResult<TranscriptRun> {
+        self.lock()?.run(run).cloned()
+    }
+
+    fn list_runs(&self, meeting: MeetingId) -> StoreResult<Vec<TranscriptRun>> {
+        let st = self.lock()?;
+        st.meeting(meeting)?;
+        Ok(st
+            .runs
+            .values()
+            .filter(|r| r.meeting_id == meeting)
+            .cloned()
+            .collect())
+    }
+
+    fn delete_run(&self, run: RunId) -> StoreResult<()> {
+        let mut st = self.lock()?;
+        st.run(run)?;
+        st.remove_run(run);
+        Ok(())
+    }
+
+    fn run_speakers(&self, run: RunId) -> StoreResult<Vec<Speaker>> {
+        let mut st = self.lock()?;
+        st.run(run)?;
+        CarryBackend::speakers(&mut *st, run)
+    }
+
+    fn list_edits(&self, meeting: MeetingId) -> StoreResult<Vec<Edit>> {
+        let mut st = self.lock()?;
+        st.meeting(meeting)?;
+        CarryBackend::edits(&mut *st, meeting)
+    }
+
+    /// Applied under the store's lock. The rules validate both runs before
+    /// changing anything; nothing after that point can fail on valid state.
+    fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
+        let mut st = self.lock()?;
+        carry_over(&mut *st, from_run, to_run)
+    }
+
+    fn append_live_utterance(
+        &self,
+        run: RunId,
+        channel: Channel,
+        utt: u32,
+        rev: u32,
+        words: &[EngineWord],
+    ) -> StoreResult<i64> {
+        let row = live_row(words);
+        let mut st = self.lock()?;
+        st.run(run)?;
+        if st
+            .live
+            .iter()
+            .any(|u| u.run_id == run && u.channel == channel && u.utt == utt && u.rev == rev)
+        {
+            return Err(StoreError::Conflict(format!(
+                "utterance {utt} rev {rev} on {channel} already stored for run {run}"
+            )));
+        }
+        let id = st.alloc();
+        st.live.push(LiveUtterance {
+            id,
+            run_id: run,
+            channel,
+            utt,
+            rev,
+            start_ms: row.start_ms,
+            end_ms: row.end_ms,
+            raw_label: row.raw_label,
+            words: row.words.iter().map(|w| w.to_engine()).collect(),
+        });
+        Ok(id)
+    }
+
+    fn list_live_utterances(&self, run: RunId) -> StoreResult<Vec<LiveUtterance>> {
+        let st = self.lock()?;
+        st.run(run)?;
+        Ok(st
+            .live
+            .iter()
+            .filter(|u| u.run_id == run)
+            .cloned()
+            .collect())
+    }
+
+    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()> {
+        let transcript = {
+            let st = self.lock()?;
+            st.run(run)?;
+            let rows: Vec<LiveUtterance> = st
+                .live
+                .iter()
+                .filter(|u| u.run_id == run)
+                .cloned()
+                .collect();
+            transcript_from_live(&latest_revisions(&rows), opts)
+        };
+        // Conflict (a transcript already there) and validation as for any insert.
+        self.insert_transcript(run, &transcript)
+    }
+
+    fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
+        let mut st = self.lock()?;
+        for a in anchors {
+            st.meeting(a.meeting_id)?;
+        }
+        for a in anchors {
+            st.anchors
+                .insert((a.meeting_id, a.channel, a.sample_index), a.qpc_100ns);
+        }
+        Ok(())
+    }
+
+    fn clock_anchors(&self, meeting: MeetingId, channel: Channel) -> StoreResult<Vec<ClockAnchor>> {
+        let st = self.lock()?;
+        st.meeting(meeting)?;
+        Ok(st
+            .anchors
+            .range((meeting, channel, i64::MIN)..=(meeting, channel, i64::MAX))
+            .map(
+                |(&(meeting_id, channel, sample_index), &qpc_100ns)| ClockAnchor {
+                    meeting_id,
+                    channel,
+                    sample_index,
+                    qpc_100ns,
+                },
+            )
+            .collect())
+    }
+
+    fn meeting_id_by_uid(&self, uid: &str) -> StoreResult<Option<MeetingId>> {
+        Ok(self
+            .lock()?
+            .meetings
+            .values()
+            .find(|m| m.uid == uid)
+            .map(|m| m.id))
+    }
+
+    fn backup(&self, _dest: &Path) -> StoreResult<()> {
+        Err(StoreError::Invalid(
+            "an in-memory store has nothing to back up".into(),
+        ))
     }
 }
 

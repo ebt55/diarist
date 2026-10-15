@@ -155,7 +155,7 @@ fn cancel_kills_the_child() {
     let events = drain(rx);
     match events.last() {
         Some(EngineEvent::Error { code, message, .. }) => {
-            assert_eq!(*code, ErrorCode::Other);
+            assert_eq!(*code, ErrorCode::Cancelled);
             assert_eq!(message, "cancelled");
         }
         // A very fast machine may finish before the cancel lands.

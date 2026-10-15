@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use meet_core::audio::ChainDecoder;
 use meet_core::engine::NemoCliEngine;
-use meet_core::pipeline::{import_file_with, ImportOptions, ImportRequest};
+use meet_core::pipeline::{import_file, CancelToken, ImportOptions, ImportRequest};
 use meet_core::store::{SqliteStore, Store};
 use meet_core::types::JobId;
 
@@ -66,7 +66,7 @@ fn cimc_77_minutes_matches_the_reference() {
         find(&models, "Nemotron-3-Diarization.q8_0.gguf").unwrap(),
     );
     let started = std::time::Instant::now();
-    let id = import_file_with(
+    let id = import_file(
         &store,
         &engine,
         &ChainDecoder::new(),
@@ -74,11 +74,10 @@ fn cimc_77_minutes_matches_the_reference() {
             job_id: JobId::new(),
             path: PathBuf::from(wav),
             title: Some("CIMC kickoff".into()),
-            language: "en".into(),
             diarize: true,
         },
-        &ImportOptions::new(tmp.path()),
-        None,
+        &ImportOptions::new(tmp.path(), &Default::default()),
+        &CancelToken::default(),
         &|_| {},
     )
     .unwrap();

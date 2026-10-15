@@ -1,23 +1,27 @@
-//! Conformance suite for `meet_core::store::Store` implementations.
+//! Conformance suite for `meet_core::store::Store` and `RunStore`
+//! implementations.
 //!
-//! Every case is a function over `&dyn Store` that starts from an empty store
-//! and creates its own data. `MemoryStore` and `SqliteStore` (an in-memory
-//! SQLite database) both run it below.
+//! Every case is a function over `&dyn Store` (or `&dyn RunStore`) that
+//! starts from an empty store and creates its own data. `MemoryStore` and
+//! `SqliteStore` (an in-memory SQLite database) both run it below.
 //!
 //! Cases assert behaviour the UI relies on, not implementation details: no
 //! assumptions about id values, search ranking or snippet window size.
 
+use meet_core::engine::EngineWord;
 use meet_core::store::{
     MemoryStore, NewAudioTrack, NewMeeting, NewSegment, NewSpeaker, NewTranscript, NewWord,
-    ScannedModelFile, SqliteStore, Store, StoreError,
+    RunStore, ScannedModelFile, SqliteStore, Store, StoreError,
 };
+use meet_core::transcript::SegmentOptions;
 use meet_core::types::{
-    AudioFormat, Channel, MeetingId, MeetingStatus, ModelCapabilities, ModelRole, ModelSource,
-    RunId, RunKind, RunStatus, SegmentId, Source, SpeakerId, TrackChannel,
+    AudioFormat, Channel, ClockAnchor, MeetingId, MeetingStatus, ModelCapabilities, ModelRole,
+    ModelSource, RunId, RunKind, RunStatus, SegmentId, Source, Speaker, SpeakerId, TrackChannel,
 };
 use meet_core::views::{default_speaker_color, SegmentView};
 
 type Case = fn(&dyn Store);
+type RunCase = fn(&dyn RunStore);
 
 /// All cases, by name.
 const CASES: &[(&str, Case)] = &[
@@ -42,20 +46,48 @@ const CASES: &[(&str, Case)] = &[
     ("settings_round_trip", settings_round_trip),
     ("audio_tracks", audio_tracks),
     ("model_files_sync", model_files_sync),
+    ("remove_setting", remove_setting),
+    ("playback_track_rules", playback_track_rules),
+    ("mark_reviewed", mark_reviewed),
 ];
 
+/// `RunStore` cases, by name.
+const RUN_CASES: &[(&str, RunCase)] = &[
+    ("runs_list_get_delete", runs_list_get_delete),
+    ("live_latest_revisions", live_latest_revisions),
+    ("anchors_uid_speakers_edits", anchors_uid_speakers_edits),
+    (
+        "carry_over_names_anchor_edits",
+        carry_over_names_anchor_edits,
+    ),
+    ("carry_over_user_speaker", carry_over_user_speaker),
+    ("carry_over_rejects_bad_runs", carry_over_rejects_bad_runs),
+];
+
+fn report(name: &str, e: Box<dyn std::any::Any + Send>) -> ! {
+    let msg = e
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    panic!("conformance case `{name}` failed: {msg}");
+}
+
 /// Runs every case against a fresh store from `make`.
-fn run_all(make: impl Fn() -> Box<dyn Store>) {
+fn run_all(make: impl Fn() -> Box<dyn RunStore>) {
     for (name, case) in CASES {
+        let store = make();
+        let as_store: &dyn Store = &*store;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(as_store)));
+        if let Err(e) = result {
+            report(name, e);
+        }
+    }
+    for (name, case) in RUN_CASES {
         let store = make();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(&*store)));
         if let Err(e) = result {
-            let msg = e
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default();
-            panic!("conformance case `{name}` failed: {msg}");
+            report(name, e);
         }
     }
 }
@@ -619,4 +651,492 @@ fn model_files_sync(store: &dyn Store) {
         ],
         4_000
     )));
+}
+
+fn track(meeting_id: MeetingId, channel: TrackChannel, format: AudioFormat) -> NewAudioTrack {
+    NewAudioTrack {
+        meeting_id,
+        channel,
+        path: format!("audio/x/{channel}.{format}"),
+        format,
+        sample_rate: 16_000,
+        channels: 1,
+        duration_ms: Some(6_000),
+        size_bytes: None,
+    }
+}
+
+fn remove_setting(store: &dyn Store) {
+    store.set_setting("theme", "dark").unwrap();
+    store.set_setting("default_language", "de").unwrap();
+    store.remove_setting("theme").unwrap();
+    store.remove_setting("never_set").unwrap();
+    let s = store.get_settings().unwrap();
+    assert_eq!(s.0.len(), 1);
+    assert_eq!(s.0["default_language"], "de");
+    assert!(is_invalid(store.remove_setting(" ")));
+}
+
+fn playback_track_rules(store: &dyn Store) {
+    // Import: the original wins over a newer intermediate WAV.
+    let (file, _) = seeded_meeting(store, "Import", T0);
+    assert_eq!(store.playback_track(file).unwrap(), None);
+    let original = store
+        .add_audio_track(track(file, TrackChannel::Playback, AudioFormat::Original))
+        .unwrap();
+    store
+        .add_audio_track(track(file, TrackChannel::Source, AudioFormat::Wav))
+        .unwrap();
+    assert_eq!(store.playback_track(file).unwrap(), Some(original));
+
+    // Live: the newest playback track; before it exists, the newest track.
+    let live = store
+        .create_meeting(NewMeeting {
+            source: Source::Live,
+            source_path: None,
+            ..new_meeting("Live", T0 + 1)
+        })
+        .unwrap()
+        .id;
+    store
+        .add_audio_track(track(live, TrackChannel::Mic, AudioFormat::Wav))
+        .unwrap();
+    let loopback = store
+        .add_audio_track(track(live, TrackChannel::Loopback, AudioFormat::Wav))
+        .unwrap();
+    assert_eq!(store.playback_track(live).unwrap(), Some(loopback));
+    let flac = store
+        .add_audio_track(track(live, TrackChannel::Playback, AudioFormat::Flac))
+        .unwrap();
+    store
+        .add_audio_track(track(live, TrackChannel::Mic, AudioFormat::Wav))
+        .unwrap();
+    assert_eq!(store.playback_track(live).unwrap(), Some(flac));
+    assert!(is_not_found(store.playback_track(MeetingId(424_242))));
+}
+
+fn mark_reviewed(store: &dyn Store) {
+    let m = store.create_meeting(new_meeting("Review", T0)).unwrap();
+    let run = store
+        .create_run(m.id, RunKind::File, serde_json::json!({}))
+        .unwrap();
+    let mut t = sample_transcript();
+    t.speakers[2].needs_review = true;
+    store.insert_transcript(run.id, &t).unwrap();
+    store.set_current_run(m.id, run.id).unwrap();
+    let spk = speaker_by_label(store, m.id, "spk_1");
+    let flagged = |store: &dyn Store| {
+        store
+            .get_meeting(m.id)
+            .unwrap()
+            .speakers
+            .iter()
+            .find(|s| s.id == spk)
+            .unwrap()
+            .needs_review
+    };
+    assert!(flagged(store));
+    assert!(segments(store, m.id)[2].needs_review);
+    store.mark_reviewed(spk).unwrap();
+    assert!(!flagged(store));
+    assert!(!segments(store, m.id)[2].needs_review);
+    store.mark_reviewed(spk).unwrap();
+    assert!(is_not_found(store.mark_reviewed(SpeakerId(424_242))));
+}
+
+// ---- RunStore cases ----------------------------------------------------------
+
+fn runs_list_get_delete(store: &dyn RunStore) {
+    let (id, current) = seeded_meeting(store, "Runs", T0);
+    let other = store
+        .create_run(id, RunKind::Rediarize, serde_json::json!({"n": 2}))
+        .unwrap();
+    store
+        .insert_transcript(other.id, &sample_transcript())
+        .unwrap();
+    let runs = store.list_runs(id).unwrap();
+    assert_eq!(
+        runs.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![current, other.id]
+    );
+    assert_eq!(store.get_run(other.id).unwrap().engine_info["n"], 2);
+    assert_eq!(store.run_speakers(other.id).unwrap().len(), 3);
+    // Deleting a non-current run leaves the transcript alone.
+    store.delete_run(other.id).unwrap();
+    assert!(is_not_found(store.get_run(other.id)));
+    assert!(is_not_found(store.run_speakers(other.id)));
+    assert_eq!(segments(store, id).len(), 3);
+    assert_eq!(store.search("approved", 10).unwrap().len(), 1);
+    // Deleting the current run clears it.
+    store.delete_run(current).unwrap();
+    let d = store.get_meeting(id).unwrap();
+    assert_eq!(d.meeting.current_run_id, None);
+    assert!(d.current_run.is_none());
+    assert!(segments(store, id).is_empty());
+    assert!(store.search("approved", 10).unwrap().is_empty());
+    assert!(store.list_runs(id).unwrap().is_empty());
+    assert!(is_not_found(store.list_runs(MeetingId(424_242))));
+    assert!(is_not_found(store.delete_run(RunId(424_242))));
+}
+
+fn ew(t0_ms: u64, t1_ms: u64, text: &str, spk: Option<&str>) -> EngineWord {
+    EngineWord {
+        t0_us: t0_ms * 1_000,
+        t1_us: t1_ms * 1_000,
+        text: text.into(),
+        conf: None,
+        spk: spk.map(str::to_owned),
+    }
+}
+
+fn live_meeting(store: &dyn RunStore) -> MeetingId {
+    store
+        .create_meeting(NewMeeting {
+            source: Source::Live,
+            source_path: None,
+            status: MeetingStatus::Recording,
+            ..new_meeting("Live", T0)
+        })
+        .unwrap()
+        .id
+}
+
+fn live_latest_revisions(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let run = store
+        .create_run(m, RunKind::Live, serde_json::json!({}))
+        .unwrap()
+        .id;
+    store
+        .append_live_utterance(
+            run,
+            Channel::Loopback,
+            0,
+            0,
+            &[ew(0, 300, "helo", Some("spk_0"))],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(
+            run,
+            Channel::Loopback,
+            0,
+            1,
+            &[
+                ew(0, 300, "hello", Some("spk_0")),
+                ew(400, 700, "all", Some("spk_0")),
+            ],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(run, Channel::Mic, 0, 0, &[ew(350, 600, "hi", None)])
+        .unwrap();
+    assert!(matches!(
+        store.append_live_utterance(run, Channel::Mic, 0, 0, &[]),
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(is_not_found(store.append_live_utterance(
+        RunId(424_242),
+        Channel::Mic,
+        0,
+        0,
+        &[]
+    )));
+    let rows = store.list_live_utterances(run).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!((rows[1].utt, rows[1].rev), (0, 1));
+    assert_eq!(rows[1].raw_label.as_deref(), Some("spk_0"));
+    assert_eq!((rows[1].start_ms, rows[1].end_ms), (0, 700));
+    assert_eq!(rows[1].words[1].t1_us, 700_000);
+    assert_eq!(rows[2].raw_label, None);
+
+    store
+        .materialise_live_run(run, &SegmentOptions::default())
+        .unwrap();
+    store.set_current_run(m, run).unwrap();
+    let texts: Vec<(String, String)> = segments(store, m)
+        .into_iter()
+        .map(|s| (s.text, s.speaker_name))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("hello".to_owned(), "Speaker 1".to_owned()),
+            ("hi".to_owned(), "Me".to_owned()),
+            ("all".to_owned(), "Speaker 1".to_owned())
+        ]
+    );
+    assert!(matches!(
+        store.materialise_live_run(run, &SegmentOptions::default()),
+        Err(StoreError::Conflict(_))
+    ));
+    // Live rows go with the run.
+    store.delete_run(run).unwrap();
+    assert!(is_not_found(store.list_live_utterances(run)));
+}
+
+fn anchors_uid_speakers_edits(store: &dyn RunStore) {
+    let (m, run) = seeded_meeting(store, "Helpers", T0);
+    let uid = store.get_meeting(m).unwrap().meeting.uid;
+    assert_eq!(store.meeting_id_by_uid(&uid).unwrap(), Some(m));
+    assert_eq!(store.meeting_id_by_uid("nope").unwrap(), None);
+    let anchor = |sample_index: i64, qpc_100ns: i64| ClockAnchor {
+        meeting_id: m,
+        channel: Channel::Mic,
+        sample_index,
+        qpc_100ns,
+    };
+    store
+        .add_clock_anchors(&[anchor(16_000, 2), anchor(0, 1)])
+        .unwrap();
+    store.add_clock_anchors(&[anchor(16_000, 3)]).unwrap();
+    let anchors = store.clock_anchors(m, Channel::Mic).unwrap();
+    assert_eq!(anchors, vec![anchor(0, 1), anchor(16_000, 3)]);
+    assert!(store
+        .clock_anchors(m, Channel::Loopback)
+        .unwrap()
+        .is_empty());
+    assert!(is_not_found(store.add_clock_anchors(&[ClockAnchor {
+        meeting_id: MeetingId(424_242),
+        ..anchor(0, 0)
+    }])));
+
+    let speakers = store.run_speakers(run).unwrap();
+    assert_eq!(speakers.len(), 3);
+    assert!(speakers.windows(2).all(|p| p[0].id < p[1].id));
+    let seg = segments(store, m)[0].id;
+    let target = speakers.iter().find(|s| s.engine_label == "spk_1").unwrap();
+    store.rename_speaker(target.id, "Dana", None).unwrap();
+    store.reassign_segment(seg, target.id).unwrap();
+    let edits = store.list_edits(m).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].payload.to_engine_label.as_deref(), Some("spk_1"));
+    assert_eq!(edits[0].payload.to_display_name.as_deref(), Some("Dana"));
+    assert_eq!(edits[0].channel, Channel::Loopback);
+    assert_eq!((edits[0].start_ms, edits[0].end_ms), (0, 1_500));
+    store.delete_meeting(m).unwrap();
+    assert!(is_not_found(store.list_edits(m)));
+    assert!(is_not_found(store.clock_anchors(m, Channel::Mic)));
+}
+
+/// A transcript on the loopback channel from `(label, [(first_s, last_s)])`
+/// segments with one 800 ms word per second.
+fn carry_transcript(spec: &[(&str, &[(i64, i64)])]) -> NewTranscript {
+    let mut t = NewTranscript::default();
+    let mut segs: Vec<(usize, i64, i64)> = Vec::new();
+    for (label, ranges) in spec {
+        t.speakers.push(speaker(Channel::Loopback, label));
+        for &(a, b) in *ranges {
+            segs.push((t.speakers.len() - 1, a, b));
+        }
+    }
+    segs.sort_by_key(|s| s.1);
+    for (i, (spk, a, b)) in segs.into_iter().enumerate() {
+        let words: Vec<i64> = (a..b).collect();
+        t.segments.push(NewSegment {
+            speaker: spk,
+            start_ms: a * 1_000,
+            end_ms: (b - 1) * 1_000 + 800,
+            text: words
+                .iter()
+                .map(|s| format!("w{s}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        });
+        for s in words {
+            t.words.push(NewWord {
+                segment: i,
+                start_ms: s * 1_000,
+                end_ms: s * 1_000 + 800,
+                text: format!("w{s}"),
+                confidence: None,
+                raw_label: Some(spec[spk].0.to_owned()),
+                margin: None,
+                overlap: false,
+            });
+        }
+    }
+    t
+}
+
+fn run_with(store: &dyn RunStore, m: MeetingId, kind: RunKind, t: &NewTranscript) -> RunId {
+    let run = store.create_run(m, kind, serde_json::json!({})).unwrap().id;
+    store.insert_transcript(run, t).unwrap();
+    run
+}
+
+fn by_label(store: &dyn RunStore, run: RunId, label: &str) -> Speaker {
+    store
+        .run_speakers(run)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == label)
+        .unwrap_or_else(|| panic!("no speaker {label}"))
+}
+
+fn segment_at(store: &dyn RunStore, m: MeetingId, start_ms: i64) -> SegmentId {
+    segments(store, m)
+        .into_iter()
+        .find(|s| s.start_ms == start_ms)
+        .unwrap_or_else(|| panic!("no segment at {start_ms}"))
+        .id
+}
+
+fn carry_over_names_anchor_edits(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    // Old (live) run: A 0-20 s, B 20-30 + 30-40 s, C 40-43 s (too short),
+    // D 43-50 + 50-60 s.
+    let old = run_with(
+        store,
+        m,
+        RunKind::Live,
+        &carry_transcript(&[
+            ("spk_0", &[(0, 20)]),
+            ("spk_1", &[(20, 30), (30, 40)]),
+            ("spk_2", &[(40, 43)]),
+            ("spk_3", &[(43, 50), (50, 60)]),
+        ]),
+    );
+    store.set_current_run(m, old).unwrap();
+    let a = by_label(store, old, "spk_0");
+    let b = by_label(store, old, "spk_1");
+    let c = by_label(store, old, "spk_2");
+    store.rename_speaker(a.id, "Priya", None).unwrap();
+    store.set_speaker_color(a.id, "#123456").unwrap();
+    // Marcus was renamed from his 30-40 s segment: that is the anchor.
+    store
+        .rename_speaker(b.id, "Marcus", Some(segment_at(store, m, 30_000)))
+        .unwrap();
+    store.rename_speaker(c.id, "Ghost", None).unwrap();
+    // The user gave D's 50-60 s segment to Priya.
+    store
+        .reassign_segment(segment_at(store, m, 50_000), a.id)
+        .unwrap();
+
+    // New (post-pass) run: X 0-20, Y 20-31, Z 31-43, W 43-60 (one segment).
+    let new = run_with(
+        store,
+        m,
+        RunKind::PostPass,
+        &carry_transcript(&[
+            ("spk_0", &[(0, 20)]),
+            ("spk_1", &[(20, 31)]),
+            ("spk_2", &[(31, 43)]),
+            ("spk_3", &[(43, 60)]),
+        ]),
+    );
+    let report = store.carry_over(old, new).unwrap();
+    let x = by_label(store, new, "spk_0");
+    let y = by_label(store, new, "spk_1");
+    let z = by_label(store, new, "spk_2");
+    let w = by_label(store, new, "spk_3");
+
+    // Overlap: A-X, B-Y (8.8 s beats B-Z 7.2 s), D-W; C is ignored (2.4 s).
+    assert!(report.matched.contains(&(a.id, x.id)));
+    assert!(report.matched.contains(&(b.id, y.id)));
+    assert_eq!(report.matched.len(), 3);
+    assert_eq!(x.display_name.as_deref(), Some("Priya"));
+    assert_eq!(x.color.as_deref(), Some("#123456"));
+    assert!(!x.needs_review);
+    // The anchor (30-39.8 s) is Z's: Marcus goes to Z, not the overlap winner Y.
+    assert_eq!(z.display_name.as_deref(), Some("Marcus"));
+    assert_eq!(z.name_anchor_start_ms, Some(30_000));
+    assert_eq!(y.display_name, None);
+    assert!(
+        y.needs_review && z.needs_review,
+        "anchor disagreement flags both"
+    );
+    assert_eq!(report.needs_review, {
+        let mut v = vec![y.id, z.id];
+        v.sort();
+        v
+    });
+    // Ghost (under 5 s) names nobody; W matched D (unnamed).
+    assert_eq!(w.display_name, None);
+    assert!(!w.needs_review);
+    assert!(store
+        .run_speakers(new)
+        .unwrap()
+        .iter()
+        .all(|s| s.display_name.as_deref() != Some("Ghost")));
+
+    // The reassign of 50-59.8 s replays onto W's 43-60 s segment, split at 50 s.
+    assert_eq!(report.edits_replayed, 1);
+    assert_eq!(report.segments_split, 1);
+    assert!(report.created_speakers.is_empty());
+    store.set_current_run(m, new).unwrap();
+    let segs = segments(store, m);
+    let tail: Vec<(i64, i64, &str)> = segs
+        .iter()
+        .filter(|s| s.start_ms >= 43_000)
+        .map(|s| (s.start_ms, s.end_ms, s.speaker_name.as_str()))
+        .collect();
+    assert_eq!(
+        tail,
+        [(43_000, 49_800, "Speaker 4"), (50_000, 59_800, "Priya")]
+    );
+    assert!(segs.windows(2).all(|p| p[0].seq + 1 == p[1].seq));
+    let words = store.get_words(m, 50_000, 60_000).unwrap();
+    let moved = segs.iter().find(|s| s.start_ms == 50_000).unwrap().id;
+    assert!(words.iter().all(|w| w.segment_id == moved));
+    assert_eq!(store.search("w55", 5).unwrap()[0].speaker_name, "Priya");
+}
+
+fn carry_over_user_speaker(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let old = run_with(
+        store,
+        m,
+        RunKind::Live,
+        &carry_transcript(&[("spk_0", &[(0, 10), (10, 20)]), ("spk_1", &[(20, 30)])]),
+    );
+    store.set_current_run(m, old).unwrap();
+    let b = by_label(store, old, "spk_1");
+    store.rename_speaker(b.id, "Temp", None).unwrap();
+    store
+        .reassign_segment(segment_at(store, m, 10_000), b.id)
+        .unwrap();
+    // Renamed afterwards: the edit still says "Temp".
+    store.rename_speaker(b.id, "Final", None).unwrap();
+
+    let new = run_with(
+        store,
+        m,
+        RunKind::PostPass,
+        &carry_transcript(&[("spk_0", &[(0, 20)]), ("spk_1", &[(20, 30)])]),
+    );
+    let report = store.carry_over(old, new).unwrap();
+    assert_eq!(report.created_speakers.len(), 1);
+    let user = by_label(store, new, "user_1");
+    assert_eq!(user.display_name.as_deref(), Some("Temp"));
+    assert!(user.needs_review);
+    // Final (old B, 10-30 s after the reassign) matched the new spk_1.
+    assert_eq!(
+        by_label(store, new, "spk_1").display_name.as_deref(),
+        Some("Final")
+    );
+    store.set_current_run(m, new).unwrap();
+    let names: Vec<(i64, String)> = segments(store, m)
+        .into_iter()
+        .map(|s| (s.start_ms, s.speaker_name))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (0, "Speaker 1".to_owned()),
+            (10_000, "Temp".to_owned()),
+            (20_000, "Final".to_owned())
+        ]
+    );
+}
+
+fn carry_over_rejects_bad_runs(store: &dyn RunStore) {
+    let m1 = live_meeting(store);
+    let m2 = live_meeting(store);
+    let t = carry_transcript(&[("spk_0", &[(0, 10)])]);
+    let r1 = run_with(store, m1, RunKind::Live, &t);
+    let r2 = run_with(store, m2, RunKind::PostPass, &t);
+    assert!(is_invalid(store.carry_over(r1, r2)));
+    assert!(is_invalid(store.carry_over(r1, r1)));
+    assert!(is_not_found(store.carry_over(r1, RunId(424_242))));
 }

@@ -128,5 +128,5 @@ pub(super) fn decode(input: &Path, output: &Path) -> Result<DecodedInfo> {
             break;
         }
     }
-    writer.finish(channels as u16)
+    writer.finish(channels as u16, super::DecoderKind::MediaFoundation)
 }

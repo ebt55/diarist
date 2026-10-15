@@ -4,7 +4,10 @@
 //! 1. [`SymphoniaDecoder`]: pure Rust (AAC-LC in MP4/M4A, MP3, FLAC, WAV,
 //!    Ogg/Vorbis) to f32, downmixed to mono and resampled to 16 kHz with
 //!    rubato (`Fft` for integer ratios such as 48 kHz, `Async` sinc
-//!    otherwise, e.g. 44.1 kHz), written with hound.
+//!    otherwise, e.g. 44.1 kHz), written with hound. Gapless: symphonia's
+//!    `enable_gapless` is on, and for MP4/M4A the edit list's priming and
+//!    padding are trimmed here (see [`super::mp4`]), so decoded time 0 is
+//!    the original file's time 0.
 //! 2. [`MediaFoundationDecoder`] (Windows): `IMFSourceReader` decodes what
 //!    Windows can (HE-AAC, video containers), same downmix and resampler.
 //! 3. [`FfmpegDecoder`]: `ffmpeg` when it is on `PATH`.
@@ -20,7 +23,7 @@ use std::sync::Mutex;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, Fft, FixedAsync, FixedSync, Indexing, Resampler, SincInterpolationParameters};
 
-use super::{DecodedInfo, Decoder};
+use super::{DecodedInfo, Decoder, DecoderKind};
 use crate::error::{CoreError, Result};
 
 /// Output sample rate of every decoder.
@@ -225,7 +228,7 @@ impl Pcm16kWriter {
 
     /// Flushes the resampler and finalizes the WAV. Returns the facts about
     /// the decoded file.
-    pub fn finish(mut self, source_channels: u16) -> Result<DecodedInfo> {
+    pub fn finish(mut self, source_channels: u16, decoder: DecoderKind) -> Result<DecodedInfo> {
         if self.resampling {
             self.drain(true)?;
         }
@@ -237,106 +240,181 @@ impl Pcm16kWriter {
             duration_ms: (frames * 1_000 / u64::from(TARGET_RATE)) as i64,
             source_sample_rate: self.rate,
             source_channels,
+            decoder,
         })
     }
 }
 
 // ---- symphonia -----------------------------------------------------------------
 
+/// Receives `(sample rate, channels, interleaved samples)` per decoded block.
+pub(crate) type BlockSink<'a> = dyn FnMut(u32, usize, &[f32]) -> Result<()> + 'a;
+
+/// Facts about a symphonia decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamInfo {
+    pub rate: u32,
+    pub channels: usize,
+    /// Frames delivered after trimming.
+    pub frames: u64,
+}
+
+/// Decodes `input` with symphonia and hands interleaved f32 blocks to
+/// `on_block(rate, channels, samples)`. With `gapless`, the MP4 edit list
+/// (priming and padding) is applied; otherwise only the container's frame
+/// count caps the output. More than 1 percent undecodable packets is an
+/// error, so the decoder chain can try the next decoder.
+pub(crate) fn symphonia_stream(
+    input: &Path,
+    gapless: bool,
+    on_block: &mut BlockSink<'_>,
+) -> Result<StreamInfo> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::errors::Error as SymError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file =
+        File::open(input).map_err(|e| decode_err(format!("open {}: {e}", input.display())))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = input.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let fmt_opts = FormatOptions {
+        enable_gapless: gapless,
+        ..Default::default()
+    };
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &fmt_opts, &MetadataOptions::default())
+        .map_err(|e| decode_err(format!("symphonia probe: {e}")))?;
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some())
+        .ok_or_else(|| decode_err("symphonia: no audio track"))?;
+    let track_id = track.id;
+    let params = track.codec_params.clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .map_err(|e| decode_err(format!("symphonia codec: {e}")))?;
+    let edit = if gapless {
+        super::mp4::audio_edit(input)
+    } else {
+        None
+    };
+
+    let mut info = StreamInfo {
+        rate: params.sample_rate.unwrap_or(0),
+        channels: params.channels.map(|c| c.count()).unwrap_or(0),
+        frames: 0,
+    };
+    // Trim window in source frames: [skip, skip + keep).
+    let mut window: Option<(u64, Option<u64>)> = None;
+    let mut position = 0u64;
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut bad_packets = 0usize;
+    let mut packets = 0usize;
+    let mut started = false;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymError::ResetRequired) => break,
+            Err(e) => return Err(decode_err(format!("symphonia read: {e}"))),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        packets += 1;
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SymError::DecodeError(_)) => {
+                bad_packets += 1;
+                continue;
+            }
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(decode_err(format!("symphonia decode: {e}"))),
+        };
+        let spec = *decoded.spec();
+        if !started {
+            started = true;
+            info.rate = spec.rate;
+            info.channels = spec.channels.count();
+            window = Some(match edit.filter(|e| !e.is_identity()) {
+                Some(e) => (e.skip_frames(spec.rate), e.present_frames(spec.rate)),
+                None => (0, params.n_frames.filter(|n| *n > 0)),
+            });
+        }
+        let cap = decoded.capacity() as u64;
+        let buf = match &mut sample_buf {
+            Some(b) if b.capacity() as u64 >= cap => b,
+            _ => sample_buf.insert(SampleBuffer::<f32>::new(cap, spec)),
+        };
+        buf.copy_interleaved_ref(decoded);
+        let ch = info.channels.max(1);
+        let samples = buf.samples();
+        let frames = (samples.len() / ch) as u64;
+        let (skip, keep) = window.unwrap_or((0, None));
+        let from = skip.saturating_sub(position).min(frames);
+        let end_abs = keep.map_or(u64::MAX, |k| skip.saturating_add(k));
+        let to = end_abs.saturating_sub(position).min(frames);
+        position += frames;
+        if to > from {
+            info.frames += to - from;
+            on_block(
+                info.rate,
+                ch,
+                &samples[from as usize * ch..to as usize * ch],
+            )?;
+        }
+    }
+    // More than 1 percent of packets undecodable: let the next decoder try.
+    if packets == 0 || bad_packets * 100 > packets {
+        return Err(decode_err(format!(
+            "symphonia: {bad_packets} of {packets} packets failed to decode"
+        )));
+    }
+    if !started {
+        return Err(decode_err("symphonia: no audio decoded"));
+    }
+    Ok(info)
+}
+
 /// Pure-Rust decoder (symphonia): AAC-LC/MP4, MP3, FLAC, WAV, Ogg/Vorbis.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SymphoniaDecoder;
 
+/// [`SymphoniaDecoder`] with gapless trimming on or off (off only for tests
+/// that measure the priming).
+pub(crate) fn symphonia_to_wav16k(
+    input: &Path,
+    output: &Path,
+    gapless: bool,
+) -> Result<DecodedInfo> {
+    let mut writer: Option<Pcm16kWriter> = None;
+    let info = symphonia_stream(input, gapless, &mut |rate, channels, samples| {
+        let w = match &mut writer {
+            Some(w) => w,
+            None => writer.insert(Pcm16kWriter::create(output, rate, channels)?),
+        };
+        w.push_interleaved(samples)
+    })?;
+    let writer = match writer {
+        Some(w) => w,
+        // Everything trimmed away: an empty but valid WAV.
+        None => Pcm16kWriter::create(output, info.rate.max(1), info.channels.max(1))?,
+    };
+    writer.finish(info.channels as u16, DecoderKind::Symphonia)
+}
+
 impl Decoder for SymphoniaDecoder {
     fn decode_to_wav16k(&self, input: &Path, output: &Path) -> Result<DecodedInfo> {
-        use symphonia::core::audio::SampleBuffer;
-        use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-        use symphonia::core::errors::Error as SymError;
-        use symphonia::core::formats::FormatOptions;
-        use symphonia::core::io::MediaSourceStream;
-        use symphonia::core::meta::MetadataOptions;
-        use symphonia::core::probe::Hint;
-
-        let file =
-            File::open(input).map_err(|e| decode_err(format!("open {}: {e}", input.display())))?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = input.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-        let fmt_opts = FormatOptions {
-            enable_gapless: true,
-            ..Default::default()
-        };
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &fmt_opts, &MetadataOptions::default())
-            .map_err(|e| decode_err(format!("symphonia probe: {e}")))?;
-        let mut format = probed.format;
-        let track = format
-            .tracks()
-            .iter()
-            .find(|t| {
-                t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some()
-            })
-            .ok_or_else(|| decode_err("symphonia: no audio track"))?;
-        let track_id = track.id;
-        let params = track.codec_params.clone();
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .map_err(|e| decode_err(format!("symphonia codec: {e}")))?;
-        let rate = params.sample_rate.unwrap_or(0);
-        let mut channels = params.channels.map(|c| c.count()).unwrap_or(0);
-
-        let mut writer: Option<Pcm16kWriter> = None;
-        let mut sample_buf: Option<SampleBuffer<f32>> = None;
-        let mut bad_packets = 0usize;
-        let mut packets = 0usize;
-        loop {
-            let packet = match format.next_packet() {
-                Ok(p) => p,
-                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(SymError::ResetRequired) => break,
-                Err(e) => return Err(decode_err(format!("symphonia read: {e}"))),
-            };
-            if packet.track_id() != track_id {
-                continue;
-            }
-            packets += 1;
-            let decoded = match decoder.decode(&packet) {
-                Ok(d) => d,
-                Err(SymError::DecodeError(_)) => {
-                    bad_packets += 1;
-                    continue;
-                }
-                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(decode_err(format!("symphonia decode: {e}"))),
-            };
-            let spec = *decoded.spec();
-            if writer.is_none() {
-                channels = spec.channels.count();
-                let mut w = Pcm16kWriter::create(output, spec.rate, channels)?;
-                w.limit_input_frames(params.n_frames);
-                writer = Some(w);
-            }
-            let cap = decoded.capacity() as u64;
-            let buf = match &mut sample_buf {
-                Some(b) if b.capacity() as u64 >= cap => b,
-                _ => sample_buf.insert(SampleBuffer::<f32>::new(cap, spec)),
-            };
-            buf.copy_interleaved_ref(decoded);
-            if let Some(w) = writer.as_mut() {
-                w.push_interleaved(buf.samples())?;
-            }
-        }
-        // More than 1 percent of packets undecodable: let the next decoder try.
-        if packets == 0 || bad_packets * 100 > packets {
-            return Err(decode_err(format!(
-                "symphonia: {bad_packets} of {packets} packets failed to decode"
-            )));
-        }
-        let writer = writer.ok_or_else(|| decode_err("symphonia: no audio decoded"))?;
-        let _ = rate;
-        writer.finish(channels as u16)
+        symphonia_to_wav16k(input, output, true)
     }
 }
 
@@ -422,6 +500,7 @@ impl Decoder for FfmpegDecoder {
             duration_ms: (frames * 1_000 / u64::from(TARGET_RATE)) as i64,
             source_sample_rate,
             source_channels,
+            decoder: DecoderKind::Ffmpeg,
         })
     }
 }
@@ -700,6 +779,51 @@ mod tests {
         chain.decode_to_wav16k(&wav, &output).unwrap();
         assert_eq!(chain.last_decoder(), Some("symphonia"));
         assert_eq!(read_mono16k(&output).len(), 8_000);
+    }
+
+    /// `aac_priming_1s.m4a`: 1 s of 440 Hz from ffmpeg's AAC encoder, whose
+    /// edit list skips 1024 priming frames (48 kHz) and presents 48000.
+    #[test]
+    fn m4a_priming_is_trimmed() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("aac_priming_1s.m4a");
+        let edit = super::super::mp4::audio_edit(&fixture).unwrap();
+        assert_eq!(edit.skip_frames(48_000), 1_024);
+        assert_eq!(edit.present_frames(48_000), Some(48_000));
+        let dir = tempfile::tempdir().unwrap();
+        let raw_out = dir.path().join("raw.wav");
+        let out = dir.path().join("trimmed.wav");
+        symphonia_to_wav16k(&fixture, &raw_out, false).unwrap();
+        let info = SymphoniaDecoder.decode_to_wav16k(&fixture, &out).unwrap();
+        assert_eq!(info.decoder, DecoderKind::Symphonia);
+        let raw = read_mono16k(&raw_out);
+        let trimmed = read_mono16k(&out);
+        // The container's presented length (what ffprobe reports) ...
+        assert_eq!(trimmed.len(), 16_000);
+        assert_eq!(info.duration_ms, 1_000);
+        // ... is the untrimmed decode minus the priming (1024 / 3 frames at 16 kHz).
+        assert_eq!(raw.len() - trimmed.len(), 341);
+        // And the trimmed audio is the untrimmed one shifted by the priming.
+        let diff_rms = |offset: usize| {
+            let n = 12_000;
+            let e: f64 = (0..n)
+                .map(|i| (f64::from(raw[i + offset]) - f64::from(trimmed[i])).powi(2))
+                .sum();
+            (e / n as f64).sqrt()
+        };
+        let level = rms(&trimmed[1_000..13_000]);
+        assert!(
+            diff_rms(341) < 0.2 * level,
+            "aligned {} vs {level}",
+            diff_rms(341)
+        );
+        assert!(
+            diff_rms(0) > 0.5 * level,
+            "unaligned {} vs {level}",
+            diff_rms(0)
+        );
     }
 
     #[test]

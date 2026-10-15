@@ -10,6 +10,10 @@ export type EngineInstall = {
  */
 id: ModelFileId, 
 /**
+ * What to show: the folder name, e.g. `nemo-speech-0.2.0-windows-x86_64-cuda`.
+ */
+display_name: string, 
+/**
  * Relative to the data root.
  */
 path: string, 

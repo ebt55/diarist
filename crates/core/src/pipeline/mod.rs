@@ -1,5 +1,11 @@
-//! Orchestration: file import (Phase 1), live post-pass and carry-over (Phase
-//! 3), and the [`JobQueue`] that keeps GPU work to one job at a time.
+//! Orchestration: file import ([`import_file`]), live post-pass and
+//! carry-over (Phase 3), and the [`JobQueue`] that keeps GPU work to one job
+//! at a time.
+//!
+//! A job is a closure submitted to the queue with a [`JobId`]; it receives a
+//! [`CancelToken`] and reports through [`crate::views::JobEvent`]s, ending
+//! with exactly one of `Done`, `Error` or `Cancelled`. A job dequeued before
+//! it ran never reports; whoever cancelled it emits `Cancelled`.
 
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -8,20 +14,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use crate::audio::Decoder;
-use crate::engine::Engine;
-use crate::error::Result;
-use crate::store::Store;
-use crate::types::{JobId, MeetingId};
-use crate::views::JobEvent;
+use crate::types::JobId;
 
 mod import;
 
-pub use import::{
-    import_file_with, ImportOptions, MIN_FREE_BYTES, SETTING_KEEP_DIARIZATION, SETTING_KEEP_WAV,
-};
+pub use import::{import_file, ImportOptions, MIN_FREE_BYTES};
 
-/// What the user asked to import.
+/// What the user asked to import. Language, retention of intermediates and
+/// the data root come from [`ImportOptions`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportRequest {
     pub job_id: JobId,
@@ -29,47 +29,7 @@ pub struct ImportRequest {
     pub path: PathBuf,
     /// Defaults to the file stem.
     pub title: Option<String>,
-    /// BCP-47 tag or `auto`.
-    pub language: String,
     pub diarize: bool,
-}
-
-/// Imports one audio or video file as a new meeting, with default
-/// [`ImportOptions`] for the resolved data root and no cancellation (see
-/// [`import_file_with`]).
-///
-/// Steps, each reported through `on_event` (`JobEvent::Progress` with the
-/// matching stage, then exactly one `Done` or `Error`):
-/// 0. Refuse when the input is missing or under 2 GB are free on the data
-///    root's volume (no meeting is created).
-/// 1. `store.create_meeting` (source `file`, status `processing`).
-/// 2. Decode to `audio/<uid>/source.wav` (16 kHz mono) with `decoder`;
-///    register the original file as the `playback` track (format
-///    `original`); `finish_meeting` with the decoded duration.
-/// 3. `store.create_run(kind = file)`, then `engine.transcribe_file` and
-///    drain its events until `Done` or `Error`; a set [`CancelToken`] is
-///    forwarded to `engine.cancel`. Optionally the standalone diarize pass.
-/// 4. Build speakers, segments (`transcript` module) and words;
-///    `store.insert_transcript`, `finish_run(done)`, `set_current_run`,
-///    status `done`; delete the 16 kHz intermediate unless kept.
-/// 5. On any failure: `finish_run(failed)`, status `failed`, `JobEvent::Error`.
-pub fn import_file(
-    store: &dyn Store,
-    engine: &dyn Engine,
-    decoder: &dyn Decoder,
-    req: ImportRequest,
-    on_event: &dyn Fn(JobEvent),
-) -> Result<MeetingId> {
-    let paths = crate::models::DataPaths::resolve()?;
-    import_file_with(
-        store,
-        engine,
-        decoder,
-        req,
-        &ImportOptions::new(paths.root),
-        None,
-        on_event,
-    )
 }
 
 /// Cooperative cancellation flag handed to each queued job.
@@ -81,7 +41,8 @@ impl CancelToken {
         self.0.load(Ordering::SeqCst)
     }
 
-    fn cancel(&self) {
+    /// Sets the flag ([`JobQueue::cancel`] does this for queued jobs).
+    pub fn cancel(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
 }

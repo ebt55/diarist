@@ -122,18 +122,11 @@ pub async fn import_file(
     path: String,
     title: Option<String>,
 ) -> CmdResult<JobId> {
-    let settings = with_store(&store, |s| s.get_settings()).await?;
-    let language = settings
-        .0
-        .get("default_language")
-        .cloned()
-        .unwrap_or_else(|| "en".into());
     let job_id = JobId::new();
     let req = ImportRequest {
         job_id: job_id.clone(),
         path: PathBuf::from(&path),
         title: title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()),
-        language,
         diarize: true,
     };
     log::info!("import queued: {path} (job {job_id})");

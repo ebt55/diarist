@@ -8,11 +8,9 @@
 //! - Full-text search uses the external-content FTS5 table `segments_fts`
 //!   (kept in sync by triggers) and only returns segments of each meeting's
 //!   current run. Snippets are split into [`SnippetPart`]s, never HTML.
-//! - Beyond the trait: runs and clock anchors, live utterances and their
-//!   materialisation ([`SqliteStore::append_live_utterance`],
-//!   [`SqliteStore::materialise_live_run`]), name and edit carry-over between
-//!   runs ([`SqliteStore::carry_over`]) and online backups
-//!   ([`SqliteStore::backup`]).
+//! - [`RunStore`]: runs and clock anchors, live utterances and their
+//!   materialisation, name and edit carry-over between runs (rules shared
+//!   with `MemoryStore` in `store::carry_over`) and online backups.
 //!
 //! One connection behind a mutex: the desktop app calls the store from
 //! `spawn_blocking`, and SQLite serialises writers anyway.
@@ -29,17 +27,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
-pub use carry_over::CarryOverReport;
-
+use super::carry_over::{carry_over, group_bounds, CarryOverReport};
 use super::{
-    is_hex_color, NewAudioTrack, NewMeeting, NewTranscript, ScannedModelFile, Store, StoreError,
-    StoreResult,
+    is_hex_color, pick_playback_track, NewAudioTrack, NewMeeting, NewTranscript, RunStore,
+    ScannedModelFile, Store, StoreError, StoreResult,
 };
 use crate::error::CoreError;
+use crate::protocol::EngineWord;
+use crate::transcript::SegmentOptions;
 use crate::types::{
-    new_id, AudioTrack, Channel, ClockAnchor, Edit, EditKind, Meeting, MeetingId, MeetingStatus,
-    ModelCapabilities, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind, RunStatus,
-    SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
+    new_id, AudioTrack, Channel, ClockAnchor, Edit, EditKind, LiveUtterance, Meeting, MeetingId,
+    MeetingStatus, ModelCapabilities, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind,
+    RunStatus, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -152,31 +151,14 @@ impl SqliteStore {
     pub fn migrate(&self) -> StoreResult<u32> {
         migrate(&mut *self.lock()?)
     }
+}
 
-    /// Writes a consistent copy of the database to `dest` with the online
-    /// backup API: into `<dest>.tmp` first, then renamed over `dest`.
-    pub fn backup(&self, dest: impl AsRef<Path>) -> StoreResult<()> {
-        let dest = dest.as_ref();
-        let mut tmp = dest.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        let _ = std::fs::remove_file(&tmp);
-        {
-            let conn = self.lock()?;
-            conn.backup(rusqlite::MAIN_DB, &tmp, None)?;
-        }
-        std::fs::rename(&tmp, dest)
-            .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))
-    }
-
-    // ---- runs ----------------------------------------------------------------
-
-    pub fn get_run(&self, run: RunId) -> StoreResult<TranscriptRun> {
+impl RunStore for SqliteStore {
+    fn get_run(&self, run: RunId) -> StoreResult<TranscriptRun> {
         get_run(&*self.lock()?, run)
     }
 
-    /// Runs of a meeting, oldest first.
-    pub fn list_runs(&self, meeting: MeetingId) -> StoreResult<Vec<TranscriptRun>> {
+    fn list_runs(&self, meeting: MeetingId) -> StoreResult<Vec<TranscriptRun>> {
         let conn = self.lock()?;
         meeting_exists(&conn, meeting)?;
         let mut stmt = conn.prepare(&format!(
@@ -188,9 +170,7 @@ impl SqliteStore {
         Ok(runs)
     }
 
-    /// Deletes a run and its speakers, segments, words and live utterances.
-    /// The meeting's `current_run_id` is cleared if it pointed there.
-    pub fn delete_run(&self, run: RunId) -> StoreResult<()> {
+    fn delete_run(&self, run: RunId) -> StoreResult<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         get_run(&tx, run)?;
@@ -201,35 +181,46 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Every speaker row of a run, by id.
-    pub fn run_speakers(&self, run: RunId) -> StoreResult<Vec<Speaker>> {
+    fn run_speakers(&self, run: RunId) -> StoreResult<Vec<Speaker>> {
         let conn = self.lock()?;
         get_run(&conn, run)?;
         run_speakers(&conn, run)
     }
 
-    /// Time-ranged user edits of a meeting in replay order.
-    pub fn list_edits(&self, meeting: MeetingId) -> StoreResult<Vec<Edit>> {
+    fn list_edits(&self, meeting: MeetingId) -> StoreResult<Vec<Edit>> {
         let conn = self.lock()?;
         meeting_exists(&conn, meeting)?;
         list_edits(&conn, meeting)
     }
 
-    /// Looks a meeting up by its ULID.
-    pub fn meeting_id_by_uid(&self, uid: &str) -> StoreResult<Option<MeetingId>> {
-        Ok(self
-            .lock()?
-            .query_row("SELECT id FROM meetings WHERE uid = ?1", [uid], |r| {
-                r.get::<_, i64>(0)
-            })
-            .optional()?
-            .map(MeetingId))
+    fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let report = carry_over(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
+        tx.commit()?;
+        Ok(report)
     }
 
-    // ---- clock anchors -------------------------------------------------------
+    fn append_live_utterance(
+        &self,
+        run: RunId,
+        channel: Channel,
+        utt: u32,
+        rev: u32,
+        words: &[EngineWord],
+    ) -> StoreResult<i64> {
+        self.append_live_utterance_impl(run, channel, utt, rev, words)
+    }
 
-    /// Inserts (or replaces) clock anchors.
-    pub fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
+    fn list_live_utterances(&self, run: RunId) -> StoreResult<Vec<LiveUtterance>> {
+        self.list_live_utterances_impl(run)
+    }
+
+    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()> {
+        self.materialise_live_run_impl(run, opts)
+    }
+
+    fn add_clock_anchors(&self, anchors: &[ClockAnchor]) -> StoreResult<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         {
@@ -251,12 +242,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Anchors of one channel by sample index.
-    pub fn clock_anchors(
-        &self,
-        meeting: MeetingId,
-        channel: Channel,
-    ) -> StoreResult<Vec<ClockAnchor>> {
+    fn clock_anchors(&self, meeting: MeetingId, channel: Channel) -> StoreResult<Vec<ClockAnchor>> {
         let conn = self.lock()?;
         meeting_exists(&conn, meeting)?;
         let mut stmt = conn.prepare(
@@ -274,6 +260,30 @@ impl SqliteStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    fn meeting_id_by_uid(&self, uid: &str) -> StoreResult<Option<MeetingId>> {
+        Ok(self
+            .lock()?
+            .query_row("SELECT id FROM meetings WHERE uid = ?1", [uid], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()?
+            .map(MeetingId))
+    }
+
+    /// Online backup API into `<dest>.tmp`, then renamed over `dest`.
+    fn backup(&self, dest: &Path) -> StoreResult<()> {
+        let mut tmp = dest.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let conn = self.lock()?;
+            conn.backup(rusqlite::MAIN_DB, &tmp, None)?;
+        }
+        std::fs::rename(&tmp, dest)
+            .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))
     }
 }
 
@@ -585,19 +595,9 @@ fn regroup_segment(
     debug_assert!(!groups.is_empty());
     let extra = groups.len() as i64 - 1;
     let mut ids = vec![seg.id];
-    let last = groups.len() - 1;
     let bounds = |i: usize, words: &[WordRow]| {
-        let start = if i == 0 {
-            seg.start_ms
-        } else {
-            words[0].start_ms
-        };
-        let end = if i == last {
-            seg.end_ms
-        } else {
-            words.iter().map(|w| w.end_ms).max().unwrap_or(start)
-        };
-        (start, end.max(start))
+        let spans: Vec<(i64, i64)> = words.iter().map(|w| (w.start_ms, w.end_ms)).collect();
+        group_bounds(i, groups.len(), seg.start_ms, seg.end_ms, &spans)
     };
     let (first_words, first_speaker) = groups[0];
     let (s0, e0) = bounds(0, first_words);
@@ -1072,6 +1072,11 @@ impl Store for SqliteStore {
         Ok(rows)
     }
 
+    fn playback_track(&self, id: MeetingId) -> StoreResult<Option<AudioTrack>> {
+        let source = get_meeting_row(&*self.lock()?, id)?.source;
+        Ok(pick_playback_track(source, &self.list_audio_tracks(id)?))
+    }
+
     fn rename_speaker(
         &self,
         id: SpeakerId,
@@ -1153,6 +1158,12 @@ impl Store for SqliteStore {
             "UPDATE speakers SET merged_into = NULL WHERE id = ?1",
             [id.0],
         )?;
+        not_found_if_zero(n, "speaker", id.0)
+    }
+
+    fn mark_reviewed(&self, id: SpeakerId) -> StoreResult<()> {
+        let conn = self.lock()?;
+        let n = conn.execute("UPDATE speakers SET needs_review = 0 WHERE id = ?1", [id.0])?;
         not_found_if_zero(n, "speaker", id.0)
     }
 
@@ -1284,6 +1295,15 @@ impl Store for SqliteStore {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    fn remove_setting(&self, key: &str) -> StoreResult<()> {
+        if key.trim().is_empty() {
+            return Err(StoreError::Invalid("setting key must not be empty".into()));
+        }
+        self.lock()?
+            .execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
     }
 

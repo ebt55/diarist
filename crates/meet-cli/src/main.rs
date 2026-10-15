@@ -12,8 +12,8 @@ use meet_core::audio::{find_on_path, ChainDecoder};
 use meet_core::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use meet_core::export::{render, ExportDoc, ExportFormat};
 use meet_core::models::{self, DataPaths, DoctorReport, Manifest};
-use meet_core::pipeline::{import_file_with, ImportOptions, ImportRequest, JobQueue};
-use meet_core::store::{SqliteStore, Store};
+use meet_core::pipeline::{import_file, ImportOptions, ImportRequest, JobQueue};
+use meet_core::store::{RunStore, SqliteStore, Store};
 use meet_core::types::{JobId, MeetingId, ModelFile, ModelRole, SegmentId, SpeakerId};
 use meet_core::views::{JobEvent, JobStage};
 use meet_core::CoreError;
@@ -431,15 +431,15 @@ fn transcribe(
     };
     let mut runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
     runner.device = device.to_owned();
-    let mut opts = ImportOptions::new(&ctx.paths.root);
-    opts.keep_intermediate = keep_wav;
-    opts.run_diarize_pass = rttm;
+    let mut opts = ImportOptions::new(&ctx.paths.root, &ctx.store.get_settings()?);
+    opts.language = language.to_owned();
+    opts.keep_intermediate |= keep_wav;
+    opts.run_diarize_pass |= rttm;
     opts.diarize_runner = Some(runner);
     let req = ImportRequest {
         job_id: JobId::new(),
         path: file.to_path_buf(),
         title,
-        language: language.to_owned(),
         diarize,
     };
     eprintln!(
@@ -455,7 +455,7 @@ fn transcribe(
     let dec = Arc::clone(&decoder);
     let started = Instant::now();
     queue.submit(req.job_id.clone(), move |token| {
-        let result = import_file_with(&*store, &*engine, &*dec, req, &opts, Some(token), &|ev| {
+        let result = import_file(&*store, &*engine, &*dec, req, &opts, token, &|ev| {
             print_progress(&ev)
         });
         let _ = tx.send(result);

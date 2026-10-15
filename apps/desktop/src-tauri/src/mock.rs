@@ -189,7 +189,7 @@ fn import(
             title,
             source: Source::File,
             source_path: Some(path.display().to_string()),
-            language: req.language.clone(),
+            language: "en".into(),
             diarize_mic: false,
             started_at,
             status: MeetingStatus::Processing,
