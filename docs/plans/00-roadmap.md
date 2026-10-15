@@ -2,7 +2,7 @@
 
 Status: v0.2, 15 Oct 2026. Each phase gets its own plan file in this folder with acceptance criteria, file boundaries and verification steps. Opus 5.5 agents implement; Fable reviews between chunks.
 
-Delivered on 15 Oct 2026: Phases 0, 0.5, 1, 2, 1.5, 3a, 3b and 4. In progress: 3.5 (live follow-ups). Next: 5 (ship). The app imports and records live end to end on the development machine; see docs/eval for the measured baseline.
+Delivered on 15 Oct 2026: Phases 0, 0.5, 1, 2, 1.5, 3, 4 and 5; 0.1.0-beta.1 published as a pre-release the same day. Proposed next: 8 Hardening (docs/plans/11-hardening.md), then the feature phases (fusion in docs/plans/06, echo in docs/plans/04 section 3f, identity). The website lives in its own repository, ebt55/diarist.dev. The app imports and records live end to end on the development machine; see docs/eval for the measured baseline.
 
 | Phase | Deliverable | Depends on | Parallel with |
 |---|---|---|---|
@@ -15,6 +15,7 @@ Delivered on 15 Oct 2026: Phases 0, 0.5, 1, 2, 1.5, 3a, 3b and 4. In progress: 3
 | 4 Eval harness | `tools/eval`: DER and words-to-wrong-speaker vs RTTM; AMI ES2002a baseline; user meetings when provided | 1 | 3 |
 | 5 Ship | First-run downloader UI, NSIS installer, portable mode, tray + shortcuts + autostart, crash recovery, settings, README, licence audit | 2, 3 | nothing |
 | 6 Identity (v3) | Speaker embeddings, cross-meeting speaker matching, sqlite-vec | 5 | nothing |
+| 8 Hardening | Local crash capture (never transmitted), `bench` measurements, soak and fault tests, eval gate as a habit, release checklist (docs/plans/11-hardening.md) | 5 | website, fusion |
 
 ## Delegation rules
 
