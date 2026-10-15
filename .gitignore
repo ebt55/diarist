@@ -5,7 +5,7 @@ node_modules/
 dist/
 # Models and runtime binaries (downloaded on first run)
 models/
-engine/bin/
+engine/
 *.gguf
 *.onnx
 # Local data
