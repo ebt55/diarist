@@ -182,7 +182,7 @@ Fixtures: `fixtures/ws_session_events.jsonl`, `fixtures/ws_two_sessions_note.md`
 
 ## 6. Pitfalls
 
-1. **Long-file tagging bug:** plain `transcribe --diarize` on a 21-minute file mislabels the first ~10 min (63% correct). Always use `--stream --endpointing` (99.6%), or re-tag words from `diarize` output. Draft upstream issue: `07-upstream-longfile-tags-bug.md`.
+1. **Long-file tagging bug:** plain `transcribe --diarize` on a 21-minute file mislabels the first ~10 min (63% correct). Always use `--stream --endpointing` (99.6%), or re-tag words from `diarize` output. Reported upstream as NVIDIA/NeMo-Speech.cpp#67 (https://github.com/NVIDIA/NeMo-Speech.cpp/issues/67); details in `07-upstream-longfile-tags-bug.md`.
 2. **Parakeet TDT v3 silently drops spans, with no error:** 45 s at 17:38–18:24 plus two ~10 s spans in the 77-minute recording. A 2-minute cut also dropped the same span, so this is model-side and context-dependent, not a long-file issue (§8). Don't use Parakeet as the only ASR.
 3. **Endpointing is off by default** in `serve` and `transcribe`. Without it, the WebSocket gives one final at commit only.
 4. **`diarize --offline` is worse** than streaming (DER 43% vs 24%) and limited to about 6.6 min.

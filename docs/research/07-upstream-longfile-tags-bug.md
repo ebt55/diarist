@@ -1,6 +1,6 @@
-# Draft upstream issue (not posted; the user decides)
+# Upstream issue (posted by Ebin on 15 Oct 2026)
 
-Target: https://github.com/NVIDIA/NeMo-Speech.cpp/issues
+Posted as https://github.com/NVIDIA/NeMo-Speech.cpp/issues/67. Check its status before each runtime upgrade; when fixed, plain `transcribe --diarize` becomes safe again, though we keep `--stream --endpointing` regardless.
 
 ---
 
