@@ -178,6 +178,9 @@ pub enum Control {
     /// The device could not be opened or read; the capture retries and
     /// synthesizes silence meanwhile.
     DeviceLost { error: String },
+    /// The capture thread did not run for `gap_hns` (the system slept). The
+    /// span is not zero-filled: the pipeline records a gap anchor instead.
+    Resumed { gap_hns: i64 },
 }
 
 /// One item in a capture ring.

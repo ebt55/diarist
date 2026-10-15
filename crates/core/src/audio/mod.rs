@@ -18,6 +18,7 @@ pub mod capture;
 pub mod clock;
 pub mod decode;
 pub mod feed;
+pub mod flac;
 #[cfg(windows)]
 mod mf;
 pub mod mp4;

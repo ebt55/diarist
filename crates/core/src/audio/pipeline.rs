@@ -115,6 +115,9 @@ pub enum PipelineEvent {
     },
     /// The capture lost its device and is retrying.
     DeviceLost { at_sample: u64, error: String },
+    /// QPC jumped by `hns` with no audio (suspend/resume); not zero-filled,
+    /// only anchored.
+    Jump { at_sample: u64, hns: i64 },
 }
 
 /// Counters for diagnostics and `post_pass_mode = on_issues`.
@@ -163,6 +166,8 @@ pub struct ChannelPipeline {
     frame_start: u64,
     /// Force a gap check (and gap anchor) on the next packet.
     pending_break: bool,
+    /// The next gap is a suspend: anchor it, do not fill it.
+    no_fill_next: bool,
     mix: Option<MixResampler>,
     stats: PipelineStats,
 }
@@ -178,6 +183,7 @@ impl ChannelPipeline {
             frame: Vec::with_capacity(FRAME_SAMPLES),
             frame_start: 0,
             pending_break: false,
+            no_fill_next: false,
             mix: None,
             stats: PipelineStats::default(),
         }
@@ -213,6 +219,9 @@ impl ChannelPipeline {
                         reason,
                     } => {
                         self.stats.device_changes += 1;
+                        if reason == ChangeReason::Resumed {
+                            self.no_fill_next = true;
+                        }
                         out.events.push(PipelineEvent::DeviceChanged {
                             at_sample: self.position,
                             device_id,
@@ -224,6 +233,7 @@ impl ChannelPipeline {
                         at_sample: self.position,
                         error,
                     }),
+                    Control::Resumed { .. } => self.no_fill_next = true,
                 }
                 self.pending_break = true;
                 Ok(())
@@ -284,7 +294,18 @@ impl ChannelPipeline {
             first || flags.discontinuity || self.pending_break || gap.abs() > GAP_TOLERANCE_HNS;
         if check {
             let tol = if first { 0 } else { GAP_TOLERANCE_HNS };
-            if gap > tol {
+            if self.no_fill_next && !first && gap > tol {
+                // Suspend: the timeline jumps; the anchors carry the jump
+                // (the last sample before it and the first after it).
+                if self.position > 0 {
+                    out.anchors
+                        .push((self.position - 1, expected - HNS_PER_SAMPLE));
+                }
+                out.events.push(PipelineEvent::Jump {
+                    at_sample: self.position,
+                    hns: gap,
+                });
+            } else if gap > tol {
                 let fill = ((gap as f64) / HNS_PER_SAMPLE as f64).round() as u64;
                 if fill > 0 {
                     if !first {
@@ -313,6 +334,7 @@ impl ChannelPipeline {
                     .push((self.position, q + skip as i64 * HNS_PER_SAMPLE));
             }
             self.pending_break = false;
+            self.no_fill_next = false;
         }
         if flags.silent {
             samples.iter_mut().for_each(|s| *s = 0);
@@ -801,6 +823,39 @@ mod tests {
         let out = run(&mut p, vec![pcm(end - 100_000, 320, 3)]);
         assert_eq!(out.samples.len(), 160);
         assert_eq!(p.stats().overlap_samples, 160);
+    }
+
+    #[test]
+    fn a_resume_is_anchored_not_filled() {
+        let mut p = ChannelPipeline::new(Channel::Mic, ORIGIN);
+        let hour = 36_000_000_000i64;
+        let out = run(
+            &mut p,
+            vec![
+                pcm(ORIGIN, 1_600, 1),
+                Packet::Control {
+                    qpc_100ns: ORIGIN + hour,
+                    control: Control::Resumed { gap_hns: hour },
+                },
+                pcm(ORIGIN + 1_000_000 + hour, 1_600, 2),
+            ],
+        );
+        assert_eq!(out.samples.len(), 3_200);
+        assert!(out.anchors.contains(&(1_600, ORIGIN + 1_000_000 + hour)));
+        assert!(matches!(
+            out.events[0],
+            PipelineEvent::Jump {
+                at_sample: 1_600,
+                ..
+            }
+        ));
+        let mut map = ClockMap::new(ORIGIN);
+        for (s, q) in &out.anchors {
+            map.push(*s as i64, *q);
+        }
+        // A word in the second packet is an hour later in meeting time.
+        assert_eq!(map.meeting_ms(150), 3_600_150);
+        assert_eq!(map.meeting_ms(50), 50);
     }
 
     #[test]

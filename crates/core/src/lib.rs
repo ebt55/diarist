@@ -18,6 +18,7 @@ pub mod engine;
 pub mod error;
 pub mod export;
 pub mod fusion;
+pub mod live;
 pub mod models;
 pub mod pipeline;
 pub mod protocol;

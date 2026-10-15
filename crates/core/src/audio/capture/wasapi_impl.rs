@@ -33,6 +33,9 @@ const POLL: Duration = Duration::from_millis(10);
 const IDLE_HNS: i64 = 2_000_000;
 /// ...up to this far behind now, so a late real packet never overlaps it.
 const SYNTH_LAG_HNS: i64 = 1_000_000;
+/// A longer idle span means the thread did not run (suspend): no silence
+/// is synthesized for it.
+const MAX_SYNTH_HNS: i64 = 100_000_000;
 
 fn werr(context: &str, e: WasapiError) -> crate::error::CoreError {
     audio_err(format!("{context}: {e}"))
@@ -357,8 +360,14 @@ impl Emitter {
         if now - self.last_end < IDLE_HNS {
             return;
         }
+        let span = now - SYNTH_LAG_HNS - self.last_end;
+        if span > MAX_SYNTH_HNS {
+            self.last_end = now - SYNTH_LAG_HNS;
+            self.control(Control::Resumed { gap_hns: span });
+            return;
+        }
         let rate = i64::from(self.layout.rate());
-        let frames = (now - SYNTH_LAG_HNS - self.last_end) * rate / 10_000_000;
+        let frames = span * rate / 10_000_000;
         if frames <= 0 {
             return;
         }
