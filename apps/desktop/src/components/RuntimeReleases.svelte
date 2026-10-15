@@ -38,7 +38,7 @@
       const ok = await app.confirm({
         title: `Install runtime ${r.version}?`,
         message:
-          `meet-assist was tested with 0.2.0. ${r.version}${r.prerelease ? " is a pre-release and" : ""} may change ` +
+          `Diarist was tested with 0.2.0. ${r.version}${r.prerelease ? " is a pre-release and" : ""} may change ` +
           "the command line the app relies on. If transcription fails, select the previous runtime in Settings, Models.",
         confirmLabel: "Install",
         danger: false,

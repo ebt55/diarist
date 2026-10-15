@@ -24,7 +24,7 @@ export interface StartupFlags {
 }
 
 export function startupFlags(): StartupFlags {
-  const f = (window as unknown as { __MEET_ASSIST_STARTUP__?: Partial<StartupFlags> }).__MEET_ASSIST_STARTUP__;
+  const f = (window as unknown as { __DIARIST_STARTUP__?: Partial<StartupFlags> }).__DIARIST_STARTUP__;
   return { autostart: f?.autostart ?? false, windowStateSaved: f?.windowStateSaved ?? false };
 }
 export type Theme = "system" | "light" | "dark";

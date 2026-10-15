@@ -198,7 +198,7 @@
 
 <aside class="sidebar" aria-label="Library">
   <header class="side-head">
-    <span class="brand">meet-assist</span>
+    <span class="brand">Diarist</span>
     <div class="head-actions">
       {#if live.active}
         <button
@@ -362,7 +362,7 @@
       {/each}
     </div>
   {:else if app.meetingsError}
-    <p class="empty error" role="alert">Could not load meetings: {app.meetingsError}. Restart meet-assist; if it keeps failing, Diagnostics shows the log.</p>
+    <p class="empty error" role="alert">Could not load meetings: {app.meetingsError}. Restart Diarist; if it keeps failing, Diagnostics shows the log.</p>
   {:else if app.meetingsLoaded && app.meetings.length === 0}
     <p class="empty">No meetings yet. Press R to record one, import a recording with Ctrl+O, or drop files here.</p>
   {:else}

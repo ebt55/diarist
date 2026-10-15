@@ -67,7 +67,7 @@
     if (failed > 0) {
       app.error(`${plural(failed, "download")} failed. Each row has Retry, Copy link and Open folder`);
     } else if (status && !status.needs_setup) {
-      app.toast("success", "meet-assist is ready: import a recording with Ctrl+O, or press R to record");
+      app.toast("success", "Diarist is ready: import a recording with Ctrl+O, or press R to record");
     }
   }
 
@@ -104,7 +104,7 @@
 
 <div class="page">
   <header class="page-head">
-    <h1>Set up meet-assist</h1>
+    <h1>Set up Diarist</h1>
     <span class="hint">Esc goes to the library · Ctrl+R checks again</span>
   </header>
   <p class="lead">
@@ -263,7 +263,7 @@
         </p>
       {/if}
       <p class="help">
-        A per-app firewall such as simplewall asks about <code>meet-assist.exe</code> (the engine download) and
+        A per-app firewall such as simplewall asks about <code>diarist.exe</code> (the engine download) and
         <code>curl.exe</code> (the engine's model downloader) on the first download; allow both, or fetch the files by hand
         with Copy link.
       </p>

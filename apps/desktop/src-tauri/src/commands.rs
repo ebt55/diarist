@@ -671,7 +671,7 @@ fn run_engine_install(
     note_download(
         app,
         &entry.name,
-        "meet-assist.exe",
+        "diarist.exe",
         &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
     );
     result.map(|d| d.display().to_string())
@@ -767,7 +767,7 @@ pub async fn pull_model(
             let r =
                 models::download_file(&entry.url, &dest, &entry.sha256, total, &mut |d, _| tick(d))
                     .map(|()| dest);
-            ("meet-assist.exe", r)
+            ("diarist.exe", r)
         } else {
             let engine = match models::selected_file(s, ModelRole::Engine)? {
                 Some(e) => e,
@@ -923,7 +923,7 @@ pub async fn add_model_url(
         note_download(
             &app,
             &name,
-            "meet-assist.exe",
+            "diarist.exe",
             &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
         );
         result.map(|p| p.display().to_string())
@@ -1309,7 +1309,7 @@ pub async fn get_autostart(app: AppHandle) -> CmdResult<bool> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
-/// Starts meet-assist with Windows (in the tray) or stops doing so.
+/// Starts Diarist with Windows (in the tray) or stops doing so.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<bool> {
     use tauri_plugin_autostart::ManagerExt;
@@ -1431,7 +1431,7 @@ pub async fn diagnostics_report(
                 Some(format!("{}\n{text}", p.display()))
             });
         let input = DiagnosticsInput {
-            app: format!("meet-assist {}", diarist_core::VERSION),
+            app: format!("Diarist {}", diarist_core::VERSION),
             os: diagnostics::os_version(),
             gpu: gpu::gpu_info(0),
             extra: vec![

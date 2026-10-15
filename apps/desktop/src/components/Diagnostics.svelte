@@ -26,7 +26,7 @@
     try {
       checks = await api.healthCheck();
     } catch (e) {
-      app.error(`The checks could not run (${errorText(e)}); restart meet-assist and try again`);
+      app.error(`The checks could not run (${errorText(e)}); restart Diarist and try again`);
     } finally {
       checking = false;
     }

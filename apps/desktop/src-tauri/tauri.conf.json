@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "meet-assist",
+  "productName": "Diarist",
   "version": "0.1.0",
-  "identifier": "app.meetassist.desktop",
+  "identifier": "app.diarist.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "meet-assist",
+        "title": "Diarist",
         "width": 1120,
         "height": 650,
         "center": true,
@@ -57,7 +57,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3NTI1Q0M4QzIzQzQ2QkMKUldTOFJqekN5RnhTOS90UldGbnQrTVdlSUQ0d05tdE8xZUhnQWg3b3h5cm00T01uTzVLeFZ1TDYK",
       "endpoints": [
-        "https://github.com/REPLACE_WITH_GITHUB_OWNER/REPLACE_WITH_GITHUB_REPO/releases/latest/download/latest.json"
+        "https://github.com/ebt55/diarist/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

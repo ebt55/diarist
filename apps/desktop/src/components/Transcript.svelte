@@ -183,7 +183,7 @@
       await api.reassignSegment(seg.id, to.id);
       await onchanged(seg.id);
     } catch (e) {
-      app.error(`Reassign failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`Reassign failed (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
   }
 
@@ -193,7 +193,7 @@
       if (to && to.id !== seg.speaker_id) await api.reassignSegment(created, to.id);
       await onchanged(created);
     } catch (e) {
-      app.error(`Split failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`Split failed (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
   }
 

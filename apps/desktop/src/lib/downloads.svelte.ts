@@ -153,13 +153,13 @@ class Downloads {
 
 /**
  * What to try after a failed download, for the row (and the firewall case:
- * per-app firewalls such as simplewall ask about meet-assist.exe for the
+ * per-app firewalls such as simplewall ask about diarist.exe for the
  * engine and about curl.exe, the runtime's downloader, for models).
  */
 export function failureHint(kind: "engine" | "model", error: string | null): string {
   const e = (error ?? "").toLowerCase();
   const net = /10013|10060|10061|11001|no such host|dns|resolve|connect|timed out|timeout|revocation|certificate|stalled|network|unreachable/.test(e);
-  const who = kind === "engine" ? "meet-assist.exe" : "curl.exe (the engine's downloader)";
+  const who = kind === "engine" ? "diarist.exe" : "curl.exe (the engine's downloader)";
   return net
     ? `This looks like the network. If a firewall such as simplewall asked about ${who}, allow it and press Retry; a partial download resumes. Or use Copy link, download the file with a browser and put it into the folder Open folder shows, then Refresh.`
     : "Press Retry (a partial download resumes), or use Copy link to download the file with a browser, put it into the folder Open folder shows, and press Refresh: the hash is checked there.";

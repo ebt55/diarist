@@ -168,7 +168,7 @@
     const ok = await app.confirm({
       title: `Use ${name} for ${role === "asr" ? "speech to text" : "speaker diarization"}?`,
       message:
-        "meet-assist does not recognise this file's architecture. It will try it; if the engine cannot run it, its own " +
+        "Diarist does not recognise this file's architecture. It will try it; if the engine cannot run it, its own " +
         "error message is shown and you can switch back here.",
       confirmLabel: "Use it",
       danger: false,
@@ -234,7 +234,7 @@
         | string
         | null;
     } catch (e) {
-      app.error(`Could not open the folder dialog (${errorText(e)}); restart meet-assist and try again`);
+      app.error(`Could not open the folder dialog (${errorText(e)}); restart Diarist and try again`);
       return;
     }
     if (!picked) return;
@@ -242,7 +242,7 @@
       title: "Move the data folder?",
       message:
         `Everything in ${root.root} (database, recordings, engine and models) is copied to ${picked} and checked. ` +
-        "meet-assist then restarts from the new folder and deletes the old copy. Choose an empty folder.",
+        "Diarist then restarts from the new folder and deletes the old copy. Choose an empty folder.",
       confirmLabel: "Move and restart",
       danger: false,
     });
@@ -305,7 +305,7 @@
     try {
       update = await api.checkForUpdate();
       if (!update.configured) app.toast("info", "This build has no update address; see the project page for new versions.");
-      else if (!update.available) app.toast("info", `meet-assist ${update.current} is the newest version`);
+      else if (!update.available) app.toast("info", `Diarist ${update.current} is the newest version`);
     } catch (e) {
       app.error(`${errorText(e)}. Check the connection, or get the newest installer from the project page`);
     } finally {
@@ -467,7 +467,7 @@
         {@const pct = moving.total_bytes ? Math.floor((moving.done_bytes / moving.total_bytes) * 100) : 0}
         <p class="help">
           <span class="dl-bar"><span class="dl-fill" style="width: {pct}%"></span></span>
-          Copying and checking: {formatBytes(moving.done_bytes)} of {formatBytes(moving.total_bytes)}. Keep meet-assist open.
+          Copying and checking: {formatBytes(moving.done_bytes)} of {formatBytes(moving.total_bytes)}. Keep Diarist open.
         </p>
       {/if}
       <p class="help">
@@ -894,7 +894,7 @@
   <section>
     <h2>About</h2>
     <p class="help">
-      meet-assist {version} · MIT licence. The speech engine (Apache-2.0) and the models (OpenMDW-1.1,
+      Diarist {version} · MIT licence. The speech engine (Apache-2.0) and the models (OpenMDW-1.1,
       NVIDIA Open Model License, CC-BY-4.0) are downloaded separately under their own licences. Nothing leaves this
       computer except those downloads and an update check you start yourself.
     </p>

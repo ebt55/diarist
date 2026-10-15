@@ -66,13 +66,13 @@ pub(crate) fn build(app: &App) -> tauri::Result<()> {
     let idle = base.to_owned();
     let recording = with_red_dot(&idle);
     let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start recording", true, Some("Ctrl+Alt+R"))?;
-    let open = MenuItem::with_id(app, ID_OPEN, "Open meet-assist", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, ID_OPEN, "Open Diarist", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ID_QUIT, "Quit", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&toggle, &open, &sep, &quit])?;
     let icon = TrayIconBuilder::with_id("main")
         .icon(idle.clone())
-        .tooltip("meet-assist")
+        .tooltip("Diarist")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -156,12 +156,12 @@ pub(crate) fn update(app: &AppHandle, phase: Phase, started_at: Option<i64>) {
                 })
                 .and_then(|d| d.format(&fmt).ok())
                 .unwrap_or_default();
-            format!("meet-assist: recording since {since}")
+            format!("Diarist: recording since {since}")
         }
-        (Phase::Recording, None) => "meet-assist: recording".into(),
-        (Phase::Starting, _) => "meet-assist: starting a recording".into(),
-        (Phase::Stopping, _) => "meet-assist: stopping".into(),
-        (Phase::Idle, _) => "meet-assist".into(),
+        (Phase::Recording, None) => "Diarist: recording".into(),
+        (Phase::Starting, _) => "Diarist: starting a recording".into(),
+        (Phase::Stopping, _) => "Diarist: stopping".into(),
+        (Phase::Idle, _) => "Diarist".into(),
     };
     let _ = tray.icon.set_tooltip(Some(tip));
 }

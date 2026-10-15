@@ -606,7 +606,7 @@ fn engine_info(sel: &ResolvedSelection) -> serde_json::Value {
         "adapter": "nemo-ws",
         "models": {"asr": sel.asr_file.display_name, "diarizer": sel.diarizer_file.display_name},
         "device": DEVICE,
-        "app": format!("meet-assist {}", diarist_core::VERSION),
+        "app": format!("Diarist {}", diarist_core::VERSION),
     })
 }
 
@@ -848,7 +848,7 @@ fn notify(app: &AppHandle, body: &str) {
     if let Err(e) = app
         .notification()
         .builder()
-        .title("meet-assist")
+        .title("Diarist")
         .body(body)
         .show()
     {

@@ -300,7 +300,7 @@
       app.patchMeeting(meeting.id, { title });
     } catch (e) {
       titleEl.value = meeting.title;
-      app.error(`Could not rename the meeting (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`Could not rename the meeting (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
   }
 
@@ -313,7 +313,7 @@
       app.patchMeeting(meeting.id, { audio_keep: keep });
       app.toast("info", keep ? "Audio pinned: kept regardless of retention" : "Audio unpinned");
     } catch (e) {
-      app.error(`Could not change the pin (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`Could not change the pin (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
   }
 
@@ -388,7 +388,7 @@
       }
       await reload(r.anchor ?? undefined);
     } catch (e) {
-      app.error(`Rename failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`Rename failed (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
     refocus(r.anchor);
   }
@@ -403,7 +403,7 @@
       await fn();
       await reload();
     } catch (e) {
-      app.error(`${what} failed (${errorText(e)}); try again, or restart meet-assist if it keeps failing`);
+      app.error(`${what} failed (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
   }
 

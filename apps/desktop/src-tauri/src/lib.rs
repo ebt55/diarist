@@ -1,11 +1,11 @@
-//! Tauri shell for meet-assist. Only command wrappers and event plumbing live
+//! Tauri shell for Diarist. Only command wrappers and event plumbing live
 //! here; logic belongs in `diarist-core` (docs/01-architecture.md). Commands call
 //! [`RunStore`] methods (and `diarist_core` functions) on the blocking pool and
 //! map errors to strings.
 //!
-//! The data root comes from `diarist_core::models::paths` (`MEET_ASSIST_DATA_DIR`,
-//! `portable.txt`, `HKCU\Software\meet-assist\DataRoot`, then
-//! `%LOCALAPPDATA%\app.meetassist.desktop`, which is Tauri's
+//! The data root comes from `diarist_core::models::paths` (`DIARIST_DATA_DIR`,
+//! `portable.txt`, `HKCU\Software\Diarist\DataRoot`, then
+//! `%LOCALAPPDATA%\app.diarist.desktop`, which is Tauri's
 //! `app_local_data_dir`). It is resolved before the app is built, so the app
 //! log (`<root>\logs`), the WebView2 profile (`<root>\EBWebView`) and the
 //! window state follow it; the store is `SqliteStore` there. A data-folder
@@ -82,7 +82,7 @@ pub(crate) struct Startup(pub(crate) Mutex<StartupReport>);
 /// The data root for this run: the demo's scratch folder, or the resolved one.
 fn resolve_paths(demo: bool) -> Result<DataPaths, String> {
     if demo {
-        return Ok(DataPaths::at(std::env::temp_dir().join("meet-assist-demo")));
+        return Ok(DataPaths::at(std::env::temp_dir().join("diarist-demo")));
     }
     DataPaths::resolve().map_err(|e| e.to_string())
 }
@@ -100,7 +100,7 @@ fn open_store(paths: &DataPaths, demo: bool) -> Result<Arc<dyn RunStore>, String
 
 /// Shows a fatal start-up error where a user can see it, then exits.
 fn fatal(message: &str) -> ! {
-    eprintln!("meet-assist cannot start: {message}");
+    eprintln!("Diarist cannot start: {message}");
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -111,8 +111,8 @@ fn fatal(message: &str) -> ! {
                 .collect()
         };
         let (text, title) = (
-            wide(&format!("meet-assist cannot start:\n\n{message}")),
-            wide("meet-assist"),
+            wide(&format!("Diarist cannot start:\n\n{message}")),
+            wide("Diarist"),
         );
         #[link(name = "user32")]
         extern "system" {
@@ -160,7 +160,7 @@ pub fn run() {
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::Folder {
                         path: paths.logs(),
-                        file_name: Some("meet-assist".into()),
+                        file_name: Some("diarist".into()),
                     }),
                 ])
                 .level(tauri_plugin_log::log::LevelFilter::Info)
@@ -272,7 +272,7 @@ pub fn run() {
                 demo::attach_demo_audio(store.as_ref(), &paths.root);
             }
             log::info!(
-                "meet-assist {} started{}{}; data root {} ({:?})",
+                "Diarist {} started{}{}; data root {} ({:?})",
                 diarist_core::VERSION,
                 if demo { " in demo mode" } else { "" },
                 if autostart { " at sign-in" } else { "" },
@@ -318,7 +318,7 @@ pub fn run() {
             let window = WebviewWindowBuilder::from_config(app.handle(), &config)?
                 .data_directory(paths.root.clone())
                 .initialization_script(format!(
-                    "window.__MEET_ASSIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
+                    "window.__DIARIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
                 ))
                 .build()?;
 
@@ -363,7 +363,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .unwrap_or_else(|e| fatal(&format!("error while building meet-assist: {e}")));
+        .unwrap_or_else(|e| fatal(&format!("error while building Diarist: {e}")));
     app.run(|app, event| {
         if let RunEvent::Exit = event {
             live::handle(app).shutdown();

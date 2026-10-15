@@ -62,8 +62,8 @@
     <div class="head">
       <h2>
         {r.action === "import"
-          ? `To transcribe ${r.pending.length > 1 ? `${r.pending.length} files` : "this file"}, meet-assist still needs:`
-          : "To record, meet-assist still needs:"}
+          ? `To transcribe ${r.pending.length > 1 ? `${r.pending.length} files` : "this file"}, Diarist still needs:`
+          : "To record, Diarist still needs:"}
       </h2>
       <button type="button" class="btn-icon" aria-label="Close" onclick={() => (app.readiness = null)}><Icon name="close" /></button>
     </div>
