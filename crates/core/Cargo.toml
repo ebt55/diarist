@@ -19,6 +19,18 @@ ulid.workspace = true
 ts-rs.workspace = true
 # SQLite with FTS5 compiled in (bundled build); backup API for `SqliteStore::backup`.
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+# File decode (docs/01 "Audio decode"): AAC-LC in MP4/M4A, MP3, FLAC, WAV, Ogg/Vorbis.
+symphonia = { version = "0.5.5", default-features = false, features = ["aac", "isomp4", "mp3", "flac", "wav", "ogg", "vorbis", "pcm"] }
+# Pinned to 5.x: the resampler API changes with every major release.
+rubato = "5.0"
+hound = "3.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 [dev-dependencies]
 tempfile = "3"
