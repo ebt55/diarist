@@ -215,7 +215,10 @@ contents of the installer's `.sig` and the release asset URL
 It must match the published asset: a tag push `v*` runs the release workflow,
 which builds the installer and `.sig`, attaches them to a draft pre-release
 and opens a pull request that updates `updater/latest.json`; merge it only
-after the draft is published.
+after the draft is published. A release built by hand skips the build: create
+the draft pre-release with the installer and its `.sig` attached, commit
+`updater/latest.json` on main with that `.sig`'s contents, then publish; the
+workflow sees the installer already on the release and builds nothing.
 
 **Versioning.** Releases are `0.1.0-beta.N` pre-releases while the app is
 tried on other machines, then `0.x.y` while the database schema, the data

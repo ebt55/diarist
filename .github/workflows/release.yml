@@ -5,6 +5,13 @@
 # publishes it (clearing the pre-release flag for a stable version), and
 # then merges the pull request.
 #
+# A release built by hand skips all of that: create the draft pre-release
+# with Diarist_<version>_x64-setup.exe and its .sig attached, commit
+# updater/latest.json on main with that .sig's contents, then publish the
+# draft. Publishing pushes the tag, the guard job finds the installer asset
+# on the release, and the workflow builds nothing (a rebuild would replace
+# the installer with one whose signature no longer matches latest.json).
+#
 # Needs two repository secrets (Settings, Secrets and variables, Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the updater private key
 #                                       (generated with `bunx tauri signer generate`)
@@ -27,7 +34,33 @@ permissions:
   pull-requests: write
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Skip when the release already has the installer
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          installer="Diarist_${version}_x64-setup.exe"
+          # gh exits non-zero when the tag has no release yet: build then.
+          assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' || true)"
+          if printf '%s\n' "$assets" | grep -Fxq "$installer"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release ${GITHUB_REF_NAME} already has ${installer}; nothing to build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No release with an installer for ${GITHUB_REF_NAME}; building"
+          fi
+
   windows:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
