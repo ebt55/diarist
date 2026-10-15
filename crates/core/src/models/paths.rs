@@ -96,14 +96,20 @@ impl DataPaths {
                 ..Self::at(root)
             });
         }
+        Ok(Self {
+            source: DataRootSource::Default,
+            ..Self::at(Self::default_root()?)
+        })
+    }
+
+    /// `%LOCALAPPDATA%\app.meetassist.desktop`: the data root when nothing
+    /// else names one (Tauri's `app_local_data_dir`).
+    pub fn default_root() -> Result<PathBuf> {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
             .ok_or_else(|| CoreError::Models("cannot find %LOCALAPPDATA%".into()))?;
-        Ok(Self {
-            source: DataRootSource::Default,
-            ..Self::at(local.join(APP_IDENTIFIER))
-        })
+        Ok(local.join(APP_IDENTIFIER))
     }
 
     /// `models\`, also `NEMO_SPEECH_MODEL_DIR` for `nemo-speech pull`.
@@ -227,6 +233,75 @@ fn registry_root() -> Option<PathBuf> {
 #[cfg(not(windows))]
 fn registry_root() -> Option<PathBuf> {
     None
+}
+
+/// The relocated data root stored in `HKCU\Software\meet-assist\DataRoot`,
+/// if any (what [`DataPaths::resolve`] uses when there is no portable marker).
+pub fn registry_data_root() -> Option<PathBuf> {
+    registry_root()
+}
+
+/// Points `HKCU\Software\meet-assist\DataRoot` at `root`, or removes the
+/// value (and the key when it is empty) for `None`, so the default root is
+/// used again. The uninstaller reads the same value.
+#[cfg(windows)]
+pub fn set_registry_root(root: Option<&Path>) -> Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, WIN32_ERROR};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteKeyW, RegDeleteValueW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, REG_SZ,
+    };
+
+    let key_name = HSTRING::from(REGISTRY_KEY);
+    let value = HSTRING::from(REGISTRY_VALUE);
+    let fail = |what: &str, rc: WIN32_ERROR| {
+        CoreError::Models(format!(
+            "cannot {what} HKCU\\{REGISTRY_KEY}\\{REGISTRY_VALUE}: {}",
+            rc.to_hresult().message()
+        ))
+    };
+    let mut key = HKEY::default();
+    let rc = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, &key_name, &mut key) };
+    if rc.is_err() {
+        return Err(fail("open", rc));
+    }
+    let rc = match root {
+        Some(p) => {
+            let wide: Vec<u16> = p
+                .as_os_str()
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let bytes: Vec<u8> = wide.iter().flat_map(|c| c.to_le_bytes()).collect();
+            unsafe { RegSetValueExW(key, &value, None, REG_SZ, Some(&bytes)) }
+        }
+        None => match unsafe { RegDeleteValueW(key, &value) } {
+            rc if rc == ERROR_FILE_NOT_FOUND => WIN32_ERROR(0),
+            rc => rc,
+        },
+    };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if rc.is_err() {
+        return Err(fail("write", rc));
+    }
+    if root.is_none() {
+        // Fails (and is ignored) while the key still holds other values.
+        unsafe {
+            let _ = RegDeleteKeyW(HKEY_CURRENT_USER, &key_name);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn set_registry_root(_root: Option<&Path>) -> Result<()> {
+    Err(CoreError::Models(
+        "a relocated data root is stored in the Windows registry".into(),
+    ))
 }
 
 /// Free bytes available to the user on the volume holding `path` (the

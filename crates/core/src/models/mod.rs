@@ -2,7 +2,8 @@
 //! "Runtime management").
 //!
 //! - [`paths`]: the data root (portable marker, registry, default) and the
-//!   `models\` and `engine\` folders under it.
+//!   `models\` and `engine\` folders under it; [`relocate`]: "Move data
+//!   folder" (copy, verify, clean the old root up after the restart).
 //! - [`gguf`]: header-only GGUF reader; [`classify`]: role and capabilities
 //!   from the header, with `<file>.meet.json` overrides.
 //! - [`scan`]: walks `models\` and `engine\`, syncs `model_files` and keeps
@@ -24,6 +25,7 @@ pub mod gguf;
 pub mod manifest;
 pub mod paths;
 pub mod pull;
+pub mod relocate;
 pub mod scan;
 
 use std::path::{Path, PathBuf};
