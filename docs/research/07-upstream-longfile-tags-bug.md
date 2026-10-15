@@ -8,7 +8,7 @@ Target: https://github.com/NVIDIA/NeMo-Speech.cpp/issues
 
 ## Summary
 
-On a 21:12 AMI meeting, `nemo-speech transcribe <file> --diarize --json` returns word speaker tags that are about 62% correct for the first 10 minutes and about 99% correct afterwards. In the early part, most of one speaker's words (FEE005) are merged into another speaker's label (MEE008).
+On a 21 min 12 s recording from the public AMI Meeting Corpus (session ES2002a, 4 speakers, Mix-Headset channel, CC-BY-4.0), `nemo-speech transcribe <file> --diarize --json` returns word speaker tags that are about 62% correct for the first 10 minutes and about 99% correct afterwards, scored against the corpus's reference speaker labels. In the early part, most of one speaker's words (AMI participant FEE005) are merged into another speaker's label (MEE008).
 
 The diarizer itself is not at fault. Standalone `nemo-speech diarize` on the same file has 0.6% speaker confusion, and re-tagging the same ASR words from that RTTM gives 99.5%.
 
