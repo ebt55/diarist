@@ -19,7 +19,7 @@ A stranger with an NVIDIA GPU installs meet-assist from a 10 MB setup file, the 
 5. **Desktop integration.** Tray icon with Record/Stop and recording indicator; global shortcuts (default Ctrl+Alt+R record toggle, Ctrl+Alt+M open window); autostart toggle; single-instance plugin; window state remembered.
 6. **Retention.** Daily job: delete `playback.flac` and WAVs of unpinned meetings older than the retention setting; never touches transcripts; shows reclaimable space in Settings, and states that re-diarization or fusion re-runs only reach meetings whose audio still exists. `meet-cli` gets `pin`/`unpin`; the eval harness pins its sessions.
 7. **Diagnostics.** Log folder opener, "copy diagnostics" (versions, GPU, data root, last engine stderr), crash recovery report on launch.
-8. **Docs.** README with screenshots, INSTALL.md, PRIVACY.md (nothing leaves the machine), LICENSES.md listing runtime and model licences, CONTRIBUTING.md.
+8. **Docs.** README with screenshots and a "Choosing your package and models" section lifted from docs/04-model-guide.md (which GPU gets which runtime zip, VRAM per scenario, why these models, the 8-speaker limit, languages), INSTALL.md, PRIVACY.md (nothing leaves the machine), LICENSES.md listing runtime and model licences, CONTRIBUTING.md.
 
 ## Acceptance
 
