@@ -158,7 +158,7 @@ class Downloads {
  */
 export function failureHint(kind: "engine" | "model", error: string | null): string {
   const e = (error ?? "").toLowerCase();
-  const net = /10013|10060|10061|dns|resolve|connect|timed out|timeout|revocation|certificate|stalled|network|unreachable/.test(e);
+  const net = /10013|10060|10061|11001|no such host|dns|resolve|connect|timed out|timeout|revocation|certificate|stalled|network|unreachable/.test(e);
   const who = kind === "engine" ? "meet-assist.exe" : "curl.exe (the engine's downloader)";
   return net
     ? `This looks like the network. If a firewall such as simplewall asked about ${who}, allow it and press Retry; a partial download resumes. Or use Copy link, download the file with a browser and put it into the folder Open folder shows, then Refresh.`

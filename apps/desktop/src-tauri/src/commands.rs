@@ -1470,7 +1470,7 @@ pub async fn startup_report(startup: State<'_, Startup>) -> CmdResult<StartupRep
 /// The download hosts a firewall must allow, by the process that connects.
 fn hosts_for(process: &str) -> &'static str {
     if process.starts_with("curl") {
-        "huggingface.co and its download servers (cdn-lfs.huggingface.co, cas-bridge.xethub.hf.co)"
+        "huggingface.co and its download servers (*.hf.co, for example us.aws.cdn.hf.co)"
     } else {
         "github.com, objects.githubusercontent.com and huggingface.co"
     }
@@ -1484,6 +1484,8 @@ fn connection_error(e: &str) -> bool {
         "10060",
         "10061",
         "10065",
+        "11001",
+        "no such host",
         "dns",
         "resolve",
         "connect",

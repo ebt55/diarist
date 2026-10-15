@@ -65,7 +65,11 @@ fn dir_bytes(dir: &Path) -> u64 {
             rd.flatten()
                 .map(|e| match e.file_type() {
                     Ok(t) if t.is_dir() => dir_bytes(&e.path()),
-                    Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                    // Opened by path: a directory entry keeps the old size of a file
+                    // that is still being written (curl's `.partial`).
+                    Ok(t) if t.is_file() => {
+                        std::fs::metadata(e.path()).map(|m| m.len()).unwrap_or(0)
+                    }
                     _ => 0,
                 })
                 .sum()

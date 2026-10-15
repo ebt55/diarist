@@ -213,6 +213,8 @@ pub fn download_file(
         have = 0;
     }
     if size != Some(have) || have == 0 {
+        // Show what a resumed download already has while the connection opens.
+        progress(have, size);
         let mut agent = agent(Some(ATTEMPT_LIMIT));
         let mut idle = 0;
         loop {

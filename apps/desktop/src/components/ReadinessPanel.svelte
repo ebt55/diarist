@@ -20,17 +20,18 @@
   );
 
   async function recheck(): Promise<void> {
-    if (!r) return;
+    // A snapshot: `r` follows app.readiness, which is cleared below.
+    const cur = app.readiness;
+    if (!cur) return;
     checking = true;
     try {
-      const next = await api.checkReady(r.action as "import" | "record");
+      const next = await api.checkReady(cur.action as "import" | "record");
       if (next.ok) {
-        const pending = r.pending;
         app.readiness = null;
-        if (r.action === "import" && pending.length > 0) await app.importPaths(pending);
-        else if (r.action === "record") live.sheetOpen = true;
+        if (cur.action === "import" && cur.pending.length > 0) await app.importPaths(cur.pending);
+        else if (cur.action === "record") live.sheetOpen = true;
       } else {
-        app.readiness = { ...r, missing: next.missing };
+        app.readiness = { ...cur, missing: next.missing };
       }
     } catch (e) {
       app.error(`Could not check again (${errorText(e)}); see Diagnostics, Why isn't it working`);
