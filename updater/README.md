@@ -13,7 +13,8 @@ this file. Merge that pull request only after the draft is published.
 A release built by hand goes the other way round: create the draft
 pre-release with the installer and its `.sig` attached, commit this file on
 `main` with that `.sig`'s contents, then publish the draft. The workflow sees
-the installer already on the release and builds nothing.
+the installer already on the release and builds nothing. If its guard job
+fails with "Could not list releases", nothing was built; re-run the workflow.
 
 The file must match the published asset: `version` is the release version,
 `platforms.windows-x86_64.signature` is the exact contents of

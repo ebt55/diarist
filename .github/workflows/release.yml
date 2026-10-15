@@ -11,6 +11,8 @@
 # draft. Publishing pushes the tag, the guard job finds the installer asset
 # on the release, and the workflow builds nothing (a rebuild would replace
 # the installer with one whose signature no longer matches latest.json).
+# If the guard job fails with "Could not list releases", nothing was built;
+# re-run the workflow.
 #
 # Needs two repository secrets (Settings, Secrets and variables, Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the updater private key
@@ -46,10 +48,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           installer="Diarist_${version}_x64-setup.exe"
-          # gh exits non-zero when the tag has no release yet: build then.
-          assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' || true)"
+          # A successful listing with no release for this tag means: build.
+          # A failed listing (network, auth, rate limit) must NOT be read as "no
+          # release": fail the job so a hand-signed installer is never rebuilt over.
+          if ! assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+                --jq ".[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .assets[].name")"; then
+            echo "::error::Could not list releases for ${GITHUB_REPOSITORY}; refusing to guess whether ${GITHUB_REF_NAME} already has ${installer}. Re-run the workflow."
+            exit 1
+          fi
           if printf '%s\n' "$assets" | grep -Fxq "$installer"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Release ${GITHUB_REF_NAME} already has ${installer}; nothing to build"
