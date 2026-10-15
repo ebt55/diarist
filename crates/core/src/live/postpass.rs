@@ -3,8 +3,9 @@
 //! Runs as a [`crate::pipeline::JobQueue`] job after Stop (or after crash
 //! recovery): the file engine over `loopback.wav` (diarized) and `mic.wav`
 //! (speaker `me`, diarized only with `diarize_mic`), word times mapped from
-//! channel time to meeting time through the clock anchors, channels
-//! interleaved and segmented into a `post_pass` run, names and edits carried
+//! channel time to meeting time through the clock anchors, each channel
+//! segmented on its own and the segments ordered by start time
+//! ([`build_transcript_channels`]) into a `post_pass` run, names and edits carried
 //! over from the live run, the new run made current, the stereo
 //! `playback.flac` (left mic, right loopback) encoded and registered, the
 //! WAVs deleted, and the live run deleted unless `keep_live_runs`. With
@@ -23,7 +24,7 @@ use crate::error::{CoreError, Result};
 use crate::pipeline::CancelToken;
 use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
 use crate::transcript::{
-    build_transcript, interleave, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
+    build_transcript_channels, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
     UNKNOWN_LABEL,
 };
 use crate::types::{
@@ -236,8 +237,7 @@ pub fn run_post_pass(
         progress(JobStage::Saving, audio_ms, total_ms);
         // Mic first on equal start times.
         channels.reverse();
-        let words = interleave(channels);
-        let transcript = build_transcript(&words, &job.segment);
+        let transcript = build_transcript_channels(channels, &job.segment);
         let info = engine.info();
         let run = store.create_run(
             job.meeting,

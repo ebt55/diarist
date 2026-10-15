@@ -4,10 +4,13 @@
 //! label (`spk_N`, or none). This module turns them into [`TranscriptWord`]s
 //! (milliseconds, a label per word), groups them into segments
 //! ([`segment`]: contiguous same-speaker words, split on long pauses, on
-//! sentence punctuation followed by a pause, and on length), interleaves the
-//! mic and loopback channels of a live meeting by time ([`interleave`]) and
-//! builds the [`NewTranscript`] that `Store::insert_transcript` writes
-//! ([`build_transcript`]).
+//! sentence punctuation followed by a pause, and on length) and builds the
+//! [`NewTranscript`] that `Store::insert_transcript` writes
+//! ([`build_transcript`]). The mic and loopback channels of a live meeting
+//! are segmented one channel at a time and their segments ordered by start
+//! time ([`interleave_segments`], [`build_transcript_channels`]), so speech
+//! that overlaps in time stays in readable per-speaker segments instead of
+//! alternating word by word.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -208,8 +211,10 @@ pub fn join_text<'a>(words: impl Iterator<Item = &'a str>) -> String {
     s
 }
 
-/// Merges channels into one time-ordered list (stable: equal start times keep
-/// the order of `channels`, then of the words within a channel).
+/// Merges channels into one time-ordered word list (stable: equal start
+/// times keep the order of `channels`, then of the words within a channel).
+/// Segmenting the result splits wherever the channels alternate; transcripts
+/// of several channels use [`build_transcript_channels`] instead.
 pub fn interleave(channels: Vec<(Channel, Vec<TranscriptWord>)>) -> Vec<TranscriptWord> {
     let mut all: Vec<(i64, usize, usize, TranscriptWord)> = Vec::new();
     for (ci, (channel, words)) in channels.into_iter().enumerate() {
@@ -222,15 +227,39 @@ pub fn interleave(channels: Vec<(Channel, Vec<TranscriptWord>)>) -> Vec<Transcri
     all.into_iter().map(|(_, _, _, w)| w).collect()
 }
 
-/// Segments `words` and builds the rows for `Store::insert_transcript`.
-/// Speakers are created per (channel, label) in order of first appearance.
-pub fn build_transcript(words: &[TranscriptWord], opts: &SegmentOptions) -> NewTranscript {
-    let drafts = segment(words, opts);
-    let mut t = NewTranscript::default();
-    let mut speaker_index: HashMap<(Channel, String), usize> = HashMap::new();
-    for (si, d) in drafts.iter().enumerate() {
+/// Orders the segments of several channels by start time: `channels[i]` are
+/// the segments of channel `i` (from [`segment`], in time order). Returns
+/// `(channel index, segment index)` pairs. Segments of different channels
+/// may overlap in time; they are never split or merged here. Equal start
+/// times keep the order of `channels`, then of the segments within one.
+pub fn interleave_segments(channels: &[Vec<SegmentDraft>]) -> Vec<(usize, usize)> {
+    let mut order: Vec<(i64, usize, usize)> = channels
+        .iter()
+        .enumerate()
+        .flat_map(|(ci, segs)| {
+            segs.iter()
+                .enumerate()
+                .map(move |(si, s)| (s.start_ms, ci, si))
+        })
+        .collect();
+    order.sort_unstable();
+    order.into_iter().map(|(_, ci, si)| (ci, si)).collect()
+}
+
+/// The rows of one transcript, filled segment by segment.
+#[derive(Default)]
+struct TranscriptBuilder {
+    t: NewTranscript,
+    speaker_index: HashMap<(Channel, String), usize>,
+}
+
+impl TranscriptBuilder {
+    /// Appends a segment and its words; speakers are created per (channel,
+    /// label) in order of first appearance.
+    fn push(&mut self, d: &SegmentDraft, words: &[TranscriptWord]) {
+        let t = &mut self.t;
         let key = (d.channel, d.speaker.clone());
-        let speaker = *speaker_index.entry(key).or_insert_with(|| {
+        let speaker = *self.speaker_index.entry(key).or_insert_with(|| {
             t.speakers.push(NewSpeaker {
                 channel: d.channel,
                 engine_label: d.speaker.clone(),
@@ -240,26 +269,63 @@ pub fn build_transcript(words: &[TranscriptWord], opts: &SegmentOptions) -> NewT
             });
             t.speakers.len() - 1
         });
+        let si = t.segments.len();
         t.segments.push(NewSegment {
             speaker,
             start_ms: d.start_ms,
             end_ms: d.end_ms,
             text: d.text.clone(),
         });
-        for w in &words[d.words.clone()] {
-            t.words.push(NewWord {
-                segment: si,
-                start_ms: w.start_ms,
-                end_ms: w.end_ms,
-                text: w.text.clone(),
-                confidence: w.confidence,
-                raw_label: w.raw_label.clone(),
-                margin: None,
-                overlap: false,
-            });
-        }
+        t.words.extend(words.iter().map(|w| NewWord {
+            segment: si,
+            start_ms: w.start_ms,
+            end_ms: w.end_ms,
+            text: w.text.clone(),
+            confidence: w.confidence,
+            raw_label: w.raw_label.clone(),
+            margin: None,
+            overlap: false,
+        }));
     }
-    t
+}
+
+/// Segments `words` (one stream in time order) and builds the rows for
+/// `Store::insert_transcript`. Speakers are created per (channel, label) in
+/// order of first appearance.
+pub fn build_transcript(words: &[TranscriptWord], opts: &SegmentOptions) -> NewTranscript {
+    let mut b = TranscriptBuilder::default();
+    for d in segment(words, opts) {
+        b.push(&d, &words[d.words.clone()]);
+    }
+    b.t
+}
+
+/// The transcript of several channels (a live meeting's mic and loopback):
+/// each channel's words are sorted and segmented on their own, then the
+/// segments are ordered by start time ([`interleave_segments`]), so `seq`
+/// follows the start times and overlapping speech keeps whole segments.
+/// Equal start times keep the order of `channels`.
+pub fn build_transcript_channels(
+    channels: Vec<(Channel, Vec<TranscriptWord>)>,
+    opts: &SegmentOptions,
+) -> NewTranscript {
+    let words: Vec<Vec<TranscriptWord>> = channels
+        .into_iter()
+        .map(|(channel, mut words)| {
+            for w in &mut words {
+                w.channel = channel;
+            }
+            words.sort_by_key(|w| w.start_ms);
+            words
+        })
+        .collect();
+    let drafts: Vec<Vec<SegmentDraft>> = words.iter().map(|w| segment(w, opts)).collect();
+    let mut b = TranscriptBuilder::default();
+    for (ci, si) in interleave_segments(&drafts) {
+        let d = &drafts[ci][si];
+        b.push(d, &words[ci][d.words.clone()]);
+    }
+    b.t
 }
 
 #[cfg(test)]
@@ -368,6 +434,73 @@ mod tests {
                 ("c", Channel::Mic)
             ]
         );
+    }
+
+    /// Two channels that talk over each other for 10 s: the mic from 0 to
+    /// 20 s, the loopback from 10 to 30 s, a word every 400 ms each. The
+    /// source's only one-word segment is a lone "Yes." on the mic at 40 s.
+    fn overlapping_channels() -> Vec<(Channel, Vec<TranscriptWord>)> {
+        let mut mic: Vec<TranscriptWord> = (0..50)
+            .map(|i| w(i * 400, i * 400 + 300, &format!("m{i}"), "me"))
+            .collect();
+        mic.push(w(40_000, 40_300, "Yes.", "me"));
+        let lb: Vec<TranscriptWord> = (0..50)
+            .map(|i| {
+                let t = 10_200 + i * 400;
+                w(t, t + 300, &format!("l{i}"), "spk_0")
+            })
+            .collect();
+        vec![(Channel::Mic, mic), (Channel::Loopback, lb)]
+    }
+
+    #[test]
+    fn overlapping_channels_keep_whole_segments() {
+        let opts = SegmentOptions::default();
+        let t = build_transcript_channels(overlapping_channels(), &opts);
+        let words_in = |si: usize| t.words.iter().filter(|w| w.segment == si).count();
+        let texts: Vec<(&str, usize)> = t
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(si, s)| (t.speakers[s.speaker].engine_label.as_str(), words_in(si)))
+            .collect();
+        assert_eq!(texts, [("me", 50), ("spk_0", 50), ("me", 1)]);
+        // Ordered by start; the first two overlap from 10.2 to 19.9 s.
+        assert!(t
+            .segments
+            .windows(2)
+            .all(|p| p[0].start_ms <= p[1].start_ms));
+        assert_eq!((t.segments[0].start_ms, t.segments[0].end_ms), (0, 19_900));
+        assert_eq!(
+            (t.segments[1].start_ms, t.segments[1].end_ms),
+            (10_200, 30_100)
+        );
+        assert_eq!(t.segments[2].text, "Yes.");
+        assert_eq!(t.words.len(), 101);
+        assert!(t.words.windows(2).all(|p| p[0].segment <= p[1].segment));
+        assert_eq!(t.speakers[0].channel, Channel::Mic);
+        assert_eq!(t.speakers[1].channel, Channel::Loopback);
+        // Interleaving words first alternates speakers word by word in the overlap.
+        let old = build_transcript(&interleave(overlapping_channels()), &opts);
+        let one_word = (0..old.segments.len())
+            .filter(|si| old.words.iter().filter(|w| w.segment == *si).count() == 1)
+            .count();
+        assert!(one_word > 40, "{one_word} one-word segments");
+    }
+
+    #[test]
+    fn interleave_segments_orders_by_start_then_channel() {
+        let seg = |start: i64| SegmentDraft {
+            channel: Channel::Source,
+            speaker: "x".into(),
+            start_ms: start,
+            end_ms: start + 5_000,
+            text: String::new(),
+            words: 0..0,
+        };
+        let order = interleave_segments(&[vec![seg(0), seg(3_000)], vec![seg(1_000), seg(3_000)]]);
+        assert_eq!(order, [(0, 0), (1, 0), (0, 1), (1, 1)]);
+        assert!(interleave_segments(&[]).is_empty());
     }
 
     #[test]

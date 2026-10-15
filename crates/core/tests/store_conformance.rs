@@ -863,12 +863,13 @@ fn live_latest_revisions(store: &dyn RunStore) {
         .into_iter()
         .map(|s| (s.text, s.speaker_name))
         .collect();
+    // Each channel is segmented on its own, then segments go by start time:
+    // the mic's "hi" inside the loopback utterance does not split it.
     assert_eq!(
         texts,
         [
-            ("hello".to_owned(), "Speaker 1".to_owned()),
+            ("hello all".to_owned(), "Speaker 1".to_owned()),
             ("hi".to_owned(), "Me".to_owned()),
-            ("all".to_owned(), "Speaker 1".to_owned())
         ]
     );
     assert!(matches!(

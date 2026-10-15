@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::NewTranscript;
 use crate::protocol::EngineWord;
 use crate::transcript::{
-    build_transcript, interleave, us_to_ms, SegmentOptions, TranscriptWord, ME_LABEL, UNKNOWN_LABEL,
+    build_transcript_channels, us_to_ms, SegmentOptions, TranscriptWord, ME_LABEL, UNKNOWN_LABEL,
 };
 use crate::types::{Channel, LiveUtterance};
 
@@ -102,8 +102,9 @@ pub(crate) fn latest_revisions(rows: &[LiveUtterance]) -> Vec<&LiveUtterance> {
 }
 
 /// The transcript of a live run from the latest revision of each utterance
-/// (already filtered by [`latest_revisions`]): channels interleaved by time,
-/// mic words without a label become `me`, other untagged words `spk_unknown`.
+/// (already filtered by [`latest_revisions`]): each channel segmented on its
+/// own and the segments ordered by start time, mic words without a label
+/// become `me`, other untagged words `spk_unknown`.
 pub(crate) fn transcript_from_live(
     latest: &[&LiveUtterance],
     opts: &SegmentOptions,
@@ -131,12 +132,5 @@ pub(crate) fn transcript_from_live(
                 }
             }));
     }
-    let channels: Vec<(Channel, Vec<TranscriptWord>)> = per_channel
-        .into_iter()
-        .map(|(c, mut words)| {
-            words.sort_by_key(|w| w.start_ms);
-            (c, words)
-        })
-        .collect();
-    build_transcript(&interleave(channels), opts)
+    build_transcript_channels(per_channel.into_iter().collect(), opts)
 }
