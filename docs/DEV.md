@@ -59,6 +59,7 @@ Gated tests (skipped unless the variables are set):
 | `MEET_ASSIST_MODELS_DIR` | real GGUF headers, scan, classification |
 | `MEET_ASSIST_ENGINE_DIR` + `MEET_ASSIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
 | `MEET_ASSIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
+| `MEET_ASSIST_CIMC_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
 
 `UPDATE_GOLDEN=1 cargo test -p meet-core golden` rewrites the export golden
 files in `crates/core/tests/golden/`.
