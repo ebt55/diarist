@@ -163,6 +163,8 @@ impl LiveEngine for FakeLive {
 /// The post-pass engine: a word per second over the WAV, `spk_0` when diarizing.
 struct FakeFile {
     jobs: Mutex<Vec<(PathBuf, bool)>>,
+    /// The next job fails (an engine crash).
+    fail_next: AtomicBool,
 }
 impl Engine for FakeFile {
     fn transcribe_file(&self, job: FileJob) -> crate::error::Result<Receiver<EngineEvent>> {
@@ -172,6 +174,15 @@ impl Engine for FakeFile {
             .push((job.wav_path.clone(), job.diarize));
         let secs = hound::WavReader::open(&job.wav_path).unwrap().duration() / 16_000;
         let (tx, rx) = channel();
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            tx.send(EngineEvent::Error {
+                job_id: job.job_id,
+                code: crate::engine::ErrorCode::Crash,
+                message: "fake crash".into(),
+            })
+            .unwrap();
+            return Ok(rx);
+        }
         let words = (0..u64::from(secs))
             .map(|s| EngineWord {
                 t0_us: s * 1_000_000 + 50_000,
@@ -232,6 +243,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
     let store = Arc::new(SqliteStore::open(dir.join("meet-assist.db")).unwrap());
     let file = Arc::new(FakeFile {
         jobs: Mutex::new(Vec::new()),
+        fail_next: AtomicBool::new(false),
     });
     let sources: Arc<SourceFactory> = Arc::new(|cfg: CaptureConfig, ring| {
         let hz = if cfg.channel == Channel::Mic {
@@ -302,6 +314,14 @@ fn records_streams_and_runs_the_post_pass() {
         st.revisions["mic"] >= 10 && st.revisions["loopback"] >= 10,
         "{st:?}"
     );
+    // An import queued while recording waits, and runs after the post-pass.
+    assert!(ctx.queue.is_paused());
+    let (import_tx, import_rx) = channel();
+    let s2 = store.clone();
+    ctx.queue.submit(JobId::new(), move |_| {
+        let status = s2.get_meeting(m).unwrap().meeting.status;
+        import_tx.send(status).unwrap();
+    });
     let out = rec.stop().unwrap();
     assert_eq!(out.mic_samples, out.loopback_samples);
     assert!(out.mic_samples >= 7 * 16_000, "{}", out.mic_samples);
@@ -312,6 +332,12 @@ fn records_streams_and_runs_the_post_pass() {
         .wait(Duration::from_secs(30))
         .unwrap()
         .unwrap();
+    assert!(!ctx.queue.is_paused());
+    assert_eq!(
+        import_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
+        MeetingStatus::Done,
+        "the import ran before the post-pass"
+    );
 
     // Sink: words with replacement semantics, finals, 10 Hz levels, devices.
     let words = sink.words.lock().unwrap();
@@ -499,7 +525,13 @@ fn on_issues_promotes_a_clean_live_run() {
     store
         .set_setting(settings::POST_PASS_MODE, "on_issues")
         .unwrap();
-    let rec = Recorder::start(ctx, StartOptions::default(), Arc::new(Sink::default())).unwrap();
+    // The app keeps the queue alive; a dropped queue drops its queued jobs.
+    let rec = Recorder::start(
+        ctx.clone(),
+        StartOptions::default(),
+        Arc::new(Sink::default()),
+    )
+    .unwrap();
     let m = rec.meeting_id();
     std::thread::sleep(Duration::from_millis(2_500));
     let out = rec.stop().unwrap();
@@ -517,6 +549,44 @@ fn on_issues_promotes_a_clean_live_run() {
     assert_eq!(d.current_run.unwrap().kind, RunKind::Live);
     assert!(d.meeting.title.starts_with("Recording "));
     assert!(!store.get_segments(m, 0, 100).unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_post_pass_runs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    let rec = Recorder::start(
+        ctx.clone(),
+        StartOptions::default(),
+        Arc::new(Sink::default()),
+    )
+    .unwrap();
+    let m = rec.meeting_id();
+    std::thread::sleep(Duration::from_millis(1_500));
+    let refused = rerun_post_pass(&ctx, m).err().unwrap();
+    assert!(refused.to_string().contains("still recording"), "{refused}");
+    file.fail_next.store(true, Ordering::SeqCst);
+    let out = rec.stop().unwrap();
+    let err = out.post_pass.wait(Duration::from_secs(30)).unwrap();
+    assert!(err.unwrap_err().contains("fake crash"));
+    let d = store.get_meeting(m).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Failed);
+    assert_eq!(d.current_run.unwrap().kind, RunKind::Live);
+
+    let again = rerun_post_pass(&ctx, m).unwrap();
+    assert!(again.transcribe);
+    assert_eq!(
+        store.get_meeting(m).unwrap().meeting.status,
+        MeetingStatus::Processing
+    );
+    let report = again.wait(Duration::from_secs(30)).unwrap().unwrap();
+    let d = store.get_meeting(m).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert_eq!(d.current_run.unwrap().id, report.current_run);
+    assert!(!report.promoted_live && report.live_run_deleted);
+    // The WAVs are gone now: nothing to run again.
+    let gone = rerun_post_pass(&ctx, m).err().unwrap();
+    assert!(gone.to_string().contains("no live transcript"), "{gone}");
 }
 
 #[test]

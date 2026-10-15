@@ -28,6 +28,12 @@ degraded: { [key in string]: DegradedUpdate },
  */
 warnings: Array<WarningNote>, post_passes: Array<PostPassView>, 
 /**
+ * The GPU queue holds new jobs while a recording runs
+ * (`JobQueue::is_paused`): queued imports show "waiting for the
+ * recording to stop".
+ */
+queue_paused: boolean, 
+/**
  * Why the last start or stop failed.
  */
 error: string | null, };

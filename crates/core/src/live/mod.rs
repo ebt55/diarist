@@ -18,20 +18,24 @@
 //!
 //! [`Recorder::stop`] stops the captures, ends both WAVs at the same length,
 //! closes the sessions (their last finals still land), materialises the live
-//! run, resumes the queue and submits the post-pass ([`postpass`]) unless
-//! `post_pass_mode = on_issues` and nothing went wrong, in which case only
-//! the audio work runs and the live run stays. [`recover`] finishes
-//! meetings a crash left in `recording`.
+//! run, resumes the queue and submits the post-pass ([`postpass`]) ahead of
+//! imports queued meanwhile, unless `post_pass_mode = on_issues` and nothing
+//! went wrong, in which case only the audio work runs and the live run
+//! stays. [`recover`] finishes meetings a crash left in `recording` or
+//! `processing`; [`rerun_post_pass`] queues a failed or cancelled post-pass
+//! again.
 
 pub mod postpass;
 pub mod power;
 mod recover;
+mod rerun;
 mod snapshot;
 pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
 pub use recover::{recover, RecoveredMeeting};
+pub use rerun::rerun_post_pass;
 pub use snapshot::snapshot;
 pub use views::{
     LiveLevels, LivePhase, LiveStateView, LiveStatusView, PostPassView, ServeView, StartRequest,
@@ -754,6 +758,9 @@ impl Recorder {
     pub fn stop(mut self) -> Result<StopOutcome> {
         let store = Arc::clone(&self.ctx.store);
         let stop_qpc = qpc_now_100ns();
+        // The queue resumes when this returns, however it returns: after the
+        // post-pass was submitted ahead of imports queued meanwhile.
+        let _resume = ResumeQueue(Arc::clone(&self.ctx.queue));
         // 1. Captures.
         let sources: Vec<_> = self
             .sources
@@ -828,7 +835,6 @@ impl Recorder {
             .issues
             .clone();
         if let Some(e) = first_err {
-            self.ctx.queue.set_paused(false);
             return Err(e);
         }
         // 5. The live run becomes a readable transcript.
@@ -846,8 +852,7 @@ impl Recorder {
             &self.folder,
             duration_ms,
         )?;
-        // 6. The queue resumes; the post-pass is submitted.
-        self.ctx.queue.set_paused(false);
+        // 6. The post-pass goes to the front of the (still paused) queue.
         let stored = settings::effective(&*store)?;
         let on_issues = settings::get(&stored, settings::POST_PASS_MODE).trim() == "on_issues";
         let transcribe = !on_issues || issues.any();
@@ -863,7 +868,7 @@ impl Recorder {
             keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
             segment: SegmentOptions::default(),
         };
-        let post_pass = submit_post_pass(&self.ctx, job);
+        let post_pass = submit_post_pass(&self.ctx, job, true);
         Ok(StopOutcome {
             meeting_id: self.meeting.id,
             live_run: self.run.id,
@@ -885,6 +890,15 @@ impl Drop for Recorder {
             self.abort();
             self.ctx.queue.set_paused(false);
         }
+    }
+}
+
+/// Unpauses the queue when dropped.
+struct ResumeQueue(Arc<JobQueue>);
+
+impl Drop for ResumeQueue {
+    fn drop(&mut self) {
+        self.0.set_paused(false);
     }
 }
 
@@ -923,15 +937,16 @@ fn register_wavs(
     Ok(())
 }
 
-/// Submits the post-pass to the queue; the handle receives its result.
-pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob) -> PostPassHandle {
+/// Submits the post-pass to the queue (with `front`, ahead of jobs queued
+/// with a plain submit); the handle receives its result.
+pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool) -> PostPassHandle {
     let (tx, rx) = mpsc::channel();
     let store = Arc::clone(&ctx.store);
     let engine = Arc::clone(&ctx.file_engine);
     let on_event = ctx.on_job_event.clone();
     let job_id = job.job_id.clone();
     let transcribe = job.transcribe;
-    ctx.queue.submit(job_id.clone(), move |token| {
+    let run = move |token: &crate::pipeline::CancelToken| {
         let emit = |e: JobEvent| {
             if let Some(f) = &on_event {
                 f(e);
@@ -961,7 +976,12 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob) -> PostPassH
             }
         }
         let _ = tx.send(result.map_err(|e| e.to_string()));
-    });
+    };
+    if front {
+        ctx.queue.submit_front(job_id.clone(), run);
+    } else {
+        ctx.queue.submit(job_id.clone(), run);
+    }
     PostPassHandle {
         job_id,
         transcribe,

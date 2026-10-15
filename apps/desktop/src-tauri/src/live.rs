@@ -36,16 +36,15 @@ use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeStatus, ServeSupervi
 pub use meet_core::live::LivePhase as Phase;
 use meet_core::live::{
     self, DegradedUpdate, DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveLevels,
-    LiveSink, LiveStateView, LiveStatusView, LiveWarning, PostPassJob, PostPassView, Recorder,
-    ServeView, StartOptions, StartRequest, StopSummary, TextFinal, ToggleAction, ToggleVia,
-    Toggled, WarningNote, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
+    LiveSink, LiveStateView, LiveStatusView, LiveWarning, PostPassView, Recorder, ServeView,
+    StartOptions, StartRequest, StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled,
+    WarningNote, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
 use meet_core::models::{self, DataPaths, ResolvedSelection, SelectedEngine};
 use meet_core::pipeline::JobQueue;
 use meet_core::settings;
-use meet_core::store::RunStore;
-use meet_core::transcript::SegmentOptions;
-use meet_core::types::{Channel, JobId, MeetingId, MeetingStatus, RunId, RunKind, Source};
+use meet_core::store::{RunStore, StoreError};
+use meet_core::types::{Channel, JobId, MeetingId, MeetingStatus, RunId, Source};
 use meet_core::views::JobEvent;
 use meet_core::CoreError;
 use serde::Serialize;
@@ -205,7 +204,8 @@ impl LiveState {
         true
     }
 
-    fn view(&self) -> LiveStateView {
+    /// `queue_paused`: [`JobQueue::is_paused`] of the app's queue.
+    fn view(&self, queue_paused: bool) -> LiveStateView {
         let slot = lock(&self.slot);
         let mut v = LiveStateView {
             phase: slot.phase,
@@ -218,6 +218,7 @@ impl LiveState {
             degraded: BTreeMap::new(),
             warnings: Vec::new(),
             post_passes: lock(&self.post_passes).values().cloned().collect(),
+            queue_paused,
             error: slot.error.clone(),
         };
         if let Some(s) = &slot.session {
@@ -279,7 +280,7 @@ pub(crate) fn handle(app: &AppHandle) -> Arc<LiveState> {
 /// Emits `live:state` and updates the tray.
 pub(crate) fn emit_state(app: &AppHandle) {
     let live = handle(app);
-    let view = live.view();
+    let view = live.view(app.state::<Jobs>().0.is_paused());
     tray::update(app, view.phase, view.started_at);
     if let Err(e) = app.emit(EV_STATE, &view) {
         log::warn!("emit {EV_STATE} failed: {e}");
@@ -731,7 +732,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
                 slot.phase = Phase::Recording;
             }
             emit_state(app);
-            Ok(live.view())
+            Ok(live.view(app.state::<Jobs>().0.is_paused()))
         }
         Err(e) => {
             log::warn!("recording did not start: {e}");
@@ -905,7 +906,7 @@ pub(crate) fn startup(app: &AppHandle) {
 }
 
 fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
-    let (store, paths, queue, demo) = app_parts(app);
+    let (store, _, _, demo) = app_parts(app);
     if demo {
         return Ok(());
     }
@@ -923,26 +924,12 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
         pending.len(),
         pending.iter().map(|m| m.id.0).collect::<Vec<_>>()
     );
-    let built = models::select_engine(&paths, &*store, DEVICE).map_err(|e| {
+    let ctx = offline_context(app, Arc::new(Mutex::new(None))).map_err(|e| {
         format!(
             "cannot recover {} interrupted recording(s) without an engine: {e}",
             pending.len()
         )
     })?;
-    let ctx = LiveContext {
-        store: Arc::clone(&store),
-        queue,
-        data_root: paths.root.clone(),
-        // Recovery opens no live session.
-        live_engine: Arc::new(NemoWsLiveEngine::with_endpoint("ws://127.0.0.1:9/", "")),
-        file_engine: built.engine,
-        sources: capture::wasapi_source_factory(),
-        vram_free_mb: Arc::new(|| None),
-        min_free_vram_mb: MIN_FREE_VRAM_MB,
-        min_free_bytes: MIN_FREE_BYTES,
-        live_engine_info: engine_info(&built.selection),
-        on_job_event: Some(job_event_fn(app, Arc::new(Mutex::new(None)))),
-    };
     let recovered = live::recover(&ctx).map_err(|e| e.to_string())?;
     let live = handle(app);
     for r in recovered {
@@ -970,10 +957,32 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<()> {
 
 // ---- retry -------------------------------------------------------------------------------------
 
+/// A context for post-passes outside a recording (crash recovery, retry):
+/// no live session or capture is opened through it.
+fn offline_context(
+    app: &AppHandle,
+    meeting: Arc<Mutex<Option<(MeetingId, String)>>>,
+) -> CmdResult<LiveContext> {
+    let (store, paths, queue, _) = app_parts(app);
+    let built = models::select_engine(&paths, &*store, DEVICE).map_err(|e| e.to_string())?;
+    Ok(LiveContext {
+        store,
+        queue,
+        data_root: paths.root.clone(),
+        live_engine: Arc::new(NemoWsLiveEngine::with_endpoint("ws://127.0.0.1:9/", "")),
+        file_engine: built.engine,
+        sources: capture::wasapi_source_factory(),
+        vram_free_mb: Arc::new(|| None),
+        min_free_vram_mb: MIN_FREE_VRAM_MB,
+        min_free_bytes: MIN_FREE_BYTES,
+        live_engine_info: engine_info(&built.selection),
+        on_job_event: Some(job_event_fn(app, meeting)),
+    })
+}
+
 /// Queues the post-pass of a live meeting again (after it failed or was
-/// cancelled): the recorded WAVs must still be there.
-// TODO(phase3b): call a core `live::rerun_post_pass` once it exists; this
-// mirrors the core's private `submit_post_pass`.
+/// cancelled) through `live::rerun_post_pass`: the recorded WAVs must still
+/// be there.
 pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResult<JobId> {
     let live = handle(app);
     if lock(&live.slot)
@@ -989,75 +998,20 @@ pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResul
     {
         return Err("A post-pass for this meeting is already queued.".into());
     }
-    let (store, paths, queue, _) = app_parts(app);
-    let detail = store.get_meeting(meeting).map_err(|e| e.to_string())?;
-    let m = detail.meeting;
-    if m.source != Source::Live {
-        return Err("Only live recordings have a post-pass.".into());
-    }
-    let runs = store.list_runs(meeting).map_err(|e| e.to_string())?;
-    let live_run = runs
-        .iter()
-        .rev()
-        .find(|r| r.kind == RunKind::Live)
-        .map(|r| r.id)
-        .ok_or("This meeting has no live transcript to replace.")?;
-    let folder = paths.audio().join(&m.uid);
-    for f in ["mic.wav", "loopback.wav"] {
-        if !folder.join(f).is_file() {
-            return Err(format!(
-                "The recorded audio ({f}) is gone, so the post-pass cannot run again. \
-                 The live transcript stays."
-            ));
-        }
-    }
-    let built = models::select_engine(&paths, &*store, DEVICE).map_err(|e| e.to_string())?;
-    let stored = settings::effective(&*store).map_err(|e| e.to_string())?;
-    let job = PostPassJob {
-        job_id: JobId::new(),
-        meeting,
-        live_run,
-        data_root: paths.root.clone(),
-        folder,
-        language: m.language.clone(),
-        diarize_mic: m.diarize_mic,
-        transcribe: true,
-        keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
-        segment: SegmentOptions::default(),
-    };
-    store
-        .set_meeting_status(meeting, MeetingStatus::Processing)
-        .map_err(|e| e.to_string())?;
-    let job_id = job.job_id.clone();
-    live.register_post_pass(&job_id, Some(meeting), &m.title);
-    let on_event = job_event_fn(app, Arc::new(Mutex::new(Some((meeting, m.title.clone())))));
-    let engine = built.engine;
+    let (store, _, _, _) = app_parts(app);
+    let title = store
+        .get_meeting(meeting)
+        .map_err(|e| e.to_string())?
+        .meeting
+        .title;
+    let ctx = offline_context(app, Arc::new(Mutex::new(Some((meeting, title.clone())))))?;
+    let handle = live::rerun_post_pass(&ctx, meeting).map_err(|e| match e {
+        CoreError::Store(StoreError::Invalid(m) | StoreError::Conflict(m)) => m,
+        other => other.to_string(),
+    })?;
+    let job_id = handle.job_id.clone();
+    live.register_post_pass(&job_id, Some(meeting), &title);
     log::info!("post-pass queued again for meeting {meeting} (job {job_id})");
-    queue.submit(job_id.clone(), move |token| {
-        let result = live::run_post_pass(&*store, &*engine, &job, token, &|e| on_event(e));
-        let terminal = match result {
-            Ok(_) => JobEvent::Done {
-                job_id: job.job_id.clone(),
-                meeting_id: job.meeting,
-            },
-            Err(CoreError::Cancelled) => {
-                let _ = store.set_meeting_status(job.meeting, MeetingStatus::Done);
-                JobEvent::Cancelled {
-                    job_id: job.job_id.clone(),
-                    meeting_id: Some(job.meeting),
-                }
-            }
-            Err(e) => {
-                let _ = store.set_meeting_status(job.meeting, MeetingStatus::Failed);
-                JobEvent::Error {
-                    job_id: job.job_id.clone(),
-                    meeting_id: Some(job.meeting),
-                    message: e.to_string(),
-                }
-            }
-        };
-        on_event(terminal);
-    });
     emit_state(app);
     Ok(job_id)
 }
@@ -1082,7 +1036,7 @@ pub(crate) fn dequeued_post_pass(app: &AppHandle, job: &JobId) -> Option<Meeting
 
 pub(crate) fn status(app: &AppHandle) -> LiveStatusView {
     let live = handle(app);
-    let state = live.view();
+    let state = live.view(app.state::<Jobs>().0.is_paused());
     let recorder = lock(&live.slot).recorder.as_ref().map(Recorder::status);
     let server = {
         let mut serve = lock(&live.serve);

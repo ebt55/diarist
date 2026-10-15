@@ -135,6 +135,8 @@ class LiveStore {
   /** Warnings before this index are dismissed. */
   warningsSeen = $state(0);
   error = $state<string | null>(null);
+  /** The GPU queue holds new jobs while a recording runs (`JobQueue::is_paused`). */
+  queuePaused = $state(false);
   mic = $state.raw<Meter | null>(null);
   loopback = $state.raw<Meter | null>(null);
   rows = $state.raw<LiveRow[]>([]);
@@ -274,6 +276,7 @@ class LiveStore {
     if (v.phase === "starting" && prev !== "starting") this.#reset();
     this.phase = v.phase;
     this.error = v.error;
+    this.queuePaused = v.queue_paused;
     if (v.meeting_id !== null) {
       if (v.meeting_id !== this.meetingId && prev !== "starting") this.#reset();
       this.meetingId = v.meeting_id;

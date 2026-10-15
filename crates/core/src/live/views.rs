@@ -65,6 +65,10 @@ pub struct LiveStateView {
     /// Warnings of this recording, oldest first.
     pub warnings: Vec<WarningNote>,
     pub post_passes: Vec<PostPassView>,
+    /// The GPU queue holds new jobs while a recording runs
+    /// (`JobQueue::is_paused`): queued imports show "waiting for the
+    /// recording to stop".
+    pub queue_paused: bool,
     /// Why the last start or stop failed.
     pub error: Option<String>,
 }

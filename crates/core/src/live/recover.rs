@@ -76,6 +76,7 @@ pub fn recover(ctx: &LiveContext) -> Result<Vec<RecoveredMeeting>> {
                     keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
                     segment: SegmentOptions::default(),
                 },
+                true,
             ))
         } else {
             // Nothing to re-run: keep whatever transcript there is.

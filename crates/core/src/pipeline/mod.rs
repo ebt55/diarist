@@ -91,9 +91,18 @@ pub enum CancelOutcome {
 
 type JobFn = Box<dyn FnOnce(&CancelToken) + Send + 'static>;
 
+/// A queued job.
+struct Queued {
+    id: JobId,
+    token: CancelToken,
+    job: JobFn,
+    /// Submitted with [`JobQueue::submit_front`].
+    front: bool,
+}
+
 #[derive(Default)]
 struct QueueState {
-    queue: VecDeque<(JobId, CancelToken, JobFn)>,
+    queue: VecDeque<Queued>,
     running: Option<(JobId, CancelToken)>,
     paused: bool,
     shutdown: bool,
@@ -117,8 +126,10 @@ impl Shared {
 /// thread. Jobs are closures that receive a [`CancelToken`].
 ///
 /// [`JobQueue::set_paused`] stops new jobs from starting (Phase 3: file jobs
-/// wait while a live recording holds the GPU). Dropping the queue waits for
-/// the running job and drops the queued ones.
+/// wait while a live recording holds the GPU). [`JobQueue::submit_front`]
+/// queues a job ahead of everything [`JobQueue::submit`] queued (the
+/// post-pass of a recording goes before imports queued while it recorded).
+/// Dropping the queue waits for the running job and drops the queued ones.
 pub struct JobQueue {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
@@ -138,11 +149,33 @@ impl JobQueue {
         }
     }
 
-    /// Enqueues a job.
+    /// Enqueues a job at the end.
     pub fn submit(&self, job_id: JobId, job: impl FnOnce(&CancelToken) + Send + 'static) {
         let mut st = self.shared.lock();
-        st.queue
-            .push_back((job_id, CancelToken::default(), Box::new(job)));
+        st.queue.push_back(Queued {
+            id: job_id,
+            token: CancelToken::default(),
+            job: Box::new(job),
+            front: false,
+        });
+        self.shared.changed.notify_all();
+    }
+
+    /// Enqueues a job ahead of every job queued with [`Self::submit`], after
+    /// the ones queued with `submit_front` before it (those keep their
+    /// order). A running job is never interrupted.
+    pub fn submit_front(&self, job_id: JobId, job: impl FnOnce(&CancelToken) + Send + 'static) {
+        let mut st = self.shared.lock();
+        let at = st.queue.iter().take_while(|q| q.front).count();
+        st.queue.insert(
+            at,
+            Queued {
+                id: job_id,
+                token: CancelToken::default(),
+                job: Box::new(job),
+                front: true,
+            },
+        );
         self.shared.changed.notify_all();
     }
 
@@ -155,7 +188,7 @@ impl JobQueue {
                 return CancelOutcome::Signalled;
             }
         }
-        if let Some(pos) = st.queue.iter().position(|(id, _, _)| id == job_id) {
+        if let Some(pos) = st.queue.iter().position(|q| &q.id == job_id) {
             st.queue.remove(pos);
             self.shared.changed.notify_all();
             return CancelOutcome::Dequeued;
@@ -178,7 +211,7 @@ impl JobQueue {
             .lock()
             .queue
             .iter()
-            .map(|(id, _, _)| id.clone())
+            .map(|q| q.id.clone())
             .collect()
     }
 
@@ -186,6 +219,11 @@ impl JobQueue {
     pub fn set_paused(&self, paused: bool) {
         self.shared.lock().paused = paused;
         self.shared.changed.notify_all();
+    }
+
+    /// New jobs wait (a recording holds the GPU).
+    pub fn is_paused(&self) -> bool {
+        self.shared.lock().paused
     }
 
     /// Blocks until nothing is running and, unless paused, nothing is queued.
@@ -230,11 +268,11 @@ fn worker_loop(shared: &Shared) {
                     return;
                 }
                 if !st.paused {
-                    if let Some((job_id, token, job)) = st.queue.pop_front() {
+                    if let Some(q) = st.queue.pop_front() {
                         // Mark running in the same critical section as the pop,
                         // so observers never see the job in neither place.
-                        st.running = Some((job_id, token.clone()));
-                        break (token, job);
+                        st.running = Some((q.id, q.token.clone()));
+                        break (q.token, q.job);
                     }
                 }
                 st = shared.changed.wait(st).unwrap_or_else(|e| e.into_inner());
@@ -319,6 +357,42 @@ mod tests {
         q.wait_idle();
         assert!(!ran_b.load(Ordering::SeqCst));
         assert_eq!(q.cancel(&id("zzz")), CancelOutcome::NotFound);
+    }
+
+    #[test]
+    fn submit_front_goes_ahead_of_submitted_jobs_in_order() {
+        let q = JobQueue::new();
+        q.set_paused(true);
+        assert!(q.is_paused());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let job = |name: &'static str| {
+            let order = Arc::clone(&order);
+            move |_: &CancelToken| order.lock().unwrap().push(name)
+        };
+        q.submit(id("import-1"), job("import-1"));
+        q.submit(id("import-2"), job("import-2"));
+        q.submit_front(id("post-pass-1"), job("post-pass-1"));
+        q.submit_front(id("post-pass-2"), job("post-pass-2"));
+        q.submit(id("import-3"), job("import-3"));
+        assert_eq!(
+            q.queued(),
+            [
+                "post-pass-1",
+                "post-pass-2",
+                "import-1",
+                "import-2",
+                "import-3"
+            ]
+            .map(id)
+        );
+        assert_eq!(q.cancel(&id("post-pass-2")), CancelOutcome::Dequeued);
+        q.set_paused(false);
+        assert!(!q.is_paused());
+        q.wait_idle();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["post-pass-1", "import-1", "import-2", "import-3"]
+        );
     }
 
     #[test]

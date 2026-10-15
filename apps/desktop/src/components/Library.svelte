@@ -269,7 +269,7 @@
     <section class="jobs" aria-label="Imports and finalizing in progress">
       {#each app.jobs as job (job.id)}
         {@const pct = job.totalMs ? Math.min(100, Math.round((job.doneMs / job.totalMs) * 100)) : 0}
-        {@const waiting = job.stage === "queued" && live.active}
+        {@const waiting = job.stage === "queued" && live.queuePaused}
         <div class="job" class:postpass={job.kind === "postpass"}>
           <div class="job-line">
             <span class="job-name" title={job.name}>

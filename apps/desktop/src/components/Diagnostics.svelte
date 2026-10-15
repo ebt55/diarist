@@ -140,7 +140,7 @@
         <dt>GPU queue</dt>
         <dd>
           {liveStatus.queue_running ? "1 job running" : "idle"}{liveStatus.queue_waiting.length > 0
-            ? ` · ${liveStatus.queue_waiting.length} waiting${liveStatus.state.phase === "recording" ? " (paused while recording)" : ""}`
+            ? ` · ${liveStatus.queue_waiting.length} waiting${liveStatus.state.queue_paused ? " (paused while recording)" : ""}`
             : ""}
         </dd>
         <dt>Shortcut</dt>
