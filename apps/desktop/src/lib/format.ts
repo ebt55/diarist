@@ -9,6 +9,21 @@ export function formatDate(unixMs: number): string {
   return dateFormat.format(new Date(unixMs));
 }
 
+const shortThisYear = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  hour: "numeric",
+  minute: "2-digit",
+});
+const shortOtherYear = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const thisYear = new Date().getFullYear();
+
+/** Compact date for list rows: "14 Oct, 2:12 pm", or "3 Mar 2025" for other years. */
+export function formatShortDate(unixMs: number): string {
+  const d = new Date(unixMs);
+  return (d.getFullYear() === thisYear ? shortThisYear : shortOtherYear).format(d);
+}
+
 export function formatDay(unixMs: number): string {
   return dayFormat.format(new Date(unixMs));
 }

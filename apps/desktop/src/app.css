@@ -5,7 +5,7 @@
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
   --font-size: 14px;
-  --sidebar-width: 320px;
+  --sidebar-width: clamp(250px, 30vw, 340px);
   --radius: 6px;
 
   --bg: #ffffff;
@@ -278,7 +278,7 @@ kbd {
   border-radius: 4px;
   background: var(--bg);
   color: var(--fg-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: 11px;
   line-height: 16px;
   white-space: nowrap;

@@ -11,8 +11,10 @@
     /** Show the mic/loopback toggles (stereo playback track). */
     stereo: boolean;
     noAudio: string | null;
+    /** Meeting length, shown when the audio has no duration (or is missing). */
+    fallbackMs: number;
   }
-  let { player, waveform, stereo, noAudio }: Props = $props();
+  let { player, waveform, stereo, noAudio, fallbackMs }: Props = $props();
 
   let track: HTMLDivElement | undefined = $state();
   let base: HTMLCanvasElement | undefined = $state();
@@ -30,6 +32,7 @@
   });
 
   const duration = $derived(player.durationMs || waveform?.duration_ms || 0);
+  const shownDuration = $derived(duration || fallbackMs);
   const pct = $derived(duration > 0 ? Math.min(100, (player.currentMs / duration) * 100) : 0);
   const long = $derived(duration >= 3_600_000);
 
@@ -127,7 +130,7 @@
     <Icon name={player.playing ? "pause" : "play"} />
   </button>
   <span class="time mono">
-    {formatClock(player.currentMs, long)} <span class="muted">/ {formatClock(duration, long)}</span>
+    {formatClock(player.currentMs, long)} <span class="muted">/ {formatClock(shownDuration, long)}</span>
   </span>
 
   <div
@@ -184,9 +187,10 @@
 <style>
   .audiobar {
     display: flex;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 6px 10px;
     align-items: center;
-    padding: 8px 14px;
+    padding: 6px 14px;
     border-top: 1px solid var(--border);
     background: var(--bg-sidebar);
   }
@@ -268,6 +272,16 @@
     font-size: 12px;
   }
   .speed select {
-    padding: 4px 6px;
+    padding: 3px 4px;
+  }
+  @container meeting (max-width: 620px) {
+    .track {
+      flex-basis: 100%;
+      order: -1;
+      height: 32px;
+    }
+    .speed {
+      margin-left: auto;
+    }
   }
 </style>

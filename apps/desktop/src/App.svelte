@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, type Component } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { PhysicalSize } from "@tauri-apps/api/dpi";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, errorText } from "./lib/api";
@@ -46,6 +47,7 @@
    */
   async function reveal() {
     await Promise.race([app.ready, new Promise((r) => setTimeout(r, 600))]);
+    await fitWindow();
     await tick();
     const tShow = performance.now();
     try {
@@ -60,6 +62,15 @@
       setTimeout(resolve, 250);
     });
     const tInteractive = performance.now();
+    // WebView2 can reset focus while the window activates; keep the list focused.
+    if (document.activeElement === document.body) document.getElementById("meeting-list")?.focus();
+    window.addEventListener(
+      "focus",
+      () => {
+        if (document.activeElement === document.body) document.getElementById("meeting-list")?.focus();
+      },
+      { once: true },
+    );
     const boot = (window as unknown as { __boot?: number }).__boot ?? 0;
     void api.log(
       "info",
@@ -67,6 +78,28 @@
         `script ${boot.toFixed(0)} ms, show() at ${tShow.toFixed(0)} ms, interactive at ${tInteractive.toFixed(0)} ms ` +
         `after navigation start; ${app.meetings.length} meetings`,
     );
+  }
+
+  /**
+   * The configured size is in OS logical pixels, but WebView2 also applies the
+   * Windows text-size setting, so the page can end up tiny (750 x 430 CSS px
+   * on a 4K screen at 200 % with 150 % text). Grow the hidden window to a
+   * comfortable share of the screen in CSS pixels; never shrink it.
+   */
+  async function fitWindow() {
+    const wantW = Math.min(1280, Math.round(screen.availWidth * 0.86));
+    const wantH = Math.min(820, Math.round(screen.availHeight * 0.86));
+    if (innerWidth >= wantW - 16 && innerHeight >= wantH - 16) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(innerWidth, wantW);
+    const h = Math.max(innerHeight, wantH);
+    try {
+      const win = getCurrentWindow();
+      await win.setSize(new PhysicalSize(Math.round(w * dpr), Math.round(h * dpr)));
+      await win.center();
+    } catch (e) {
+      void api.log("warn", `window resize failed: ${errorText(e)}`);
+    }
   }
 
   async function importDialog() {
@@ -108,7 +141,9 @@
       else if (e.shiftKey && lower === "c" && app.route === "diagnostics") window.dispatchEvent(new Event("app:copy"));
       else if (!e.shiftKey && k === "1") {
         app.route = "library";
-        void tick().then(() => document.getElementById("meeting-list")?.focus());
+        void tick().then(() =>
+          (document.getElementById("meeting-list") ?? document.getElementById("search-results"))?.focus(),
+        );
       } else if (lower === "r") refreshView();
       else if (lower === "p" || lower === "u" || lower === "s" || lower === "g") {
         // Keep WebView2's print, view-source, save and find bars out of the app.

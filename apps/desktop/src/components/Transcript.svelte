@@ -324,6 +324,12 @@
       bind:this={vlist}
       onscroll={() => scheduleWords()}
       onwheel={() => (lastUserScroll = performance.now())}
+      onfocusin={(e: FocusEvent) => {
+        const list = e.currentTarget as HTMLElement;
+        // Rows and timestamps are not tab stops; keep focus on the listbox.
+        if (e.target !== list) list.focus({ preventScroll: true });
+        else vlist?.scrollToIndex(cursor, { align: "nearest" });
+      }}
       {onkeydown}
     >
       {#snippet children(seg: SegmentView, i: number)}
@@ -354,7 +360,7 @@
             }}>{formatClock(seg.start_ms, long)}</button
           >
           <div class="body">
-            <span class="chip spk" class:review={seg.needs_review}>{seg.speaker_name}</span>
+            <span class="chip spk" class:review={seg.needs_review} title={seg.needs_review ? "New label: check who this is" : undefined}>{seg.speaker_name}</span>
             <span class="text"
               >{#if ws}{#each ws as w (w.id)}<span class="w" class:now={w.id === activeWordId} data-w={w.id}
                     >{w.text}</span
@@ -382,7 +388,7 @@
     outline: none;
   }
   .transcript-wrap :global(.transcript:focus-visible) {
-    box-shadow: inset 0 0 0 2px var(--focus);
+    outline: none;
   }
   .empty {
     margin: 24px;
@@ -392,8 +398,8 @@
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 10px;
-    margin: 0 14px 0 10px;
-    padding: 5px 10px 5px 8px;
+    margin: 0 10px 0 8px;
+    padding: 4px 8px 4px 6px;
     border-left: 3px solid var(--spk);
     border-radius: 0 4px 4px 0;
     line-height: 1.5;
@@ -444,9 +450,14 @@
     vertical-align: 1px;
   }
   .spk.review::after {
-    content: " ·new";
-    color: var(--warning-fg);
-    font-weight: 500;
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-left: 5px;
+    border-radius: 50%;
+    background: var(--warning-fg);
+    vertical-align: 1px;
   }
   .text {
     overflow-wrap: anywhere;

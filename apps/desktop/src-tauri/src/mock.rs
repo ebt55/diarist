@@ -98,6 +98,8 @@ const SUPPORTED: &[&str] = &[
     "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "m4v", "mkv", "mov", "webm",
     "mka",
 ];
+/// Message of the `job:error` event for a cancelled import (the UI shows it as info).
+pub const CANCELLED: &str = "Import cancelled";
 const TICKS: u64 = 20;
 const TICK: Duration = Duration::from_millis(250);
 
@@ -125,7 +127,11 @@ pub fn run_import(store: &dyn Store, app: &AppHandle, req: ImportRequest, token:
             meeting_id,
             message,
         }) => {
-            log::error!("import failed: {}: {message}", req.path.display());
+            if meeting_id.is_none() && message == CANCELLED {
+                log::info!("import cancelled: {}", req.path.display());
+            } else {
+                log::error!("import failed: {}: {message}", req.path.display());
+            }
             emit(JobEvent::Error {
                 job_id,
                 meeting_id,
@@ -208,7 +214,7 @@ fn import(
             let _ = store.delete_meeting(id);
             return Err(Failure {
                 meeting_id: None,
-                message: "Import cancelled".into(),
+                message: CANCELLED.into(),
             });
         }
         let stage = match tick {

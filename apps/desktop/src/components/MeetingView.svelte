@@ -335,8 +335,7 @@
     <p class="state">Loading…</p>
   {:else}
     <header class="m-head">
-      <div class="title-row">
-        <input
+      <input
           bind:this={titleEl}
           class="title"
           value={meeting.title}
@@ -354,6 +353,19 @@
           }}
           onblur={commitTitle}
         />
+      <div class="meta-row">
+        <div class="meta">
+          <span>{formatDate(meeting.started_at)}</span>
+          <span>{formatDuration(meeting.duration_ms)}</span>
+          <span>{meeting.source === "live" ? "Recorded live" : "Imported file"}</span>
+          <span>{meeting.language}</span>
+          {#if detail?.current_run}<span>{detail.current_run.kind.replace("_", "-")} run</span>{/if}
+          {#if meeting.status !== "done"}<span class="chip status-{meeting.status}">{meeting.status}</span>{/if}
+          {#if (meeting.duration_ms ?? 0) > 3 * 3_600_000}
+            <span class="chip warn" title="The diarizer keeps at most 8 labels per recording; past that, labels are reused">Over 3 h</span>
+          {/if}
+          {#if labelsFull}<span class="chip warn">All 8 speaker labels in use</span>{/if}
+        </div>
         <div class="actions">
           <button
             type="button"
@@ -363,27 +375,15 @@
             onclick={togglePin}
             title="Keep this meeting's audio regardless of retention (P)"
           >
-            <Icon name="pin" />{meeting.audio_keep ? "Pinned" : "Pin audio"}
+            <Icon name="pin" /><span class="btn-label">{meeting.audio_keep ? "Pinned" : "Pin audio"}</span>
           </button>
           <button type="button" id="export-btn" class="btn" onclick={() => exportMenu()} title="Export transcript (Ctrl+E)">
-            <Icon name="export" /> Export
+            <Icon name="export" /><span class="btn-label">Export</span>
           </button>
           <button type="button" class="btn btn-icon" onclick={deleteMeeting} title="Delete meeting (Ctrl+Delete)" aria-label="Delete meeting">
             <Icon name="trash" />
           </button>
         </div>
-      </div>
-      <div class="meta">
-        <span>{formatDate(meeting.started_at)}</span>
-        <span>{formatDuration(meeting.duration_ms)}</span>
-        <span>{meeting.source === "live" ? "Recorded live" : "Imported file"}</span>
-        <span>{meeting.language}</span>
-        {#if detail?.current_run}<span>{detail.current_run.kind.replace("_", "-")} run</span>{/if}
-        {#if meeting.status !== "done"}<span class="chip status-{meeting.status}">{meeting.status}</span>{/if}
-        {#if (meeting.duration_ms ?? 0) > 3 * 3_600_000}
-          <span class="chip warn" title="The diarizer keeps at most 8 labels per recording">Over 3 h: labels may be reused</span>
-        {/if}
-        {#if labelsFull}<span class="chip warn">All 8 speaker labels in use</span>{/if}
       </div>
     </header>
 
@@ -412,7 +412,7 @@
     />
   {/if}
 
-  <AudioBar {player} {waveform} {stereo} noAudio={loaded ? noAudio : null} />
+  <AudioBar {player} {waveform} {stereo} noAudio={loaded ? noAudio : null} fallbackMs={meeting?.duration_ms ?? 0} />
 </section>
 
 {#if menu}
@@ -428,6 +428,7 @@
     flex-direction: column;
     height: 100%;
     min-width: 0;
+    container: meeting / inline-size;
   }
   .state {
     flex: 1;
@@ -438,16 +439,18 @@
     color: var(--danger);
   }
   .m-head {
-    padding: 12px 14px 8px;
+    padding: 10px 14px 6px;
   }
-  .title-row {
+  .meta-row {
     display: flex;
     gap: 10px;
     align-items: center;
+    justify-content: space-between;
+    margin-top: 2px;
   }
   .title {
-    flex: 1;
-    min-width: 0;
+    display: block;
+    width: calc(100% + 6px);
     margin-left: -6px;
     padding: 2px 6px;
     border: 1px solid transparent;
@@ -472,11 +475,16 @@
   .meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px 12px;
+    gap: 2px 10px;
     align-items: center;
-    margin-top: 4px;
+    min-width: 0;
     color: var(--fg-muted);
     font-size: 12px;
+  }
+  @container meeting (max-width: 620px) {
+    .btn-label {
+      display: none;
+    }
   }
   .warn {
     border-color: var(--warning-border);

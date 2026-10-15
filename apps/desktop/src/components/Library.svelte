@@ -2,7 +2,7 @@
   import { tick, untrack } from "svelte";
   import { VList, type VListHandle } from "virtua/svelte";
   import { api, errorText } from "../lib/api";
-  import { formatClock, formatDate, formatDuration, plural } from "../lib/format";
+  import { formatClock, formatDuration, formatShortDate, plural } from "../lib/format";
   import type { SearchHit } from "../lib/generated/SearchHit";
   import type { MeetingSummary } from "../lib/generated/MeetingSummary";
   import type { JobStage } from "../lib/generated/JobStage";
@@ -64,9 +64,11 @@
   $effect(() => {
     const id = app.openId;
     const list = app.meetings;
-    if (id === null) return;
-    const i = list.findIndex((m) => m.id === id);
-    if (i >= 0) untrack(() => (cursor = i));
+    const i = id === null ? -1 : list.findIndex((m) => m.id === id);
+    untrack(() => {
+      if (i >= 0) cursor = i;
+      else if (cursor >= list.length) cursor = Math.max(0, list.length - 1);
+    });
   });
 
   const STAGES: Record<JobStage, string> = {
@@ -163,6 +165,12 @@
     e.preventDefault();
   }
 
+  /** Rows are options, not tab stops: a click on one keeps focus on the listbox. */
+  function keepFocusOnList(e: FocusEvent) {
+    const list = e.currentTarget as HTMLElement;
+    if (e.target !== list) list.focus({ preventScroll: true });
+  }
+
   function searchKeys(e: KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -230,7 +238,7 @@
       bind:value={query}
       onkeydown={searchKeys}
     />
-    <kbd class="search-kbd">Ctrl K</kbd>
+    {#if !query}<kbd class="search-kbd">Ctrl K</kbd>{/if}
   </div>
 
   {#if app.jobs.length > 0}
@@ -275,6 +283,7 @@
       aria-label="Search results"
       aria-activedescendant={hits[hitCursor] ? `hit-${hitCursor}` : undefined}
       bind:this={resultsEl}
+      onfocusin={keepFocusOnList}
       onkeydown={(e) => listKeys(e, "hits")}
     >
       {#each hits as hit, i (hit.segment_id)}
@@ -294,7 +303,7 @@
         >
           <div class="row-title">{hit.meeting_title || "Untitled meeting"}</div>
           <div class="row-meta">
-            <span>{formatDate(hit.meeting_started_at)}</span>
+            <span>{formatShortDate(hit.meeting_started_at)}</span>
             <span class="mono">{formatClock(hit.start_ms)}</span>
             <span>{hit.speaker_name}</span>
           </div>
@@ -324,6 +333,7 @@
       getKey={(m) => m.id}
       itemSize={56}
       bind:this={vlist}
+      onfocusin={keepFocusOnList}
       onkeydown={(e: KeyboardEvent) => listKeys(e, "meetings")}
     >
       {#snippet children(m: MeetingSummary, i: number)}
@@ -341,15 +351,15 @@
           }}
           onkeydown={() => {}}
         >
-          <div class="row-title">
-            {m.title || "Untitled meeting"}
+          <div class="row-top">
+            <span class="row-title">{m.title || "Untitled meeting"}</span>
+            {#if m.audio_keep}<span class="pin" title="Audio pinned"><Icon name="pin" size={12} /></span>{/if}
+            {#if m.status !== "done"}<span class="chip status-{m.status}">{m.status}</span>{/if}
           </div>
           <div class="row-meta">
-            <span>{formatDate(m.started_at)}</span>
+            <span>{formatShortDate(m.started_at)}</span>
             <span>{formatDuration(m.duration_ms)}</span>
             <span>{plural(m.speaker_count, "speaker")}</span>
-            {#if m.status !== "done"}<span class="chip status-{m.status}">{m.status}</span>{/if}
-            {#if m.audio_keep}<span class="pin" title="Audio pinned"><Icon name="pin" size={12} /></span>{/if}
           </div>
         </div>
       {/snippet}
@@ -373,8 +383,11 @@
     padding: 10px 10px 6px 14px;
   }
   .brand {
+    overflow: hidden;
     font-weight: 700;
     letter-spacing: -0.01em;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .head-actions {
     display: flex;
@@ -458,7 +471,7 @@
   }
   .results:focus-visible,
   :global(.mlist:focus-visible) {
-    box-shadow: inset 0 0 0 2px var(--focus);
+    outline: none;
   }
   .row {
     display: flex;
@@ -486,6 +499,20 @@
   :global(.mlist:focus-visible) .row.cursor,
   .results:focus-visible .row.cursor {
     box-shadow: inset 0 0 0 2px var(--focus);
+  }
+  .row-top {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+  }
+  .row-top .row-title {
+    flex: 1;
+    min-width: 0;
+  }
+  .row-top .chip,
+  .row-top .pin {
+    flex: none;
   }
   .row-title {
     overflow: hidden;

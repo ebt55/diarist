@@ -22,6 +22,11 @@
 
   let finished = false;
 
+  function chipTitle(sp: SpeakerView, i: number): string {
+    const key = i < 9 ? ` Key ${i + 1} on a segment gives it to this speaker.` : "";
+    return `${sp.name}: double-click or R renames, Enter opens the menu.${key}`;
+  }
+
   function editor(node: HTMLInputElement) {
     finished = false;
     node.focus();
@@ -79,7 +84,7 @@
         <button
           type="button"
           class="spk-chip"
-          title="{sp.name}: double-click or R to rename, Enter for more"
+          title={chipTitle(sp, i)}
           ondblclick={() => onstartrename(sp.id)}
           oncontextmenu={(e) => {
             e.preventDefault();
@@ -89,7 +94,6 @@
         >
           <span class="dot"></span>
           <span class="name">{sp.name}</span>
-          {#if i < 9}<kbd class="num" title="Press {i + 1} on a segment to give it to {sp.name}">{i + 1}</kbd>{/if}
           <span class="stat mono">{formatClock(sp.talk_ms)}</span>
           {#if sp.needs_review}<span class="chip badge-new">new label</span>{/if}
         </button>
@@ -121,9 +125,9 @@
   .legend {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 4px 6px;
     align-items: center;
-    padding: 0 14px 10px;
+    padding: 0 14px 8px;
   }
   .item {
     display: inline-flex;
@@ -135,9 +139,9 @@
   }
   .spk-chip {
     display: inline-flex;
-    gap: 6px;
+    gap: 5px;
     align-items: center;
-    padding: 3px 4px 3px 8px;
+    padding: 2px 4px 2px 7px;
     border: 0;
     border-radius: var(--radius) 0 0 var(--radius);
     background: none;
@@ -164,19 +168,15 @@
   .name {
     font-weight: 600;
   }
-  .num {
-    min-width: 16px;
-    text-align: center;
-  }
   .stat {
     color: var(--fg-muted);
-    font-size: 12px;
+    font-size: 11px;
   }
   .more {
     display: inline-flex;
     align-items: center;
     align-self: stretch;
-    padding: 0 6px;
+    padding: 0 4px;
     border: 0;
     border-left: 1px solid var(--border);
     border-radius: 0 var(--radius) var(--radius) 0;

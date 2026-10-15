@@ -222,7 +222,7 @@ class AppState {
 
   #onJob(e: JobEvent): void {
     const job = this.jobs.find((j) => j.id === e.job_id);
-    const name = job?.name ?? "file";
+    const name = job && job.name !== "Importing…" ? job.name : "file";
     if (e.type === "progress") {
       const first = !job || job.stage === "queued";
       this.#upsertJob(e.job_id, { stage: e.stage, doneMs: e.done_ms, totalMs: e.total_ms });
@@ -231,11 +231,16 @@ class AppState {
       return;
     }
     this.jobs = this.jobs.filter((j) => j.id !== e.job_id);
-    void this.refreshMeetings();
     if (e.type === "done") {
       const meetingId = e.meeting_id;
-      this.toast("success", `Imported ${name}`, { label: "Open", run: () => this.open(meetingId) });
-    } else if (e.message === "Import cancelled") {
+      void this.refreshMeetings().then(() => {
+        const title = this.meetings.find((m) => m.id === meetingId)?.title || name;
+        this.toast("success", `Imported "${title}"`, { label: "Open", run: () => this.open(meetingId) });
+      });
+      return;
+    }
+    void this.refreshMeetings();
+    if (e.message === "Import cancelled") {
       this.toast("info", `Import of ${name} cancelled`);
     } else {
       this.error(`Import of ${name} failed: ${e.message}`);

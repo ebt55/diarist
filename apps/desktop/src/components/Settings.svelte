@@ -297,14 +297,16 @@
                   <span class="model-name">{f.display_name}</span>
                   <span class="model-path mono">{f.path}</span>
                 </span>
-                <span class="cell mono">{f.quant ?? "–"}</span>
-                <span class="cell mono">{formatBytes(f.size_bytes)}</span>
-                <span class="cell" title={v ? (v.measured ? "Measured on the reference GPU" : "Estimated from file size") : ""}>
-                  {#if v}<span class="mono">{formatVram(v.mb)}</span> <span class="help inline">{v.measured ? "measured" : "est."}</span>{:else}–{/if}
+                <span class="facts">
+                  <span class="cell q mono">{f.quant ?? "–"}</span>
+                  <span class="cell s mono">{formatBytes(f.size_bytes)}</span>
+                  <span class="cell v" title={v ? (v.measured ? "Measured on the reference GPU" : "Estimated from file size") : ""}>
+                    {#if v}<span class="mono">{formatVram(v.mb)}</span> <span class="help inline">{v.measured ? "measured" : "est."}</span>{:else}–{/if}
+                  </span>
+                  <span class="fit {ft.cls}" title={ft.text}><span aria-hidden="true">{ft.mark}</span><span class="sr-only">{ft.text}</span></span>
+                  <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
+                  {#if f.missing}<span class="chip warn">missing</span>{/if}
                 </span>
-                <span class="fit {ft.cls}" title={ft.text}><span aria-hidden="true">{ft.mark}</span><span class="sr-only">{ft.text}</span></span>
-                <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
-                {#if f.missing}<span class="chip warn">missing</span>{/if}
               </label>
             {/each}
           </fieldset>
@@ -319,13 +321,15 @@
               <input type="radio" disabled aria-label="{f.display_name} cannot be selected" />
               <span class="model-main">
                 <span class="model-name">{f.display_name}</span>
-                <span class="model-path mono">{f.path} · architecture "{f.architecture ?? "unknown"}"</span>
+                <span class="model-path mono">architecture "{f.architecture ?? "unknown"}" · {f.path}</span>
               </span>
-              <span class="cell mono">{f.quant ?? "–"}</span>
-              <span class="cell mono">{formatBytes(f.size_bytes)}</span>
-              <span class="cell">–</span>
-              <span class="fit unknown" aria-hidden="true">–</span>
-              <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
+              <span class="facts">
+                <span class="cell q mono">{f.quant ?? "–"}</span>
+                <span class="cell s mono">{formatBytes(f.size_bytes)}</span>
+                <span class="cell v">–</span>
+                <span class="fit unknown" aria-hidden="true">–</span>
+                <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
+              </span>
             </div>
           {/each}
         </fieldset>
@@ -346,12 +350,14 @@
               <span class="model-name">nemo-speech {eng.version}</span>
               <span class="model-path mono">{eng.path}</span>
             </span>
-            {#if eng.tested}
-              <span class="chip ok">tested</span>
-            {:else}
-              <span class="chip warn" title="Works, but no fixtures recorded for this version">untested version</span>
-            {/if}
-            {#if eng.missing}<span class="chip warn">missing</span>{/if}
+            <span class="facts">
+              {#if eng.tested}
+                <span class="chip ok">tested</span>
+              {:else}
+                <span class="chip warn" title="Works, but no fixtures recorded for this version">untested version</span>
+              {/if}
+              {#if eng.missing}<span class="chip warn">missing</span>{/if}
+            </span>
           </label>
         {:else}
           <p class="help">No engine found. The first-run download installs one.</p>
@@ -366,8 +372,10 @@
 <style>
   .page {
     height: 100%;
+    overflow-x: hidden;
     overflow-y: auto;
-    padding: 16px 24px 48px;
+    padding: 16px 20px 48px;
+    container: settings / inline-size;
   }
   .page > * {
     max-width: 900px;
@@ -496,8 +504,8 @@
   }
   .model {
     display: grid;
-    grid-template-columns: 20px minmax(180px, 1fr) 56px 76px 120px 24px auto auto;
-    gap: 10px;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    gap: 2px 10px;
     align-items: center;
     padding: 6px 8px;
     border: 1px solid var(--border);
@@ -540,9 +548,37 @@
   .unknown .model-path {
     color: var(--fg-faint);
   }
+  .facts {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .facts > .chip {
+    min-width: 92px;
+    text-align: center;
+  }
   .cell {
     font-size: 12px;
     white-space: nowrap;
+  }
+  .cell.q {
+    width: 44px;
+  }
+  .cell.s {
+    width: 64px;
+    text-align: right;
+  }
+  .cell.v {
+    width: 112px;
+  }
+  @container settings (max-width: 680px) {
+    .facts {
+      grid-column: 2 / -1;
+      flex-wrap: wrap;
+    }
+    .cell.s {
+      text-align: left;
+    }
   }
   .fit {
     display: inline-flex;

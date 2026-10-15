@@ -156,7 +156,7 @@ pub async fn cancel_job(app: AppHandle, jobs: State<'_, Jobs>, job_id: JobId) ->
                 &JobEvent::Error {
                     job_id,
                     meeting_id: None,
-                    message: "Import cancelled".into(),
+                    message: mock::CANCELLED.into(),
                 },
             );
             Ok(())
