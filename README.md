@@ -184,7 +184,7 @@ CPU runtime packages and machines other than the author's are untested. Next
 on the roadmap: punctuation restoration, better speaker-change handling, and
 recognising the same person across meetings
 ([docs/plans/00-roadmap.md](docs/plans/00-roadmap.md)). Changes:
-[CHANGELOG.md](CHANGELOG.md).
+[CHANGELOG.md](CHANGELOG.md). Picking the project up: [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Building from source
 
