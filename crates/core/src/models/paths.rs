@@ -29,11 +29,15 @@ pub enum DataRootSource {
     Default,
 }
 
-/// The data root and its well-known children.
+/// The data root and its well-known children. `models\` and `engine\` can
+/// be redirected (dev setups, tests); paths outside the root are stored
+/// absolute in `model_files`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataPaths {
     pub root: PathBuf,
     pub source: DataRootSource,
+    pub models_override: Option<PathBuf>,
+    pub engine_override: Option<PathBuf>,
 }
 
 impl DataPaths {
@@ -42,7 +46,21 @@ impl DataPaths {
         Self {
             root: root.into(),
             source: DataRootSource::Explicit,
+            models_override: None,
+            engine_override: None,
         }
+    }
+
+    /// Uses `dir` instead of `<root>\models`.
+    pub fn with_models_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.models_override = Some(dir.into());
+        self
+    }
+
+    /// Uses `dir` instead of `<root>\engine` (a folder of runtimes, or one runtime).
+    pub fn with_engine_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.engine_override = Some(dir.into());
+        self
     }
 
     /// Resolves the data root (portable marker, registry, default).
@@ -53,15 +71,15 @@ impl DataPaths {
         if let Some(dir) = &exe_dir {
             if let Some(root) = portable_root(dir) {
                 return Ok(Self {
-                    root,
                     source: DataRootSource::Portable,
+                    ..Self::at(root)
                 });
             }
         }
         if let Some(root) = registry_root() {
             return Ok(Self {
-                root,
                 source: DataRootSource::Registry,
+                ..Self::at(root)
             });
         }
         let local = std::env::var_os("LOCALAPPDATA")
@@ -69,19 +87,23 @@ impl DataPaths {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
             .ok_or_else(|| CoreError::Models("cannot find %LOCALAPPDATA%".into()))?;
         Ok(Self {
-            root: local.join(APP_IDENTIFIER),
             source: DataRootSource::Default,
+            ..Self::at(local.join(APP_IDENTIFIER))
         })
     }
 
     /// `models\`, also `NEMO_SPEECH_MODEL_DIR` for `nemo-speech pull`.
     pub fn models(&self) -> PathBuf {
-        self.root.join("models")
+        self.models_override
+            .clone()
+            .unwrap_or_else(|| self.root.join("models"))
     }
 
     /// `engine\`: one folder per runtime version.
     pub fn engine(&self) -> PathBuf {
-        self.root.join("engine")
+        self.engine_override
+            .clone()
+            .unwrap_or_else(|| self.root.join("engine"))
     }
 
     /// The SQLite database.

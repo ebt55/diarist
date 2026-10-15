@@ -1,0 +1,664 @@
+//! File import: decode, transcribe, store (`docs/01`, "File-mode flow").
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, UNIX_EPOCH};
+
+use super::{CancelToken, ImportRequest};
+use crate::audio::Decoder;
+use crate::engine::{DiarPreset, DiarizeRunner, Engine, EngineEvent, EngineWord, FileJob};
+use crate::error::{CoreError, Result};
+use crate::models::free_disk_bytes;
+use crate::store::{NewAudioTrack, NewMeeting, Store};
+use crate::transcript::{build_transcript, words_from_engine, SegmentOptions, UNKNOWN_LABEL};
+use crate::types::{
+    AudioFormat, Channel, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source, TrackChannel,
+};
+use crate::views::{JobEvent, JobStage};
+
+/// Free space required before an import starts.
+pub const MIN_FREE_BYTES: u64 = 2 << 30;
+
+/// Settings keys read by the import.
+pub const SETTING_KEEP_WAV: &str = "keep_intermediate_wav";
+pub const SETTING_KEEP_DIARIZATION: &str = "keep_diarization_segments";
+
+/// How an import runs.
+#[derive(Debug, Clone)]
+pub struct ImportOptions {
+    /// The data root: the 16 kHz WAV, the engine JSON and logs go to
+    /// `<root>/audio/<meeting uid>/`.
+    pub data_root: PathBuf,
+    /// Keep `source.wav` (also on when the `keep_intermediate_wav` setting is `1`/`true`).
+    pub keep_intermediate: bool,
+    /// Refuse to start with less free space than this.
+    pub min_free_bytes: u64,
+    /// Run the standalone diarization pass and keep `diarization.rttm`/`.json`
+    /// in the meeting folder (also when `keep_diarization_segments` is set,
+    /// provided a runner is given).
+    pub diarize_runner: Option<DiarizeRunner>,
+    pub run_diarize_pass: bool,
+    pub segment: SegmentOptions,
+}
+
+impl ImportOptions {
+    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+            keep_intermediate: false,
+            min_free_bytes: MIN_FREE_BYTES,
+            diarize_runner: None,
+            run_diarize_pass: false,
+            segment: SegmentOptions::default(),
+        }
+    }
+}
+
+fn setting_on(store: &dyn Store, key: &str) -> bool {
+    store
+        .get_settings()
+        .ok()
+        .and_then(|s| s.0.get(key).cloned())
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn mtime_ms(path: &Path) -> Option<i64> {
+    let t = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as i64)
+}
+
+/// [`super::import_file`] with explicit options and cancellation.
+pub fn import_file_with(
+    store: &dyn Store,
+    engine: &dyn Engine,
+    decoder: &dyn Decoder,
+    req: ImportRequest,
+    opts: &ImportOptions,
+    cancel: Option<&CancelToken>,
+    on_event: &dyn Fn(JobEvent),
+) -> Result<MeetingId> {
+    let job_id = req.job_id.clone();
+    let fail_early = |e: CoreError| {
+        on_event(JobEvent::Error {
+            job_id: job_id.clone(),
+            meeting_id: None,
+            message: e.to_string(),
+        });
+        Err(e)
+    };
+    if !req.path.is_file() {
+        return fail_early(CoreError::Decode(format!(
+            "{} is not a file",
+            req.path.display()
+        )));
+    }
+    if let Some(free) = free_disk_bytes(&opts.data_root) {
+        if free < opts.min_free_bytes {
+            return fail_early(CoreError::InsufficientSpace {
+                path: opts.data_root.display().to_string(),
+                free_mb: free >> 20,
+                needed_mb: opts.min_free_bytes >> 20,
+            });
+        }
+    }
+    let source = std::path::absolute(&req.path).unwrap_or_else(|_| req.path.clone());
+    let title = req
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| {
+            source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    let started_at = mtime_ms(&source).unwrap_or_else(now_ms);
+    let meeting = match store.create_meeting(NewMeeting {
+        title,
+        source: Source::File,
+        source_path: Some(source.display().to_string()),
+        language: req.language.clone(),
+        diarize_mic: false,
+        started_at,
+        status: MeetingStatus::Processing,
+    }) {
+        Ok(m) => m,
+        Err(e) => return fail_early(e.into()),
+    };
+    let dir = opts.data_root.join("audio").join(&meeting.uid);
+    let wav = dir.join("source.wav");
+    let keep_wav = opts.keep_intermediate || setting_on(store, SETTING_KEEP_WAV);
+    let mut run: Option<RunId> = None;
+    let result = run_import(
+        store,
+        engine,
+        decoder,
+        &req,
+        opts,
+        cancel,
+        on_event,
+        &meeting.uid,
+        meeting.id,
+        started_at,
+        &source,
+        &wav,
+        keep_wav,
+        &mut run,
+    );
+    if !keep_wav {
+        let _ = std::fs::remove_file(&wav);
+    }
+    match result {
+        Ok(()) => {
+            on_event(JobEvent::Done {
+                job_id,
+                meeting_id: meeting.id,
+            });
+            Ok(meeting.id)
+        }
+        Err(e) => {
+            if let Some(run) = run {
+                let _ = store.finish_run(run, RunStatus::Failed);
+            }
+            let _ = store.set_meeting_status(meeting.id, MeetingStatus::Failed);
+            on_event(JobEvent::Error {
+                job_id,
+                meeting_id: Some(meeting.id),
+                message: e.to_string(),
+            });
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_import(
+    store: &dyn Store,
+    engine: &dyn Engine,
+    decoder: &dyn Decoder,
+    req: &ImportRequest,
+    opts: &ImportOptions,
+    cancel: Option<&CancelToken>,
+    on_event: &dyn Fn(JobEvent),
+    uid: &str,
+    meeting: MeetingId,
+    started_at: i64,
+    source: &Path,
+    wav: &Path,
+    keep_wav: bool,
+    run_out: &mut Option<RunId>,
+) -> Result<()> {
+    let job_id = req.job_id.clone();
+    let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+    let progress = |stage: JobStage, done_ms: u64, total_ms: Option<u64>| {
+        on_event(JobEvent::Progress {
+            job_id: job_id.clone(),
+            stage,
+            done_ms,
+            total_ms,
+        })
+    };
+
+    // 1. Decode into the meeting folder.
+    progress(JobStage::Decoding, 0, None);
+    if let Some(dir) = wav.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let info = decoder.decode_to_wav16k(source, wav)?;
+    if cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    let audio_ms = info.duration_ms.max(0) as u64;
+    let total_ms = Some(audio_ms);
+    store.add_audio_track(NewAudioTrack {
+        meeting_id: meeting,
+        channel: TrackChannel::Playback,
+        path: source.display().to_string(),
+        format: AudioFormat::Original,
+        sample_rate: info.source_sample_rate,
+        channels: info.source_channels,
+        duration_ms: Some(info.duration_ms),
+        size_bytes: std::fs::metadata(source).ok().map(|m| m.len() as i64),
+    })?;
+    if keep_wav {
+        store.add_audio_track(NewAudioTrack {
+            meeting_id: meeting,
+            channel: TrackChannel::Source,
+            path: format!("audio/{uid}/source.wav"),
+            format: AudioFormat::Wav,
+            sample_rate: crate::audio::TARGET_RATE,
+            channels: 1,
+            duration_ms: Some(info.duration_ms),
+            size_bytes: std::fs::metadata(wav).ok().map(|m| m.len() as i64),
+        })?;
+    }
+    store.finish_meeting(meeting, started_at + info.duration_ms, info.duration_ms)?;
+
+    // 2. A `file` run and the engine job.
+    let engine_info = engine.info();
+    let run = store.create_run(
+        meeting,
+        RunKind::File,
+        serde_json::json!({
+            "runtime": engine_info.runtime,
+            "models": engine_info.models,
+            "device": engine_info.device,
+            "language": req.language,
+            "diarize": req.diarize,
+            "source_sample_rate": info.source_sample_rate,
+            "source_channels": info.source_channels,
+            "segmentation": {
+                "max_gap_ms": opts.segment.max_gap_ms,
+                "sentence_gap_ms": opts.segment.sentence_gap_ms,
+                "max_words": opts.segment.max_words,
+            },
+        }),
+    )?;
+    *run_out = Some(run.id);
+    progress(JobStage::Transcribing, 0, total_ms);
+    let rx = engine.transcribe_file(FileJob {
+        job_id: job_id.clone(),
+        wav_path: wav.to_path_buf(),
+        diarize: req.diarize,
+        language: req.language.clone(),
+        diar_preset: DiarPreset::Streaming,
+    })?;
+    let mut utterances: BTreeMap<(Channel, u32), (u32, Vec<EngineWord>)> = BTreeMap::new();
+    let mut cancel_sent = false;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(EngineEvent::Progress { done_ms, .. }) => {
+                progress(JobStage::Transcribing, done_ms, total_ms)
+            }
+            Ok(EngineEvent::Utterance {
+                channel,
+                utt,
+                rev,
+                words,
+                ..
+            }) => {
+                let e = utterances
+                    .entry((channel, utt))
+                    .or_insert((rev, Vec::new()));
+                if rev >= e.0 {
+                    *e = (rev, words);
+                }
+            }
+            Ok(EngineEvent::Done { .. }) => break,
+            Ok(EngineEvent::Error { code, message, .. }) => {
+                if cancel_sent {
+                    return Err(CoreError::Cancelled);
+                }
+                return Err(CoreError::Engine(format!("{code:?}: {message}")));
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                if cancelled() && !cancel_sent {
+                    engine.cancel(job_id.clone());
+                    cancel_sent = true;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(CoreError::Engine(
+                    "engine stopped without Done or Error".into(),
+                ))
+            }
+        }
+    }
+
+    // 3. Optional standalone diarization pass, kept for the eval harness.
+    let want_pass = opts.run_diarize_pass || setting_on(store, SETTING_KEEP_DIARIZATION);
+    if let (true, true, Some(runner)) = (want_pass, req.diarize, &opts.diarize_runner) {
+        if cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        progress(JobStage::Diarizing, 0, total_ms);
+        let dir = wav.parent().unwrap_or(Path::new("."));
+        runner.run(
+            wav,
+            &dir.join("diarization.rttm"),
+            Some(&dir.join("diarization.json")),
+        )?;
+    }
+
+    // 4. Segments, speakers and words in one transaction.
+    progress(JobStage::Saving, audio_ms, total_ms);
+    let default_label = if req.diarize { UNKNOWN_LABEL } else { "spk_0" };
+    let mut words = Vec::new();
+    for ((channel, _), (_, ws)) in &utterances {
+        words.extend(words_from_engine(*channel, ws, default_label));
+    }
+    words.sort_by_key(|w| w.start_ms);
+    let transcript = build_transcript(&words, &opts.segment);
+    store.insert_transcript(run.id, &transcript)?;
+    store.finish_run(run.id, RunStatus::Done)?;
+    store.set_current_run(meeting, run.id)?;
+    store.set_meeting_status(meeting, MeetingStatus::Done)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::DecodedInfo;
+    use crate::engine::nemo_cli::{engine_words, file_events, parse_transcribe_json};
+    use crate::engine::{EngineInfo, ErrorCode};
+    use crate::store::SqliteStore;
+    use crate::types::JobId;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::{Arc, Mutex};
+
+    /// Writes one second of silence; reports a 48 kHz stereo source.
+    struct FakeDecoder;
+    impl Decoder for FakeDecoder {
+        fn decode_to_wav16k(&self, _: &Path, output: &Path) -> Result<DecodedInfo> {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::create(output, spec).unwrap();
+            for _ in 0..16_000 {
+                w.write_sample(0i16).unwrap();
+            }
+            w.finalize().unwrap();
+            Ok(DecodedInfo {
+                duration_ms: 300_032,
+                source_sample_rate: 48_000,
+                source_channels: 2,
+            })
+        }
+    }
+
+    enum Mode {
+        Fixture,
+        Fail,
+        WaitForCancel,
+    }
+
+    struct FakeEngine {
+        mode: Mode,
+        cancelled: Arc<AtomicBool>,
+        seen_wav: Mutex<Option<PathBuf>>,
+    }
+
+    impl FakeEngine {
+        fn new(mode: Mode) -> Self {
+            Self {
+                mode,
+                cancelled: Arc::default(),
+                seen_wav: Mutex::new(None),
+            }
+        }
+    }
+
+    impl Engine for FakeEngine {
+        fn transcribe_file(&self, job: FileJob) -> Result<Receiver<EngineEvent>> {
+            assert!(job.wav_path.is_file(), "engine gets the decoded WAV");
+            *self.seen_wav.lock().unwrap() = Some(job.wav_path.clone());
+            let (tx, rx) = channel();
+            match self.mode {
+                Mode::Fixture => {
+                    let json = std::fs::read_to_string(format!(
+                        "{}/tests/fixtures/nemotron35_transcribe_diarize_5min.json",
+                        env!("CARGO_MANIFEST_DIR")
+                    ))
+                    .unwrap();
+                    let out = parse_transcribe_json(&json).unwrap();
+                    tx.send(EngineEvent::Progress {
+                        job_id: job.job_id.clone(),
+                        done_ms: 1_000,
+                        total_ms: Some(300_032),
+                    })
+                    .unwrap();
+                    for ev in file_events(
+                        &job.job_id,
+                        Channel::Source,
+                        engine_words(&out),
+                        300_032_000,
+                        Duration::from_secs(11),
+                    ) {
+                        tx.send(ev).unwrap();
+                    }
+                }
+                Mode::Fail => tx
+                    .send(EngineEvent::Error {
+                        job_id: job.job_id,
+                        code: ErrorCode::Oom,
+                        message: "CUDA out of memory".into(),
+                    })
+                    .unwrap(),
+                Mode::WaitForCancel => {
+                    let flag = Arc::clone(&self.cancelled);
+                    std::thread::spawn(move || {
+                        while !flag.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        let _ = tx.send(EngineEvent::Error {
+                            job_id: job.job_id,
+                            code: ErrorCode::Other,
+                            message: "cancelled".into(),
+                        });
+                    });
+                }
+            }
+            Ok(rx)
+        }
+        fn cancel(&self, _: JobId) {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+        fn info(&self) -> EngineInfo {
+            EngineInfo {
+                runtime: "fake 1.0".into(),
+                ..Default::default()
+            }
+        }
+    }
+
+    fn request(path: &Path) -> ImportRequest {
+        ImportRequest {
+            job_id: JobId("job".into()),
+            path: path.to_path_buf(),
+            title: None,
+            language: "en".into(),
+            diarize: true,
+        }
+    }
+
+    fn input(dir: &Path) -> PathBuf {
+        let p = dir.join("Weekly sync.m4a");
+        std::fs::write(&p, b"pretend audio").unwrap();
+        p
+    }
+
+    #[test]
+    fn imports_a_file_into_a_current_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let src = input(dir.path());
+        let engine = FakeEngine::new(Mode::Fixture);
+        let events = Mutex::new(Vec::new());
+        let opts = ImportOptions {
+            min_free_bytes: 0,
+            ..ImportOptions::new(dir.path())
+        };
+        let id = import_file_with(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&src),
+            &opts,
+            None,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .unwrap();
+        let d = store.get_meeting(id).unwrap();
+        assert_eq!(d.meeting.title, "Weekly sync");
+        assert_eq!(d.meeting.status, MeetingStatus::Done);
+        assert_eq!(d.meeting.duration_ms, Some(300_032));
+        assert_eq!(d.current_run.as_ref().unwrap().status, RunStatus::Done);
+        assert_eq!(d.current_run.unwrap().engine_info["runtime"], "fake 1.0");
+        assert_eq!(d.speakers.len(), 4);
+        assert_eq!(store.get_words(id, 0, i64::MAX).unwrap().len(), 464);
+        let segs = store.get_segments(id, 0, 10_000).unwrap();
+        assert!(segs.len() > 20);
+        assert!(!store.search("project", 5).unwrap().is_empty());
+        let tracks = store.list_audio_tracks(id).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].format, AudioFormat::Original);
+        assert_eq!(tracks[0].channel, TrackChannel::Playback);
+        assert_eq!(tracks[0].sample_rate, 48_000);
+        // The intermediate WAV is gone; the meeting folder stays.
+        let wav = engine.seen_wav.lock().unwrap().clone().unwrap();
+        assert!(!wav.exists());
+        assert!(wav.parent().unwrap().is_dir());
+        let events = events.into_inner().unwrap();
+        assert!(matches!(
+            events.first(),
+            Some(JobEvent::Progress {
+                stage: JobStage::Decoding,
+                ..
+            })
+        ));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            JobEvent::Progress {
+                stage: JobStage::Transcribing,
+                done_ms: 1_000,
+                ..
+            }
+        )));
+        assert!(
+            matches!(events.last(), Some(JobEvent::Done { meeting_id, .. }) if *meeting_id == id)
+        );
+    }
+
+    #[test]
+    fn engine_failure_marks_meeting_and_run_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let src = input(dir.path());
+        store.set_setting(SETTING_KEEP_WAV, "1").unwrap();
+        let engine = FakeEngine::new(Mode::Fail);
+        let events = Mutex::new(Vec::new());
+        let opts = ImportOptions {
+            min_free_bytes: 0,
+            ..ImportOptions::new(dir.path())
+        };
+        let err = import_file_with(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&src),
+            &opts,
+            None,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("out of memory"));
+        let m = store.list_meetings().unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].status, MeetingStatus::Failed);
+        let runs = store.list_runs(m[0].id).unwrap();
+        assert_eq!(runs[0].status, RunStatus::Failed);
+        assert!(store.get_meeting(m[0].id).unwrap().current_run.is_none());
+        // keep_intermediate_wav=1 keeps the WAV and registers it.
+        assert!(engine.seen_wav.lock().unwrap().as_ref().unwrap().exists());
+        assert_eq!(store.list_audio_tracks(m[0].id).unwrap().len(), 2);
+        assert!(matches!(
+            events.into_inner().unwrap().last(),
+            Some(JobEvent::Error {
+                meeting_id: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cancel_reaches_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("meet-assist.db")).unwrap();
+        let src = input(dir.path());
+        let engine = FakeEngine::new(Mode::WaitForCancel);
+        let token = CancelToken::default();
+        let t2 = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            t2.cancel();
+        });
+        let opts = ImportOptions {
+            min_free_bytes: 0,
+            ..ImportOptions::new(dir.path())
+        };
+        let err = import_file_with(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&src),
+            &opts,
+            Some(&token),
+            &|_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::Cancelled));
+        assert_eq!(
+            store.list_meetings().unwrap()[0].status,
+            MeetingStatus::Failed
+        );
+    }
+
+    #[test]
+    fn refuses_without_free_space_or_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let src = input(dir.path());
+        let engine = FakeEngine::new(Mode::Fixture);
+        let opts = ImportOptions {
+            min_free_bytes: u64::MAX,
+            ..ImportOptions::new(dir.path())
+        };
+        let events = Mutex::new(Vec::new());
+        let err = import_file_with(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&src),
+            &opts,
+            None,
+            &|e| events.lock().unwrap().push(e),
+        )
+        .unwrap_err();
+        if cfg!(windows) {
+            assert!(matches!(err, CoreError::InsufficientSpace { .. }), "{err}");
+            assert!(store.list_meetings().unwrap().is_empty());
+            assert!(matches!(
+                events.into_inner().unwrap().as_slice(),
+                [JobEvent::Error {
+                    meeting_id: None,
+                    ..
+                }]
+            ));
+        }
+        let missing = dir.path().join("nope.m4a");
+        assert!(import_file_with(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&missing),
+            &ImportOptions::new(dir.path()),
+            None,
+            &|_| {}
+        )
+        .is_err());
+    }
+}

@@ -119,6 +119,9 @@ pub fn engine_dirs(engine_root: &Path) -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
+    if process::is_engine_dir(engine_root) {
+        return vec![engine_root.to_path_buf()];
+    }
     if let Ok(entries) = std::fs::read_dir(engine_root) {
         let mut dirs: Vec<PathBuf> = entries
             .flatten()
