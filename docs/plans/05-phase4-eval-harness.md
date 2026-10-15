@@ -29,7 +29,7 @@ tools/eval/
 
 ## Protocol
 
-- Tuning set: Aug "2 Justin Shenk", Aug "9 Ali Ladak". Held-out: Sep "7 Alex Mallen", Sep "5 Stephen Casper". Controls: Sep "Logistics Presentation" (single speaker; report hypothesis speaker count), AMI ES2002a (word-level reference, overlap).
+- Tuning set: Aug 2, Aug 9. Held-out: Sep 7, Sep 5. Controls: Sep Logistics (single speaker; report hypothesis speaker count), AMI ES2002a (word-level reference, overlap).
 - `run.py --config <name>` records the engine version, model hashes, diarizer preset and fusion settings in the table header. Results go to `docs/eval/<yyyy-mm-dd>-<config>.md`.
 - Hand correction: `run.py --export-for-correction <session>` writes the app's SegLST; the user corrects speaker labels and boundaries in a text editor; corrected files live in `data/eval/refs/` (gitignored) and take precedence over the Zoom reference when present.
 

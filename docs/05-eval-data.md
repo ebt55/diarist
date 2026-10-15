@@ -6,8 +6,8 @@ Status: v0.1, 15 Oct 2026.
 
 | Folder | Count | Content |
 |---|---|---|
-| `C:\Users\ebin\Documents\digital-minds-meet-aug2026-archive` | 15 sessions | Zoom recordings, Aug 2026: talks with host intro and Q&A; one multi-speaker "CIMC House kickoff talks"; one "Logistics Presentation + Q&A" |
-| `C:\Users\ebin\glm-ground\meets` | 8 sessions | Zoom recordings, Sep 2026: same shape, one "Logistics Presentation" |
+| `C:\Users\ebin\Documents\digital-minds-meet-aug2026-archive` | 15 sessions | Zoom recordings, Aug 2026: talks with host intro and Q&A; one in-room multi-speaker session; one logistics presentation with Q&A |
+| `C:\Users\ebin\glm-ground\meets` | 8 sessions | Zoom recordings, Sep 2026: same shape, one logistics presentation |
 
 Each session has: `*.m4a` audio (use this), `*_WxH.mp4` video (ignore), `*.transcript.vtt` (Zoom transcript with speaker names per cue), `*.cc.vtt` (closed captions without speakers), `*newChat.txt`.
 
@@ -23,26 +23,26 @@ Mostly one speaker for long stretches (a talk), then dense turn-taking in Q&A. T
 
 | Zoom labels | Changes | Min | Session |
 |---|---|---|---|
-| 6 | 97 | 44 | Aug: 2 Justin Shenk |
-| 6 | 83 | 77 | Aug: 14 CIMC House kickoff talks |
-| 3 | 78 | 44 | Aug: 9 Ali Ladak |
-| 3 | 68 | 35 | Sep: 1 Justin Shenk |
-| 3 | 67 | 43 | Sep: 4 Isaak Mengesha |
-| 3 | 60 | 52 | Aug: 3 Soenke Ziesche |
-| 5 | 50 | 48 | Sep: 7 Alex Mallen |
-| 5 | 49 | 45 | Sep: 5 Stephen Casper |
-| 5 | 45 | 47 | Sep: 6 David Krueger |
-| 5 | 42 | 55 | Aug: 7 Berlin Kickoffs |
-| 1 | 0 | 46 | Sep: Logistics Presentation (single speaker) |
+| 6 | 97 | 44 | Aug 2 (talk, 6 labels) |
+| 6 | 83 | 77 | Aug 14 (in-room kickoff talks) |
+| 3 | 78 | 44 | Aug 9 (talk, 3 labels) |
+| 3 | 68 | 35 | Sep 1 |
+| 3 | 67 | 43 | Sep 4 |
+| 3 | 60 | 52 | Aug 3 |
+| 5 | 50 | 48 | Sep 7 |
+| 5 | 49 | 45 | Sep 5 |
+| 5 | 45 | 47 | Sep 6 |
+| 5 | 42 | 55 | Aug 7 |
+| 1 | 0 | 46 | Sep Logistics (single speaker) |
 
 Caveat: in the CIMC session the labels "CIMC" and "Team Apart" are shared room devices, so one Zoom label can hide several real speakers. Treat its reference as speaker-count lower bound only.
 
 ## Selection for the first eval set (to confirm in Phase 4)
 
-1. Aug "2 Justin Shenk" (6 labels, 97 changes) and Aug "9 Ali Ladak" (3 labels, 78 changes): dense Q&A, clean per-person labels. Primary WDER set.
-2. Sep "7 Alex Mallen" and Sep "5 Stephen Casper" (5 labels each): held-out set after tuning.
-3. Sep "Logistics Presentation" (1 speaker, 46 min): false-speaker control. The diarizer must report one speaker.
-4. Aug "14 CIMC House kickoff talks": in-room multi-speaker stress test, reported separately because the reference is coarse.
+1. Aug 2 (6 labels, 97 changes) and Aug 9 (3 labels, 78 changes): dense Q&A, clean per-person labels. Primary WDER set.
+2. Sep 7 and Sep 5 (5 labels each): held-out set after tuning.
+3. Sep Logistics (1 speaker, 46 min): false-speaker control. The diarizer must report one speaker.
+4. Aug 14 (in-room kickoff talks): in-room multi-speaker stress test, reported separately because the reference is coarse.
 5. AMI ES2002a Mix-Headset (public, 4 speakers, reference RTTM): dense-overlap control and the only one with a word-level reference.
 
 `ffprobe` and `ffmpeg` are available on this machine via Chocolatey for the eval harness; the shipped app does not depend on them.
