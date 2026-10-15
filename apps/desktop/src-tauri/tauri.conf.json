@@ -14,15 +14,19 @@
       {
         "label": "main",
         "title": "meet-assist",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 720,
+        "width": 1180,
+        "height": 760,
+        "minWidth": 760,
         "minHeight": 480,
         "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {

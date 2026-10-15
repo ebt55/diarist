@@ -19,7 +19,12 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 meet-core.workspace = true
-tauri = { version = "2.12", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+log = "0.4"
+# protocol-asset: playback streams stored audio through the asset protocol
+# (Range requests); the scope is set at runtime from the data root.
+tauri = { version = "2.12", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.8"
 tauri-plugin-log = "2.10"
 tauri-plugin-shell = "2.5"
