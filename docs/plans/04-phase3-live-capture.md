@@ -8,7 +8,7 @@ Press Record: the app captures the microphone and the system render loopback, ke
 
 ## Owns
 
-`crates/core/src/audio/{capture,pipeline,wav}.rs`, `crates/core/src/engine/live*.rs`, `crates/core/src/live/`, `crates/meet-cli` (`record`, `devices`). UI wiring is a separate chunk under `apps/desktop`.
+`crates/core/src/audio/{capture,pipeline,wav}.rs`, `crates/core/src/engine/live*.rs`, `crates/core/src/live/`, `crates/cli` (`record`, `devices`). UI wiring is a separate chunk under `apps/desktop`.
 
 ## Chunks
 
@@ -44,7 +44,7 @@ Press Record: the app captures the microphone and the system render loopback, ke
 - Crash recovery at launch: for meetings in `recording`, repair WAV headers, materialise the live run, queue the post-pass.
 
 ### 3e CLI
-- `meet-cli devices`; `meet-cli record [--seconds N] [--title s]` prints live words with channel and label, Ctrl-C stops and runs the post-pass, prints a summary.
+- `diarist-cli devices`; `diarist-cli record [--seconds N] [--title s]` prints live words with channel and label, Ctrl-C stops and runs the post-pass, prints a summary.
 
 ### 3f Echo (v2.1, after 3a to 3e are verified)
 - If `is_aec_supported` on the mic client, set the loopback endpoint as the echo-cancellation reference and category Communications.
@@ -52,7 +52,7 @@ Press Record: the app captures the microphone and the system render loopback, ke
 
 ## Verification
 
-- Unit tests above. Manual: play a YouTube talk on speakers, speak into the mic for 2 minutes with `meet-cli record`; both WAVs exist, their lengths differ by under 50 ms, cross-correlation of a clap heard by both peaks at the same timeline position; live words for the mic appear within 1.5 s; post-pass transcript has `me` plus the video's speakers; renaming a preview speaker before Stop survives the post-pass.
+- Unit tests above. Manual: play a YouTube talk on speakers, speak into the mic for 2 minutes with `diarist-cli record`; both WAVs exist, their lengths differ by under 50 ms, cross-correlation of a clap heard by both peaks at the same timeline position; live words for the mic appear within 1.5 s; post-pass transcript has `me` plus the video's speakers; renaming a preview speaker before Stop survives the post-pass.
 - Record 60 minutes in the background while using the PC; no gap growth, memory flat, WAV sizes 115 MB each.
 
 ## Out of scope

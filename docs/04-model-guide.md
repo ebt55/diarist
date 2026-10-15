@@ -2,7 +2,7 @@
 
 Status: v0.2, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. Remaining PENDING items are the Vulkan and CPU packages, untested by us.
 
-## 1. What runs inside meet-assist
+## 1. What runs inside Diarist
 
 Three neural models and one runtime. Nothing else. No Python, no PyTorch, no CUDA toolkit on the user's machine.
 

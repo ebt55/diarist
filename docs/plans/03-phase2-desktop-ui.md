@@ -1,6 +1,6 @@
 # Phase 2: desktop UI
 
-Status: draft, to be delegated once Phase 0 is merged. Runs in parallel with Phase 1 against an in-memory mock store; wiring to the real `meet_core::db` is a short follow-up chunk.
+Status: draft, to be delegated once Phase 0 is merged. Runs in parallel with Phase 1 against an in-memory mock store; wiring to the real `diarist_core::db` is a short follow-up chunk.
 
 ## Goal
 
@@ -8,7 +8,7 @@ A fast, keyboard-friendly Tauri 2 + Svelte 5 interface over the data model: a li
 
 ## Owns
 
-`apps/desktop/**`. Must not touch `crates/`. Uses `meet_core::store::MemoryStore` (seeded) behind `meet_core::store::Store` from Phase 0.5; view types come from `meet_core::views` and the ts-rs output in `src/lib/generated/`. If a view or trait method is missing, report it to the orchestrator instead of defining a local copy.
+`apps/desktop/**`. Must not touch `crates/`. Uses `diarist_core::store::MemoryStore` (seeded) behind `diarist_core::store::Store` from Phase 0.5; view types come from `diarist_core::views` and the ts-rs output in `src/lib/generated/`. If a view or trait method is missing, report it to the orchestrator instead of defining a local copy.
 
 ## Command contract (Tauri commands, all return `Result<T, String>`)
 
@@ -31,7 +31,7 @@ list_model_files() / select_model(role, id) / rescan_models() / open_models_fold
 
 Events: `job:progress {job_id, done_ms, total_ms}`, `job:done {job_id, meeting_id}`, `job:error {job_id, message}`, `transcript:words` and `transcript:relabel` (reserved for live mode; define the payload types now, do not implement producers).
 
-Types are `meet_core::views` (generated TypeScript in `src/lib/generated/`); the Tauri commands are thin wrappers that call `Store` methods inside `spawn_blocking`. Audio playback uses the asset protocol with a scope set at runtime from the data root; for imported meetings the source is the original file (WebView2 decodes AAC), for live meetings the `playback` track. Never fetch the audio file into JavaScript; waveform peaks come from a command.
+Types are `diarist_core::views` (generated TypeScript in `src/lib/generated/`); the Tauri commands are thin wrappers that call `Store` methods inside `spawn_blocking`. Audio playback uses the asset protocol with a scope set at runtime from the data root; for imported meetings the source is the original file (WebView2 decodes AAC), for live meetings the `playback` track. Never fetch the audio file into JavaScript; waveform peaks come from a command.
 
 ## Screens
 

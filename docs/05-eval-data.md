@@ -49,6 +49,6 @@ Caveat: in the Aug 14 session two labels are shared room devices, so one Zoom la
 
 ## Pipeline
 
-`tools/eval` (Python, dev-only): parse transcript.vtt to SegLST and RTTM, run the app's `meet-cli transcribe` on the m4a, export per-word JSON and RTTM, compute DER (collar 0.25 and 0), JER, speaker-count error, WDER overall and within 1 s of a reference speaker change, cpWER and tcpWER via meeteval. Results table committed to `docs/eval/`.
+`tools/eval` (Python, dev-only): parse transcript.vtt to SegLST and RTTM, run the app's `diarist-cli transcribe` on the m4a, export per-word JSON and RTTM, compute DER (collar 0.25 and 0), JER, speaker-count error, WDER overall and within 1 s of a reference speaker change, cpWER and tcpWER via meeteval. Results table committed to `docs/eval/`.
 
 First configs to compare: Nemotron 3.5 (default) versus Nemotron EN on word coverage and cpWER, and 3.5 with the runtime's `--verbatim` flag to see whether the dropped fillers come back. The Zoom captions are machine output, so word accuracy is judged only on AMI ES2002a; the Zoom set judges speaker attribution.

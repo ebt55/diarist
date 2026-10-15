@@ -1,6 +1,6 @@
 # Data model (SQLite)
 
-Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjudication (research/06). One SQLite file at `<data root>\meet-assist.db`, WAL mode, foreign keys on. Backups via the rusqlite backup API or `VACUUM INTO` a temp file followed by flush and rename; never by copying the live file.
+Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjudication (research/06). One SQLite file at `<data root>\diarist.db`, WAL mode, foreign keys on. Backups via the rusqlite backup API or `VACUUM INTO` a temp file followed by flush and rename; never by copying the live file.
 
 ## Principles
 

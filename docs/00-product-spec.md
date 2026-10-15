@@ -1,4 +1,4 @@
-# meet-assist: product spec
+# Diarist: product spec
 
 Status: draft v0.1, 15 Oct 2026. Owner: Ebin. Planner: Fable 5.1. Implementation: Opus 5.5 agents.
 

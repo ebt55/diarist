@@ -32,17 +32,17 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p meet-cli -- version                     # prints "meet-cli 0.1.0"
-cargo run -p meet-cli -- doctor                      # data root, selections, GPU, free VRAM
-cargo run -p meet-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
-cargo run -p meet-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
-cargo run -p meet-cli -- engine install              # runtime zip from manifests/engine.json
-cargo run -p meet-cli -- retention [--apply]         # audio past audio_retention_days (dry run by default)
-cargo run --release -p meet-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
-cargo run -p meet-cli -- list | show <id> | search <words> | export <id> --format srt
-cargo run -p meet-cli -- devices                     # audio endpoints with ids, default and comms marks
-cargo run -p meet-cli -- play --device "Speakers (2- VB-Audio" x.wav   # render a WAV to an output endpoint
-cargo run --release -p meet-cli -- record [--seconds 60] [--title t] [--language en] [--diarize-mic] [--mic <id|name>] [--loopback <id|name>]
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0"
+cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
+cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
+cargo run -p diarist-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
+cargo run -p diarist-cli -- engine install              # runtime zip from manifests/engine.json
+cargo run -p diarist-cli -- retention [--apply]         # audio past audio_retention_days (dry run by default)
+cargo run --release -p diarist-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
+cargo run -p diarist-cli -- list | show <id> | search <words> | export <id> --format srt
+cargo run -p diarist-cli -- devices                     # audio endpoints with ids, default and comms marks
+cargo run -p diarist-cli -- play --device "Speakers (2- VB-Audio" x.wav   # render a WAV to an output endpoint
+cargo run --release -p diarist-cli -- record [--seconds 60] [--title t] [--language en] [--diarize-mic] [--mic <id|name>] [--loopback <id|name>]
 ```
 
 `transcribe` extras: `--json` prints one machine-readable result object on
@@ -56,14 +56,14 @@ The default ASR model is the EN model (`nemotron-en`, measured best on
 English, docs/eval); Nemotron 3.5 is the optional pick for other or mixed
 languages, and only it receives `--language`.
 
-Global flags: `--data-dir` (default: `MEET_ASSIST_DATA_DIR`, then
-`portable.txt` next to the exe, then `HKCU\Software\meet-assist\DataRoot`,
-then `%LOCALAPPDATA%\app.meetassist.desktop`), `--db`, and `--models-dir` /
+Global flags: `--data-dir` (default: `DIARIST_DATA_DIR`, then
+`portable.txt` next to the exe, then `HKCU\Software\Diarist\DataRoot`,
+then `%LOCALAPPDATA%\app.diarist.desktop`), `--db`, and `--models-dir` /
 `--engine-dir` (relative paths are taken from the current directory) to use
 models and a runtime from elsewhere, e.g. the repo's local copies:
 
 ```sh
-cargo run --release -p meet-cli -- --data-dir %TEMP%\ma --models-dir models --engine-dir engine transcribe data\samples\ES2002a.Mix-Headset.wav
+cargo run --release -p diarist-cli -- --data-dir %TEMP%\diarist-scratch --models-dir models --engine-dir engine transcribe data\samples\ES2002a.Mix-Headset.wav
 ```
 
 ### Live recording (`record`, Phase 3a)
@@ -80,7 +80,7 @@ default output, following the endpoint other apps actually play to), and
 prints live words per channel with provisional labels and the levels once a
 second. Ctrl-C or `--seconds` stops it; it then waits for the post-pass and
 prints the run ids, speakers, FLAC size and wall time. Devices are given by
-id or by (a prefix of) the name `meet-cli devices` prints. It never changes
+id or by (a prefix of) the name `diarist-cli devices` prints. It never changes
 the system's default devices or volumes.
 
 `play --device <render id|name> <16-bit wav>` renders a WAV to an output
@@ -91,8 +91,8 @@ there comes out of the `CABLE Output (2- VB-Audio Virtual Cable)` capture
 endpoint, which makes a deterministic mic:
 
 ```sh
-meet-cli play --device "Speakers (2- VB-Audio" talk.wav &
-meet-cli record --seconds 30 --mic "CABLE Output"
+diarist-cli play --device "Speakers (2- VB-Audio" talk.wav &
+diarist-cli record --seconds 30 --mic "CABLE Output"
 ```
 
 Setting `capture.autoconvert` (default true) set to `false` opens the
@@ -110,16 +110,16 @@ Skipped unless the variables are set:
 
 | Variable | Tests |
 |---|---|
-| `MEET_ASSIST_SAMPLES` (folders, `;`-separated) | `--test decode_samples`: every `*.m4a` decodes within 50 ms of ffprobe (run with `--release`) |
-| `MEET_ASSIST_MODELS_DIR` | real GGUF headers, scan, classification |
-| `MEET_ASSIST_ENGINE_DIR` + `MEET_ASSIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
-| `MEET_ASSIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
-| `MEET_ASSIST_CIMC_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
-| engine + models | `-p meet-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency, VRAM |
-| `MEET_ASSIST_AUDIO_TEST=1` (VB-Audio Cable) | `-p meet-core --test capture_device`: a tone played into the cable is captured from `CABLE Output` at 16 kHz |
-| `MEET_ASSIST_LIVE_TEST=1` + engine + models (VB-Audio Cable) | `-p meet-cli --test live_record` (about 80 s, one minute audible on the loopback output): cable as the mic, a second AMI cut on the default output (`MEET_ASSIST_LOOPBACK_RENDER` picks another output; `MEET_ASSIST_CABLE_RENDER` / `MEET_ASSIST_CABLE_CAPTURE` override the cable); WAV lengths, cross-correlation offsets, live latency, post-pass run, FLAC, rename carry-over |
+| `DIARIST_SAMPLES` (folders, `;`-separated) | `--test decode_samples`: every `*.m4a` decodes within 50 ms of ffprobe (run with `--release`) |
+| `DIARIST_MODELS_DIR` | real GGUF headers, scan, classification |
+| `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
+| `DIARIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
+| `DIARIST_LONGFILE_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
+| engine + models | `-p diarist-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency, VRAM |
+| `DIARIST_AUDIO_TEST=1` (VB-Audio Cable) | `-p diarist-core --test capture_device`: a tone played into the cable is captured from `CABLE Output` at 16 kHz |
+| `DIARIST_LIVE_TEST=1` + engine + models (VB-Audio Cable) | `-p diarist-cli --test live_record` (about 80 s, one minute audible on the loopback output): cable as the mic, a second AMI cut on the default output (`DIARIST_LOOPBACK_RENDER` picks another output; `DIARIST_CABLE_RENDER` / `DIARIST_CABLE_CAPTURE` override the cable); WAV lengths, cross-correlation offsets, live latency, post-pass run, FLAC, rename carry-over |
 
-`UPDATE_GOLDEN=1 cargo test -p meet-core golden` rewrites the export golden
+`UPDATE_GOLDEN=1 cargo test -p diarist-core golden` rewrites the export golden
 files in `crates/core/tests/golden/`.
 
 `.cargo/config.toml` turns on the MSRV-aware resolver
@@ -128,20 +128,20 @@ versions that support the workspace `rust-version` (1.90) when they exist.
 
 ### Core/UI seam
 
-- **TypeScript types** for `meet_core::views`, the domain types and the
-  live payloads (`meet_core::live`, `live::views`, `audio::capture`'s
+- **TypeScript types** for `diarist_core::views`, the domain types and the
+  live payloads (`diarist_core::live`, `live::views`, `audio::capture`'s
   `DeviceInfo` as `AudioDevice`, `engine::ServeStatus` / `ServeSnapshot`)
   are generated by ts-rs into `apps/desktop/src/lib/generated/` whenever the
-  `meet-core` tests run (`cargo test -p meet-core`, or the workspace test
+  `diarist-core` tests run (`cargo test -p diarist-core`, or the workspace test
   above), together with two constant modules: `palette.ts`
   (`SPEAKER_PALETTE`, `ME_COLOR`) and `settingDefaults.ts`
-  (`meet_core::settings::DEFAULTS`). They are committed; never edit them by
+  (`diarist_core::settings::DEFAULTS`). They are committed; never edit them by
   hand. ts-rs does not delete
   files for removed types, so after renaming or removing one, regenerate from
   scratch:
 
   ```sh
-  rm -rf apps/desktop/src/lib/generated && cargo test -p meet-core --lib export_bindings
+  rm -rf apps/desktop/src/lib/generated && cargo test -p diarist-core --lib export_bindings
   ```
 
   `.cargo/config.toml` sets `TS_RS_EXPORT_DIR` and `TS_RS_LARGE_INT=number`
@@ -151,10 +151,10 @@ versions that support the workspace `rust-version` (1.90) when they exist.
   against `MemoryStore` and `SqliteStore` (in-memory); a new implementation
   adds one test that calls `run_all` with its own factory.
 - **FFI sidecar wire format** (not on the main path):
-  `cargo test -p meet-core --features ffi-wire`.
-- **Demo data:** `meet-assist.exe --demo` runs on `MemoryStore::demo()`
+  `cargo test -p diarist-core --features ffi-wire`.
+- **Demo data:** `diarist.exe --demo` runs on `MemoryStore::demo()`
   (500 meetings, three with 2,000 segments, model files and selections) with
-  a scratch data root under `%TEMP%\meet-assist-demo`. Without `--demo` the
+  a scratch data root under `%TEMP%\diarist-demo`. Without `--demo` the
   app opens `SqliteStore` on the resolved data root.
 
 ## Desktop frontend
@@ -177,11 +177,11 @@ From `apps/desktop`:
 
 ```sh
 bun run tauri dev                       # dev window with hot reload (not yet run)
-bun run tauri build --debug --no-bundle # target/debug/meet-assist.exe, frontend embedded
+bun run tauri build --debug --no-bundle # target/debug/diarist.exe, frontend embedded
 bun run tauri build                     # release exe + NSIS installer + updater signature
 ```
 
-A plain `cargo build -p meet-assist` builds an exe that loads the frontend
+A plain `cargo build -p diarist` builds an exe that loads the frontend
 from the Vite dev server (`bun run dev`); use the `tauri build` commands for
 an exe with the frontend inside.
 
@@ -189,54 +189,58 @@ The release build signs the updater artifact (`bundle.createUpdaterArtifacts`)
 and needs the updater private key:
 
 ```sh
-export TAURI_SIGNING_PRIVATE_KEY="$USERPROFILE/.tauri/meet-assist.key"   # a path or the key itself
+export TAURI_SIGNING_PRIVATE_KEY="$USERPROFILE/.tauri/diarist.key"   # a path or the key itself
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""                              # this key has no password
 bun run tauri build
 ```
 
 Without the key, build with `bun run tauri build -c '{"bundle":{"createUpdaterArtifacts":false}}'`.
 The key was generated once with `bunx tauri signer generate --ci -w
-%USERPROFILE%\.tauri\meet-assist.key`; it is not in the repository. Its public
+%USERPROFILE%\.tauri\diarist.key` (a key file kept under an earlier name
+works the same: point the variable at it or rename it); it is not in the
+repository. Its public
 half is `plugins.updater.pubkey` in `tauri.conf.json`. Losing the private key
 means installed copies can no longer verify updates: back it up, and give it
 to CI as the `TAURI_SIGNING_PRIVATE_KEY` secret (`.github/workflows/release.yml`,
-not run yet). The update endpoint in `tauri.conf.json` is a placeholder
-(`REPLACE_WITH_GITHUB_OWNER/REPLACE_WITH_GITHUB_REPO`); while it is, Check for
-updates says the build has no update address.
+not run yet). The update endpoint in `tauri.conf.json` is
+`https://github.com/ebt55/diarist/releases/latest/download/latest.json`; it
+answers once a release with `latest.json` is published there. The
+repository's social preview (Settings, General, Social preview) is
+`branding/social.png`.
 
 The Tauri CLI downloads NSIS into its cache on the first bundle. If that
 download is blocked, add `--no-bundle` to get just the exe.
 
 Release build on the reference machine (15 Oct 2026, 5 min 47 s from a warm
-cache): installer `meet-assist_0.1.0_x64-setup.exe` 6.67 MiB, exe 24.9 MiB.
+cache): installer `Diarist_0.1.0_x64-setup.exe` 6.67 MiB, exe 24.9 MiB.
 Startup and import timings: "Release measurements" below.
 
 ### Installer and uninstaller
 
 `apps/desktop/src-tauri/windows/hooks.nsh` hooks Tauri's NSIS template
 (per-user install, `downloadBootstrapper` for WebView2). The POSTUNINSTALL
-hook reads `HKCU\Software\meet-assist\DataRoot`: with "Delete the application
-data" ticked it also removes meet-assist's items from a moved data root and
+hook reads `HKCU\Software\Diarist\DataRoot`: with "Delete the application
+data" ticked it also removes Diarist's items from a moved data root and
 the key; unticked it asks whether to remove `engine\` and `models\`. For
 tests, `uninstall.exe /S /DELETEAPPDATA` acts as if the box were ticked and
 `/S /REMOVEMODELS` answers Yes to the question. **The ticked box (and
-`/DELETEAPPDATA`) always removes `%LOCALAPPDATA%\app.meetassist.desktop`**:
+`/DELETEAPPDATA`) always removes `%LOCALAPPDATA%\app.diarist.desktop`**:
 move a real data folder out of the way before testing it.
 
 Smoke test (PowerShell), as used for Phase 0 acceptance:
 
 ```powershell
-$p = Start-Process -FilePath .\target\debug\meet-assist.exe -PassThru
+$p = Start-Process -FilePath .\target\debug\diarist.exe -PassThru
 Start-Sleep -Seconds 5
 $p.Refresh(); "alive: $(-not $p.HasExited)"
 Stop-Process -Id $p.Id; $p.WaitForExit(5000) | Out-Null; "exited: $($p.HasExited)"
 ```
 
 Runtime locations, all under the resolved data root (default
-`%LOCALAPPDATA%\app.meetassist.desktop`): the app log `logs\meet-assist.log`
+`%LOCALAPPDATA%\app.diarist.desktop`): the app log `logs\diarist.log`
 and the live server's `logs\serve.log`, the WebView2 profile `EBWebView\`,
 the window state `.window-state.json`. A scratch data root
-(`MEET_ASSIST_DATA_DIR`, `portable.txt` or the registry key) therefore never
+(`DIARIST_DATA_DIR`, `portable.txt` or the registry key) therefore never
 touches the real one. Only one instance runs at a time (single-instance
 plugin): close the app before starting another build.
 To inspect the page from outside, start the exe with
@@ -246,7 +250,7 @@ called from the page with `window.__TAURI_INTERNALS__.invoke(...)` (e.g.
 `import_file`, `export_meeting_to` writes an export without the dialog).
 
 Debug builds compile dependencies with `opt-level = 2` (workspace
-`Cargo.toml`), but `meet-core` itself stays unoptimised: decoding a 45-minute
+`Cargo.toml`), but `diarist-core` itself stays unoptimised: decoding a 45-minute
 m4a takes about 90 s in a debug build against 3 s in release.
 
 ### End-to-end on the GPU against a scratch data root
@@ -256,13 +260,13 @@ and `engine` folders are junctions to the repo's local copies, so nothing is
 copied or downloaded.
 
 ```powershell
-$root = "$env:TEMP\ma-e2e"
+$root = "$env:TEMP\diarist-e2e"
 New-Item -ItemType Directory -Force $root | Out-Null
 cmd /c mklink /J "$root\models" "$PWD\models"
 cmd /c mklink /J "$root\engine" "$PWD\engine"
-$env:MEET_ASSIST_DATA_DIR = $root
+$env:DIARIST_DATA_DIR = $root
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9223"
-.\target\debug\meet-assist.exe
+.\target\debug\diarist.exe
 ```
 
 The first import scans the folders and selects the EN model and Nemotron 3
@@ -294,20 +298,20 @@ arrives 40 dB down (the AGC makes up for most of it; see `LoopbackQuiet`).
 Nothing here changes the system's default devices or volumes.
 
 ```sh
-meet-cli --data-dir %TEMP%\ma-cli devices        # ids and names, [default] / [comms] marks
-meet-cli --data-dir %TEMP%\ma-cli play --device "Speakers (2- VB-Audio" talk.wav
-meet-cli --data-dir %TEMP%\ma-cli play --device "Speakers (HyperX QuadCast)" other.wav
+diarist-cli --data-dir %TEMP%\diarist-cli-data devices        # ids and names, [default] / [comms] marks
+diarist-cli --data-dir %TEMP%\diarist-cli-data play --device "Speakers (2- VB-Audio" talk.wav
+diarist-cli --data-dir %TEMP%\diarist-cli-data play --device "Speakers (HyperX QuadCast)" other.wav
 ```
 
-`meet-cli doctor` prints the NVML reading (`nvml  8409 MB free of 10240
+`diarist-cli doctor` prints the NVML reading (`nvml  8409 MB free of 10240
 MB`) next to the runtime's.
 
 ### From the CLI
 
 ```sh
-meet-cli play --device "Speakers (2- VB-Audio" talk.wav &
-meet-cli play --device "Speakers (HyperX QuadCast)" other.wav &
-meet-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (HyperX QuadCast)"
+diarist-cli play --device "Speakers (2- VB-Audio" talk.wav &
+diarist-cli play --device "Speakers (HyperX QuadCast)" other.wav &
+diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (HyperX QuadCast)"
 ```
 
 ### From the app
@@ -382,7 +386,7 @@ records (or while it shows "Finalizing") and start it again.
 
 A scratch data root whose `models` and `engine` are junctions to the repo
 copies (see "End-to-end on the GPU" above), the debug app started with
-`MEET_ASSIST_DATA_DIR` set to it and
+`DIARIST_DATA_DIR` set to it and
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`, and a
 Node script talking to `http://127.0.0.1:9223/json`: `Runtime.evaluate`
 for `window.__TAURI_INTERNALS__.invoke(...)` and DOM checks,
@@ -405,12 +409,12 @@ recorded:
 | R while recording | still recording, a hint toast, no sheet |
 | Live legend | no chip for speakers without words |
 
-The app log goes to `<data root>\logs\meet-assist.log`.
+The app log goes to `<data root>\logs\diarist.log`.
 
 ## First run, downloads and the data folder (Phase 5)
 
 Checked on the reference machine on 15 Oct 2026 with scratch data roots set
-through `HKCU\Software\meet-assist\DataRoot` (and removed afterwards).
+through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
 
 - `setup_status` scans, installs runtime zips dropped into `engine\`
   (`download::install_dropped_engines`, SHA-checked), and reports the GPU
@@ -431,7 +435,7 @@ through `HKCU\Software\meet-assist\DataRoot` (and removed afterwards).
   hashed once on scan and cached in `<file>.sha256`; a mismatch is reported
   and the file is not treated as the manifest model. Linked folders under
   `models\` are scanned.
-- Observed connections: the engine zip from `meet-assist.exe` (github.com,
+- Observed connections: the engine zip from `diarist.exe` (github.com,
   then GitHub's download CDN on 185.199.108-111.133); model pulls only from
   `C:\Windows\System32\curl.exe` (huggingface.co, us.aws.cdn.hf.co).
 - Move data folder: `move_data_root` copies (database through the backup
@@ -440,8 +444,18 @@ through `HKCU\Software\meet-assist\DataRoot` (and removed afterwards).
   the default root) and leaves `moved-from.json`; the UI restarts the app and
   the next launch deletes the copied items from the old root, retrying for up
   to 10 s while the exiting instance still holds files.
+- Rename migration (`models::legacy`): when the data root has no
+  `diarist.db` and a data root from before the rename to Diarist exists
+  (the old registry value, else the old default folder), the app runs on an
+  empty `MemoryStore` and asks once whether to move it in (`migrate_legacy_data`,
+  the same copy, verify, restart and cleanup as Move data folder, plus
+  removing the old registry value) or start fresh (`start_fresh` creates
+  `diarist.db`). Test it only against a scratch copy:
+  `DIARIST_LEGACY_ROOT=<copy of an old root>` with `DIARIST_DATA_DIR=<empty
+  folder>` (without `DIARIST_LEGACY_ROOT`, a `DIARIST_DATA_DIR` run never
+  offers the move).
 - Retention runs at launch and every 24 h (`maintenance.rs`);
-  `meet-cli retention --dry-run|--apply [--days N]` does the same from the CLI.
+  `diarist-cli retention --dry-run|--apply [--days N]` does the same from the CLI.
 - `health_check` is the Diagnostics checklist; `diagnostics_report` (Copy
   diagnostics) includes it.
 
@@ -456,7 +470,7 @@ Release build of 15 Oct 2026 on the reference machine:
 
 | What | Value |
 |---|---|
-| Installer | 6.67 MiB, 6,990,679 bytes (`meet-assist_0.1.0_x64-setup.exe`, plus a 440-byte `.sig`) |
+| Installer | 6.67 MiB, 6,990,679 bytes (`Diarist_0.1.0_x64-setup.exe`, plus a 440-byte `.sig`) |
 | Exe | 24.9 MiB, 26,150,400 bytes |
 | Release build time | 5 min 47 s (LTO, codegen-units 1, warm dependency cache) |
 | Start, second and later launches | 756 to 779 ms from process start to the "interactive" log line (3 runs); 113 to 136 ms after navigation start (`performance.now()`); library with 0 meetings, scratch data root |
@@ -468,18 +482,18 @@ Release build of 15 Oct 2026 on the reference machine:
 ## Install and uninstall test (15 Oct 2026)
 
 On the reference machine, with the real data root protected: a byte copy and
-a SHA-256 manifest of `%LOCALAPPDATA%\app.meetassist.desktop` first (232
-files), `HKCU\Software\meet-assist\DataRoot` pointed at an empty scratch
+a SHA-256 manifest of `%LOCALAPPDATA%\app.diarist.desktop` first (232
+files), `HKCU\Software\Diarist\DataRoot` pointed at an empty scratch
 folder, and the real root renamed aside only for the ticked uninstall (the
-template removes `%LOCALAPPDATA%\app.meetassist.desktop` whenever the box is
+template removes `%LOCALAPPDATA%\app.diarist.desktop` whenever the box is
 ticked).
 
 | Step | Result |
 |---|---|
-| `meet-assist_0.1.0_x64-setup.exe /S` | 13 s; `%LOCALAPPDATA%\meet-assist\{meet-assist.exe, uninstall.exe}`, Start menu entry, uninstall key |
+| `Diarist_0.1.0_x64-setup.exe /S` | 13 s; `%LOCALAPPDATA%\Diarist\{diarist.exe, uninstall.exe}`, Start menu entry, uninstall key |
 | Launch the installed app | setup screen for the empty scratch root (GPU, driver 610.88, CUDA 13.3; Install engine (98 MB), Install recommended models (770 MB)); log, WebView2 profile and window state written under the scratch root |
 | Uninstall, box unticked (driven with BM_CLICK on the NSIS controls) | question "Remove the downloaded engine and models (903 MB)? Transcripts and recordings are kept in ...", answered Yes: `engine\` and `models\` removed; database (the AMI transcript), `audio\`, logs and the DataRoot key kept; program, Start menu entry and uninstall key removed |
-| Reinstall `/S`, uninstall with the box ticked | no question; the scratch root's items and then the folder removed, `HKCU\Software\meet-assist` removed, `%APPDATA%\app.meetassist.desktop` removed |
+| Reinstall `/S`, uninstall with the box ticked | no question; the scratch root's items and then the folder removed, `HKCU\Software\Diarist` removed, `%APPDATA%\app.diarist.desktop` removed |
 | Real data root afterwards | renamed back; 232 files with the same sizes and SHA-256 as before the test |
 
 UI Automation exposes the NSIS controls only as panes, so the test script

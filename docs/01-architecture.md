@@ -32,7 +32,7 @@ Status: v0.7, 15 Oct 2026 (Phase 5: install model, layout, runtime and model man
 | Recording storage | Per-channel 16 kHz mono WAV during recording with periodic `flush()`. After the post-pass: one stereo FLAC (left mic, right loopback) encoded with the `flac-codec` crate, registered as the `playback` track, WAVs deleted (lossless). Imports keep the original file as the playback source and delete the 16 kHz intermediate. Retention default 30 days, pin to keep. Free-space check before recording or import | FLAC is 30 to 40 percent of PCM on this material (about 90 MB per stereo hour); pure-Rust encoders are mature; symphonia already decodes it; no Media Foundation (research/06 B) |
 | Audio decode | symphonia (AAC-LC, MP3, FLAC, WAV, Ogg/Vorbis), then Windows Media Foundation `IMFSourceReader`, then `ffmpeg` if on PATH, then an error that shows the conversion command. Phase 1 test decodes all 23 eval files | All eval files are AAC-LC 48 kHz stereo (symphonia rates AAC-LC "Great"); HE-AAC and Opus need the fallbacks |
 | Playback in UI | Tauri asset protocol with Range requests (206, 1000 kB chunks); asset scope set at runtime from the data root; `<audio crossorigin="anonymous">` routed through a Web Audio gain matrix (mono by default, solo-channel toggle) so hard-panned me/them is not forced on headphones; waveform peaks precomputed in Rust, never by fetching the file | Seeking works; the page and the asset are different local origins, so Web Audio needs CORS; fetching a file whole would load 690 MB of floats |
-| Install layout | Install dir stays Tauri's NSIS default (`%LOCALAPPDATA%\meet-assist`, user-changeable on the directory page). Data root defaults to Tauri's `app_local_data_dir()` = `%LOCALAPPDATA%\app.meetassist.desktop` (db, audio, engine, models, logs, the WebView2 profile and the window state, all resolved before the app starts so they follow a moved root; nothing in Roaming except an empty folder the window-state plugin creates), relocatable from Settings (copy, verify, registry, restart, old copy deleted at the next launch), with the chosen path in `HKCU\Software\meet-assist\DataRoot`; portable mode `<exe dir>\data`. The uninstaller's "delete app data" checkbox (off by default, hidden during updates) wipes everything; a POSTUNINSTALL hook otherwise offers to remove engine and models while keeping transcripts and recordings | No forked NSIS template; Tauri's path APIs and the uninstaller agree on one folder (research/06 C) |
+| Install layout | Install dir stays Tauri's NSIS default (`%LOCALAPPDATA%\Diarist`, user-changeable on the directory page). Data root defaults to Tauri's `app_local_data_dir()` = `%LOCALAPPDATA%\app.diarist.desktop` (db, audio, engine, models, logs, the WebView2 profile and the window state, all resolved before the app starts so they follow a moved root; nothing in Roaming except an empty folder the window-state plugin creates), relocatable from Settings (copy, verify, registry, restart, old copy deleted at the next launch), with the chosen path in `HKCU\Software\Diarist\DataRoot`; portable mode `<exe dir>\data`. The uninstaller's "delete app data" checkbox (off by default, hidden during updates) wipes everything; a POSTUNINSTALL hook otherwise offers to remove engine and models while keeping transcripts and recordings | No forked NSIS template; Tauri's path APIs and the uninstaller agree on one folder (research/06 C) |
 | Install model | 7 MB installer (6.66 MiB measured); first run downloads the runtime package for the GPU (CUDA 98 MB, Vulkan 19 MB or CPU 6 MB; preselected from NVML and DXGI, the user can override) with our downloader (SHA-256 from the manifest, rustls with `rustls-platform-verifier`, Range resume, requests of at most two minutes so a dead connection ends as stalled), then the two default models with the runtime's own `nemo-speech pull` (System32 `curl.exe`) into `NEMO_SPEECH_MODEL_DIR` under the data root, SHA-checked by the runtime and by us: Nemotron 3 Diarization (102 MB) and the EN model (668 MB), 770 MB. Nemotron 3.5 (742 MB) and experimental Parakeet (681 MB) are opt-in from Settings. Every item shows URL, hash, size and folder with Retry and Copy link; files placed by hand are hash-checked on Refresh. Nothing is a gate (docs/00, "nobody fights the app"): Import and Record check at click time and offer the fix | ComfyUI-style: no Python, no torch, no CUDA toolkit; one ASR model serves live and file; 870 MB default download, 2.3 GB with every option |
 | Model management (ComfyUI-style) | One `models\` tree under the data root. The app scans it recursively at launch and on Refresh, reads each GGUF header (`general.architecture`, name, quantization, file size) and classifies the file by role (ASR, diarizer, later embedding, punctuation, LLM) from a small architecture table; unknown architectures are listed as "unrecognised" with the header's name. Settings shows every discovered model per role with size, measured or estimated VRAM, and a fit mark against free VRAM; the user picks one per role. Downloads (first run, `nemo-speech pull`, "Download recommended", "Add from URL" into `models\user\`) land in the same tree; `models.user.json` in the data root adds recommended entries. A `<file>.meet.json` sidecar can override role and capabilities when detection is wrong; an unrecognised file can still be selected for a role, with a warning | Drop a new NVIDIA GGUF in the folder and use it the same minute, no app release. The runtime decides at load time whether it can run the file; its error is shown verbatim. Role subfolders are a convention for humans, not a requirement, because the header already says what the file is |
 | Runtime management | `engine\<name>-<version>\` folders are scanned the same way; the app runs `nemo-speech --json doctor` on each, lists versions in Settings, defaults to the newest it has fixtures for, and lets the user pick or drop in a newer zip or extracted folder. "Check for newer runtime" lists the NeMo-Speech.cpp GitHub releases (unauthenticated API, on demand only) and installs a package into `engine\<name>\` with the release's `.sha256`. Versions outside the tested range work with a warning | Runtime updates are a folder drop, like a ComfyUI custom node; the adapter contract is re-verified against fixtures per tested version |
@@ -47,7 +47,7 @@ Status: v0.7, 15 Oct 2026 (Phase 5: install model, layout, runtime and model man
 
 ```
 +---------------------------------------------------------------+
-| meet-assist.exe (Tauri 2)                                     |
+| diarist.exe (Tauri 2)                                     |
 |  WebView2: Svelte UI  <-- Tauri events/commands -->           |
 |  Rust backend (crates/core)                                   |
 |    audio::capture   wasapi mic + loopback -> rtrb rings       |
@@ -73,16 +73,16 @@ Status: v0.7, 15 Oct 2026 (Phase 5: install model, layout, runtime and model man
 ## Data layout on disk
 
 ```
-%LOCALAPPDATA%\meet-assist\              Tauri app install dir (NSIS, per-user, about 10 MB)
+%LOCALAPPDATA%\Diarist\              Tauri app install dir (NSIS, per-user, about 10 MB)
 
-%LOCALAPPDATA%\app.meetassist.desktop\   data root (relocatable; portable mode: <exe dir>\data)
+%LOCALAPPDATA%\app.diarist.desktop\   data root (relocatable; portable mode: <exe dir>\data)
   engine\
     nemo-speech-0.2.0-windows-x86_64-cuda\   one folder per runtime version; drop in a newer one to try it
   models\                                 scanned recursively; drop any GGUF here
     asr\                                  convention only: the app reads the GGUF header to find the role
     diarization\
     nvidia\<repo>\<rev>\...               where `nemo-speech pull` puts files (NEMO_SPEECH_MODEL_DIR points here)
-  meet-assist.db (+ -wal)                 SQLite
+  diarist.db (+ -wal)                 SQLite
   audio\<meeting_uid>\                    mic.wav, loopback.wav while recording; playback.flac after
   logs\
 ```
@@ -107,10 +107,10 @@ The repo ships `manifests/engine.json` and `manifests/models.json` (URLs, sha256
 ## Repository layout
 
 ```
-meet-assist/
+diarist/
   Cargo.toml                workspace
   crates/core/              lib: types, views, store (trait, memory, sqlite), engine, audio, pipeline, models, transcript, export
-  crates/meet-cli/          dev CLI: transcribe, record, export, search, models, doctor (no UI)
+  crates/cli/          dev CLI: transcribe, record, export, search, models, doctor (no UI)
   crates/meet-engine/       v2 optional: Rust sidecar linking the C ABI (only if FFI wins)
   apps/desktop/             Tauri 2 app: src-tauri/ (thin commands) + src/ (Svelte 5) + src/lib/generated (ts-rs)
   manifests/                engine.json, models.json
@@ -118,7 +118,7 @@ meet-assist/
   docs/
 ```
 
-Rule: `apps/desktop/src-tauri` holds only Tauri command wrappers and event plumbing over `meet_core::store::Store`. All logic is in `crates/core` and is testable without a GUI.
+Rule: `apps/desktop/src-tauri` holds only Tauri command wrappers and event plumbing over `diarist_core::store::Store`. All logic is in `crates/core` and is testable without a GUI.
 
 ## Where the "implement a research paper" ambition lands
 
@@ -131,7 +131,7 @@ The streaming Sortformer paper (arXiv 2507.18446) is already implemented in the 
 ## Testing strategy
 
 - `crates/core` unit tests use fixtures: real runtime JSON outputs captured in the spike, synthetic PCM for the pipeline (gap insertion, drift, anchors), SQL migration round-trips, the `Store` conformance suite run against both `MemoryStore` and `SqliteStore`.
-- Integration tests that need the GPU are gated on `MEET_ASSIST_ENGINE_DIR` and `MEET_ASSIST_MODELS_DIR`; decode tests over the user's files are gated on `MEET_ASSIST_SAMPLES`.
+- Integration tests that need the GPU are gated on `DIARIST_ENGINE_DIR` and `DIARIST_MODELS_DIR`; decode tests over the user's files are gated on `DIARIST_SAMPLES`.
 - The eval harness (`tools/eval`) computes DER, JER, WDER and cpWER on the eval set; results are committed as a regression table.
 
 ## Risks and mitigations

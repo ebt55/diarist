@@ -1,6 +1,6 @@
 # Phase 4: eval harness
 
-Status: draft. Depends on Phase 1 (`meet-cli transcribe` with JSON and RTTM export). Python under `tools/eval` only; nothing here ships.
+Status: draft. Depends on Phase 1 (`diarist-cli transcribe` with JSON and RTTM export). Python under `tools/eval` only; nothing here ships.
 
 ## Goal
 
@@ -14,7 +14,7 @@ tools/eval/
   sessions.example.toml   committed; sessions.toml is gitignored (points at private m4a and vtt paths)
   zoom_vtt_to_ref.py      transcript.vtt -> SegLST (JSONL) + RTTM, label -> speaker id map kept in a sidecar JSON
   ami_fetch.py            downloads AMI ES2002a Mix-Headset WAV + reference RTTM into data/samples/ami/
-  run.py                  runs meet-cli per session, converts output, computes metrics, writes the table
+  run.py                  runs diarist-cli per session, converts output, computes metrics, writes the table
   metrics.py              DER (collar 0.25 and 0, overlap scored), JER, speaker-count error, WDER (overall and within 1 s of a reference change), cpWER, tcpWER
   README.md
 ```

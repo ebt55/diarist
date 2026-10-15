@@ -22,5 +22,5 @@ Freeze the seam between `crates/core` and `apps/desktop` so Phase 1 (core) and P
 
 ## Boundaries after this phase
 
-- Phase 1 owns `crates/core/src/{db,models,audio,engine,transcript,export,pipeline}` and `crates/meet-cli`. It implements `SqliteStore: Store` and must not change `views.rs` or the `Store` trait without a note to the orchestrator.
-- Phase 2 owns `apps/desktop/**` and codes only against `meet_core::{views, store::Store, types}` and the generated TypeScript.
+- Phase 1 owns `crates/core/src/{db,models,audio,engine,transcript,export,pipeline}` and `crates/cli`. It implements `SqliteStore: Store` and must not change `views.rs` or the `Store` trait without a note to the orchestrator.
+- Phase 2 owns `apps/desktop/**` and codes only against `diarist_core::{views, store::Store, types}` and the generated TypeScript.

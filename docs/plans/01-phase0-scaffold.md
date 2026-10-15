@@ -8,14 +8,14 @@ A buildable monorepo skeleton matching the repository layout in `docs/01-archite
 
 ## Deliverables
 
-1. `Cargo.toml` workspace (resolver 2) with members `crates/core`, `crates/meet-cli`, `apps/desktop/src-tauri`; shared `[workspace.dependencies]` for serde, serde_json, thiserror, anyhow, tracing, ulid, clap.
-2. `crates/core` (package `meet-core`):
+1. `Cargo.toml` workspace (resolver 2) with members `crates/core`, `crates/cli`, `apps/desktop/src-tauri`; shared `[workspace.dependencies]` for serde, serde_json, thiserror, anyhow, tracing, ulid, clap.
+2. `crates/core` (package `diarist-core`):
    - `types.rs`: `Meeting`, `AudioTrack`, `Speaker`, `Segment`, `Word`, enums `Source`, `Channel`, `MeetingStatus`, matching `docs/02-data-model.md`; serde derive; ids are `String` (ulid).
    - `protocol.rs`: `EngineCommand` (tag `cmd`) and `EngineEvent` (tag `ev`) enums matching `docs/03-engine-protocol.md`; serde round-trip tests using the JSON examples from that doc; frame header helpers (`u8 type + u32 LE len`) with tests.
    - `error.rs`: `thiserror` error type.
    - Empty modules `db`, `audio`, `engine`, `models`, `transcript`, each a `mod.rs` with a doc comment stating its responsibility (landing spots for Phases 1 to 3).
-3. `crates/meet-cli` (bin `meet-cli`): clap with `version` and `transcribe <file>` (stub exits 2 with "not implemented").
-4. `apps/desktop`: Tauri 2.12.x, product name `meet-assist`, identifier `app.meetassist.desktop`, Svelte 5 + TypeScript + Vite, bun as package manager. `src-tauri` depends on `meet-core`. One command `list_meetings` returning three fixture `Meeting`s. Frontend: sidebar listing meetings from the command, main pane placeholder. Window `visible: false` in config, shown from the frontend after mount. Plain CSS with variables, light and dark via `prefers-color-scheme`. Bundle target NSIS, `webviewInstallMode: downloadBootstrapper`. Plugins: shell, dialog, log, with a capabilities file.
+3. `crates/cli` (bin `diarist-cli`): clap with `version` and `transcribe <file>` (stub exits 2 with "not implemented").
+4. `apps/desktop`: Tauri 2.12.x, product name `Diarist`, identifier `app.diarist.desktop`, Svelte 5 + TypeScript + Vite, bun as package manager. `src-tauri` depends on `diarist-core`. One command `list_meetings` returning three fixture `Meeting`s. Frontend: sidebar listing meetings from the command, main pane placeholder. Window `visible: false` in config, shown from the frontend after mount. Plain CSS with variables, light and dark via `prefers-color-scheme`. Bundle target NSIS, `webviewInstallMode: downloadBootstrapper`. Plugins: shell, dialog, log, with a capabilities file.
 5. `manifests/engine.json`, `manifests/models.json`: schema `{name, version, kind, url, sha256, size_bytes, licence}` with placeholder entries for the NeMo-Speech.cpp Windows CUDA zip and the three GGUF models (values to be filled by the spike).
 6. `tools/eval/README.md` placeholder. `README.md`, `docs/DEV.md` (commands verified to work), `LICENSE` (MIT), `.editorconfig`, `rustfmt.toml`.
 

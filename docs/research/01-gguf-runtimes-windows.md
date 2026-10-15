@@ -1,5 +1,7 @@
 # Research: GGUF speech runtimes on Windows (verified 15 Oct 2026)
 
+> The project was renamed from meet-assist to Diarist on 15 Oct 2026; docs/research and docs/eval keep the old name as historical records.
+
 Opus 5.5 research agent, read via GitHub API and Hugging Face. C = confirmed in a primary source. U = unconfirmed.
 
 ## NeMo-Speech.cpp (NVIDIA, Apache-2.0)

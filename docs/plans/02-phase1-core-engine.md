@@ -4,11 +4,11 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 
 ## Goal
 
-`meet-cli transcribe <audio file>` decodes any common audio container, runs NeMo-Speech.cpp with Nemotron 3 Diarization on the GPU, and writes a complete meeting (speakers, segments, words, FTS) into the SQLite database. `meet-cli export` writes it back out in several formats. Everything is testable without a GUI, and the GPU path is gated behind an environment variable.
+`diarist-cli transcribe <audio file>` decodes any common audio container, runs NeMo-Speech.cpp with Nemotron 3 Diarization on the GPU, and writes a complete meeting (speakers, segments, words, FTS) into the SQLite database. `diarist-cli export` writes it back out in several formats. Everything is testable without a GUI, and the GPU path is gated behind an environment variable.
 
 ## Owns
 
-`crates/core/src/{store/sqlite*,models,audio,engine,transcript,export,pipeline}`, `crates/meet-cli`, `crates/core/tests/fixtures/`. Must not touch `apps/desktop`, `core::views`, or the `Store` trait (report needed changes to the orchestrator).
+`crates/core/src/{store/sqlite*,models,audio,engine,transcript,export,pipeline}`, `crates/cli`, `crates/core/tests/fixtures/`. Must not touch `apps/desktop`, `core::views`, or the `Store` trait (report needed changes to the orchestrator).
 
 ## Modules and acceptance
 
@@ -21,7 +21,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 
 ### `models` (ComfyUI-style drop-in, see docs/01 "Model management")
 - `paths`: data root resolution (portable marker, registry key, `app_local_data_dir`), `models\` and `engine\` under it; `NEMO_SPEECH_MODEL_DIR` = `models\`.
-- `gguf::read_header(path) -> GgufHeader { architecture, name, quant, tensor_count, kv: Map }`: parse only the header (magic, version 2/3, tensor and kv counts, kv pairs; never read tensors). Tests on hand-built minimal GGUF files and on the real downloaded models when `MEET_ASSIST_MODELS_DIR` is set.
+- `gguf::read_header(path) -> GgufHeader { architecture, name, quant, tensor_count, kv: Map }`: parse only the header (magic, version 2/3, tensor and kv counts, kv pairs; never read tensors). Tests on hand-built minimal GGUF files and on the real downloaded models when `DIARIST_MODELS_DIR` is set.
 - `classify(header, size) -> (Role, Capabilities)` from a small architecture table (Nemotron streaming ASR, Parakeet TDT, Nemotron 3 / Sortformer diarization, plus `unknown`); `<file>.meet.json` sidecar overrides when present. VRAM: measured values from the manifest when the sha matches, else an estimate from file size (flagged as estimate).
 - `scan(data_root) -> Vec<ModelFile>`: recursive over `models\` (GGUF, ONNX) and `engine\` (folders containing `bin\nemo-speech.exe`; version via `--json doctor`), upserts `model_files`, marks missing files, keeps selections valid (falls back to the recommended model with a note when the selected file vanished).
 - `download(entry, dest, progress_cb)` for the engine zip: HTTP with resume (Range), SHA-256 verify (`sha2`), atomic rename, `ureq` with `rustls-platform-verifier`; extracted with the `zip` crate into `engine\<name>-<version>\`. Models go through `nemo-speech pull` (JSON output parsed for the final path) with our manifest's sha and size verified afterwards; optional models by name.
@@ -30,7 +30,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 
 ### `audio::decode`
 - `trait Decoder { fn decode_to_wav16k(&self, input, output) -> Result<DecodedInfo> }` with a chain: `SymphoniaDecoder` (features: aac, isomp4, mp3, flac, wav, ogg, vorbis) to f32, downmix to mono, resample with rubato `Fft` (integer ratio) or `Async` sinc to 16 kHz, write PCM16 WAV with `hound`; then `MediaFoundationDecoder` (`IMFSourceReader` via the `windows` crate, requesting PCM output); then `FfmpegDecoder` if `ffmpeg` is on PATH; then an error whose message contains the ffmpeg command the user could run. Report duration, source rate, channels and which decoder succeeded.
-- Tests: synthesized 48 kHz stereo WAV round-trips to 16 kHz mono with the right length; a 44.1 kHz input works. With `MEET_ASSIST_SAMPLES` set to a folder, decode every `*.m4a` under it (the user's 23 files) and assert the duration is within 50 ms of the container's (`ffprobe` or the MP4 header).
+- Tests: synthesized 48 kHz stereo WAV round-trips to 16 kHz mono with the right length; a 44.1 kHz input works. With `DIARIST_SAMPLES` set to a folder, decode every `*.m4a` under it (the user's 23 files) and assert the duration is within 50 ms of the container's (`ffprobe` or the MP4 header).
 
 ### `engine`
 - Implements the `Engine` trait from docs/03 v0.2.
@@ -38,12 +38,12 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 - `DiarizeRunner`: optional standalone `diarize --format rttm` (and `json`) pass, stored next to the transcript, run when `keep_diarization_segments` is set or the CLI asks (`--rttm`).
 - `NemoCascadeEngine` (experimental, behind a setting): Parakeet `transcribe` without diarize plus `DiarizeRunner` plus `fusion::assign_words`. Not the default (silent drops on long files, research/08 pitfall 2).
 - All adapters: the fixtures in `docs/research/fixtures/` are copied to `crates/core/tests/fixtures/` and drive the parsers (`nemotron35_transcribe_diarize_5min.json`, `nemotron_transcribe_diarize_5min.json`, `parakeet_transcribe_5min.json`, `diarize_5min.{json,rttm}`).
-- `models`: the manifest lists `nemotron-3.5` and `nemotron-3-diarization` as required and `nemotron-en` and `parakeet-tdt` as optional (`experimental: true` on Parakeet); `meet-cli models pull` fetches required ones by default and optional ones by name, using `nemo-speech pull` with the revision, size and SHA-256 from docs/research/08 sections 3 and 7 recorded in `manifests/models.json`.
+- `models`: the manifest lists `nemotron-3.5` and `nemotron-3-diarization` as required and `nemotron-en` and `parakeet-tdt` as optional (`experimental: true` on Parakeet); `diarist-cli models pull` fetches required ones by default and optional ones by name, using `nemo-speech pull` with the revision, size and SHA-256 from docs/research/08 sections 3 and 7 recorded in `manifests/models.json`.
 
 ### `fusion`
 - `assign_words(words, segments) -> Vec<TaggedWord>`: start-anchored window rule from docs/03; nearest-segment fallback; `spk_N` labels in order of first appearance; keeps `raw_label`.
 - Tests on hand-written cases: a word straddling a boundary goes to the speaker active at its start; a word in a gap goes to the nearest segment; label numbering is stable. A fixture test re-tags `parakeet_transcribe_5min.json` with `diarize_5min` from `docs/research/fixtures/` and checks agreement with `nemotron_transcribe_diarize_5min.json` above 95 percent on words both have.
-- Fixtures: the real JSON produced by the spike, committed under `crates/core/tests/fixtures/nemo_cli_*.json`. Tests cover the mapping, the absent-speaker case and the error path. A GPU integration test runs the real binary when `MEET_ASSIST_ENGINE_DIR` and `MEET_ASSIST_MODELS_DIR` are set.
+- Fixtures: the real JSON produced by the spike, committed under `crates/core/tests/fixtures/nemo_cli_*.json`. Tests cover the mapping, the absent-speaker case and the error path. A GPU integration test runs the real binary when `DIARIST_ENGINE_DIR` and `DIARIST_MODELS_DIR` are set.
 - Long files: a GPU-gated acceptance test transcribes the 77-minute in-room recording (Aug 14) already converted under `data/samples/` and asserts word count within 2 percent of 12,266, 8 speakers, and no 60 s bucket with zero words where the fixture run had more than 20 (the spike's coverage check).
 - `models::download` uses rustls with `rustls-platform-verifier` so the Windows certificate store and system proxy are honoured; HF URLs are pinned to commit SHAs in the manifest and redirects are re-resolved when resuming.
 
@@ -61,7 +61,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 ### `export`
 - `to_markdown`, `to_text`, `to_json`, `to_srt`, `to_vtt`, `to_rttm` (RTTM for the eval harness: one line per segment, `SPEAKER <id> 1 <start> <dur> <NA> <NA> <label> <NA> <NA>`). Golden-file tests.
 
-### `meet-cli`
+### `diarist-cli`
 - `transcribe <file> [--db <path>] [--data-dir <dir>] [--no-diarize] [--title <s>] [--out <path> --format md|txt|json|srt|vtt|rttm]`: decode, run engine, segment, store, print a summary (duration, speakers, segments, RTF).
 - `list`, `show <meeting_id>`, `search <query>`, `export <meeting_id> --format ... --out ...`, `rename <speaker_id> <name>`, `models list` (what the scanner found, by role, with fit marks), `models scan`, `models select <role> <path-or-name>`, `models pull [name]` (required models by default, optional by name, progress bar), `engine list` / `engine select <version>`, `doctor` (data root, selected engine and models, GPU and free VRAM via the engine's `doctor`).
 - Exit codes: 0 ok, 1 error, 2 usage.
@@ -69,7 +69,7 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 ## Verification
 
 - `cargo test --workspace`, clippy with `-D warnings`, fmt check.
-- With the engine and models present: `meet-cli transcribe <one of the user's m4a>` completes; `meet-cli export --format md` produces a readable transcript with speaker labels; `meet-cli search <word from the transcript>` finds it. Report wall time and the number of speakers found.
+- With the engine and models present: `diarist-cli transcribe <one of the user's m4a>` completes; `diarist-cli export --format md` produces a readable transcript with speaker labels; `diarist-cli search <word from the transcript>` finds it. Report wall time and the number of speakers found.
 - Report fixture JSON size and where it came from.
 
 ## Out of scope

@@ -1,6 +1,6 @@
 # Branding and rename plan
 
-Status: draft, 15 Oct 2026. Name decision pending between Diarist (recommended) and the Green Lantern check (Sayd). The logo concept below is name-agnostic; the wordmark and the rename checklist apply once the name is final.
+Status: done, 15 Oct 2026. The name is Diarist (`docs/research/09-naming.md`); the logo outcome and the rename are recorded below.
 
 ## Logo and app icon (brief for an Opus agent)
 
@@ -14,22 +14,22 @@ Deliverables:
 
 Constraints: pure SVG, no raster effects, no embedded fonts, under 8 kB each; the 16 px rendering of the mono icon must stay legible (test by rasterising at 16, 24, 32 px and viewing the PNGs); contrast of each bar colour against both #ffffff and #0f1115 at least 3:1.
 
-## Rename checklist (from "meet-assist" to the final name)
+## Rename checklist (done 15 Oct 2026)
 
-Decide the identifiers once, then apply everywhere in one agent chunk:
+The project was renamed from meet-assist (now Diarist; decision in `docs/research/09-naming.md`). Identifiers, applied everywhere:
 - Product name (installer, window title, tray): `Diarist`.
-- Bundle identifier: `app.diarist.desktop` (changes `app_local_data_dir`; see migration).
-- Executable: `diarist.exe`; CLI: `diarist-cli` (crate `diarist-cli`); core crate: `diarist-core`; Tauri crate package `diarist`.
-- Registry key for the data root: `HKCU\Software\Diarist\DataRoot`.
-- GitHub org/repo: `diarist-app/diarist` (bare `diarist` handle is dormant); updater endpoint in `tauri.conf.json`; release workflow; README badges.
-- Environment variables used by tests and the CLI: `MEET_ASSIST_*` to `DIARIST_*`.
-- Database file name `meet-assist.db` to `diarist.db`; logs folder unchanged.
-- Docs: README, INSTALL, PRIVACY, CONTRIBUTING, CHANGELOG, docs/00 to 05, docs/plans; keep docs/research and docs/eval as historical records with a one-line note at the top of each that the project was renamed.
-- Memory and tooling outside the repo: `tools/eval` paths, `.bin`, configs.
+- Bundle identifier: `app.diarist.desktop`, so the default data root is `%LOCALAPPDATA%\app.diarist.desktop` (see migration).
+- Executable `diarist.exe`; CLI `diarist-cli` (crate `diarist-cli` in `crates/cli`); core crate `diarist-core` (lib `diarist_core`); Tauri package `diarist` (lib `diarist_lib`).
+- Registry key for a moved data root: `HKCU\Software\Diarist\DataRoot`.
+- Repository `ebt55/diarist` on the owner's account (an org can take it over later; GitHub redirects). Updater endpoint `https://github.com/ebt55/diarist/releases/latest/download/latest.json`; the release workflow names releases "Diarist <tag>" and uploads `Diarist_<version>_x64-setup.exe`.
+- Environment variables `DIARIST_*` (the long-file acceptance WAV is `DIARIST_LONGFILE_WAV`); the eval harness uses `DIARIST_EVAL_*`.
+- Database `diarist.db`; log file `logs\diarist.log` (logs folder unchanged).
+- Docs: README, INSTALL, PRIVACY, CONTRIBUTING, CHANGELOG, LICENSES, docs/00 to 05, DEV and docs/plans carry the new name; docs/research and docs/eval stay as historical records with a note at the top.
+- Tooling: `tools/eval` runs `.bin/diarist-cli.exe` (rebuild and copy it once, README).
 
-Migration for existing installs (only the developer's today): on first launch, if the new data root is empty and the old one (`%LOCALAPPDATA%\app.meetassist.desktop`) exists, offer "Move your existing data" using the existing Move data folder code; otherwise start fresh. The old uninstaller is never run against the new root.
+Migration for existing installs (only the developer's today): `crates/core/src/models/legacy.rs` and `apps/desktop/src/components/LegacyMove.svelte`. When the new data root has no `diarist.db` and an old data root with a database exists (the old registry value, else the old default folder), the first launch runs on an empty in-memory store and asks once whether to move it in. Move reuses the Move data folder code (copy with the SQLite backup API, verify, restart, delete the old copy at the next launch, then the old registry value); Start fresh creates `diarist.db` and leaves the old folder alone. `DIARIST_LEGACY_ROOT` points the check at a scratch copy for tests. The old uninstaller is never run against the new root.
 
-Acceptance: no occurrence of the old name remains outside `docs/research`, `docs/eval` and CHANGELOG history (`git grep -iE "meet-assist|meetassist|meet_assist|meet-core|meet_core|meet-cli|meet_cli"` is empty elsewhere); workspace build, tests, clippy, fmt, bun build and check green; installer builds and installs under the new name; the first-run screen shows the new icon; the old data root migration prompt works.
+Acceptance: `git grep -niE "meet[-_]?assist|meet[-_](core|cli)"` finds the old name only in docs/research, docs/eval, CHANGELOG, the migration code and one-line history notes like the one above; workspace build, tests, clippy, fmt, bun build and check green; installer builds and installs under the new name; the first-run screen shows the new icon; the old data root migration prompt works.
 
 ## Logo outcome (15 Oct 2026)
 
