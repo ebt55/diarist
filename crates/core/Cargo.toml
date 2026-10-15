@@ -24,16 +24,23 @@ symphonia = { version = "0.5.5", default-features = false, features = ["aac", "i
 # Pinned to 5.x: the resampler API changes with every major release.
 rubato = "5.0"
 hound = "3.5"
+# Engine zip download: rustls with the platform verifier (Windows cert store, system proxy).
+ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.11"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Registry",
 ] }
 
 [dev-dependencies]
 tempfile = "3"
+tiny_http = "0.12"
 
 [features]
 # Binary stdin framing for an optional FFI sidecar (docs/03 appendix).

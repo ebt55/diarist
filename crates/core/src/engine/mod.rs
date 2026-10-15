@@ -10,6 +10,8 @@
 use std::sync::mpsc::Receiver;
 
 use crate::error::Result;
+
+pub mod process;
 pub use crate::protocol::{
     DiarPreset, EngineEvent, EngineInfo, EngineWord, ErrorCode, FileJob, JobStats, LiveOpts,
 };
