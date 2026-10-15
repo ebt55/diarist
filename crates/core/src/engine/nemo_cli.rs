@@ -469,6 +469,13 @@ pub struct NemoCliEngine {
     pub version: Option<String>,
     /// Speed assumed for `Progress`.
     pub realtime_factor: f64,
+    /// Pass the meeting language as `--language` (multilingual models such as
+    /// Nemotron 3.5). Off for single-language models like the default EN
+    /// model, which ignores it; [`crate::models::select_engine`] decides from
+    /// the model's languages.
+    pub pass_language: bool,
+    /// Extra flags appended verbatim to `transcribe` (e.g. `--verbatim`).
+    pub extra_args: Vec<String>,
     running: Running,
 }
 
@@ -487,6 +494,8 @@ impl NemoCliEngine {
             diar_model: diar_model.into(),
             version: None,
             realtime_factor: EXPECTED_REALTIME_FACTOR,
+            pass_language: true,
+            extra_args: Vec::new(),
             running: Running::default(),
         }
     }
@@ -498,7 +507,7 @@ impl NemoCliEngine {
         a.push("--model".into());
         a.push(process::path_arg(&self.asr_model));
         let lang = job.language.trim();
-        if !lang.is_empty() && !lang.eq_ignore_ascii_case("auto") {
+        if self.pass_language && !lang.is_empty() && !lang.eq_ignore_ascii_case("auto") {
             a.push("--language".into());
             a.push(lang.into());
         }
@@ -514,6 +523,7 @@ impl NemoCliEngine {
         }
         a.push(process::path_arg(output));
         a.push("--force".into());
+        a.extend(self.extra_args.iter().map(Into::into));
         a
     }
 
@@ -1126,6 +1136,22 @@ mod tests {
         };
         let args = e.args(&auto, &out);
         assert!(!args.iter().any(|a| a == "--language" || a == "--diarize"));
+        // A single-language model (the default EN one) gets no `--language`;
+        // extra flags go last, verbatim.
+        let mut en = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/en.gguf", "d.gguf");
+        en.pass_language = false;
+        en.extra_args = vec!["--verbatim".into()];
+        let args = en.args(&auto, &out);
+        assert!(!args.iter().any(|a| a == "--language"));
+        let args = en.args(
+            &FileJob {
+                language: "de".into(),
+                ..auto
+            },
+            &out,
+        );
+        assert!(!args.iter().any(|a| a == "--language"));
+        assert_eq!(args.last().unwrap(), "--verbatim");
         let info = e.info();
         assert_eq!(info.models["asr"], "asr.gguf");
         assert_eq!(info.device, "cuda:0");

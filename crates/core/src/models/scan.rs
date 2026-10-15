@@ -564,13 +564,14 @@ mod tests {
             .iter()
             .filter_map(|f| f.manifest_name.as_deref())
             .collect();
-        for want in ["nemotron-3.5", "nemotron-3-diarization"] {
+        for want in ["nemotron-en", "nemotron-3-diarization"] {
             assert!(names.contains(&want), "{want} not found in {names:?}");
         }
+        // The default ASR selection is the EN model.
         let asr = r
             .files
             .iter()
-            .find(|f| f.manifest_name.as_deref() == Some("nemotron-3.5"))
+            .find(|f| f.manifest_name.as_deref() == Some("nemotron-en"))
             .unwrap();
         let sel = store.get_settings().unwrap().0["selected_model.asr"].clone();
         assert_eq!(sel, asr.id.to_string());

@@ -148,6 +148,9 @@ pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Resu
         let mut e = NemoCliEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
         e.version = sel.engine_version.clone();
+        // `--language` only for multilingual models (Nemotron 3.5); the EN
+        // model ignores it. The meeting keeps its language either way.
+        e.pass_language = is_multilingual(&sel.asr_file);
         Arc::new(e)
     };
     let mut diarize_runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
@@ -158,6 +161,12 @@ pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Resu
         selection: sel,
         experimental,
     })
+}
+
+/// A model that understands more than one language (its header or sidecar
+/// lists several), so the meeting language is worth passing to it.
+pub fn is_multilingual(file: &ModelFile) -> bool {
+    file.capabilities.languages.len() > 1
 }
 
 /// Selects file `id` for `role` after checking it can be: a known role,

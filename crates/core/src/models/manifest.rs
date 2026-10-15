@@ -28,6 +28,10 @@ pub struct ModelEntry {
     /// Offered only behind the experimental setting.
     #[serde(default)]
     pub experimental: bool,
+    /// Why an optional model is worth installing, e.g. `multilingual`
+    /// (Nemotron 3.5: other or mixed languages; the EN model is the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_for: Option<String>,
     pub repo: String,
     pub revision: String,
     pub file: String,
@@ -143,10 +147,14 @@ mod tests {
     fn builtin_manifest_has_the_documented_models() {
         let m = Manifest::builtin();
         let required: Vec<&str> = m.required().map(|e| e.name.as_str()).collect();
-        assert_eq!(required, ["nemotron-3.5", "nemotron-3-diarization"]);
+        // The EN model is the default ASR (docs/eval, 15 Oct 2026); 3.5 is the
+        // optional pick for other or mixed languages.
+        assert_eq!(required, ["nemotron-3-diarization", "nemotron-en"]);
         let parakeet = m.model("parakeet-tdt").unwrap();
         assert!(parakeet.experimental && !parakeet.required);
-        assert!(!m.model("nemotron-en").unwrap().required);
+        let multi = m.model("nemotron-3.5").unwrap();
+        assert!(!multi.required && !multi.experimental);
+        assert_eq!(multi.recommended_for.as_deref(), Some("multilingual"));
         for e in &m.models {
             assert_eq!(e.sha256.len(), 64, "{}", e.name);
             assert_eq!(e.revision.len(), 40, "{}", e.name);
