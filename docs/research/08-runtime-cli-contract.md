@@ -183,7 +183,7 @@ Fixtures: `fixtures/ws_session_events.jsonl`, `fixtures/ws_two_sessions_note.md`
 ## 6. Pitfalls
 
 1. **Long-file tagging bug:** plain `transcribe --diarize` on a 21-minute file mislabels the first ~10 min (63% correct). Always use `--stream --endpointing` (99.6%), or re-tag words from `diarize` output. Draft upstream issue: `07-upstream-longfile-tags-bug.md`.
-2. **Parakeet TDT v3 silently drops spans on long files:** 45 s at 17:38–18:24 plus two ~10 s spans in the 77-minute recording. There is no error. Don't use it as the only ASR for long files.
+2. **Parakeet TDT v3 silently drops spans, with no error:** 45 s at 17:38–18:24 plus two ~10 s spans in the 77-minute recording. A 2-minute cut also dropped the same span, so this is model-side and context-dependent, not a long-file issue (§8). Don't use Parakeet as the only ASR.
 3. **Endpointing is off by default** in `serve` and `transcribe`. Without it, the WebSocket gives one final at commit only.
 4. **`diarize --offline` is worse** than streaming (DER 43% vs 24%) and limited to about 6.6 min.
 5. **No max-speakers control, and 8 labels per stream for the whole session.** The 77-minute talk produced all 8 labels (Zoom shows 6 named sources). In a 2-hour concatenation of two different meetings, the second meeting's speakers were **merged into labels already used by the first**. Labels are not unique people once more than 8 have appeared.
@@ -192,3 +192,69 @@ Fixtures: `fixtures/ws_session_events.jsonl`, `fixtures/ws_two_sessions_note.md`
 8. **WebSocket labels are never revised.** Treat them as live previews; the post-meeting file pass is canonical.
 9. **AMI download:** Windows schannel fails the revocation check against groups.inf.ed.ac.uk. Use `curl --ssl-revoke-best-effort`.
 10. **Per-process VRAM is not visible on WDDM.** Measure with total `nvidia-smi` deltas.
+
+## 7. Nemotron 3.5 as the default model: test results (15 Oct 2026)
+
+**Model:** `nemo-speech pull nemotron-3.5` → `nvidia\nemotron-3.5-asr-streaming-0.6b\1c8deaecc64b91f034d73e08dd8b64625eb3395d\nemotron-3.5-asr-streaming-0.6b.q8_0.gguf`, 741,548,352 B, SHA-256 `a5c435f2…29ae`. Index licence line: `"license": "NVIDIA Open Model License (OpenMDW 1.1)"`. The pull took 86 s.
+
+All file runs below use `--stream --endpointing --diarize --diar-model <Nemotron-3-Diarization>`. No `--language` was passed, so 3.5 auto-detects.
+
+| Metric | Nemotron 3.5 | Nemotron EN | Parakeet TDT v3 (no diarize) |
+|---|---|---|---|
+| AMI 5 min: words | 464 | 531 | 510 |
+| AMI 5 min: words carrying punctuation | 5 | 1 | 98 |
+| AMI 5 min: tag agreement with `diarize_5min.json` | 97.4% | 97.9% | – |
+| CIMC 77 min: wall / × real time | 181 s / 26× | 171 s / 27× | 54 s / 85× |
+| CIMC: peak VRAM delta | **1.82 GB** | 2.58 GB | 4.64 GB |
+| CIMC: words / punctuated % / um+uh | 11,896 / 2.5% / 180 | 12,266 / 0.2% / 302 | 11,758 / 12.4% / 315 |
+| CIMC: speakers / tag agreement with `diarize` | 8 / 99.9% | 8 / 99.9% | – |
+| CIMC: words in 17:38–18:24 | **143** | 193 | **0** (dropped) |
+| CIMC: empty 60 s buckets where EN > 20 words | **none** | – | 3 spans |
+| `languages` field | `["en-US"]` (auto) | `[]` | `[]` |
+
+Excerpt, AMI 125–145 s:
+
+| Nemotron 3.5 | Nemotron EN | Parakeet TDT v3 |
+|---|---|---|
+| to the design I'm not really sure what what you guys have already received in your emails what did you get um I just got the project announcement designing remote control yeah that's that where everybody got okay so we're | to the design um I'm not really sure what what you guys have already received um in your emails what did you get um I just got the project announcement but project designing a remote control yeah that is that what everybody got okay um so we're gonna | the design. Um I'm not really sure what what you guys have already received. Um in your emails. What did you get? Um I just got the project announcement, but the project is out designing remote control. That's about it. Is that what everybody got? Okay. Um so we're gonna have |
+
+**Live:** `serve --asr-model <3.5> --diar-model <diar> --asr.endpointing.enable=true --asr.batching.state_arena_slots 2`, streaming 60 s from AMI 0:50.
+
+| Metric | 3.5, `language:"en"` | 3.5, `language:"auto"` | EN (earlier) |
+|---|---|---|---|
+| `language` field | **accepted** (echoed in `session.updated`) | **accepted** | – |
+| First text delta after the first word's onset | 0.18 s | 0.10 s (but the first word arrives 1.3 s later) | ~0.2 s |
+| Finals without commit / words / speakers | 17 / 114 / 1–4 | 15 / 99 / 1–4 | 20 / 177 / 1–4 (80 s) |
+| Final latency after the last word | 0.86 s | 0.80 s | 0.84 s |
+| Lag (max) | 0.07 s | 0.10 s | 0.09 s |
+| Server VRAM, both models loaded | ~1.05 GB idle; 1.26 GB after sessions; transient +0.5–0.6 GB per session | | 1.18 GB idle, +50–70 MiB per session |
+
+**Recommendation: one model, Nemotron 3.5, for both live and file mode. Keep `nemotron-en` installed as a fallback.** Deciding fact: on the 77-minute file, 3.5 had no dropped spans and tagged speakers exactly as well as EN (99.9%), at the same speed with 30% less peak VRAM. It also auto-detects language and adds some punctuation.
+
+Caveats:
+- 3.5 drops fillers (about 40% fewer um/uh), giving 3–13% fewer words.
+- `auto` lost about 1 s of the first utterance; pass the user's language when it is known.
+- Live per-session VRAM spikes are larger than EN's (+0.6 GB transient), so budget about 2 GB for live.
+
+## 8. Parakeet drops: chunked test (15 Oct 2026)
+
+Parakeet TDT v3 `transcribe --json` (no diarize, explicit path) was run on cuts of the 77-minute CIMC 16 kHz WAV. Times are absolute seconds in the original file.
+
+| Piece | Words | Nemotron EN, same range | Single 77-min run, same range | Words in the dropped spans |
+|---|---|---|---|---|
+| 0–600 | 1677 | 1700 | 1673 | – |
+| 600–1200 | 1714 | 1826 | 1633 | 1058–1104: **105** (single run: 0) |
+| 1200–1800 | 1739 | 1808 | 1689 | 1570–1580: **30** (single run: 0) |
+| 1800–2400 | 1650 | 1668 | 1614 | 1950–1960: **34** (single run: ~0) |
+| 2400–3000 | 1473 | 1476 | 1421 | – |
+| 3000–3600 | 1491 | 1526 | 1496 | – |
+| 3600–4200 | 1362 | 1382 | 1371 | – |
+| 4200–4622 | 848 | 880 | 861 | – |
+| **Sum of 10-min pieces** | **11,954** | 12,266 | 11,758 | No empty 60 s buckets |
+| 0–1500 (25 min, one run) | 4259 | – | – | 1058–1104: 105. No empty buckets |
+| **1020–1140 (17:00–19:00, 2 min)** | 237 | – | – | **1058–1104: 2 words.** Gap 1057.7→1103.4 s, the same span as the full run |
+| 1050–1110 (60 s) | 192 | – | – | 146 words in the span |
+
+The 2-minute piece is far below the ~6.6 min positional limit, so the runtime runs one full-attention pass with no internal splitting. It still drops exactly the same 46 s. A 60 s cut and the 10- and 25-minute cuts keep the span. The drop therefore depends on the audio context the model sees, not on the runtime's long-file splitter. This matches the open transcribe.cpp issue #71 (Parakeet TDT v3 offline silently drops a multi-second span) in a different runtime.
+
+**Conclusion: (b) the drop is model-side, so Parakeet TDT v3 stays experimental.** Chunking at 10 minutes happened to recover all three spans here, but a 2-minute chunk reproduced the drop, so no chunk length is safe. Nothing is added to the upstream draft 07, because this is not a NeMo-Speech.cpp runtime bug.
