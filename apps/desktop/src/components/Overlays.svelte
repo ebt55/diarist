@@ -21,7 +21,7 @@
       [
         ["Ctrl K", "Search transcripts"],
         ["Ctrl O", "Import audio or video"],
-        ["R", "Record, or stop the recording"],
+        ["R", "Start a recording"],
         ["Ctrl Alt R", "Record or stop from any app"],
         ["Ctrl 1 / Ctrl 2", "Focus meeting list / transcript"],
         ["Ctrl ,", "Settings"],
@@ -70,7 +70,7 @@
     [
       "Recording",
       [
-        ["Ctrl .", "Stop recording"],
+        ["Ctrl .", "Stop recording (asks first; Enter confirms)"],
         ["↑ ↓", "Move between live lines"],
         ["R", "Rename the line's speaker"],
         ["End", "Follow the live text again"],
@@ -111,6 +111,15 @@
     dialog?.close();
     app.confirmRequest?.resolve(false);
   }}
+  onkeydown={(e) => {
+    // Enter confirms, unless a button other than the confirm one has the focus.
+    if (e.key !== "Enter" || e.defaultPrevented || !app.confirmRequest) return;
+    if (e.target instanceof HTMLButtonElement && !e.target.classList.contains("confirm")) return;
+    e.preventDefault();
+    const req = app.confirmRequest;
+    dialog?.close();
+    req.resolve(true);
+  }}
 >
   {#if app.confirmRequest}
     {@const req = app.confirmRequest}
@@ -128,7 +137,7 @@
       <!-- svelte-ignore a11y_autofocus -->
       <button
         type="button"
-        class="btn {req.danger ? 'btn-danger' : 'btn-primary'}"
+        class="btn confirm {req.danger ? 'btn-danger' : 'btn-primary'}"
         autofocus
         onclick={() => {
           dialog?.close();

@@ -98,7 +98,7 @@
       return;
     }
     close();
-    app.toast("info", "Recording. Ctrl+. or R stops; Ctrl+Alt+R works from any app.");
+    app.toast("info", "Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.");
   }
 </script>
 

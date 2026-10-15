@@ -88,14 +88,27 @@
       : null,
   );
 
-  /** While recording, talk time comes from the live words (there are no segments yet). */
+  /**
+   * While recording, talk time comes from the live words (there are no
+   * segments yet), and speakers without words are hidden: a label the engine
+   * revised away (the "Unknown speaker 0:00" of a first partial) has a row
+   * but nothing to show. A root stays while a speaker merged into it has words.
+   */
   const shownSpeakers = $derived.by((): SpeakerView[] => {
     if (!isLive) return speakers;
     const talk = new Map<number, number>();
     for (const r of live.rows) {
       if (r.speakerId !== null) talk.set(r.speakerId, (talk.get(r.speakerId) ?? 0) + (r.end_ms - r.start_ms));
     }
-    return speakers.map((s) => ({ ...s, talk_ms: talk.get(s.id) ?? 0 }));
+    const rootOf = (s: SpeakerView) => s.merged_into ?? s.id;
+    const rootTalk = new Map<number, number>();
+    for (const s of speakers) {
+      const t = talk.get(s.id);
+      if (t !== undefined) rootTalk.set(rootOf(s), (rootTalk.get(rootOf(s)) ?? 0) + t);
+    }
+    return speakers
+      .filter((s) => talk.has(s.id) || (s.merged_into === null && rootTalk.has(s.id)))
+      .map((s) => ({ ...s, talk_ms: s.merged_into === null ? (rootTalk.get(s.id) ?? 0) : (talk.get(s.id) ?? 0) }));
   });
 
   $effect(() => {

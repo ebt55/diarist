@@ -85,8 +85,6 @@ function meter(l: LevelsUpdate, at: number): Meter {
   return { rms: l.rms_dbfs, peak: l.peak_dbfs, gain: l.gain_db, rawPeak: l.raw_peak_dbfs, at };
 }
 
-/** Stopping a recording younger than this asks first. */
-export const STOP_CONFIRM_MS = 10_000;
 /** Text older than this counts as final without a `text_final` mark. */
 export const FINAL_AFTER_MS = 10_000;
 
@@ -208,10 +206,16 @@ class LiveStore {
 
   // ---- actions ---------------------------------------------------------------
 
-  /** R, the Record button: open the start sheet, or stop. */
+  /** The Record / Stop button: open the start sheet, or stop (after confirming). */
   async toggle(): Promise<void> {
     if (this.phase === "idle") this.sheetOpen = true;
     else if (this.phase === "recording") await this.stop();
+  }
+
+  /** The R key: only ever starts (opens the start sheet); a running recording is left alone. */
+  record(): void {
+    if (this.phase === "idle") this.sheetOpen = true;
+    else if (this.phase === "recording") app.toast("info", "Already recording. Ctrl+. or the Stop button ends it.");
   }
 
   /** Starts a recording; resolves to an error message, or null. */
@@ -225,17 +229,17 @@ class LiveStore {
     }
   }
 
+  /** Ctrl+. and the Stop buttons: always asks first (Enter confirms, Esc keeps recording). */
   async stop(): Promise<void> {
     if (this.phase !== "recording") return;
-    if (this.elapsedMs < STOP_CONFIRM_MS) {
-      const ok = await app.confirm({
-        title: "Stop recording?",
-        message: `Only ${Math.round(this.elapsedMs / 1000)} s recorded so far.`,
-        confirmLabel: "Stop",
-        danger: false,
-      });
-      if (!ok || this.phase !== "recording") return;
-    }
+    const secs = Math.round(this.elapsedMs / 1000);
+    const ok = await app.confirm({
+      title: "Stop recording?",
+      message: `${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} recorded. The transcript is finalized from the recording after you stop.`,
+      confirmLabel: "Stop",
+      danger: false,
+    });
+    if (!ok || this.phase !== "recording") return;
     this.#logLag();
     try {
       const r = await api.stopRecording();

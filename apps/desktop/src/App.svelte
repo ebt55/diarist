@@ -163,9 +163,10 @@
     }
     if (isTyping(e) || e.altKey) return;
     if ((k === "r" || k === "R") && !e.defaultPrevented && !e.shiftKey && !app.helpOpen) {
-      // Record or stop; R on a transcript row or a speaker chip renames instead
-      // (those handlers take the key first).
-      void live.toggle();
+      // Start a recording (never stops one: that is Ctrl+. or the Stop
+      // button). R on a transcript row, a live line or a speaker chip renames
+      // instead (those handlers take the key first).
+      live.record();
       e.preventDefault();
     } else if (k === "F1" || k === "?") {
       app.helpOpen = !app.helpOpen;

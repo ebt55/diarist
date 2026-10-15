@@ -206,7 +206,7 @@
           class="btn btn-rec"
           disabled={live.phase === "stopping"}
           onclick={() => live.toggle()}
-          title="Stop recording (Ctrl+. or R; Ctrl+Alt+R from any app)"
+          title="Stop recording (Ctrl+.; Ctrl+Alt+R from any app)"
         >
           <span class="rec-dot live" aria-hidden="true"></span>
           <span class="mono">{formatClock(live.elapsedMs)}</span>
