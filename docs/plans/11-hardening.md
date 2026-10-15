@@ -68,6 +68,10 @@ Property tests (proptest) for the GGUF header parser, the WAV header repair, the
 - Winget manifest once a stable 0.1.0 exists, so `winget install Diarist` works.
 - A release checklist in docs/DEV.md: version bump, changelog, eval table, build, draft, publish, verify the updater manifest.
 
+## 8f. Ship `diarist-cli` in the installer
+
+Coding agents and scripts set Diarist up for people (docs/SETUP-WITH-AN-AGENT.md). Today the installer carries only the app, so an agent can place files but cannot select a package or model, turn on low-VRAM mode or run `doctor`; it has to tell the user what to click. Bundling `diarist-cli.exe` next to `diarist.exe` (Tauri `bundle.resources` or `externalBin`, a few MB) turns the whole setup into commands with checkable output: `diarist-cli engine install`, `models pull`, `models select`, `doctor`. Settings that live in the database get CLI verbs for the few an agent needs (`settings set engine.low_vram true`). The setup guide is then updated to prefer the CLI and keep the file-placement path as the fallback.
+
 ## Order
 
 8a first (small, self-contained, closes the open question about crash logs). Then 8b measurement only, so the numbers exist before anything is optimised. Then 8c in two or three chunks. 8b fixes and 8d interleave with whatever the measurements and soaks turn up.
