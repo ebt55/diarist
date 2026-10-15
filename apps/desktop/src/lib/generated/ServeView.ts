@@ -2,18 +2,23 @@
 import type { ServeStatus } from "./ServeStatus";
 
 /**
- * The live engine server for Diagnostics.
+ * The live engine server for Diagnostics: the supervisor's state, uptime,
+ * restarts and pid, and what the app knows about it.
  */
-export type ServeView = { status: ServeStatus, 
-/**
- * Since the server last became ready.
- */
-uptime_ms: number | null, 
-/**
- * Restarts after the server had been ready.
- */
-restarts: number, pid: number | null, 
+export type ServeView = { 
 /**
  * VRAM the idle server holds (free before launch minus free once ready).
  */
-resident_vram_mb: number | null, asr_model: string, diar_model: string, log_path: string | null, };
+resident_vram_mb: number | null, asr_model: string, diar_model: string, log_path: string | null, status: ServeStatus, 
+/**
+ * How long it has been ready (`None` unless it is ready now).
+ */
+uptime_ms: number | null, 
+/**
+ * Restarts after the server had been ready (crashes it came back from).
+ */
+restarts: number, 
+/**
+ * Process id of the running server.
+ */
+pid: number | null, };

@@ -23,7 +23,9 @@
 
 mod supervisor;
 
-pub use supervisor::{ServeConfig, ServeEndpoint, ServeStatus, ServeSupervisor, SessionLease};
+pub use supervisor::{
+    ServeConfig, ServeEndpoint, ServeSnapshot, ServeStatus, ServeSupervisor, SessionLease,
+};
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, OnceLock};

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use meet_core::engine::{
-    EngineEvent, LiveEngine, LiveOpts, NemoWsLiveEngine, ServeConfig, ServeStatus, ServeSupervisor,
+    EngineEvent, LiveEngine, LiveOpts, NemoWsLiveEngine, ServeConfig, ServeSupervisor,
 };
 use meet_core::types::{Channel, JobId};
 
@@ -78,7 +78,7 @@ fn streams_ami_in_real_time() {
     let t = Instant::now();
     sup.ensure_ready(Duration::from_secs(120)).unwrap();
     let ready_s = t.elapsed().as_secs_f64();
-    assert!(matches!(sup.status(), ServeStatus::Ready { .. }));
+    assert!(sup.status().is_ready());
     let vram_idle = vram_used_mb();
     let engine = NemoWsLiveEngine::new(sup.clone(), false);
     let job = JobId::new();

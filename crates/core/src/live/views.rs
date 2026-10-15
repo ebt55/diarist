@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{DegradedUpdate, DeviceChange, LevelsUpdate, LiveIssues, LiveWarning, RecorderStatus};
-use crate::engine::ServeStatus;
+use crate::engine::ServeSnapshot;
 use crate::types::{Channel, JobId, MeetingId, RunId};
 
 /// Where the app's one recorder slot is.
@@ -172,16 +172,14 @@ pub struct StopSummary {
     pub issues: LiveIssues,
 }
 
-/// The live engine server for Diagnostics.
+/// The live engine server for Diagnostics: the supervisor's state, uptime,
+/// restarts and pid, and what the app knows about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]
 pub struct ServeView {
-    pub status: ServeStatus,
-    /// Since the server last became ready.
-    pub uptime_ms: Option<u64>,
-    /// Restarts after the server had been ready.
-    pub restarts: u32,
-    pub pid: Option<u32>,
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub server: ServeSnapshot,
     /// VRAM the idle server holds (free before launch minus free once ready).
     pub resident_vram_mb: Option<u32>,
     pub asr_model: String,

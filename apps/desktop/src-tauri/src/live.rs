@@ -32,7 +32,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use meet_core::audio::capture::{self, find_device, DeviceFlow, DeviceInfo as AudioDevice};
-use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeStatus, ServeSupervisor};
+use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeSupervisor};
+use meet_core::gpu::{self, VramReading, VramSource};
 pub use meet_core::live::LivePhase as Phase;
 use meet_core::live::{
     self, DegradedUpdate, DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveLevels,
@@ -120,7 +121,6 @@ struct Serve {
     supervisor: ServeSupervisor,
     multilingual: bool,
     resident_mb: Option<u32>,
-    ready_since: Option<Instant>,
     log_path: Option<PathBuf>,
 }
 
@@ -417,6 +417,18 @@ fn vram_reading(app: &AppHandle, max_age: Duration) -> (Option<u32>, Instant) {
     (free, at)
 }
 
+/// Free VRAM now: NVML, else a doctor reading younger than `max_age`.
+fn free_vram(app: &AppHandle, max_age: Duration) -> Option<VramReading> {
+    gpu::nvml_vram(gpu::device_index(DEVICE)).or_else(|| {
+        let (free, _) = vram_reading(app, max_age);
+        free.map(|free_mb| VramReading {
+            free_mb,
+            total_mb: None,
+            source: VramSource::Doctor,
+        })
+    })
+}
+
 /// The supervisor for `sel`, started (a no-op when it runs). A server for
 /// another selection is stopped first. The first launch measures how much
 /// VRAM the idle server holds, in the background.
@@ -430,9 +442,8 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
     let mut serve = lock(&live.serve);
     if let Some(s) = serve.as_mut() {
         if s.key == key {
-            if !matches!(s.supervisor.status(), ServeStatus::Ready { .. }) {
+            if !s.supervisor.status().is_ready() {
                 // Stopped after the idle timeout (or failed): launch again.
-                s.ready_since = None;
                 s.supervisor.start();
                 watch_ready(app, key, s.supervisor.clone(), None);
             }
@@ -456,12 +467,11 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
         supervisor: supervisor.clone(),
         multilingual,
         resident_mb: None,
-        ready_since: None,
         log_path: Some(log_path),
     });
     drop(serve);
     // Free VRAM before the models load, then once the server is ready.
-    let (before, _) = vram_reading(app, Duration::from_secs(5));
+    let before = free_vram(app, Duration::from_secs(5)).map(|r| r.free_mb);
     supervisor.start();
     log::info!(
         "live server starting: asr {} | diarizer {} | free VRAM before {}",
@@ -490,7 +500,7 @@ fn watch_ready(
                 Ok(ep) => {
                     let secs = t.elapsed().as_secs_f64();
                     let resident = before.map(|b| {
-                        let (after, _) = vram_reading(&app, Duration::ZERO);
+                        let after = free_vram(&app, Duration::ZERO).map(|r| r.free_mb);
                         b.zip(after)
                             .map(|(b, a)| b.saturating_sub(a))
                             // doctor may not see the server's allocations: 0 is unknown.
@@ -510,7 +520,6 @@ fn watch_ready(
                         if let Some(r) = resident {
                             s.resident_mb = r;
                         }
-                        s.ready_since = Some(Instant::now());
                     }
                 }
                 Err(e) => log::warn!("live server did not become ready: {e}"),
@@ -521,18 +530,10 @@ fn watch_ready(
     }
 }
 
-/// Free VRAM for the start gate, counted as if the live server were not
-/// loaded yet (the gate's 2.5 GB includes it).
-fn gate_vram(app: &AppHandle) -> Option<u32> {
-    let (free, at) = vram_reading(app, VRAM_READING_TTL);
-    let live = handle(app);
-    let serve = lock(&live.serve);
-    let resident = serve
-        .as_ref()
-        .filter(|s| s.ready_since.is_some_and(|r| r <= at))
-        .and_then(|s| s.resident_mb)
-        .unwrap_or(0);
-    free.map(|f| f + resident)
+/// Free VRAM for the start gate, as NVML (or doctor) reports it: nothing is
+/// added or subtracted for the live server.
+fn gate_vram(app: &AppHandle) -> Option<VramReading> {
+    free_vram(app, VRAM_READING_TTL)
 }
 
 /// Records post-pass events and forwards them as `job:*`. `meeting`
@@ -653,7 +654,8 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
         let mic = resolve_device(&devices, DeviceFlow::Capture, req.mic.clone(), strict)?;
         let loopback = resolve_device(&devices, DeviceFlow::Render, req.loopback.clone(), strict)?;
         let (supervisor, multilingual) = ensure_server(app, &built.selection);
-        let free = gate_vram(app);
+        let reading = gate_vram(app);
+        let free = reading.map(|r| r.free_mb);
         let ctx = LiveContext {
             store: Arc::clone(&store),
             queue,
@@ -684,7 +686,11 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             req.diarize_mic,
             mic,
             loopback,
-            free.map_or("unknown".into(), |m| format!("{m} MB"))
+            reading.map_or("unknown".into(), |r| format!(
+                "{} MB ({}; needs {MIN_FREE_VRAM_MB} MB)",
+                r.free_mb,
+                r.source.as_str()
+            ))
         );
         Recorder::start(
             ctx,
@@ -1050,25 +1056,13 @@ pub(crate) fn status(app: &AppHandle) -> LiveStatusView {
     let state = live.view(app.state::<Jobs>().0.is_paused());
     let recorder = lock(&live.slot).recorder.as_ref().map(Recorder::status);
     let server = {
-        let mut serve = lock(&live.serve);
-        serve.as_mut().map(|s| {
-            let status = s.supervisor.status();
-            match status {
-                ServeStatus::Ready { .. } => {
-                    s.ready_since.get_or_insert_with(Instant::now);
-                }
-                _ => s.ready_since = None,
-            }
-            ServeView {
-                status,
-                uptime_ms: s.ready_since.map(|t| t.elapsed().as_millis() as u64),
-                restarts: s.supervisor.restarts(),
-                pid: s.supervisor.pid(),
-                resident_vram_mb: s.resident_mb,
-                asr_model: file_name(&s.key.asr),
-                diar_model: file_name(&s.key.diar),
-                log_path: s.log_path.as_ref().map(|p| p.display().to_string()),
-            }
+        let serve = lock(&live.serve);
+        serve.as_ref().map(|s| ServeView {
+            server: s.supervisor.status(),
+            resident_vram_mb: s.resident_mb,
+            asr_model: file_name(&s.key.asr),
+            diar_model: file_name(&s.key.diar),
+            log_path: s.log_path.as_ref().map(|p| p.display().to_string()),
         })
     };
     let queue = Arc::clone(&app.state::<Jobs>().0);
@@ -1126,7 +1120,10 @@ pub async fn prepare_recording(app: AppHandle) -> CmdResult<()> {
         }
         let built = select(&paths, &*store)?;
         ensure_server(&app, &built.selection);
-        vram_reading(&app, VRAM_READING_TTL);
+        if gpu::nvml_vram(gpu::device_index(DEVICE)).is_none() {
+            // Without NVML the gate reads doctor (seconds): refresh it now.
+            vram_reading(&app, VRAM_READING_TTL);
+        }
         Ok(())
     })
     .await

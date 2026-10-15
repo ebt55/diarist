@@ -37,6 +37,9 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Stereo playback track after the post-pass (docs/research/06 B). Pinned to 1.x.
 flac-codec = { version = "1", default-features = false }
+# Free VRAM for the live start gate (docs/01 "Capture robustness"): loads the
+# driver's nvml.dll at run time; `nemo-speech doctor` is the fallback.
+nvml-wrapper = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

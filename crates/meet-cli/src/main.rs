@@ -1013,6 +1013,15 @@ fn doctor(ctx: &Ctx) -> CliResult {
     if let Some(free) = models::free_disk_bytes(&ctx.paths.root) {
         println!("free disk   {} MB", free >> 20);
     }
+    match meet_core::gpu::nvml_vram(0) {
+        Some(r) => println!(
+            "nvml        {} MB free of {} MB (the live start gate needs {} MB)",
+            r.free_mb,
+            r.total_mb.unwrap_or(0),
+            meet_core::live::MIN_FREE_VRAM_MB
+        ),
+        None => println!("nvml        not available (the live start gate uses doctor)"),
+    }
     println!(
         "ffmpeg      {}",
         find_on_path("ffmpeg")

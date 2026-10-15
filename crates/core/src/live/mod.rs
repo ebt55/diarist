@@ -1,7 +1,7 @@
 //! Live recording (`docs/01`, "Live flow"; plan 04 chunk 3d).
 //!
-//! [`Recorder::start`] checks free VRAM (refuses under 2.5 GB, from the
-//! runtime's doctor report) and free disk, creates the meeting (status
+//! [`Recorder::start`] checks free VRAM (refuses under 2.5 GB, from NVML or
+//! the runtime's doctor report: [`crate::gpu`]) and free disk, creates the meeting (status
 //! `recording`) and its `live` run (made current, so the UI shows its
 //! speakers), starts per channel a capture ([`crate::audio::capture`]), a
 //! pipeline thread ([`crate::audio::pipeline`]: WAV, clock anchors, frames)
@@ -98,7 +98,8 @@ pub const LOOPBACK_SILENT_WARNING: Duration = Duration::from_secs(60);
 /// Capture rings hold this many packets (about 20 s of 10 ms packets).
 const RING_PACKETS: usize = 2_048;
 
-/// Free VRAM in MB (`None` when unknown).
+/// Free VRAM in MB (`None` when unknown), as it is at Start
+/// ([`crate::gpu::free_vram`]).
 pub type VramProbe = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 /// Receives post-pass job events.
 pub type JobEventFn = Arc<dyn Fn(JobEvent) + Send + Sync>;
@@ -474,13 +475,7 @@ impl Recorder {
     /// Starts a recording (see the module docs).
     pub fn start(ctx: LiveContext, opts: StartOptions, sink: Arc<dyn LiveSink>) -> Result<Self> {
         if let Some(free) = (ctx.vram_free_mb)() {
-            if free < ctx.min_free_vram_mb {
-                return Err(CoreError::Engine(format!(
-                    "only {free} MB of GPU memory is free; live transcription needs {} MB. \
-                     Close other GPU applications and try again.",
-                    ctx.min_free_vram_mb
-                )));
-            }
+            crate::gpu::check_free_vram(free, ctx.min_free_vram_mb)?;
         }
         if let Some(free) = free_disk_bytes(&ctx.data_root) {
             if free < ctx.min_free_bytes {

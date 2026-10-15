@@ -126,6 +126,29 @@ pub enum ServeStatus {
     },
 }
 
+/// What [`ServeSupervisor::status`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ServeSnapshot {
+    pub status: ServeStatus,
+    /// When the server last became ready (`None` unless it is ready now).
+    #[serde(skip)]
+    #[ts(skip)]
+    pub ready_since: Option<Instant>,
+    /// How long it has been ready (`None` unless it is ready now).
+    pub uptime_ms: Option<u64>,
+    /// Restarts after the server had been ready (crashes it came back from).
+    pub restarts: u32,
+    /// Process id of the running server.
+    pub pid: Option<u32>,
+}
+
+impl ServeSnapshot {
+    pub fn is_ready(&self) -> bool {
+        matches!(self.status, ServeStatus::Ready { .. })
+    }
+}
+
 /// Where a ready server listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeEndpoint {
@@ -152,6 +175,8 @@ struct State {
     failures: u32,
     /// Restarts after the server had been ready (diagnostics).
     restarts: u32,
+    /// When the status last became `Ready`.
+    ready_since: Option<Instant>,
     retry_at: Option<Instant>,
     want_running: bool,
     sessions: usize,
@@ -210,6 +235,7 @@ impl ServeSupervisor {
                 launched_at: Instant::now(),
                 failures: 0,
                 restarts: 0,
+                ready_since: None,
                 retry_at: None,
                 want_running: false,
                 sessions: 0,
@@ -272,8 +298,18 @@ impl ServeSupervisor {
         }
     }
 
-    pub fn status(&self) -> ServeStatus {
-        self.inner.lock().status.clone()
+    /// State, uptime, restart count and process id.
+    pub fn status(&self) -> ServeSnapshot {
+        let st = self.inner.lock();
+        let ready = matches!(st.status, ServeStatus::Ready { .. });
+        let ready_since = st.ready_since.filter(|_| ready);
+        ServeSnapshot {
+            status: st.status.clone(),
+            ready_since,
+            uptime_ms: ready_since.map(|t| t.elapsed().as_millis() as u64),
+            restarts: st.restarts,
+            pid: st.child.as_ref().map(Child::id),
+        }
     }
 
     /// Restarts after the server had been ready once.
@@ -466,6 +502,7 @@ fn monitor(weak: Weak<Inner>) {
             if st.status == (ServeStatus::Starting { port }) {
                 if ready {
                     st.status = ServeStatus::Ready { port };
+                    st.ready_since = Some(Instant::now());
                     st.failures = 0;
                     st.idle_since = Instant::now();
                     notify = true;
@@ -551,14 +588,17 @@ mod tests {
             dir.path().join("asr.gguf"),
             dir.path().join("diar.gguf"),
         ));
-        assert_eq!(sup.status(), ServeStatus::Stopped);
+        let s = sup.status();
+        assert_eq!(s.status, ServeStatus::Stopped);
+        assert_eq!((s.uptime_ms, s.restarts, s.pid), (None, 0, None));
+        assert!(!s.is_ready());
         // Spawning fails every time: Restarting with backoff, then Failed.
         // (1 + 2 + 4 + 8 s of backoff is too long for a unit test, so only
         // the first transition is checked.)
         sup.start();
         let t = Instant::now();
         while !matches!(
-            sup.status(),
+            sup.status().status,
             ServeStatus::Restarting { .. } | ServeStatus::Failed { .. }
         ) {
             assert!(t.elapsed() < Duration::from_secs(5), "{:?}", sup.status());
@@ -566,7 +606,7 @@ mod tests {
         }
         assert!(sup.ensure_ready(Duration::from_millis(200)).is_err());
         sup.stop();
-        assert_eq!(sup.status(), ServeStatus::Stopped);
+        assert_eq!(sup.status().status, ServeStatus::Stopped);
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub use crate::protocol::{
     DiarPreset, EngineEvent, EngineInfo, EngineWord, ErrorCode, FileJob, JobStats, LiveOpts,
 };
 use crate::types::{Channel, JobId};
-pub use live_ws::{NemoWsLiveEngine, ServeConfig, ServeStatus, ServeSupervisor};
+pub use live_ws::{NemoWsLiveEngine, ServeConfig, ServeSnapshot, ServeStatus, ServeSupervisor};
 pub use nemo_cli::{DiarizeRunner, NemoCascadeEngine, NemoCliEngine};
 
 /// Whole-file transcription (and diarization).

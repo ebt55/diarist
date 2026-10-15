@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use meet_core::audio::capture::{self, find_device, DeviceFlow};
 use meet_core::engine::{NemoWsLiveEngine, ServeConfig, ServeSupervisor};
+use meet_core::gpu;
 use meet_core::live::{
     DegradedUpdate, DeviceChange, DeviceSelection, LevelsUpdate, LiveContext, LiveSink,
     LiveWarning, Recorder, StartOptions, WordsUpdate, MIN_FREE_BYTES, MIN_FREE_VRAM_MB,
 };
-use meet_core::models::{self, DoctorReport};
+use meet_core::models;
 use meet_core::pipeline::JobQueue;
 use meet_core::store::{RunStore, Store};
 use meet_core::types::Channel;
@@ -170,21 +171,21 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
             sel.asr_file.display_name
         )));
     }
-    let report: Option<DoctorReport> = models::doctor(&sel.engine_dir).ok();
-    let free = report.as_ref().and_then(DoctorReport::free_vram_mb);
+    let reading = gpu::free_vram(gpu::device_index(&args.device), Some(&sel.engine_dir));
+    let free = reading.map(|r| r.free_mb);
     eprintln!(
         "engine {} | asr {} | diarizer {} | free VRAM {}",
         sel.engine_version.as_deref().unwrap_or("?"),
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
-        free.map_or("unknown".into(), |m| format!("{m} MB"))
+        reading.map_or("unknown".into(), |r| format!(
+            "{} MB ({})",
+            r.free_mb,
+            r.source.as_str()
+        ))
     );
     if let Some(f) = free {
-        if f < MIN_FREE_VRAM_MB {
-            return Err(CliError::Failed(format!(
-                "only {f} MB of GPU memory is free; live transcription needs {MIN_FREE_VRAM_MB} MB"
-            )));
-        }
+        gpu::check_free_vram(f, MIN_FREE_VRAM_MB).map_err(|e| CliError::Failed(e.to_string()))?;
     }
     let mut cfg = ServeConfig::new(&sel.engine_dir, ctx.paths.models(), &sel.asr, &sel.diarizer);
     cfg.device = args.device.clone();
