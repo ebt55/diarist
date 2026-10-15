@@ -36,6 +36,8 @@ Primarily the author, on one machine: Windows 11, RTX 3080 10 GB, 32 GB RAM. Sec
 - File mode: one hour of audio transcribed and diarized in under 6 minutes on the RTX 3080 (real-time factor under 0.1), including 77-minute and 2-hour recordings.
 - Robustness: a crash or stall in the inference engine never loses audio or already-transcribed text. Recording continues, the app says so, and the transcript is completed when the engine is back.
 
+Baseline measured 15 Oct 2026 (`docs/eval/2026-10-15-nemotron35.md`, `-nemotron_en.md`, cue-level Zoom references, not yet hand-corrected): WDER 0.2 to 0.6 percent on the four English Zoom meetings, 7 to 9 percent within 1 s of a speaker change, speaker count exact on the single-speaker control and within one elsewhere, AMI cpWER 19.8 (EN model) and 23.0 (3.5). The in-room stress session scores 20.7 percent WDER against a coarse reference. The bar is met on remote meetings; speaker changes and in-room audio are where work remains.
+
 ## Constraints
 
 - GPU memory: ASR plus diarizer resident under 4 GB; never more than 6 GB of the 10 GB, leaving room for a browser and the meeting app sharing the GPU.

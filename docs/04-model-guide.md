@@ -10,11 +10,11 @@ Three neural models and one runtime. Nothing else. No Python, no PyTorch, no CUD
 |---|---|---|---|
 | NeMo-Speech.cpp 0.2.0 (NVIDIA) | GGUF inference runtime, one zip per GPU backend | 98 MB zip, 134 MB extracted (CUDA build) | Apache-2.0 |
 | Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers, streaming and file | 102 MB | OpenMDW-1.1 |
-| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text for live and file mode (default), 40+ locales with automatic detection | 742 MB | OpenMDW-1.1 |
-| Nemotron Speech Streaming EN 0.6B, q8_0 | Optional English fallback, keeps more filler words | 668 MB | NVIDIA Open Model Licence |
+| Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text for live and file mode, default for English | 668 MB | NVIDIA Open Model Licence |
+| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Recommended for non-English or mixed meetings: 40+ locales with automatic detection, 30 percent less VRAM | 742 MB | OpenMDW-1.1 |
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only, off by default: better punctuation but drops speech (see section 3) | 681 MB | CC-BY-4.0 |
 
-First-run download with the defaults: engine plus diarizer plus Nemotron 3.5, about 940 MB. With every optional model: 2.3 GB.
+First-run download with the defaults: engine plus diarizer plus the EN model, about 870 MB. With every optional model: 2.3 GB.
 
 ## 2. Speaker diarization: why Nemotron 3
 
@@ -37,7 +37,7 @@ Limits you should know (*published* and **measured**):
 - The "offline" full-attention preset scored worse than streaming on our test clip (DER 43 versus 24) and is not used.
 - Hard cases listed on the model card: heavy overlap, far-field microphones, noisy rooms.
 
-## 3. Speech to text: why Nemotron 3.5 for everything, and why not Parakeet
+## 3. Speech to text: why the Nemotron streaming models, which one, and why not Parakeet
 
 Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 
@@ -54,12 +54,20 @@ Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 
 Why not the top two: they give no word timestamps, and speaker assignment needs the start and end of every word. They also run only inside a Python stack.
 
-Why Nemotron 3.5 is the single model for both live and file mode (**measured**, docs/research/08 section 7):
-- On the 77-minute recording it dropped nothing (143 words in the span Parakeet lost), found all 8 labels, and its speaker tags agreed 99.9 percent with the standalone diarizer, exactly like the EN model.
-- Same speed (26x real time) with 30 percent less VRAM (1.82 GB peak versus 2.58 GB).
-- Live: 0.18 s to the first text delta, finals 0.86 s after the last word, two channels in real time.
-- It detects the language automatically (`en-US` on our tests) and accepts a language hint live; 40+ locales.
-- Trade-off: it writes clean verbatim, dropping about 40 percent of "um" and "uh", so word counts run 3 to 13 percent below the EN model. Neither Nemotron model punctuates much (2.5 percent of words for 3.5, 0.2 for EN).
+Both Nemotron streaming models are safe on long files (**measured**, docs/research/08 section 7): on the 77-minute recording each found all 8 labels, dropped nothing, and tagged speakers at 99.9 percent agreement with the standalone diarizer; live, both reach first text in about 0.2 s and keep two channels in real time. The choice between them comes from the eval harness (docs/eval, 15 Oct 2026, **measured**):
+
+| | EN 0.6B | 3.5 0.6B |
+|---|---|---|
+| cpWER on the four English Zoom meetings | 5.1, 7.8, 8.5, 10.3 | 5.4, 7.9, 9.2, 12.0 |
+| cpWER on AMI ES2002a (word-level reference) | 19.8 | 23.0 |
+| Words to wrong speaker | identical | identical |
+| Peak VRAM, 77-minute file | 2.6 GB | 1.8 GB |
+| Languages | English | 40+ locales, automatic detection |
+| Filler words ("um", "uh") | kept | about 40 percent dropped |
+
+- **Default for English: the EN model.** It keeps more of what was said, and the difference is real after fillers are discounted on both sides.
+- **Recommended for other or mixed languages: Nemotron 3.5.** It is also the better choice on a 4 GB card.
+- Neither model punctuates much (0.2 and 2.5 percent of words); the app's segmenting at pauses supplies the structure, and punctuation restoration is planned as a CPU post-step.
 
 Why Parakeet TDT v3 is experimental only (**measured**, docs/research/08 section 8):
 - It is about 0.6 WER points better than the EN model and writes real punctuation and casing (12 percent of words punctuated).
@@ -115,7 +123,7 @@ Other requirements:
 ## 6. Languages
 
 - Diarization is language-independent.
-- Live and file mode: Nemotron 3.5 covers 40+ locales. Set the meeting's language when you know it; automatic detection works but loses about a second of the first utterance. The optional EN model is English only.
+- Live and file mode: the default EN model is English only. Select Nemotron 3.5 in Settings for 40+ locales; set the meeting's language when you know it, since automatic detection loses about a second of the first utterance.
 - Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language.
 
 ## 7. Honest caveats

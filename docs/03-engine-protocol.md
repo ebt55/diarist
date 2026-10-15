@@ -60,10 +60,10 @@ Rules:
 
 One child process per file, exact command line and output schema in `docs/research/08-runtime-cli-contract.md` section 1:
 
-`nemo-speech.exe transcribe <wav> --model <nemotron-3.5-asr-streaming-0.6b.q8_0.gguf> --language <lang> --stream --endpointing --diarize --diar-model <Nemotron-3-Diarization.q8_0.gguf> --device cuda:0 --json --output <words.json> --force`
+`nemo-speech.exe transcribe <wav> --model <selected ASR .gguf> [--language <lang>] --stream --endpointing --diarize --diar-model <Nemotron-3-Diarization.q8_0.gguf> --device cuda:0 --json --output <words.json> --force`
 
 - Environment: `NEMO_SPEECH_MODEL_DIR` set to our models dir; `PATH` = engine `bin`, System32, Windows. Model paths are always absolute (a short name triggers a download).
-- `--language` is the meeting's language (default `en`); omitted when the meeting says `auto`, which lets 3.5 detect it at the cost of about a second of the first utterance. The EN fallback model ignores the flag.
+- The selected ASR model is the EN model by default (measured best on English, docs/eval) or Nemotron 3.5 when the user selects it. `--language` is passed only for 3.5: the meeting's language (default `en`), omitted for `auto`, which costs about a second of the first utterance.
 - Output `words[{word, start, end, confidence, speaker?}]` (seconds on an 80 ms grid; confidence always 1.0 in v0.2.0, stored as `None`; `speaker` 1-based, absent when untagged). Normalized to `spk_N` in order of first appearance; `Utterance` per contiguous same-speaker stretch; then `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
 - Errors: exit codes 0 ok, 1 runtime, 2 invalid argument, 3 missing model, 4 unsupported; with `--json` a one-line `{"error":{...}}` object on stderr. Mapped to `Error { code }`.
 - No progress output exists; the adapter emits `Progress` from elapsed time against the expected duration (27x real time measured).
