@@ -1,6 +1,6 @@
 # Data model (SQLite)
 
-Status: v0.2, 15 Oct 2026, after the architecture review (research/05). One SQLite file at `<data root>\meet-assist.db`, WAL mode, foreign keys on, backups via the rusqlite backup API (never by copying the file or `VACUUM INTO`).
+Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjudication (research/06). One SQLite file at `<data root>\meet-assist.db`, WAL mode, foreign keys on. Backups via the rusqlite backup API or `VACUUM INTO` a temp file followed by flush and rename; never by copying the live file.
 
 ## Principles
 
@@ -9,7 +9,7 @@ Status: v0.2, 15 Oct 2026, after the architecture review (research/05). One SQLi
 - INTEGER primary keys everywhere (rowid aliases), so FTS5 external content stays stable across VACUUM and joins stay fast at tens of millions of words. The only ULID is `meetings.uid`, used for folder names and exports.
 - The segment owns the speaker. Words keep the engine's raw label and, from v1.5, the fusion margin and overlap flag, so a smoothing pass can be compared with what the engine said.
 - User edits survive new runs: display names and colours are carried over by time-overlap matching; segment reassignments are stored as time-ranged edits and re-applied.
-- Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; one stereo FLAC (left mic, right loopback) after the post-pass, WAVs deleted; retention default 30 days unless a meeting is pinned. Imports keep the original file as the playback source.
+- Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; one stereo FLAC (left mic, right loopback) after the post-pass, WAVs deleted; retention default 30 days unless a meeting is pinned (`audio_keep`). Eval-set meetings are pinned by the harness. A later re-diarization or fusion re-run only reaches meetings whose audio still exists, and Settings says so. Imports keep the original file as the playback source.
 - Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
 
 ## Tables
@@ -78,6 +78,8 @@ CREATE TABLE speakers (
   global_id     INTEGER REFERENCES global_speakers(id) ON DELETE SET NULL,
   merged_into   INTEGER REFERENCES speakers(id) ON DELETE SET NULL,  -- always points at a root; chains are flattened on merge
   needs_review  INTEGER NOT NULL DEFAULT 0,      -- 1 when carry-over from a previous run was ambiguous
+  name_anchor_start_ms INTEGER,                  -- time range of the segment the user renamed from (set on rename)
+  name_anchor_end_ms   INTEGER,                  -- used by carry-over to give the name to whoever speaks there in the new run
   UNIQUE (run_id, channel, engine_label)
 );
 CREATE INDEX speakers_meeting ON speakers(meeting_id);
@@ -192,14 +194,15 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ## Carry-over from the previous current run
 
 1. Build the overlap matrix between old speakers and new speakers on the same channel: seconds where a word of old speaker A and a word of new speaker X overlap in time. Old speakers with under 5 s of speech are ignored so spurious live labels cannot claim names.
-2. Greedy one-to-one matching, highest overlap first. A match is accepted when it covers at least 60 percent of the smaller speaker's speech time. Copy `display_name`, `color`, `global_id`.
-3. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge. (A post-pass that splits a live label into two usually means two people were conflated, so only the better match inherits the name.)
-4. Merges are not carried structurally; matched speakers inherit the merged root's name, so two new labels may share a name, and the UI offers "merge again" in one click.
-5. `edits` of kind `reassign` are replayed in `created_at` order at word level: new words whose midpoints fall inside the edit's range belong to the edit's target. If that covers a whole segment, the segment is reassigned; otherwise the segment is split at the word boundary and the covered part reassigned. The target is resolved by display name against the new run after step 2; if no speaker has that name, a speaker row `user_N` with `needs_review = 1` is created rather than dropping the edit.
+2. Greedy one-to-one matching, highest overlap first. A match is accepted when it covers at least 60 percent of the smaller speaker's speech time. Copy `color` and `global_id` to the match.
+3. Names follow the anchor, not the overlap: when an old speaker has `name_anchor_*` (the segment the user renamed from), the name goes to the new speaker who owns most words inside that range. If that speaker differs from the overlap winner, both get `needs_review = 1`. Old speakers without an anchor (named through a merge or from an earlier run) pass the name to the overlap winner. This handles the case where the live diarizer conflated two people and the user named one of them: the post-pass split gives the name to the person who was actually talking where the user pressed rename.
+4. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge. (A post-pass that splits a live label into two usually means two people were conflated.)
+5. Merges are not carried structurally; matched speakers inherit the merged root's name, so two new labels may share a name, and the UI offers "merge again" in one click.
+6. `edits` of kind `reassign` are replayed in `created_at` order at word level: new words whose midpoints fall inside the edit's range belong to the edit's target. If that covers a whole segment, the segment is reassigned; otherwise the segment is split at the word boundary and the covered part reassigned. The target is resolved by display name against the new run after step 2; if no speaker has that name, a speaker row `user_N` with `needs_review = 1` is created rather than dropping the edit.
 
 ## Speaker rename, merge, reassign
 
-- Rename or colour: update the speaker row.
+- Rename: update `display_name` and set `name_anchor_start_ms/end_ms` to the segment the rename was invoked from (NULL when renamed from the legend without a segment). Colour: update the row.
 - Merge A into B: set `A.merged_into = root(B)`, and repoint any speaker whose `merged_into = A` to `root(B)` so chains stay one level deep; reject cycles. Queries resolve `COALESCE(merged_into, id)`.
 - Reassign a segment: update `segments.speaker_id`, write an `edits` row. To reassign part of a segment, split it at a word boundary first (segments and words are updated in one transaction).
 

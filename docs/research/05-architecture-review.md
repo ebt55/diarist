@@ -20,6 +20,15 @@ Disposition legend: ACCEPT (applied), MODIFY (applied in a different form, reaso
 | 12 | MEDIUM | First-week gaps: sleep, in-room meetings (mic hard-wired to "me"), non-English live, single instance, crash-safe WAV | ACCEPT: `SetThreadExecutionState` while recording, suspend/resume handling, `diarize_mic` per meeting, `meetings.language`, `unicode61 remove_diacritics 2` tokenizer, single-instance plugin, periodic `flush()`; spike asked to check Nemotron 3.5 streaming multilingual |
 | 13 | LOW | Rust 1.88 may be below 2026 crates' MSRV | ACCEPT: agents may run `rustup update stable` if a dependency requires it, and must report that they did |
 
+## Convergence (concurrence round, 15 Oct 2026)
+
+The Opus reviewer read research/06 and concurred with all four verdicts and both reopened items. Three additions were accepted and applied:
+- B: `<audio crossorigin="anonymous">` is required for the Web Audio gain matrix because `tauri.localhost` and `asset.localhost` are different origins (plans/03, docs/01). Eval-set meetings are pinned; Settings states that re-runs only reach meetings whose audio still exists (docs/02, plans/06).
+- C: the POSTUNINSTALL hook reads `HKCU\Software\meet-assist\DataRoot` and, when the delete-app-data checkbox is ticked, wipes the moved data root too; the key lives outside the identifier keys the checkbox removes (plans/06).
+- D: a rename records the time range of the segment it was invoked from (`speakers.name_anchor_*`); carry-over gives the name to the new speaker owning most words in that range and flags disagreement with the overlap winner (docs/02). This covers the case where the live diarizer conflated two people and the user named one of them.
+
+No open disagreements remain between the reviewer, the adjudicator and the architect.
+
 ## Kept as is (reviewer agreed)
 
 Out-of-process engine behind a trait; post-pass canonical, live as preview; mic is "me", loopback is "them"; endpoint loopback never process loopback; wasapi over cpal; QPC timeline with zero-fill; Tauri 2 + Svelte 5 + virtua with a thin `src-tauri`; rusqlite bundled, WAL, FTS5, numbered migrations; Nemotron 3 offline preset for finals with retuned post-processing; the eval design; hash-pinned manifests, portable mode, identity in v3 on CPU; v1.5 fusion measured not assumed.

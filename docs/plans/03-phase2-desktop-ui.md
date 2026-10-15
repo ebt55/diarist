@@ -20,7 +20,7 @@ get_words(id, from_ms, to_ms) -> Vec<Word>
 search(query, limit) -> Vec<SearchHit { meeting_id, meeting_title, segment_id, start_ms, snippet }>
 import_file(path, title?) -> job_id                    // emits events job:progress, job:done, job:error
 cancel_job(job_id)
-rename_speaker(speaker_id, name) / set_speaker_color(speaker_id, hex) / merge_speakers(from, into) / unmerge_speaker(id) / reassign_segment(segment_id, speaker_id)
+rename_speaker(speaker_id, name, anchor_segment_id?) / set_speaker_color(speaker_id, hex) / merge_speakers(from, into) / unmerge_speaker(id) / reassign_segment(segment_id, speaker_id)
 set_meeting_title(id, title) / delete_meeting(id)
 export_meeting(id, format) -> path                     // uses the dialog plugin for the save location
 get_audio_url(id, channel) -> string                   // asset-protocol URL for the stored WAV
@@ -35,7 +35,7 @@ Types are `meet_core::views` (generated TypeScript in `src/lib/generated/`); the
 ## Screens
 
 1. **Library.** Left: search box (Ctrl+K focuses it) and the meeting list sorted by date, each row with title, date, duration, speaker count. Search results replace the list and show snippets with `<mark>` highlights; Enter opens the meeting at that segment. Top: Import button (Ctrl+O) and drag-and-drop zone for files.
-2. **Meeting view.** Header: editable title, date, duration, status chip. Speaker legend: colour chip, name (double-click or R to rename), menu with merge-into and colour, a "new label" badge when `needs_review`. Transcript: virtualized (virtua) list of segments; each row shows a monospace timestamp, speaker chip, text; the word under the playhead is highlighted; clicking a word seeks audio. Audio bar: play/pause (Space), seek, speed, and a channel control for live meetings (the stereo FLAC is routed through a Web Audio gain matrix: mono mix by default, solo mic or solo loopback toggles). Right-click a segment: reassign speaker (split at a word when only part is selected). Export menu (md, txt, json, srt, vtt).
+2. **Meeting view.** Header: editable title, date, duration, status chip. Speaker legend: colour chip, name (double-click or R to rename), menu with merge-into and colour, a "new label" badge when `needs_review`. Transcript: virtualized (virtua) list of segments; each row shows a monospace timestamp, speaker chip, text; the word under the playhead is highlighted; clicking a word seeks audio. Audio bar: play/pause (Space), seek, speed, and a channel control for live meetings (the stereo FLAC is routed through a Web Audio gain matrix: mono mix by default, solo mic or solo loopback toggles). The `<audio>` element must carry `crossorigin="anonymous"`: the page is served from `tauri.localhost` and the file from `asset.localhost`, and a Web Audio node fed by a cross-origin element without it outputs silence (Tauri's asset protocol sends the matching `Access-Control-Allow-Origin`, also on 206 responses). Right-click a segment: reassign speaker (split at a word when only part is selected). Export menu (md, txt, json, srt, vtt).
 3. **Import progress.** Toast or inline row in the library showing percent and elapsed; error with "show log".
 4. **Settings.** Data directory, audio retention toggle, theme, engine status with Install button (calls a stub for now).
 5. **Diagnostics.** Tail of the app log (from tauri-plugin-log) and engine stderr of the last job.
