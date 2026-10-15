@@ -118,6 +118,7 @@ pub fn run() {
             commands::import_file,
             commands::cancel_job,
             commands::rename_speaker,
+            commands::rename_speaker_at,
             commands::set_speaker_color,
             commands::merge_speakers,
             commands::unmerge_speaker,

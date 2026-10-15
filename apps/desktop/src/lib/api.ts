@@ -57,6 +57,9 @@ export const api = {
 
   renameSpeaker: (speaker_id: SpeakerId, name: string, anchor_segment_id: SegmentId | null) =>
     invoke<void>("rename_speaker", { speaker_id, name, anchor_segment_id }),
+  /** Rename while recording, anchored at a live line's meeting-time range. */
+  renameSpeakerAt: (speaker_id: SpeakerId, name: string, start_ms: number, end_ms: number) =>
+    invoke<void>("rename_speaker_at", { speaker_id, name, start_ms, end_ms }),
   setSpeakerColor: (speaker_id: SpeakerId, color: string) =>
     invoke<void>("set_speaker_color", { speaker_id, color }),
   mergeSpeakers: (from: SpeakerId, into: SpeakerId) =>

@@ -202,6 +202,21 @@ pub trait Store: Send + Sync {
         anchor_segment: Option<SegmentId>,
     ) -> StoreResult<()>;
 
+    /// Sets the display name like [`Store::rename_speaker`], with the name
+    /// anchor given as a time range (meeting ms) instead of a segment: for
+    /// renames made while recording, when the live run has no segments yet
+    /// (the UI passes the range of the utterance the rename was invoked on).
+    /// Carry-over gives the name to whoever speaks in that range in the next
+    /// run, however little the old speaker said. `Invalid` when `end_ms <
+    /// start_ms`; a blank name restores the default and clears the anchor.
+    fn rename_speaker_at(
+        &self,
+        id: SpeakerId,
+        name: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StoreResult<()>;
+
     /// `color` must be `#rrggbb`.
     fn set_speaker_color(&self, id: SpeakerId, color: &str) -> StoreResult<()>;
 

@@ -9,10 +9,13 @@
 //! 2. Greedy one-to-one matching, highest overlap first, accepted at 60
 //!    percent of the smaller speaker's speech time; colour and global id are
 //!    copied to the match.
-//! 3. Names follow the anchor: an old speaker with a name anchor gives its
-//!    name to the new speaker owning most words inside the anchor range; when
-//!    that differs from the overlap winner both get `needs_review`. Names
-//!    without an anchor (including names inherited through a merge) go to the
+//! 3. Names follow the anchor: an old speaker with a name anchor (the
+//!    segment renamed from, or the utterance range of a rename made while
+//!    recording, `Store::rename_speaker_at`) gives its name to the new
+//!    speaker owning most words inside the anchor range, however little the
+//!    old speaker said (the 5 s minimum applies only to step 1); when that
+//!    differs from the overlap winner both get `needs_review`. Names without
+//!    an anchor (including names inherited through a merge) go to the
 //!    overlap winner.
 //! 4. Unmatched new speakers get `needs_review`.
 //! 5. Merges are not carried structurally.

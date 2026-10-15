@@ -223,6 +223,23 @@ pub async fn rename_speaker(
     .await
 }
 
+/// Renames a speaker while recording: the anchor is the time range (meeting
+/// ms) of the live line the rename was invoked on, since there are no
+/// segments yet.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn rename_speaker_at(
+    store: State<'_, AppStore>,
+    speaker_id: SpeakerId,
+    name: String,
+    start_ms: i64,
+    end_ms: i64,
+) -> CmdResult<()> {
+    with_store(&store, move |s| {
+        s.rename_speaker_at(speaker_id, &name, start_ms, end_ms)
+    })
+    .await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_speaker_color(
     store: State<'_, AppStore>,

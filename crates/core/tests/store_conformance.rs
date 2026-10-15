@@ -61,6 +61,10 @@ const RUN_CASES: &[(&str, RunCase)] = &[
         carry_over_names_anchor_edits,
     ),
     ("carry_over_user_speaker", carry_over_user_speaker),
+    (
+        "rename_at_anchors_a_live_speaker",
+        rename_at_anchors_a_live_speaker,
+    ),
     ("carry_over_rejects_bad_runs", carry_over_rejects_bad_runs),
     (
         "live_speakers_survive_materialise",
@@ -1177,6 +1181,111 @@ fn carry_over_names_anchor_edits(store: &dyn RunStore) {
     let moved = segs.iter().find(|s| s.start_ms == 50_000).unwrap().id;
     assert!(words.iter().all(|w| w.segment_id == moved));
     assert_eq!(store.search("w55", 5).unwrap()[0].speaker_name, "Priya");
+}
+
+/// A live run while recording: `spk_0` says three words (2.4 s, under the
+/// 5 s overlap minimum) at 10-13 s, `spk_1` talks from 20 to 40 s. The user
+/// renames `spk_0` from its utterance (`anchored`) or from the legend.
+/// Returns the meeting, the live run and the two live speakers.
+fn recorded_live_run(
+    store: &dyn RunStore,
+    anchored: bool,
+) -> (MeetingId, RunId, SpeakerId, SpeakerId) {
+    let m = live_meeting(store);
+    let live = store
+        .create_run(m, RunKind::Live, serde_json::json!({}))
+        .unwrap()
+        .id;
+    let words = |from: u64, to: u64, spk: &str| -> Vec<EngineWord> {
+        (from..to)
+            .map(|s| ew(s * 1_000, s * 1_000 + 800, &format!("w{s}"), Some(spk)))
+            .collect()
+    };
+    store
+        .append_live_utterance(live, Channel::Loopback, 0, 0, &words(10, 13, "spk_0"))
+        .unwrap();
+    store
+        .append_live_utterance(live, Channel::Loopback, 1, 0, &words(20, 40, "spk_1"))
+        .unwrap();
+    let a = store
+        .live_speaker(live, Channel::Loopback, "spk_0")
+        .unwrap();
+    let b = store
+        .live_speaker(live, Channel::Loopback, "spk_1")
+        .unwrap();
+    if anchored {
+        store
+            .rename_speaker_at(a.id, "  Dana ", 10_000, 12_800)
+            .unwrap();
+    } else {
+        store.rename_speaker(a.id, "Dana", None).unwrap();
+    }
+    store.rename_speaker(b.id, "Eve", None).unwrap();
+    store
+        .materialise_live_run(live, &SegmentOptions::default())
+        .unwrap();
+    store.finish_run(live, RunStatus::Done).unwrap();
+    store.set_current_run(m, live).unwrap();
+    (m, live, a.id, b.id)
+}
+
+fn rename_at_anchors_a_live_speaker(store: &dyn RunStore) {
+    let (m, live, a, b) = recorded_live_run(store, true);
+    // The anchor is stored and survives the materialisation.
+    let row = store
+        .run_speakers(live)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == a)
+        .unwrap();
+    assert_eq!(row.display_name.as_deref(), Some("Dana"));
+    assert_eq!(
+        (row.name_anchor_start_ms, row.name_anchor_end_ms),
+        (Some(10_000), Some(12_800))
+    );
+    assert_eq!(segments(store, m)[0].speaker_name, "Dana");
+    assert!(is_invalid(store.rename_speaker_at(b, "X", 5_000, 4_999)));
+    assert!(is_not_found(store.rename_speaker_at(
+        SpeakerId(424_242),
+        "X",
+        0,
+        1
+    )));
+
+    // The post-pass labels the three words spk_1 and the long talker spk_0.
+    let new = run_with(
+        store,
+        m,
+        RunKind::PostPass,
+        &carry_transcript(&[("spk_0", &[(20, 40)]), ("spk_1", &[(10, 13)])]),
+    );
+    let report = store.carry_over(live, new).unwrap();
+    let dana = by_label(store, new, "spk_1");
+    let eve = by_label(store, new, "spk_0");
+    // The anchored name goes to the owner of the anchor range although the
+    // old speaker had under 5 s of speech; the unanchored name follows the
+    // overlap match.
+    assert_eq!(dana.display_name.as_deref(), Some("Dana"));
+    assert_eq!(dana.name_anchor_start_ms, Some(10_000));
+    assert_eq!(eve.display_name.as_deref(), Some("Eve"));
+    assert_eq!(report.matched, [(b, eve.id)]);
+    // Unmatched by overlap: the new label is flagged for review.
+    assert!(dana.needs_review && !eve.needs_review);
+
+    // The same rename from the legend (no anchor) passes no name on.
+    let (m2, live2, _, _) = recorded_live_run(store, false);
+    let new2 = run_with(
+        store,
+        m2,
+        RunKind::PostPass,
+        &carry_transcript(&[("spk_0", &[(20, 40)]), ("spk_1", &[(10, 13)])]),
+    );
+    store.carry_over(live2, new2).unwrap();
+    assert_eq!(by_label(store, new2, "spk_1").display_name, None);
+    assert_eq!(
+        by_label(store, new2, "spk_0").display_name.as_deref(),
+        Some("Eve")
+    );
 }
 
 fn carry_over_user_speaker(store: &dyn RunStore) {

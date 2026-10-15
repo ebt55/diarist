@@ -17,7 +17,8 @@
 
   interface Props {
     speakers: SpeakerView[];
-    onrename: (speaker: SpeakerId) => void;
+    /** Rename the line's speaker; `range` (meeting ms) is the line's time range, the name anchor. */
+    onrename: (speaker: SpeakerId, range: { start_ms: number; end_ms: number }) => void;
   }
   let { speakers, onrename }: Props = $props();
 
@@ -57,6 +58,10 @@
     if (listEl) listEl.scrollTop = listEl.scrollHeight;
   }
 
+  function renameRow(row: LiveRow) {
+    if (row.speakerId !== null) onrename(row.speakerId, { start_ms: row.start_ms, end_ms: row.end_ms });
+  }
+
   function moveCursor(i: number) {
     if (rows.length === 0) return;
     cursor = Math.max(0, Math.min(rows.length - 1, i));
@@ -93,7 +98,7 @@
       case "R": {
         // The selected line, else the newest one.
         const target = row ?? rows[rows.length - 1];
-        if (target?.speakerId != null) onrename(target.speakerId);
+        if (target) renameRow(target);
         break;
       }
       default:
@@ -231,7 +236,7 @@
             listEl?.focus({ preventScroll: true });
           }}
           onkeydown={() => {}}
-          ondblclick={() => row.speakerId !== null && onrename(row.speakerId)}
+          ondblclick={() => renameRow(row)}
         >
           <span class="ts mono">{formatClock(row.start_ms)}</span>
           <div class="body">

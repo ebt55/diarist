@@ -814,6 +814,30 @@ impl MemoryStore {
     }
 }
 
+/// Sets (trimmed) or clears (blank) a display name with its name anchor.
+fn set_speaker_name(
+    st: &mut State,
+    id: SpeakerId,
+    name: &str,
+    anchor: Option<(i64, i64)>,
+) -> StoreResult<()> {
+    let name = name.trim();
+    let sp = st
+        .speakers
+        .get_mut(&id)
+        .ok_or_else(|| StoreError::not_found("speaker", id))?;
+    if name.is_empty() {
+        sp.display_name = None;
+        sp.name_anchor_start_ms = None;
+        sp.name_anchor_end_ms = None;
+    } else {
+        sp.display_name = Some(name.to_owned());
+        sp.name_anchor_start_ms = anchor.map(|a| a.0);
+        sp.name_anchor_end_ms = anchor.map(|a| a.1);
+    }
+    Ok(())
+}
+
 impl Store for MemoryStore {
     fn list_meetings(&self) -> StoreResult<Vec<MeetingSummary>> {
         let st = self.lock()?;
@@ -945,21 +969,23 @@ impl Store for MemoryStore {
             }
             None => None,
         };
-        let name = name.trim();
-        let sp = st
-            .speakers
-            .get_mut(&id)
-            .ok_or_else(|| StoreError::not_found("speaker", id))?;
-        if name.is_empty() {
-            sp.display_name = None;
-            sp.name_anchor_start_ms = None;
-            sp.name_anchor_end_ms = None;
-        } else {
-            sp.display_name = Some(name.to_owned());
-            sp.name_anchor_start_ms = anchor.map(|a| a.0);
-            sp.name_anchor_end_ms = anchor.map(|a| a.1);
+        set_speaker_name(&mut st, id, name, anchor)
+    }
+
+    fn rename_speaker_at(
+        &self,
+        id: SpeakerId,
+        name: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StoreResult<()> {
+        if end_ms < start_ms {
+            return Err(StoreError::Invalid(format!(
+                "name anchor ends before it starts ({start_ms} > {end_ms} ms)"
+            )));
         }
-        Ok(())
+        let mut st = self.lock()?;
+        set_speaker_name(&mut st, id, name, Some((start_ms, end_ms)))
     }
 
     fn set_speaker_color(&self, id: SpeakerId, color: &str) -> StoreResult<()> {

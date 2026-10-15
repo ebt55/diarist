@@ -515,6 +515,30 @@ fn get_run(conn: &Connection, run: RunId) -> StoreResult<TranscriptRun> {
     .ok_or_else(|| StoreError::not_found("run", run))
 }
 
+/// Sets (trimmed) or clears (blank) a display name with its name anchor.
+fn write_speaker_name(
+    conn: &Connection,
+    id: SpeakerId,
+    name: &str,
+    anchor: Option<(i64, i64)>,
+) -> StoreResult<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        conn.execute(
+            "UPDATE speakers SET display_name = NULL, name_anchor_start_ms = NULL,
+             name_anchor_end_ms = NULL WHERE id = ?1",
+            [id.0],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE speakers SET display_name = ?2, name_anchor_start_ms = ?3,
+             name_anchor_end_ms = ?4 WHERE id = ?1",
+            params![id.0, name, anchor.map(|a| a.0), anchor.map(|a| a.1)],
+        )?;
+    }
+    Ok(())
+}
+
 fn get_speaker(conn: &Connection, id: SpeakerId) -> StoreResult<Speaker> {
     conn.query_row(
         &format!("SELECT {SPEAKER_COLS} FROM speakers WHERE id = ?1"),
@@ -1166,21 +1190,24 @@ impl Store for SqliteStore {
             }
             None => None,
         };
-        let name = name.trim();
-        if name.is_empty() {
-            conn.execute(
-                "UPDATE speakers SET display_name = NULL, name_anchor_start_ms = NULL,
-                 name_anchor_end_ms = NULL WHERE id = ?1",
-                [id.0],
-            )?;
-        } else {
-            conn.execute(
-                "UPDATE speakers SET display_name = ?2, name_anchor_start_ms = ?3,
-                 name_anchor_end_ms = ?4 WHERE id = ?1",
-                params![id.0, name, anchor.map(|a| a.0), anchor.map(|a| a.1)],
-            )?;
+        write_speaker_name(&conn, id, name, anchor)
+    }
+
+    fn rename_speaker_at(
+        &self,
+        id: SpeakerId,
+        name: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StoreResult<()> {
+        if end_ms < start_ms {
+            return Err(StoreError::Invalid(format!(
+                "name anchor ends before it starts ({start_ms} > {end_ms} ms)"
+            )));
         }
-        Ok(())
+        let conn = self.lock()?;
+        get_speaker(&conn, id)?;
+        write_speaker_name(&conn, id, name, Some((start_ms, end_ms)))
     }
 
     fn set_speaker_color(&self, id: SpeakerId, color: &str) -> StoreResult<()> {

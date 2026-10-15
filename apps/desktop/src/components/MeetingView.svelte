@@ -56,7 +56,13 @@
   let loadError = $state<string | null>(null);
   let waveform = $state.raw<Waveform | null>(null);
   let noAudio = $state<string | null>(null);
-  let renaming = $state.raw<{ speakerId: SpeakerId; anchor: SegmentId | null } | null>(null);
+  /** The speaker being renamed and its name anchor: a segment, or a live line's time range. */
+  interface Rename {
+    speakerId: SpeakerId;
+    anchor: SegmentId | null;
+    range: { start_ms: number; end_ms: number } | null;
+  }
+  let renaming = $state.raw<Rename | null>(null);
   let menu = $state.raw<{ items: MenuItem[]; x: number; y: number; label: string } | null>(null);
   let retrying = $state(false);
   let now = $state(Date.now());
@@ -343,8 +349,12 @@
     };
   }
 
-  function startRename(speakerId: SpeakerId, anchor: SegmentId | null) {
-    renaming = { speakerId, anchor };
+  function startRename(
+    speakerId: SpeakerId,
+    anchor: SegmentId | null,
+    range: { start_ms: number; end_ms: number } | null = null,
+  ) {
+    renaming = { speakerId, anchor, range };
   }
 
   async function commitRename(name: string) {
@@ -357,7 +367,12 @@
       return;
     }
     try {
-      await api.renameSpeaker(r.speakerId, name, r.anchor);
+      if (r.range) {
+        // While recording there are no segments: the live line's range is the anchor.
+        await api.renameSpeakerAt(r.speakerId, name, r.range.start_ms, r.range.end_ms);
+      } else {
+        await api.renameSpeaker(r.speakerId, name, r.anchor);
+      }
       await reload(r.anchor ?? undefined);
     } catch (e) {
       app.error(`Rename failed: ${errorText(e)}`);
@@ -562,7 +577,7 @@
     />
 
     {#if isLive}
-      <LiveView bind:this={liveView} speakers={shownSpeakers} onrename={(id) => startRename(id, null)} />
+      <LiveView bind:this={liveView} speakers={shownSpeakers} onrename={(id, range) => startRename(id, null, range)} />
     {:else}
       {#if finalizing}
         {@const job = postPassJob}
