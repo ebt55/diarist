@@ -2,9 +2,11 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [0.1.0] - unreleased
+## [Unreleased]
 
-The first public release.
+## [0.1.0-beta.1] - 2026-10-15
+
+The first public release, as a beta pre-release.
 
 ### Renamed to Diarist
 

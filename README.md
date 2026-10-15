@@ -35,7 +35,7 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `Diarist_0.1.0_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.1_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
    `%LOCALAPPDATA%\Diarist`.
@@ -169,7 +169,8 @@ checks anything by itself and sends nothing about you. See
 
 ## Status
 
-Version 0.1.0, the first public release: file import and live recording work
+Version 0.1.0-beta.1, the first public release (a beta pre-release): file
+import and live recording work
 end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
 CPU runtime packages and machines other than the author's are untested. Next
 on the roadmap: punctuation restoration, better speaker-change handling, and
