@@ -30,14 +30,15 @@ Primarily the author, on one machine: Windows 11, RTX 3080 10 GB, 32 GB RAM. Sec
 
 ## Quality bar
 
-- Diarization: on 3 to 5 hand-labelled meetings of the user's own, fewer than 10 percent of words attributed to the wrong speaker, and the speaker count correct in most of them. Measured, written down, kept as a regression set.
-- ASR: word error rate comparable to Parakeet TDT 0.6B published numbers on clean English meeting audio.
-- Live: end-to-end latency (speech to text on screen) under 1.5 seconds; final speaker labels settle within 10 seconds.
-- Robustness: a crash in the inference engine never loses already-transcribed text. The app keeps running and offers to restart the engine.
+- Diarization: on 3 to 5 hand-labelled meetings of the user's own, fewer than 10 percent of words attributed to the wrong speaker on average, no single meeting above 20 percent, and the speaker count exact on the single-speaker control and within one on the others. Measured, written down, kept as a regression set (docs/05-eval-data.md).
+- ASR: word error rate on AMI ES2002a within 2 points of Parakeet TDT 0.6B v3's published AMI figure. (The user's Zoom captions are machine output and cannot serve as an ASR reference.)
+- Live: first text on screen within 1.5 s of speech. Speaker labels in the live view are provisional; the canonical transcript, with full-context speaker labels, is ready within 60 s of Stop for a one-hour meeting.
+- File mode: one hour of audio transcribed and diarized in under 6 minutes on the RTX 3080 (real-time factor under 0.1), including 77-minute and 2-hour recordings.
+- Robustness: a crash or stall in the inference engine never loses audio or already-transcribed text. Recording continues, the app says so, and the transcript is completed when the engine is back.
 
 ## Constraints
 
-- GPU memory budget for inference: 6 GB of the 10 GB, leaving room for a browser and the meeting app sharing the GPU.
+- GPU memory: ASR plus diarizer resident under 4 GB; never more than 6 GB of the 10 GB, leaving room for a browser and the meeting app sharing the GPU.
 - The author has RSI. Agents write the code. The UI must be usable with minimal mouse work (keyboard shortcuts for record/stop, search, rename).
 - OSS release: permissive licence (MIT or Apache-2.0) for our code; every bundled model and runtime must have a licence that permits redistribution without gating.
 

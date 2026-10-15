@@ -8,15 +8,16 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 
 ## Owns
 
-`crates/core` (all modules), `crates/meet-cli`, `crates/core/tests/fixtures/`. Must not touch `apps/desktop`.
+`crates/core/src/{store/sqlite*,models,audio,engine,transcript,export,pipeline}`, `crates/meet-cli`, `crates/core/tests/fixtures/`. Must not touch `apps/desktop`, `core::views`, or the `Store` trait (report needed changes to the orchestrator).
 
 ## Modules and acceptance
 
-### `db`
-- rusqlite with `bundled` feature; WAL; foreign keys on; `busy_timeout` 5 s.
-- Migrations as numbered SQL files embedded with `include_str!`, applied by `user_version`. `0001_init.sql` implements `docs/02-data-model.md` exactly, including the FTS5 external-content table and its insert/update/delete triggers.
-- Repository API (sync, `&Connection` behind a `Db` struct with a mutex): `create_meeting`, `set_meeting_status`, `finish_meeting`, `insert_transcript(meeting_id, speakers, segments, words)` in one transaction, `list_meetings() -> Vec<MeetingSummary>` (duration, speaker count, first 200 chars), `get_meeting`, `get_speakers`, `get_segments(meeting_id, offset, limit) -> Vec<SegmentView>` with resolved speaker name and colour, `get_words(meeting_id, from_ms, to_ms)`, `search(query, limit) -> Vec<SearchHit>` with `snippet()` and `bm25` ordering, `rename_speaker`, `set_speaker_color`, `merge_speaker(from, into)`, `unmerge_speaker`, `reassign_segment`, `delete_meeting` (also removes the audio folder), settings get/set, models registry upsert/list, live checkpoint put/get/clear.
-- Tests on `:memory:` databases: migration applies twice idempotently; insert then FTS search finds a word; merge resolves in `get_segments`; delete cascades.
+### `store::sqlite` (implements `Store` from Phase 0.5)
+- rusqlite with `bundled` feature; WAL; foreign keys on; `busy_timeout` 5 s; backups via the backup API.
+- Migrations as numbered SQL files embedded with `include_str!`, applied by `user_version`. `0001_init.sql` implements `docs/02-data-model.md` v0.2 exactly: INTEGER primary keys, `transcript_runs`, `current_run_id`, `live_utterances`, `edits`, `clock_anchors`, every index listed, the FTS5 external-content table on `content_rowid='id'` with `unicode61 remove_diacritics 2` and its three triggers.
+- Beyond the `Store` trait: `create_run`, `finish_run`, `insert_run_transcript(run_id, speakers, segments, words)` in one transaction, `set_current_run`, `append_live_utterance`, `materialise_live_run`, `carry_over(from_run, to_run)` (overlap matrix, greedy one-to-one at 60 percent, `needs_review`, re-apply `edits` at 80 percent), `merge_speaker` with chain flattening and cycle rejection, `delete_meeting` (also removes the audio folder), models registry, settings, anchors.
+- Search filters `segments.run_id = meetings.current_run_id`.
+- Tests on `:memory:`: the Phase 0.5 conformance suite passes; migration applies twice idempotently; FTS finds a word with diacritics stripped; merge chain stays one level; carry-over on a synthetic two-run meeting copies names and flags an unmatched speaker; delete cascades and FTS has no orphans.
 
 ### `models`
 - Parse `manifests/engine.json` and `manifests/models.json` (serde). Compute the install layout under a configurable data dir (default `%LOCALAPPDATA%\meet-assist`, or the exe folder in portable mode when `portable.txt` exists).
@@ -25,13 +26,19 @@ Status: draft, to be delegated after the runtime spike fills in the exact CLI co
 - Tests: manifest parsing; sha mismatch rejected; resume logic on a local file served from a test HTTP server (`tiny_http` dev-dependency) or skipped if too costly.
 
 ### `audio::decode`
-- `decode_to_wav16k(input, output) -> Result<DecodedInfo>`: symphonia (features: aac, isomp4, mp3, flac, wav, ogg, vorbis) to f32, downmix to mono, resample with rubato `Fft` (fixed ratio when integer, `Async` sinc otherwise) to 16 kHz, write PCM16 WAV with `hound`. Report duration and source sample rate.
-- Tests: synthesized 48 kHz stereo WAV round-trips to 16 kHz mono with the right length; a 44.1 kHz input works. An `.m4a` test is gated on `MEET_ASSIST_SAMPLES` pointing at a folder with one.
+- `trait Decoder { fn decode_to_wav16k(&self, input, output) -> Result<DecodedInfo> }` with a chain: `SymphoniaDecoder` (features: aac, isomp4, mp3, flac, wav, ogg, vorbis) to f32, downmix to mono, resample with rubato `Fft` (integer ratio) or `Async` sinc to 16 kHz, write PCM16 WAV with `hound`; then `MediaFoundationDecoder` (`IMFSourceReader` via the `windows` crate, requesting PCM output); then `FfmpegDecoder` if `ffmpeg` is on PATH; then an error whose message contains the ffmpeg command the user could run. Report duration, source rate, channels and which decoder succeeded.
+- Tests: synthesized 48 kHz stereo WAV round-trips to 16 kHz mono with the right length; a 44.1 kHz input works. With `MEET_ASSIST_SAMPLES` set to a folder, decode every `*.m4a` under it (the user's 23 files) and assert the duration is within 50 ms of the container's (`ffprobe` or the MP4 header).
 
 ### `engine`
 - `trait Engine { fn transcribe_file(&self, job: FileJob) -> Result<Receiver<EngineEvent>>; fn cancel(&self, job_id) }`.
 - `NemoCliEngine { engine_dir, models_dir, device }`: spawns `nemo-speech.exe transcribe` with the flags documented in the spike report (diarize on, JSON output to a temp file, cuda device, offline diarizer preset, ASR model path, diarizer model path). Captures stderr to a log and, if the CLI prints progress, forwards `progress` events. On exit, parses the JSON (`words[{word,start,end,confidence,speaker?}]`, speaker 1-based and absent when 0), emits one or more `words` events with `final: true`, then `finalized`, then `done` with stats. Non-zero exit or missing JSON becomes an `error` event with the stderr tail.
 - Fixtures: the real JSON produced by the spike, committed under `crates/core/tests/fixtures/nemo_cli_*.json`. Tests cover the mapping, the absent-speaker case and the error path. A GPU integration test runs the real binary when `MEET_ASSIST_ENGINE_DIR` and `MEET_ASSIST_MODELS_DIR` are set.
+- Long files: a GPU-gated acceptance test transcribes the 77-minute CIMC recording and a 2-hour file (two eval files concatenated) and logs peak VRAM (`nvidia-smi` sampled). If the runtime fails or degrades, implement the fallback from docs/03: whole-file `diarize` pass plus ASR over silence-cut chunks of at most 10 minutes, fused by the start-anchored window rule.
+- `models::download` uses rustls with `rustls-platform-verifier` so the Windows certificate store and system proxy are honoured; HF URLs are pinned to commit SHAs in the manifest and redirects are re-resolved when resuming.
+
+### `pipeline`
+- Fill in `pipeline::import` from Phase 0.5: decode, create a `file` run, run the engine through `JobQueue`, segment, store, set current run, delete the intermediate WAV unless kept, emit `JobEvent`s, support cancel.
+- Free-space check before decoding (refuse under 2 GB free).
 
 ### `transcript`
 - `label_for(speaker_int: Option<u32>) -> String` (`spk_0`.., or `spk_unknown` for absent).

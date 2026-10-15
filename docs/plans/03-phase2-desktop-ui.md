@@ -8,7 +8,7 @@ A fast, keyboard-friendly Tauri 2 + Svelte 5 interface over the data model: a li
 
 ## Owns
 
-`apps/desktop/**`. May add a mock store under `apps/desktop/src-tauri/src/mock.rs`. Must not touch `crates/`.
+`apps/desktop/**`. Must not touch `crates/`. Uses `meet_core::store::MemoryStore` (seeded) behind `meet_core::store::Store` from Phase 0.5; view types come from `meet_core::views` and the ts-rs output in `src/lib/generated/`. If a view or trait method is missing, report it to the orchestrator instead of defining a local copy.
 
 ## Command contract (Tauri commands, all return `Result<T, String>`)
 
@@ -30,7 +30,7 @@ engine_status() -> EngineStatus                        // installed flags, dirs,
 
 Events: `job:progress {job_id, done_ms, total_ms}`, `job:done {job_id, meeting_id}`, `job:error {job_id, message}`, `transcript:words` and `transcript:relabel` (reserved for live mode; define the payload types now, do not implement producers).
 
-Types mirror `meet_core::types` plus view structs (`MeetingSummary`, `SpeakerView`, `SegmentView`, `SearchHit`, `EngineStatus`) defined in `src-tauri/src/views.rs` and generated or hand-mirrored in `src/lib/types.ts`.
+Types are `meet_core::views` (generated TypeScript in `src/lib/generated/`); the Tauri commands are thin wrappers that call `Store` methods inside `spawn_blocking`. Audio playback uses the asset protocol with a scope set at runtime from the data root; for imported meetings the source is the original file (WebView2 decodes AAC), for live meetings the `playback` track. Never fetch the audio file into JavaScript; waveform peaks come from a command.
 
 ## Screens
 

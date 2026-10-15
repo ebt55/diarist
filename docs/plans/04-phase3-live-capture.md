@@ -19,22 +19,24 @@ Press Record: the app captures the microphone and the system render loopback, ke
 - Never process loopback (new Teams returns zeros).
 - `list_devices() -> Vec<DeviceInfo { id, name, flow, is_default, is_default_comms }>`.
 
-### 3b Pipeline (`audio::pipeline`, `audio::wav`)
-- One `ChannelPipeline` per channel. Input: packets. Steps: place on a QPC timeline relative to `session_start_qpc`; zero-fill any gap (missing frames = gap duration times rate); treat `silent`-flagged packets as zeros; downmix to mono (average); resample to 16 kHz with rubato `Fft` when the ratio is an integer (48 kHz), else `Async` sinc; chunk into 100 ms PCM16 frames with `pts_us` from the QPC timeline.
-- Drift tracker: compares frames produced with QPC elapsed, reports ppm; if |ppm| > 50, adjust with `Slip`. Log once per minute.
-- WAV writer (`hound`): append PCM16, flush every second, header finalized on close; on crash the header is repaired at next launch from file length.
-- Engine feed gets 1-LSB dither on frames that are exactly zero (runtime bug #48). The WAV gets the clean signal.
-- Tests with synthetic packets: a 300 ms gap yields exactly 4800 zero samples at 16 kHz; a SILENT packet is zeroed; 48 kHz stereo sine resamples to the right length and frequency; drift tracker reports an injected 100 ppm offset within 10 percent.
+### 3b Pipeline (`audio::pipeline`, `audio::wav`, `audio::feed`)
+- One `ChannelPipeline` per channel. Input: packets. Steps: place on a QPC timeline relative to `session_start_qpc`; zero-fill any gap (missing frames = gap duration times rate); treat `silent`-flagged packets as zeros; downmix to mono (average); bring to 16 kHz (CONTESTED point A: rubato in our thread vs WASAPI `AUTOCONVERTPCM`; implement whichever research/06 decides); chunk into 100 ms PCM16 frames with `pts_us` from the QPC timeline.
+- Clock anchors: once per second record `(sample_index, qpc_100ns)` per channel into `clock_anchors`. Drift is reported in ppm for diagnostics and corrected offline by piecewise-linear mapping when interleaving; the resampler ratio is never changed live.
+- WAV writer (`hound`): append PCM16, `flush()` every second, header finalized on close; on crash the header is repaired at next launch from file length. The writer runs on the pipeline thread and never waits on the engine.
+- Engine feed (`audio::feed`): a bounded queue (10 s per channel) between the pipeline and the live sessions on its own thread. When full, it drops to record-only, emits a `Degraded` event for the UI banner, and resumes feeding when the engine catches up. Frames that are exactly zero get 1-LSB dither before the engine (runtime bug #48); the WAV gets the clean signal.
+- Keep the system awake with `SetThreadExecutionState(ES_SYSTEM_REQUIRED | ES_CONTINUOUS)` while recording; on `WM_POWERBROADCAST` suspend, flush and anchor; on resume, reopen captures and record a gap anchor.
+- Tests with synthetic packets: a 300 ms gap yields exactly 4800 zero samples at 16 kHz; a SILENT packet is zeroed; 48 kHz stereo sine comes out at the right length and frequency; anchors reproduce an injected 100 ppm drift within 10 percent; a stalled consumer makes the feed degrade and recover without the WAV losing a sample.
 
 ### 3c Live engine adapter (`engine::live`) PENDING spike
 - Interface fixed now: `trait LiveEngine { fn open(&self, channel: Channel, diarize: bool) -> Result<Box<dyn LiveSession>> }`, `trait LiveSession { fn push(&mut self, pcm16: &[i16], pts_us: u64); fn events(&mut self) -> &mut Receiver<EngineEvent>; fn close(self) }`.
 - Implementation chosen from the spike: WebSocket to `nemo-speech serve` (one long-lived process, two sessions) or Rust FFI to the C ABI in a `meet-engine` sidecar. Either way the adapter emits protocol `words` (final false), `relabel` if available, and `finalized` when the runtime commits (or after a fixed horizon of 10 s if it never does).
 
 ### 3d Live orchestrator (`live::Recorder`)
-- Start: create meeting (status recording), start captures and pipelines, open sessions `mic` (diarize off, speaker `me`) and `loopback` (diarize on), route frames.
-- Preview buffer: words keyed by (channel, t0); `words` events upsert; `relabel` remaps labels in the window; `finalized` moves words older than `up_to_t` into a "committed preview" list. Every 2 s the buffer is written to `live_checkpoints`. A `LiveSink` trait receives UI events (`transcript:words`, `transcript:relabel`); the CLI prints, the desktop app forwards to the WebView.
-- Stop: close sessions, finish WAVs, status processing, then post-pass: `NemoCliEngine` on `loopback.wav` (diarize) and `mic.wav` (no diarize, speaker `me`), `transcript::interleave`, `transcript::segment`, replace in one transaction. Speaker carry-over: build the overlap matrix between preview labels and post-pass labels on the loopback channel (seconds of speech both assign to the same time), greedy match highest first, copy `display_name` and `color`. Clear the checkpoint. Status done.
-- Crash recovery at launch: for meetings in `recording`, repair WAV headers, replay checkpoint into segments/words marked recovered, then run the post-pass.
+- Start: NVML free-VRAM check (refuse under 2 GB) and free-disk check; create meeting (status recording) and a `live` run; start captures and pipelines; open sessions `mic` (diarize off unless `diarize_mic`, speaker `me`) and `loopback` (diarize on); route frames through the feed.
+- Preview: `Utterance` events are appended to `live_utterances` (one row per `utt`/`rev`) and forwarded through a `LiveSink` trait (`transcript:words` with `{utt, rev}` replacement semantics); the CLI prints, the desktop app forwards to the WebView. Text older than `TextFinalUntil` (or 10 s) is shown as final text; all labels are shown as provisional.
+- Loopback endpoint: every 2 s check which render endpoint foreign processes are playing to (anarlog's approach); after two confirmations, reopen loopback on it and record a gap anchor. Also reopen on `AUDCLNT_E_DEVICE_INVALIDATED` and on default-device notifications.
+- Stop: close sessions, finish WAVs, materialise the live run (latest `rev` per `utt` into segments and words), status processing. Post-pass through `JobQueue`: `NemoCliEngine` on `loopback.wav` (diarize) and `mic.wav` (no diarize, speaker `me`, or diarize when `diarize_mic`), map times through `clock_anchors`, `transcript::interleave`, `transcript::segment`, write a `post_pass` run, `carry_over(live_run, post_pass_run)`, set `current_run_id`, write the playback track (format per research/06 point B), delete the live run unless `keep_live_runs`. Status done.
+- Crash recovery at launch: for meetings in `recording`, repair WAV headers, materialise the live run, queue the post-pass.
 
 ### 3e CLI
 - `meet-cli devices`; `meet-cli record [--seconds N] [--title s]` prints live words with channel and label, Ctrl-C stops and runs the post-pass, prints a summary.

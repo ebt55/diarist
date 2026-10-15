@@ -1,107 +1,178 @@
 # Data model (SQLite)
 
-Status: draft v0.1. Runtime-agnostic. One SQLite file per user profile at `%LOCALAPPDATA%\meet-assist\meet-assist.db`, WAL mode, foreign keys on.
+Status: v0.2, 15 Oct 2026, after the architecture review (research/05). One SQLite file at `<data root>\meet-assist.db`, WAL mode, foreign keys on, backups via the rusqlite backup API (never by copying the file or `VACUUM INTO`).
 
 ## Principles
 
-- The DB is the product. Everything the UI shows is a query; nothing lives only in memory except the live preview buffer.
-- Words are the atomic unit. Segments are derived (same speaker, contiguous) but stored, because the UI and FTS work on segments.
-- Audio is kept, per channel, as 16 kHz mono FLAC next to the DB (`%LOCALAPPDATA%\meet-assist\audio\<meeting_id>\mic.flac`, `loopback.flac`, or `source.flac` for files). Re-diarization and the eval harness need it. User can disable retention or purge per meeting.
-- Speaker labels are per meeting. A separate table links them to a global identity (v3, embeddings).
-- Schema is migrated by numbered SQL files applied at startup (`user_version` pragma).
+- The DB is the product. Everything the UI shows is a query.
+- **Runs.** A meeting can have several transcripts over time: the live preview, the canonical post-pass, a later re-diarization or a new fusion algorithm. Each is a `transcript_run`; `meetings.current_run_id` says which one the UI shows. Nothing is ever deleted to make room for a better run.
+- INTEGER primary keys everywhere (rowid aliases), so FTS5 external content stays stable across VACUUM and joins stay fast at tens of millions of words. The only ULID is `meetings.uid`, used for folder names and exports.
+- The segment owns the speaker. Words keep the engine's raw label and, from v1.5, the fusion margin and overlap flag, so a smoothing pass can be compared with what the engine said.
+- User edits survive new runs: display names and colours are carried over by time-overlap matching; segment reassignments are stored as time-ranged edits and re-applied.
+- Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; a stereo playback file after the post-pass; retention default 30 days unless a meeting is pinned. Imports keep the original file as the playback source.
+- Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
 
 ## Tables
 
 ```sql
 CREATE TABLE meetings (
-  id            TEXT PRIMARY KEY,            -- ulid
-  title         TEXT NOT NULL DEFAULT '',
-  source        TEXT NOT NULL CHECK (source IN ('live','file')),
-  source_path   TEXT,                        -- original file path for 'file'
-  started_at    INTEGER NOT NULL,            -- unix ms, wall clock
-  ended_at      INTEGER,
-  duration_ms   INTEGER,
-  status        TEXT NOT NULL CHECK (status IN ('recording','processing','done','failed')),
-  engine_info   TEXT,                        -- JSON: model names, versions, runtime version
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  id              INTEGER PRIMARY KEY,
+  uid             TEXT NOT NULL UNIQUE,         -- ulid for folder names and exports
+  title           TEXT NOT NULL DEFAULT '',
+  source          TEXT NOT NULL CHECK (source IN ('live','file')),
+  source_path     TEXT,                          -- original file for 'file'
+  language        TEXT NOT NULL DEFAULT 'en',    -- BCP-47 or 'auto'
+  diarize_mic     INTEGER NOT NULL DEFAULT 0,    -- live: 1 when the mic hears a room with several people
+  started_at      INTEGER NOT NULL,              -- unix ms
+  ended_at        INTEGER,
+  duration_ms     INTEGER,
+  status          TEXT NOT NULL CHECK (status IN ('recording','processing','done','failed')),
+  current_run_id  INTEGER REFERENCES transcript_runs(id) ON DELETE SET NULL,
+  audio_keep      INTEGER NOT NULL DEFAULT 0,    -- 1 = pinned, exempt from retention
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
 );
+
+CREATE TABLE transcript_runs (
+  id            INTEGER PRIMARY KEY,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('live','file','post_pass','rediarize','refuse')),
+  engine_info   TEXT NOT NULL,                   -- JSON: runtime version, model names and hashes, presets, fusion settings
+  started_at    INTEGER NOT NULL,
+  finished_at   INTEGER,
+  status        TEXT NOT NULL CHECK (status IN ('running','done','failed'))
+);
+CREATE INDEX runs_meeting ON transcript_runs(meeting_id);
 
 CREATE TABLE audio_tracks (
-  id            TEXT PRIMARY KEY,
-  meeting_id    TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-  channel       TEXT NOT NULL CHECK (channel IN ('mic','loopback','source')),
-  path          TEXT NOT NULL,               -- relative to audio root
+  id            INTEGER PRIMARY KEY,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  channel       TEXT NOT NULL CHECK (channel IN ('mic','loopback','source','playback')),
+  path          TEXT NOT NULL,                   -- relative to the data root, or absolute for 'original'
+  format        TEXT NOT NULL CHECK (format IN ('wav','flac','original')),
   sample_rate   INTEGER NOT NULL,
+  channels      INTEGER NOT NULL DEFAULT 1,
   duration_ms   INTEGER,
-  offset_ms     INTEGER NOT NULL DEFAULT 0   -- alignment offset vs meeting t=0
+  size_bytes    INTEGER
 );
+CREATE INDEX tracks_meeting ON audio_tracks(meeting_id);
+
+-- Live alignment: one (sample index, QPC) anchor per channel per second.
+-- Word times are mapped piecewise-linearly between anchors when channels are interleaved.
+CREATE TABLE clock_anchors (
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  channel       TEXT NOT NULL,
+  sample_index  INTEGER NOT NULL,
+  qpc_100ns     INTEGER NOT NULL,
+  PRIMARY KEY (meeting_id, channel, sample_index)
+) WITHOUT ROWID;
 
 CREATE TABLE speakers (
-  id            TEXT PRIMARY KEY,
-  meeting_id    TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-  engine_label  TEXT NOT NULL,               -- 'spk_0'..'spk_7' from diarizer, or 'me' for the mic channel
+  id            INTEGER PRIMARY KEY,
+  run_id        INTEGER NOT NULL REFERENCES transcript_runs(id) ON DELETE CASCADE,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
   channel       TEXT NOT NULL CHECK (channel IN ('mic','loopback','source')),
-  display_name  TEXT,                        -- user-set; NULL means show "Speaker N"
-  color         TEXT,                        -- hex, assigned deterministically, user-overridable
-  global_id     TEXT REFERENCES global_speakers(id) ON DELETE SET NULL,
-  merged_into   TEXT REFERENCES speakers(id) ON DELETE SET NULL,  -- non-null when user merged this label into another
-  UNIQUE (meeting_id, channel, engine_label)
+  engine_label  TEXT NOT NULL,                   -- 'spk_0'.., 'me', 'spk_unknown'
+  display_name  TEXT,                            -- NULL shows "Speaker N"
+  color         TEXT,                            -- hex
+  global_id     INTEGER REFERENCES global_speakers(id) ON DELETE SET NULL,
+  merged_into   INTEGER REFERENCES speakers(id) ON DELETE SET NULL,  -- always points at a root; chains are flattened on merge
+  needs_review  INTEGER NOT NULL DEFAULT 0,      -- 1 when carry-over from a previous run was ambiguous
+  UNIQUE (run_id, channel, engine_label)
 );
+CREATE INDEX speakers_meeting ON speakers(meeting_id);
+CREATE INDEX speakers_merged ON speakers(merged_into);
 
 CREATE TABLE segments (
-  id            TEXT PRIMARY KEY,
-  meeting_id    TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-  speaker_id    TEXT NOT NULL REFERENCES speakers(id),
+  id            INTEGER PRIMARY KEY,
+  run_id        INTEGER NOT NULL REFERENCES transcript_runs(id) ON DELETE CASCADE,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  speaker_id    INTEGER NOT NULL REFERENCES speakers(id),
   start_ms      INTEGER NOT NULL,
   end_ms        INTEGER NOT NULL,
   text          TEXT NOT NULL,
-  seq           INTEGER NOT NULL             -- display order within meeting
+  seq           INTEGER NOT NULL
 );
+CREATE INDEX segments_run_seq ON segments(run_id, seq);
 CREATE INDEX segments_meeting_start ON segments(meeting_id, start_ms);
+CREATE INDEX segments_speaker ON segments(speaker_id);
 
 CREATE TABLE words (
   id            INTEGER PRIMARY KEY,
-  meeting_id    TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-  segment_id    TEXT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
-  speaker_id    TEXT NOT NULL REFERENCES speakers(id),
+  segment_id    INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
   start_ms      INTEGER NOT NULL,
   end_ms        INTEGER NOT NULL,
   text          TEXT NOT NULL,
-  confidence    REAL
+  confidence    REAL,
+  raw_label     TEXT,                            -- engine's speaker label before smoothing or edits
+  margin        REAL,                            -- v1.5: top speaker score minus runner-up
+  overlap       INTEGER NOT NULL DEFAULT 0       -- v1.5: 1 when another speaker was active
 );
 CREATE INDEX words_segment ON words(segment_id);
+CREATE INDEX words_meeting_start ON words(meeting_id, start_ms);
 
--- Full-text search over segments (external content table)
-CREATE VIRTUAL TABLE segments_fts USING fts5(
-  text, content='segments', content_rowid='rowid',
-  tokenize='porter unicode61'
+-- Live preview: append-only, one row per utterance revision. Materialised into
+-- segments/words when recording stops or on crash recovery. Replaces any JSON checkpoint blob.
+CREATE TABLE live_utterances (
+  id            INTEGER PRIMARY KEY,
+  run_id        INTEGER NOT NULL REFERENCES transcript_runs(id) ON DELETE CASCADE,
+  channel       TEXT NOT NULL,
+  utt           INTEGER NOT NULL,
+  rev           INTEGER NOT NULL,
+  start_ms      INTEGER NOT NULL,
+  end_ms        INTEGER NOT NULL,
+  raw_label     TEXT,
+  words_json    TEXT NOT NULL,                   -- [{t0,t1,text,conf,spk}]
+  UNIQUE (run_id, channel, utt, rev)
 );
--- triggers keep segments_fts in sync (insert/update/delete)
 
-CREATE TABLE global_speakers (           -- v3: cross-meeting identity
-  id            TEXT PRIMARY KEY,
+-- Time-ranged user edits that must survive a new run.
+CREATE TABLE edits (
+  id            INTEGER PRIMARY KEY,
+  meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('reassign')),
+  channel       TEXT NOT NULL,
+  start_ms      INTEGER NOT NULL,
+  end_ms        INTEGER NOT NULL,
+  payload       TEXT NOT NULL,                   -- JSON: {"to_display_name": "...", "to_engine_label": "..."}
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX edits_meeting ON edits(meeting_id);
+
+-- Full-text search over segments. content_rowid is the INTEGER PRIMARY KEY, stable across VACUUM.
+CREATE VIRTUAL TABLE segments_fts USING fts5(
+  text, content='segments', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER segments_ai AFTER INSERT ON segments BEGIN
+  INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER segments_ad AFTER DELETE ON segments BEGIN
+  INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER segments_au AFTER UPDATE OF text ON segments BEGIN
+  INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
+  INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TABLE global_speakers (                   -- v3: cross-meeting identity
+  id            INTEGER PRIMARY KEY,
   name          TEXT NOT NULL,
   created_at    INTEGER NOT NULL
 );
-CREATE TABLE speaker_embeddings (        -- v3
+CREATE TABLE speaker_embeddings (                -- v3
   id            INTEGER PRIMARY KEY,
-  global_id     TEXT REFERENCES global_speakers(id) ON DELETE CASCADE,
-  speaker_id    TEXT REFERENCES speakers(id) ON DELETE CASCADE,
+  global_id     INTEGER REFERENCES global_speakers(id) ON DELETE CASCADE,
+  speaker_id    INTEGER REFERENCES speakers(id) ON DELETE CASCADE,
   model         TEXT NOT NULL,
   dim           INTEGER NOT NULL,
-  vector        BLOB NOT NULL               -- float32 little-endian; sqlite-vec later if needed
+  vector        BLOB NOT NULL                    -- float32 LE
 );
 
-CREATE TABLE live_checkpoints (          -- crash safety during live mode
-  meeting_id    TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
-  payload       TEXT NOT NULL,             -- JSON of unfinalized segments/words
-  updated_at    INTEGER NOT NULL
-);
-
-CREATE TABLE models (                    -- what is installed in the models folder
-  name          TEXT PRIMARY KEY,          -- e.g. 'parakeet-tdt-0.6b-v3-q8'
-  kind          TEXT NOT NULL,             -- asr_offline | asr_streaming | diarizer | embedder
+CREATE TABLE models (
+  name          TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL,                   -- engine | asr_offline | asr_streaming | diarizer | embedder
   version       TEXT NOT NULL,
   path          TEXT NOT NULL,
   sha256        TEXT NOT NULL,
@@ -112,21 +183,30 @@ CREATE TABLE models (                    -- what is installed in the models fold
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
-## Live-mode write policy
+## Run lifecycle
 
-- Engine emits partial words and provisional speaker labels. These live in a Rust-side buffer and are mirrored to `live_checkpoints` every 2 seconds.
-- When the engine marks a region final (label stable, no more revisions), its words and segments are inserted in one transaction and removed from the checkpoint.
-- On restart after a crash, the checkpoint is replayed into `segments`/`words` as-is, marked in `engine_info` as "recovered".
+- **File import.** One `file` run. On success it becomes `current_run_id`.
+- **Live.** A `live` run receives `live_utterances` while recording. On stop, the latest `rev` of each `utt` is materialised into segments and words of the live run (so a crash of the post-pass still leaves a readable transcript), then a `post_pass` run is created and, on success, becomes current. The live run is kept until the post-pass is done, then deleted unless `settings.keep_live_runs = 1`.
+- **Re-runs** (`rediarize`, `refuse`): new run, carry-over, becomes current only when the user accepts it in the UI (or always, from the CLI with a flag). Old runs stay for comparison and for the eval harness.
 
-## Speaker rename and merge
+## Carry-over from the previous current run
 
-- Rename: update `speakers.display_name`. Nothing else moves.
-- Merge A into B: set `speakers.merged_into = B` on A; queries resolve `COALESCE(merged_into, id)`. Undoable by clearing the field. No rewriting of `words`.
-- Reassign one segment to a different speaker: update `segments.speaker_id` and its `words.speaker_id`.
+1. Build the overlap matrix between old speakers and new speakers on the same channel: seconds where a word of old speaker A and a word of new speaker X overlap in time.
+2. Greedy one-to-one matching, highest overlap first. A match is accepted when it covers at least 60 percent of the smaller speaker's speech time. Copy `display_name`, `color`, `global_id`.
+3. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge.
+4. Merges are not carried structurally; matched speakers inherit the merged root's name, so two new labels may share a name, and the UI offers "merge again" in one click.
+5. `edits` of kind `reassign` are re-applied when a new segment overlaps the edit's range by at least 80 percent.
 
-## Queries the UI needs (and must be fast)
+## Speaker rename, merge, reassign
 
-- Meeting list with duration, speaker count, first 200 chars.
-- Segments for a meeting, ordered by `seq`, with resolved speaker name/color, paged by range for virtualization.
-- FTS: `SELECT ... FROM segments_fts WHERE segments_fts MATCH ? ORDER BY bm25(segments_fts)` with `snippet()`; joined to meetings for grouping.
-- Words in a time window (for click-to-seek and for the eval export).
+- Rename or colour: update the speaker row.
+- Merge A into B: set `A.merged_into = root(B)`, and repoint any speaker whose `merged_into = A` to `root(B)` so chains stay one level deep; reject cycles. Queries resolve `COALESCE(merged_into, id)`.
+- Reassign a segment: update `segments.speaker_id`, write an `edits` row. To reassign part of a segment, split it at a word boundary first (segments and words are updated in one transaction).
+
+## Queries the UI needs
+
+- Meeting list with duration, speaker count, first 200 chars of the current run.
+- Segments of the current run ordered by `seq`, with resolved speaker name and colour, paged for virtualization.
+- FTS: join `segments_fts` to `segments` and `meetings`, filter `segments.run_id = meetings.current_run_id`, order by `bm25`, `snippet()`.
+- Words in a time window of the current run (click-to-seek, eval export).
+- Audio for playback: the `playback` track for live meetings, the `original` for imports.

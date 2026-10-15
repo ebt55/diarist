@@ -1,32 +1,42 @@
 # Architecture decision record
 
-Status: v0.3, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/`. Items marked PENDING wait on the runtime spike (research/03).
+Status: v0.4, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/`, revised after the Opus review (research/05). PENDING = waits on the runtime spike (research/03). CONTESTED = under Fable/Opus adjudication (research/06); the current text is the architect's position.
 
 ## Decisions at a glance
 
 | Area | Decision | Why (short) |
 |---|---|---|
 | Inference runtime | NVIDIA NeMo-Speech.cpp v0.2.0, prebuilt Windows CUDA zip, portable folder | Only shipped runtime with Nemotron 3 Diarization (8 spk) plus word-level speaker tags; self-contained DLLs, no CUDA toolkit for users; NVIDIA-maintained |
-| Diarizer | Nemotron 3 Diarization q8_0 (streaming Sortformer v3) | Best open non-gated DER; beat pyannote in an independent AMI test; streaming and offline in one checkpoint |
-| ASR, file mode | Parakeet TDT 0.6B v3 (fallback: Nemotron streaming EN 0.6B) | Best accuracy with timestamps in the runtime; PENDING spike comparison |
-| ASR, live mode | Nemotron Speech Streaming EN 0.6B q8_0 | Only true cache-aware streaming model in the runtime |
-| Engine integration | Separate engine process behind a Rust `Engine` trait speaking our protocol (docs/03) | Crash isolation; runtime churn stays behind one adapter |
-| v1 file adapter | Spawn `nemo-speech.exe transcribe --diarize --json` | Known-good path; includes the CLI's speaker-label refresh; zero C++ for us |
-| v2 live adapter | PENDING spike: `nemo-speech serve` WebSocket (default) vs Rust FFI to the C ABI | WS needs no build step and shares weights across sessions; FFI gives control if WS bugs #48/#49 block |
-| Live labels | Preview only. Canonical post-pass over the recorded channels when recording stops | Streaming labels are never revised over WS or C ABI; post-pass with full context is strictly better and costs under a minute |
-| Audio capture | `wasapi` crate for mic and render-endpoint loopback; QPC timeline; zero-fill; no process loopback | Process loopback returns zeros for new Teams; wasapi exposes SILENT flag, QPC stamps, device notifications, AEC hook |
-| Channels | Mic = "me" (ASR only). Loopback = "them" (ASR + diarization). Two engine sessions | Speaker separation for the user is free and exact; diarizer sees fewer speakers |
-| Resampling | rubato 5 `Fft` 48 to 16 kHz with drift slip | Exact 3:1 ratio, real-time safe |
-| UI shell | Tauri 2.12.x, NSIS installer, WebView2 download bootstrapper, hidden window until first paint | Smallest installer with a rich transcript view; sidecar and tray support |
-| Frontend | Svelte 5 + TypeScript + virtua | Fine-grained reactivity for row-level relabels; tiny runtime; virtualization with dynamic heights |
-| Database | rusqlite `bundled` (FTS5 on), WAL | Zero-install, FTS5 proven; sqlite-vec statically later for embeddings |
-| Recording storage | 16 kHz mono WAV per channel during recording; optional FLAC afterwards | Crash-safe append; needed for the post-pass and the eval set |
-| Install model | 10 MB installer; first run downloads engine zip and models into `%LOCALAPPDATA%\meet-assist` with SHA-256 checks; portable mode via marker file | ComfyUI-style: no Python, no torch, no CUDA toolkit; engine and models update independently |
-| Licence | MIT for our code | Runtime Apache-2.0; models OpenMDW / NVIDIA Open Model Licence / CC-BY-4.0, downloaded by the user at first run |
-| Word-to-speaker fusion | v1: runtime's start-anchored argmax. v1.5: our own fusion (per-word speaker score vector, margin and overlap flags, Viterbi smoothing with cheaper switches at pauses and punctuation), measured against v1 on the eval set | NeMo-Speech.cpp uses mean probability over [start, start+160 ms] argmax; boundary words and 1 to 2 word islands are the known failure; smoothing is cheap and testable |
+| Diarizer | Nemotron 3 Diarization q8_0 (streaming Sortformer v3) | Tops the only independent cross-system benchmark (VoiceArena DER 14.7 vs 19 to 31); streaming and offline in one checkpoint |
 | Diarizer config | Post-pass and file mode: `v3-offline` preset (30.4 s context). Live: 1.04 s low-latency preset. Retune onset/offset/min-duration on our eval set (defaults are V2 CALLHOME-tuned) | Offline context is strictly more accurate; live only needs to be readable |
+| ASR, file mode | Parakeet TDT 0.6B v3 (25 languages; fallback Nemotron streaming EN 0.6B) | Best accuracy with timestamps in the runtime; PENDING spike comparison and long-file behaviour |
+| ASR, live mode | Nemotron Speech Streaming EN 0.6B q8_0; Nemotron 3.5 streaming if the spike confirms multilingual | Only true cache-aware streaming models in the runtime |
+| Engine integration | Child process behind Rust traits `Engine` / `LiveEngine` (docs/03); no wire format unless an FFI sidecar is built | Crash isolation; runtime churn stays behind one adapter |
+| v1 file adapter | Spawn `nemo-speech.exe transcribe --diarize --json` | Known-good path with the CLI's speaker-label refresh; zero C++ for us |
+| Long files | Acceptance test on the 77 min CIMC recording and a 2 h file with VRAM logged. Fallback if the runtime degrades: whole-file `diarize` pass plus ASR over silence-cut chunks of at most 10 min, fused by the start-anchored window rule | Parakeet TDT is full-utterance only per the runtime docs; nobody has run a long file yet. PENDING spike |
+| v2 live adapter | PENDING spike: `nemo-speech serve` WebSocket (default) vs Rust FFI to the C ABI | WS needs no build step and shares weights across sessions; FFI gives control if WS bugs #48/#49 block |
+| Live labels | Preview only. Canonical post-pass over the recorded channels when recording stops; display names carried over by overlap matching | Streaming labels are never revised over WS or C ABI; post-pass with full context is strictly better |
+| Transcript runs | Every transcript is a `transcript_run`; `meetings.current_run_id` selects the shown one; runs are never overwritten | Live, post-pass, re-diarization and fusion experiments coexist; edits survive |
+| Audio capture | `wasapi` crate for mic and render-endpoint loopback; event-driven with timeout; QPC anchors per second; zero-fill; follow the endpoint foreign apps render to (anarlog's trick) from v2.0; reopen on `DEVICE_INVALIDATED`; no process loopback | Process loopback returns zeros for new Teams; the default render endpoint is often not where Teams plays; wasapi exposes SILENT flag, QPC stamps, notifications, AEC hook |
+| Capture resampling | CONTESTED (point A). Architect's position: capture at mix format, resample in our worker with rubato; Opus: open clients at 16 kHz with `AUTOCONVERTPCM` | Quality control and archival fidelity vs simplicity and robustness to endpoint rate changes |
+| Alignment | QPC anchors `(sample_index, qpc)` per channel per second stored in the DB; word times mapped piecewise-linearly at interleave time; drift fixed offline, never by steering the resampler live | Testable, deterministic, no real-time ratio changes |
+| Channels | Mic = "me" (ASR only) unless `diarize_mic` is set for in-room meetings. Loopback = "them" (ASR + diarization). Two engine sessions | Speaker separation for the user is exact and free; diarizer sees fewer speakers |
+| Capture robustness | WAV writer never waits on inference; engine feed has a bounded queue and degrades to record-only with a UI banner; NVML free-VRAM check before opening sessions; `SetThreadExecutionState(ES_SYSTEM_REQUIRED)` while recording; suspend flushes and resume reopens with a logged gap; single-instance plugin | An engine stall or VRAM contention must never lose audio; NVIDIA drivers spill CUDA allocations to system RAM silently instead of failing |
+| UI shell | Tauri 2.12.x, NSIS installer, WebView2 download bootstrapper, hidden window until first paint | Smallest installer with a rich transcript view; sidecar and tray support |
+| Frontend | Svelte 5 + TypeScript + virtua; TypeScript types generated from Rust with ts-rs | Fine-grained reactivity for row-level relabels; one source of truth for types |
+| Core/UI seam | `core::views`, `trait Store` (with `MemoryStore` and `SqliteStore`), `core::pipeline::import`, `JobQueue` (one GPU job at a time) frozen in Phase 0.5 before Phases 1 and 2 | Lets core and UI proceed in parallel without touching the same files |
+| Database | rusqlite `bundled` (FTS5 on), WAL, INTEGER primary keys, FTS `content_rowid` on the integer id, tokenizer `unicode61 remove_diacritics 2`, backups via the backup API | Stable across VACUUM; fast at tens of millions of words; language-neutral search |
+| Recording storage | Per-channel 16 kHz mono WAV during recording with periodic `flush()`. Imports keep the original file as the playback source and delete the 16 kHz intermediate. Playback file for live meetings: CONTESTED (point B). Retention default 30 days, pin to keep. Free-space check before recording or import | Audio is disposable, transcripts are not |
+| Audio decode | symphonia (AAC-LC, MP3, FLAC, WAV, Ogg/Vorbis), then Windows Media Foundation `IMFSourceReader`, then `ffmpeg` if on PATH, then an error that shows the conversion command. Phase 1 test decodes all 23 eval files | All eval files are AAC-LC 48 kHz stereo (symphonia rates AAC-LC "Great"); HE-AAC and Opus need the fallbacks |
+| Playback in UI | Tauri asset protocol with Range requests (206, 1000 kB chunks); asset scope set at runtime from the data root; waveform peaks precomputed in Rust, never by fetching the file | Seeking a 115 MB WAV works; fetching it whole would load 690 MB of floats |
+| Install layout | CONTESTED (point C). Architect's position: NSIS default install dir; data root `%LOCALAPPDATA%\meet-assist-data` (configurable); portable mode `<exe dir>\data`; uninstall hook offers to remove engine and models, never DB or audio | Avoid the per-user install dir colliding with data; keep the DB safe from the uninstaller |
+| Install model | 10 MB installer; first run downloads the engine zip (102 MB) and the diarizer plus offline ASR (about 820 MB); the streaming ASR (700 MB) downloads on first Record. SHA-256 checks; HF URLs pinned to commit SHAs; redirects re-resolved on resume; HTTP via rustls with `rustls-platform-verifier`; "import models from folder" for offline machines | ComfyUI-style: no Python, no torch, no CUDA toolkit; engine and models update independently; 1.6 GB total |
+| Code signing | Plan SignPath's free OSS programme before public release; document Smart App Control behaviour for the unsigned runtime | nemo-speech.exe and its DLLs are unsigned |
+| Licence | MIT for our code | Runtime Apache-2.0; models OpenMDW / NVIDIA Open Model Licence / CC-BY-4.0, downloaded by the user at first run |
+| Word-to-speaker fusion | v1: runtime's start-anchored argmax. v1.5: our own fusion (per-word speaker score vector, margin and overlap flags, Viterbi smoothing with cheaper switches at pauses and punctuation) as a new run kind, measured against v1 on the eval set | Boundary words and 1 to 2 word islands are the known failure; smoothing is cheap and testable |
 | Cross-meeting identity | v3. TitaNet-L (CC-BY-4.0, EER 0.66) via sherpa-onnx CPU; A/B WeSpeaker ResNet293-LM. Voiceprint = mean of embeddings from 2 to 6 s single-speaker crops; cosine match; user confirms | Not needed for the transcript itself; CPU inference keeps VRAM for ASR |
 | Research upgrade path | Diarization-conditioned ASR (NVIDIA SSA-v2, cpWER 15.9 vs cascade 42.3) when released or ported; DiCoW v3.3 as offline ceiling | Cascades lose about 2x cpWER to conditioned ASR on overlap and boundaries; nothing shippable today on a GGUF runtime |
+| Toolchain | Rust stable; agents may run `rustup update stable` when a dependency requires it and must report it | 2026 crates may exceed the installed 1.88 |
 
 ## Process model
 
@@ -36,94 +46,81 @@ Status: v0.3, 15 Oct 2026. Decided by Fable 5.1 from research in `docs/research/
 |  WebView2: Svelte UI  <-- Tauri events/commands -->           |
 |  Rust backend (crates/core)                                   |
 |    audio::capture   wasapi mic + loopback -> rtrb rings       |
-|    audio::pipeline  QPC align, zero-fill, resample, WAV write |
-|    engine::supervisor  spawn/restart, protocol, job queue     |
-|    engine::nemo_cli    v1 file jobs                           |
-|    engine::nemo_live   v2 live sessions (WS or FFI)           |
-|    db                  rusqlite, migrations, FTS, queries     |
-|    models              manifest, download, verify, registry   |
+|    audio::pipeline  QPC anchors, zero-fill, (resample), WAV   |
+|    audio::feed      bounded queue -> live engine sessions     |
+|    engine::*        Engine / LiveEngine adapters, JobQueue    |
+|    store::Sqlite    rusqlite, migrations, FTS, runs, queries  |
+|    pipeline         import, post-pass, carry-over             |
+|    models           manifest, download, verify, registry      |
 +----------------------------+----------------------------------+
                              | child processes
               +--------------+----------------+
-              | nemo-speech.exe transcribe     |  (per file job)
+              | nemo-speech.exe transcribe     |  (per file job, one at a time)
               | nemo-speech.exe serve          |  (long-lived, live) PENDING
               +--------------------------------+
 ```
 
 - One Tauri process. All heavy lifting is Rust; the WebView only renders.
-- Audio callbacks are real-time threads: they only copy into lock-free rings (`rtrb`). A worker thread drains rings, aligns on the QPC timeline, zero-fills gaps and SILENT packets, resamples, appends to WAV and feeds the engine.
-- The engine supervisor owns child processes. If one dies, in-flight jobs are marked failed, the UI is told, and the supervisor relaunches on the next job. Live sessions reconnect and continue; the post-pass makes the final transcript whole.
-
-## Install layout
-
-```
-%LOCALAPPDATA%\meet-assist\
-  app\                       Tauri app (NSIS, per-user, about 10 MB)
-  engine\nemo-speech-0.2.0\  runtime zip contents incl. CUDA DLLs (first run)
-  models\                    *.gguf (first run; about 1 GB)
-  models.json                installed manifest with sha256 and versions
-  meet-assist.db (+ -wal)    SQLite
-  audio\<meeting_id>\        mic.wav, loopback.wav or source.wav
-  logs\
-```
-
-Portable mode: if `portable.txt` sits next to the exe, all of the above live in that folder. The repo ships `manifests/engine.json` and `manifests/models.json` (URLs, sha256, sizes, licences); the app can refresh them from GitHub releases.
+- Audio callbacks are real-time threads: they only copy into lock-free rings (`rtrb`). The pipeline thread drains rings, records a QPC anchor per second, zero-fills gaps and SILENT packets, writes WAV, and hands frames to the feed. The feed thread owns the engine sessions and a bounded queue; when the queue is full it drops to record-only and raises a UI banner. The writer never blocks on the engine.
+- `JobQueue` runs one GPU job at a time (imports, post-passes, re-runs) and exposes cancel. Live sessions are not jobs; they hold the GPU while recording, and the post-pass is queued at Stop.
+- The engine supervisor owns child processes. If one dies, in-flight jobs become `Error`, the UI is told, and the next job relaunches. A dead live session leaves recording running; the post-pass makes the transcript whole.
 
 ## File-mode flow (v1)
 
-1. User drops a file. Rust decodes any container via `symphonia` to 16 kHz mono PCM16 WAV in `audio\<id>\source.wav`.
-2. `NemoCliEngine` spawns `nemo-speech.exe transcribe source.wav --diarize --json --device cuda:0 --output out.json`, streams progress from stderr if available.
-3. Adapter maps CLI JSON (`words[{word,start,end,speaker}]`) to protocol `words` events with `final:true`, then `finalized`, then `done`.
-4. `core::transcript` builds segments (contiguous same-speaker words, split on gaps over 1.5 s or sentence punctuation) and writes speakers, segments, words in one transaction. FTS triggers index the text.
+1. User drops a file. The decoder chain (symphonia, Media Foundation, ffmpeg) produces `audio\<uid>\source.wav` at 16 kHz mono PCM16; the original path is stored as the `original` playback track.
+2. `NemoCliEngine` runs `nemo-speech.exe transcribe` with diarization and JSON output; progress is forwarded if the CLI prints it.
+3. Adapter maps CLI JSON to `Utterance` events, then `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
+4. `transcript::segment` builds segments; `SqliteStore` writes a `file` run with speakers, segments and words in one transaction and sets `current_run_id`. FTS triggers index the text. The intermediate WAV is deleted unless a setting keeps it.
 
 ## Live flow (v2)
 
-1. Start: create meeting (status recording), open mic capture and loopback capture, start WAV writers, open two engine sessions: `mic` (diarize off) and `loopback` (diarize on).
-2. Steady state: 100 ms PCM frames per channel go to the engine with QPC-derived timestamps. `words` events feed an in-memory preview buffer and the UI. Mic words get speaker `me`. Loopback words carry `spk_N` provisional labels. The preview buffer is checkpointed to `live_checkpoints` every 2 s.
+1. Start: NVML check (refuse under 2 GB free with a clear message), free-space check, create meeting (status recording), start captures and pipelines, open sessions `mic` (diarize off unless `diarize_mic`) and `loopback` (diarize on). Keep the system awake.
+2. Steady state: 100 ms frames per channel go through the bounded feed to the engine. `Utterance` events are appended to `live_utterances` and forwarded to the UI; mic words get speaker `me`; loopback labels are provisional. Level meters per channel; a warning when loopback has been silent for 60 s while the mic is active. If the default or active render endpoint changes, the loopback capture reopens on the new endpoint and logs a discontinuity.
 3. Echo: when the OS reports AEC support, request it on the mic client with the loopback endpoint as reference. Otherwise (v2.1) gate mic words whose span overlaps loopback speech with high cross-correlation.
-4. Stop: close sessions, finish WAVs, status processing. Run the canonical post-pass: file-mode flow on `loopback.wav` (diarize) and `mic.wav` (no diarize, speaker `me`), interleave by time, replace the preview. Match preview speakers to post-pass speakers by time-overlap (greedy on the overlap matrix) so display names set during the meeting carry over. Status done.
-5. Crash: on next launch, any meeting left in `recording` has its checkpoint replayed and its WAVs post-passed.
-
-Loopback endpoint selection: v2.0 uses the default render endpoint and follows default-device changes via wasapi notifications. v2.1 adopts anarlog's trick of following the endpoint a foreign process is actually rendering to (so a headset used by Teams is captured).
+4. Stop: close sessions, finish WAVs, materialise the live run, status processing. Post-pass: file-mode flow on `loopback.wav` (diarize) and `mic.wav` (no diarize, speaker `me`), map times through the clock anchors, `transcript::interleave`, `transcript::segment`, write a `post_pass` run, carry over names and edits (docs/02), set `current_run_id`, write the playback file, delete the live run unless kept. Status done.
+5. Suspend: flush and anchor; resume: reopen captures and mark the gap. Crash: on next launch, meetings left in `recording` get WAV headers repaired, the live run materialised, and the post-pass queued.
 
 ## Repository layout
 
 ```
 meet-assist/
   Cargo.toml                workspace
-  crates/core/              lib: db, audio, engine, models, transcript, types
-  crates/meet-cli/          dev CLI: transcribe a file, dump JSON, run post-pass (no UI)
+  crates/core/              lib: types, views, store (trait, memory, sqlite), engine, audio, pipeline, models, transcript, export
+  crates/meet-cli/          dev CLI: transcribe, record, export, search, models, doctor (no UI)
   crates/meet-engine/       v2 optional: Rust sidecar linking the C ABI (only if FFI wins)
-  apps/desktop/             Tauri 2 app: src-tauri/ (thin commands) + src/ (Svelte 5)
+  apps/desktop/             Tauri 2 app: src-tauri/ (thin commands) + src/ (Svelte 5) + src/lib/generated (ts-rs)
   manifests/                engine.json, models.json
-  tools/eval/               Python (uv), dev-only: DER / cpWER against hand labels
+  tools/eval/               Python (uv), dev-only: DER / WDER / cpWER against references
   docs/
 ```
 
-Rule: `apps/desktop/src-tauri` holds only Tauri command wrappers and event plumbing. All logic is in `crates/core` and is testable without a GUI.
+Rule: `apps/desktop/src-tauri` holds only Tauri command wrappers and event plumbing over `meet_core::store::Store`. All logic is in `crates/core` and is testable without a GUI.
 
 ## Where the "implement a research paper" ambition lands
 
-The streaming Sortformer paper (arXiv 2507.18446) is already implemented in the runtime as Nemotron 3 Diarization, and it tops the only independent cross-system benchmark (VoiceArena, DER 14.7 vs 19 to 31 for everything else open). Re-implementing it would not improve anything. The places where our own work moves quality are, in order:
+The streaming Sortformer paper (arXiv 2507.18446) is already implemented in the runtime as Nemotron 3 Diarization, and it tops the only independent cross-system benchmark. Re-implementing it would not improve anything. The places where our own work moves quality are, in order:
 
-1. **Fusion (v1.5).** Replace argmax-per-word with a sequence model over words (Viterbi with pause- and punctuation-aware switch costs, overlap flags). Needs speaker activity at better than segment granularity; the spike checks whether the C ABI or a CLI flag exposes 10 ms probabilities, otherwise we work from RTTM segments.
-2. **Eval (Phase 4).** Hand-labelled meetings of the user's own, WDER near speaker changes as the headline number. Everything above is tuned on this.
-3. **Conditioned ASR (later).** When NVIDIA releases SSA-v2 or a GGUF port exists, swap the loopback ASR for it. The engine trait makes that a new adapter, not a rewrite.
+1. **Fusion (v1.5).** Replace argmax-per-word with a sequence model over words (Viterbi with pause- and punctuation-aware switch costs, overlap flags), stored as a new run so it is compared, not assumed. Needs speaker activity at better than segment granularity; the spike checks whether the C ABI or a CLI flag exposes 10 ms probabilities, otherwise we work from RTTM segments.
+2. **Eval (Phase 4).** Hand-labelled meetings of the user's own; WDER near speaker changes and the per-meeting maximum as headline numbers.
+3. **Conditioned ASR (later).** When NVIDIA releases SSA-v2 or a GGUF port exists, swap the loopback ASR for it: a new adapter, not a rewrite.
 
 ## Testing strategy
 
-- `crates/core` unit tests use fixtures: real runtime JSON outputs captured in the spike, synthetic PCM for the pipeline (gap insertion, drift), SQL migration round-trips.
-- Integration tests that need the GPU are gated on `MEET_ASSIST_ENGINE_DIR` being set and are run manually.
-- The eval harness (`tools/eval`) computes DER and words-to-wrong-speaker on the user's hand-labelled meetings plus AMI ES2002a; results are committed as a regression table.
+- `crates/core` unit tests use fixtures: real runtime JSON outputs captured in the spike, synthetic PCM for the pipeline (gap insertion, drift, anchors), SQL migration round-trips, the `Store` conformance suite run against both `MemoryStore` and `SqliteStore`.
+- Integration tests that need the GPU are gated on `MEET_ASSIST_ENGINE_DIR` and `MEET_ASSIST_MODELS_DIR`; decode tests over the user's files are gated on `MEET_ASSIST_SAMPLES`.
+- The eval harness (`tools/eval`) computes DER, JER, WDER and cpWER on the eval set; results are committed as a regression table.
 
 ## Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| Runtime is three months old; live path has open bugs | Live is preview; post-pass is canonical; dither silent loopback (never exact zeros); never rely on WS `commit` |
-| VRAM unknown | Spike measures; `state_arena_slots` 2 to 4; budget 4 GB resident |
-| Loopback silence gaps desync channels (Vibe #1592) | QPC timeline with zero-fill; drift tracker |
+| Runtime is three months old; live path has open bugs | Live is preview; post-pass is canonical; dither silent loopback for the engine feed only; never rely on WS `commit` |
+| VRAM unknown; sysmem fallback hides OOM as a slowdown | Spike measures; `state_arena_slots` 2 to 4; NVML check; document per-app "Prefer No Sysmem Fallback"; CPU retry for file jobs |
+| Long files on a full-utterance ASR | Acceptance test on 77 min and 2 h; chunked fallback |
+| Loopback silence gaps or endpoint switches desync channels | QPC anchors with zero-fill; reopen on invalidation; piecewise-linear mapping offline |
 | Echo without headphones | OS AEC when available; correlation gate; document "use headphones" |
-| Label permutation between preview and post-pass | Overlap matching carries display names |
-| Runtime API changes (v3 of Tauri, new engine releases) | Engine trait boundary; manifests pin versions and hashes |
+| Label permutation between preview and post-pass | Overlap matching carries display names; `needs_review` badge for the rest |
+| Disk fills up | Free-space checks; retention; pins |
+| Unsigned runtime blocked by Smart App Control | Document; plan signing |
+| Runtime or Tauri API changes | Trait boundary; manifests pin versions and hashes |
 | WebView2 cold start | Hidden window until first paint; measure; Slint fallback documented |
