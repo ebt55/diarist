@@ -23,8 +23,9 @@ enum Command {
     },
 }
 
-/// Exit code for commands that exist but do nothing yet.
-const EXIT_NOT_IMPLEMENTED: u8 = 2;
+/// Exit code for commands that exist but do nothing yet. (0 ok, 1 error,
+/// 2 usage error, which clap emits itself.)
+const EXIT_NOT_IMPLEMENTED: u8 = 1;
 
 fn main() -> ExitCode {
     match Cli::parse().command {
