@@ -192,6 +192,8 @@ Fixtures: `fixtures/ws_session_events.jsonl`, `fixtures/ws_two_sessions_note.md`
 8. **WebSocket labels are never revised.** Treat them as live previews; the post-meeting file pass is canonical.
 9. **AMI download:** Windows schannel fails the revocation check against groups.inf.ed.ac.uk. Use `curl --ssl-revoke-best-effort`.
 10. **Per-process VRAM is not visible on WDDM.** Measure with total `nvidia-smi` deltas.
+11. **Word-time offset between models (Phase 1 finding):** Nemotron streaming word times run about 320 ms behind Parakeet's on the same audio (up to 700 ms), and the last word can end after the audio does. Account for this in v1.5 fusion, in live-to-post-pass carry-over, and when interleaving channels; clamp word ends to the track duration.
+12. **AAC encoder priming (Phase 1 finding):** symphonia does not trim the 21 to 44 ms encoder delay by default, so word times from m4a imports sit that far ahead of the original file used for playback. Enable symphonia's gapless option (`FormatOptions { enable_gapless: true }`) so decoded audio and the original line up.
 
 ## 7. Nemotron 3.5 as the default model: test results (15 Oct 2026)
 
