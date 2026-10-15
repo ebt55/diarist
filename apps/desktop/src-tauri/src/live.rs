@@ -56,12 +56,7 @@ use crate::{tray, AppPaths, AppStore, GpuCache, Jobs};
 
 /// Where live sessions and post-passes run.
 const DEVICE: &str = "cuda:0";
-/// Setting: the microphone endpoint id for new recordings ("" = default).
-pub const MIC_DEVICE: &str = "record.mic_device";
-/// Setting: the render endpoint id whose loopback is recorded ("" = default).
-pub const LOOPBACK_DEVICE: &str = "record.loopback_device";
-/// Setting: diarize the mic by default (several people in the room).
-pub const DIARIZE_MIC: &str = "record.diarize_mic";
+
 /// The global shortcut that toggles recording.
 pub const SHORTCUT: &str = "Ctrl+Alt+R";
 /// A doctor reading (free VRAM) younger than this is reused at Start.
@@ -873,9 +868,9 @@ fn remembered_request(app: &AppHandle) -> StartRequest {
     StartRequest {
         title: None,
         language: None,
-        diarize_mic: settings::get_bool(&s, DIARIZE_MIC),
-        mic: get(MIC_DEVICE),
-        loopback: get(LOOPBACK_DEVICE),
+        diarize_mic: settings::get_bool(&s, settings::RECORD_DIARIZE_MIC),
+        mic: get(settings::RECORD_MIC_DEVICE),
+        loopback: get(settings::RECORD_LOOPBACK_DEVICE),
     }
 }
 

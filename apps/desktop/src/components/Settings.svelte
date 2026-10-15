@@ -9,7 +9,7 @@
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
-  import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
+  import { SETTING_DEFAULTS, type SettingKey } from "../lib/generated/settingDefaults";
   import { LANGUAGES, languageLabel } from "../lib/languages";
   import { app, type Theme } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
@@ -30,23 +30,20 @@
     pull: "pulled",
     user: "added by you",
   };
-  /** Recording settings that are not in the core's defaults table, with their defaults. */
-  const CAPTURE_TOGGLES: { key: string; def: boolean; label: string; help: string }[] = [
+  /** Capture switches; defaults come from `meet_core::settings::DEFAULTS`. */
+  const CAPTURE_TOGGLES: { key: SettingKey; label: string; help: string }[] = [
     {
       key: "capture.loopback_agc",
-      def: true,
       label: "Automatic gain on system audio",
       help: "Raises quiet system audio (an output at low Windows volume) before it is recorded and transcribed.",
     },
     {
       key: "capture.mic_agc",
-      def: false,
       label: "Automatic gain on the microphone",
       help: "Usually not needed: Windows and most headsets already level the mic.",
     },
     {
       key: "capture.autoconvert",
-      def: true,
       label: "Let Windows convert to 16 kHz",
       help: "Turn off only if recordings sound wrong on this machine; the app then resamples itself.",
     },
@@ -66,12 +63,7 @@
   const mics = $derived(devices.filter((d) => d.flow === "capture"));
   const outputs = $derived(devices.filter((d) => d.flow === "render"));
 
-  function boolSetting(key: string, def: boolean): boolean {
-    const v = (app.settings[key] ?? "").trim().toLowerCase();
-    if (["1", "true", "yes", "on"].includes(v)) return true;
-    if (["0", "false", "no", "off"].includes(v)) return false;
-    return def;
-  }
+  const boolSetting = (key: SettingKey): boolean => app.settingBool(key);
 
   async function loadDevices() {
     try {
@@ -314,7 +306,7 @@
       <label class="label" for="rec-mic">Microphone</label>
       <select
         id="rec-mic"
-        value={app.settings["record.mic_device"] ?? ""}
+        value={app.setting("record.mic_device")}
         onchange={(e) => app.setSetting("record.mic_device", (e.currentTarget as HTMLSelectElement).value)}
       >
         <option value="">Windows default communications microphone</option>
@@ -325,7 +317,7 @@
       <label class="label" for="rec-out">System audio</label>
       <select
         id="rec-out"
-        value={app.settings["record.loopback_device"] ?? ""}
+        value={app.setting("record.loopback_device")}
         onchange={(e) => app.setSetting("record.loopback_device", (e.currentTarget as HTMLSelectElement).value)}
       >
         <option value="">Default output, following the app that plays</option>
@@ -341,7 +333,7 @@
     <label class="radio block">
       <input
         type="checkbox"
-        checked={boolSetting("record.diarize_mic", false)}
+        checked={boolSetting("record.diarize_mic")}
         onchange={(e) => app.setSetting("record.diarize_mic", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
       />
       <span><strong>The mic hears a room with several people</strong>: find speakers on the mic channel too (the default in the start sheet)</span>
@@ -370,7 +362,7 @@
     <label class="radio block">
       <input
         type="checkbox"
-        checked={boolSetting("keep_live_runs", false)}
+        checked={boolSetting("keep_live_runs")}
         onchange={(e) => app.setSetting("keep_live_runs", (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
       />
       <span><strong>Keep the live transcript</strong> next to the final one after the post-pass (for comparison)</span>
@@ -379,7 +371,7 @@
       <label class="radio block">
         <input
           type="checkbox"
-          checked={boolSetting(t.key, t.def)}
+          checked={boolSetting(t.key)}
           onchange={(e) => app.setSetting(t.key, (e.currentTarget as HTMLInputElement).checked ? "true" : "false")}
         />
         <span><strong>{t.label}</strong>. {t.help}</span>

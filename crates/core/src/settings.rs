@@ -25,6 +25,21 @@ pub const KEEP_LIVE_RUNS: &str = "keep_live_runs";
 pub const KEEP_DIARIZATION_SEGMENTS: &str = "keep_diarization_segments";
 /// Keep the 16 kHz intermediate WAV of imports.
 pub const KEEP_INTERMEDIATE_WAV: &str = "keep_intermediate_wav";
+/// Capture endpoint id for new recordings ("" = the default communications
+/// microphone).
+pub const RECORD_MIC_DEVICE: &str = "record.mic_device";
+/// Render endpoint id whose loopback is recorded ("" = the default output,
+/// following the app that plays).
+pub const RECORD_LOOPBACK_DEVICE: &str = "record.loopback_device";
+/// Diarize the mic of new recordings (several people in the room).
+pub const RECORD_DIARIZE_MIC: &str = "record.diarize_mic";
+/// Open the captures at 16 kHz mono via `AUTOCONVERTPCM` (`true`) or at the
+/// mix format with rubato (`false`).
+pub const CAPTURE_AUTOCONVERT: &str = "capture.autoconvert";
+/// Automatic gain on the loopback before the WAV and the engine feed.
+pub const CAPTURE_LOOPBACK_AGC: &str = "capture.loopback_agc";
+/// Automatic gain on the mic.
+pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
@@ -40,6 +55,12 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("selected_engine", ""),
     ("selected_model.asr", ""),
     ("selected_model.diarizer", ""),
+    (RECORD_MIC_DEVICE, ""),
+    (RECORD_LOOPBACK_DEVICE, ""),
+    (RECORD_DIARIZE_MIC, "false"),
+    (CAPTURE_AUTOCONVERT, "true"),
+    (CAPTURE_LOOPBACK_AGC, "true"),
+    (CAPTURE_MIC_AGC, "false"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -74,12 +95,22 @@ pub fn get<'a>(settings: &'a Settings, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// `1`, `true`, `yes` or `on` (any case) is true.
+/// `1`, `true`, `yes` or `on` (any case) is true; `0`, `false`, `no` or
+/// `off` is false.
+fn parse_bool(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// A boolean setting: the stored value when it reads as one, else the
+/// key's default, else false.
 pub fn get_bool(settings: &Settings, key: &str) -> bool {
-    matches!(
-        get(settings, key).trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    parse_bool(get(settings, key))
+        .or_else(|| default_of(key).and_then(parse_bool))
+        .unwrap_or(false)
 }
 
 /// The language for new imports and recordings (`default_language`, "en"
@@ -126,6 +157,14 @@ mod tests {
         assert!(!get_bool(&s, KEEP_LIVE_RUNS));
         assert_eq!(default_language(&s), "en");
         assert_eq!(get(&s, "selected_model.asr"), "");
+        assert_eq!(get(&s, RECORD_MIC_DEVICE), "");
+        assert!(get_bool(&s, CAPTURE_AUTOCONVERT) && get_bool(&s, CAPTURE_LOOPBACK_AGC));
+        assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
+        // A value that is not a boolean falls back to the default.
+        store.set_setting(CAPTURE_AUTOCONVERT, "maybe").unwrap();
+        assert!(get_bool(&effective(&store).unwrap(), CAPTURE_AUTOCONVERT));
+        store.set_setting(CAPTURE_AUTOCONVERT, "off").unwrap();
+        assert!(!get_bool(&effective(&store).unwrap(), CAPTURE_AUTOCONVERT));
         store.set_setting(DEFAULT_LANGUAGE, "de").unwrap();
         store.set_setting(KEEP_LIVE_RUNS, "1").unwrap();
         let s = effective(&store).unwrap();

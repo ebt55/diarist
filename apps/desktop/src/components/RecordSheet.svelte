@@ -4,15 +4,15 @@
   import { tick } from "svelte";
   import { api, errorText } from "../lib/api";
   import { formatDate } from "../lib/format";
-  import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
+  import type { SettingKey } from "../lib/generated/settingDefaults";
   import { LANGUAGES, languageLabel } from "../lib/languages";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
   import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
 
-  const MIC_KEY = "record.mic_device";
-  const LOOPBACK_KEY = "record.loopback_device";
-  const DIARIZE_KEY = "record.diarize_mic";
+  const MIC_KEY: SettingKey = "record.mic_device";
+  const LOOPBACK_KEY: SettingKey = "record.loopback_device";
+  const DIARIZE_KEY: SettingKey = "record.diarize_mic";
 
   let dialog: HTMLDialogElement | undefined = $state();
   let titleEl: HTMLInputElement | undefined = $state();
@@ -42,8 +42,8 @@
 
   async function openSheet() {
     title = `Meeting ${formatDate(Date.now())}`;
-    language = app.settings.default_language ?? SETTING_DEFAULTS.default_language;
-    diarizeMic = ["1", "true", "yes", "on"].includes((app.settings[DIARIZE_KEY] ?? "").toLowerCase());
+    language = app.setting("default_language");
+    diarizeMic = app.settingBool(DIARIZE_KEY);
     error = null;
     starting = false;
     dialog?.showModal();
@@ -59,8 +59,8 @@
       devices = [];
       devicesError = errorText(e);
     }
-    const remembered = (key: string, list: AudioDevice[]) => {
-      const id = app.settings[key] ?? "";
+    const remembered = (key: SettingKey, list: AudioDevice[]) => {
+      const id = app.setting(key);
       return list.some((d) => d.id === id) ? id : "";
     };
     mic = remembered(MIC_KEY, mics);
@@ -71,8 +71,8 @@
     live.sheetOpen = false;
   }
 
-  async function remember(key: string, value: string) {
-    if ((app.settings[key] ?? "") !== value) await app.setSetting(key, value);
+  async function remember(key: SettingKey, value: string) {
+    if (app.setting(key) !== value) await app.setSetting(key, value);
   }
 
   async function submit(e: SubmitEvent) {

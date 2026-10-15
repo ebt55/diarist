@@ -9,6 +9,7 @@ import type { MeetingSummary } from "./generated/MeetingSummary";
 import type { PostPassView } from "./generated/PostPassView";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
+import { SETTING_DEFAULTS, type SettingKey } from "./generated/settingDefaults";
 
 export type Route = "library" | "settings" | "diagnostics";
 export type Theme = "system" | "light" | "dark";
@@ -165,6 +166,22 @@ class AppState {
   }
 
   // ---- Settings and theme --------------------------------------------------
+
+  /** A setting's value: stored, else its default from `meet_core::settings::DEFAULTS`. */
+  setting(key: SettingKey): string {
+    return this.settings[key] ?? SETTING_DEFAULTS[key];
+  }
+
+  /** A boolean setting, read like `settings::get_bool` (unparseable values take the default). */
+  settingBool(key: SettingKey): boolean {
+    const parse = (v: string): boolean | null => {
+      const s = v.trim().toLowerCase();
+      if (["1", "true", "yes", "on"].includes(s)) return true;
+      if (["0", "false", "no", "off"].includes(s)) return false;
+      return null;
+    };
+    return parse(this.setting(key)) ?? parse(SETTING_DEFAULTS[key]) ?? false;
+  }
 
   async setSetting(key: string, value: string): Promise<boolean> {
     try {

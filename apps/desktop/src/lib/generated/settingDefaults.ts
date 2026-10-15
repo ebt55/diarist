@@ -12,6 +12,12 @@ export const SETTING_DEFAULTS = {
   "selected_engine": "",
   "selected_model.asr": "",
   "selected_model.diarizer": "",
+  "record.mic_device": "",
+  "record.loopback_device": "",
+  "record.diarize_mic": "false",
+  "capture.autoconvert": "true",
+  "capture.loopback_agc": "true",
+  "capture.mic_agc": "false",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

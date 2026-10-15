@@ -78,13 +78,7 @@ use crate::types::{
 };
 use crate::views::JobEvent;
 
-/// Setting: open the captures at 16 kHz mono via `AUTOCONVERTPCM` (`true`,
-/// the default when unset) or at the mix format with rubato (`false`).
-pub const CAPTURE_AUTOCONVERT: &str = "capture.autoconvert";
-/// Setting: automatic gain on the loopback (default `true`).
-pub const CAPTURE_LOOPBACK_AGC: &str = "capture.loopback_agc";
-/// Setting: automatic gain on the mic (default `false`).
-pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
+pub use crate::settings::{CAPTURE_AUTOCONVERT, CAPTURE_LOOPBACK_AGC, CAPTURE_MIC_AGC};
 /// Loopback peaks (before the AGC) under this for [`LOOPBACK_QUIET_WINDOW`]
 /// while there is audio: the output's volume is too low.
 pub const LOOPBACK_QUIET_DBFS: f32 = -50.0;
@@ -401,27 +395,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// A boolean setting with a default (these keys are not in
-/// `settings::DEFAULTS`).
-fn bool_setting(s: &crate::views::Settings, key: &str, default: bool) -> bool {
-    match settings::get(s, key).trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
-    }
-}
-
-/// `capture.autoconvert` (true unless set to a false value).
+/// `capture.autoconvert` (default true).
 pub fn autoconvert_setting(s: &crate::views::Settings) -> bool {
-    bool_setting(s, CAPTURE_AUTOCONVERT, true)
+    settings::get_bool(s, CAPTURE_AUTOCONVERT)
 }
 
 /// Whether `channel` gets automatic gain (`capture.loopback_agc`, default
 /// true; `capture.mic_agc`, default false).
 pub fn agc_setting(s: &crate::views::Settings, channel: Channel) -> bool {
     match channel {
-        Channel::Loopback => bool_setting(s, CAPTURE_LOOPBACK_AGC, true),
-        _ => bool_setting(s, CAPTURE_MIC_AGC, false),
+        Channel::Loopback => settings::get_bool(s, CAPTURE_LOOPBACK_AGC),
+        _ => settings::get_bool(s, CAPTURE_MIC_AGC),
     }
 }
 
