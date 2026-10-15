@@ -9,7 +9,7 @@ Status: v0.2, 15 Oct 2026, after the architecture review (research/05). One SQLi
 - INTEGER primary keys everywhere (rowid aliases), so FTS5 external content stays stable across VACUUM and joins stay fast at tens of millions of words. The only ULID is `meetings.uid`, used for folder names and exports.
 - The segment owns the speaker. Words keep the engine's raw label and, from v1.5, the fusion margin and overlap flag, so a smoothing pass can be compared with what the engine said.
 - User edits survive new runs: display names and colours are carried over by time-overlap matching; segment reassignments are stored as time-ranged edits and re-applied.
-- Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; a stereo playback file after the post-pass; retention default 30 days unless a meeting is pinned. Imports keep the original file as the playback source.
+- Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; one stereo FLAC (left mic, right loopback) after the post-pass, WAVs deleted; retention default 30 days unless a meeting is pinned. Imports keep the original file as the playback source.
 - Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
 
 ## Tables
@@ -191,11 +191,11 @@ CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 ## Carry-over from the previous current run
 
-1. Build the overlap matrix between old speakers and new speakers on the same channel: seconds where a word of old speaker A and a word of new speaker X overlap in time.
+1. Build the overlap matrix between old speakers and new speakers on the same channel: seconds where a word of old speaker A and a word of new speaker X overlap in time. Old speakers with under 5 s of speech are ignored so spurious live labels cannot claim names.
 2. Greedy one-to-one matching, highest overlap first. A match is accepted when it covers at least 60 percent of the smaller speaker's speech time. Copy `display_name`, `color`, `global_id`.
-3. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge.
+3. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge. (A post-pass that splits a live label into two usually means two people were conflated, so only the better match inherits the name.)
 4. Merges are not carried structurally; matched speakers inherit the merged root's name, so two new labels may share a name, and the UI offers "merge again" in one click.
-5. `edits` of kind `reassign` are re-applied when a new segment overlaps the edit's range by at least 80 percent.
+5. `edits` of kind `reassign` are replayed in `created_at` order at word level: new words whose midpoints fall inside the edit's range belong to the edit's target. If that covers a whole segment, the segment is reassigned; otherwise the segment is split at the word boundary and the covered part reassigned. The target is resolved by display name against the new run after step 2; if no speaker has that name, a speaker row `user_N` with `needs_review = 1` is created rather than dropping the edit.
 
 ## Speaker rename, merge, reassign
 
