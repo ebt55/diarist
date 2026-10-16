@@ -4,6 +4,14 @@ All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [Unreleased]
 
+- Added: local crash reports. A crash of the app or the CLI (a panic or a
+  native fault) leaves `logs\crash-<time>.txt` in the data folder, a native
+  fault also a minidump `crash-<time>.dmp`, and an engine that exits on its
+  own `logs\engine-crash-<time>.txt`. The next launch says "Diarist closed
+  unexpectedly" with Open folder, Copy report (your user folder shown as
+  `~`) and Dismiss; Diagnostics lists the reports. The newest five of each
+  kind are kept. Nothing is sent anywhere. Errors in the window's scripts
+  now reach the app log.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
 - Fixed: the live view did not open for the second and later recordings of
   a session until Stop. A recording made after deleting the previous one

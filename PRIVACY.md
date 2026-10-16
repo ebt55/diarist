@@ -11,6 +11,18 @@ folder you moved it to) and nowhere else. Speech recognition and speaker
 detection run on your own GPU or CPU. There is no account, no cloud service,
 no analytics, no crash reporting and no telemetry of any kind.
 
+If Diarist or its speech engine crashes, it writes a crash report: a text
+file in the data folder's `logs` folder (`crash-<time>.txt`, or
+`engine-crash-<time>.txt` for the engine), with the app version, Windows
+version, GPU and driver, what went wrong and the last lines of the app log.
+A crash in native code also leaves a minidump (`crash-<time>.dmp`), a copy
+of part of the program's memory that may contain transcript text; it is for
+your own debugging. Crash reports are never transmitted. The next launch
+tells you a report exists; **Copy report** puts the text report (never the
+minidump) on the clipboard with your user folder shown as `~`, for you to
+paste into an issue if you choose. The newest five reports of each kind are
+kept, and they are deleted with the data folder.
+
 ## When the app uses the network
 
 Only when you ask it to, and only to fetch files or version lists:

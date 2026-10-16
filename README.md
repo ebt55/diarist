@@ -172,8 +172,9 @@ Everything stays on your computer: audio, transcripts, names, settings. The
 app makes network requests only when you ask for a download (the runtime from
 GitHub, the models from Hugging Face), when you press **Check for newer
 runtime** (the GitHub API), or when you press **Check for updates**. It never
-checks anything by itself and sends nothing about you. See
-[PRIVACY.md](PRIVACY.md).
+checks anything by itself and sends nothing about you. A crash leaves a
+report in the data folder's `logs` folder that is never sent anywhere and is
+deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 ## Status
 
