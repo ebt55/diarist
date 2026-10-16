@@ -78,6 +78,8 @@ Report naming: sessions appear under their `label` (docs/05 shorthand such as "A
 | `nemotron35_verbatim` | nemotron-3.5 | `--verbatim`: in nemo-speech 0.2.0 this disables ITN, not filler removal; no ITN grammars are configured, so it changes nothing |
 | `en_rc_13`, `en_rc_max` | nemotron-en | decoder lookahead 1.12 s (`--asr.streaming.rnnt_right_context 13`; `-1` resolves to the same) |
 | `n35_rc_3`, `n35_rc_6`, `n35_rc_13`, `n35_rc_max` | nemotron-3.5 | lookahead 320 ms, 560 ms, 1.12 s; `-1` resolves to 3 on the pinned GGUF |
+| `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 13 and `--asr.diar.preset v3-offline` passed explicitly (the measurements behind 0.1.0-beta.2's defaults) |
+| `shipped_n35`, `shipped_en` | both | no `engine_args`: the app's own defaults. With a 0.1.0-beta.2 build (`tools/eval/.bin/diarist-cli.exe`; the earlier build is kept as `diarist-cli-0.1.0-beta.1.exe`) run.json records lookahead 13 and preset v3-offline, and `levers.py diff --a n35_rc_13_diar_off --b shipped_n35 --sessions ami,aug2,aug9,sep5,sep7,seplog,aug14` shows identical words, times and tags |
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 1.12 s plus `--asr.diar.preset v3-offline` in the fused pass (21 s diarizer chunks); the standalone `--rttm` pass stays on `v3-streaming` |
 
 To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest names from `manifests/models.json`), `language`, a `description` and optionally `engine_args`: a list of flags for `nemo-speech transcribe`, one item per argument (`["--asr.streaming.rnnt_right_context", "13"]`). They reach the transcribe step only, not the standalone diarize pass.
