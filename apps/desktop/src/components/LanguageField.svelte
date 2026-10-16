@@ -20,7 +20,6 @@
     isTag,
     languageOptions,
     planFor,
-    type LanguagePlan,
     type LanguageTable,
   } from "../lib/languages";
   import { app } from "../lib/state.svelte";
@@ -35,7 +34,8 @@
     label?: string;
     /** Set while the job cannot start in this language (nothing installed covers it). */
     blocked?: boolean;
-    plan?: LanguagePlan;
+    /** "Transcribing with Nemotron 3.5: ..." when the job will switch models, else null. */
+    notice?: string | null;
     /** The language changed (also a typed tag), or a download made it runnable. */
     onchange?: (language: string) => void;
   }
@@ -45,7 +45,7 @@
     active,
     label = "Language",
     blocked = $bindable(false),
-    plan = $bindable({ kind: "selected", file: null, note: null }),
+    notice = $bindable(null),
     onchange,
   }: Props = $props();
 
@@ -57,10 +57,19 @@
   let typed = $state("");
 
   const options = $derived(languageOptions(files, selectedId, language, true, table));
+  const current = $derived(planFor(files, selectedId, language, table));
 
+  // Pushed to the parent's bindings as plain values. An object written to
+  // a binding is a new value on every run, so an effect that wrote the plan
+  // object and read it back looped (effect_update_depth_exceeded at every
+  // launch); this one reads only `current` and `language`, and writes
+  // values that compare equal when nothing changed.
   $effect(() => {
-    plan = planFor(files, selectedId, language, table);
-    blocked = plan.kind === "install" || language === TYPED;
+    const kind = current.kind;
+    const note = kind === "switch" ? current.note : null;
+    const stop = kind === "install" || language === TYPED;
+    blocked = stop;
+    notice = note;
   });
 
   $effect(() => {
@@ -143,11 +152,11 @@
     </p>
   {/if}
   {#if isAuto(language)}<p class="help">{AUTO_NOTE}</p>{/if}
-  {#if plan.note && plan.kind !== "install"}<p class="help">{plan.note}</p>{/if}
+  {#if current.note && current.kind !== "install"}<p class="help">{current.note}</p>{/if}
   {#if loadError}<p class="help">Could not read the installed models ({loadError}); the job checks again when it starts.</p>{/if}
-  {#if plan.kind === "install"}
+  {#if current.kind === "install"}
     <div class="needs" role="alert">
-      <p>{plan.note} Install it, or choose another language.</p>
+      <p>{current.note} Install it, or choose another language.</p>
       {#if item}
         {@const it = item}
         <ul class="rows">

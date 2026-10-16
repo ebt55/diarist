@@ -8,7 +8,7 @@
   import { api, errorText, langApi } from "../lib/api";
   import { formatDate } from "../lib/format";
   import type { SettingKey } from "../lib/generated/settingDefaults";
-  import { canonical, OTHER, type LanguagePlan } from "../lib/languages";
+  import { canonical, OTHER } from "../lib/languages";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
   import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
@@ -30,7 +30,7 @@
   let error = $state<string | null>(null);
   let starting = $state(false);
   let blocked = $state(false);
-  let plan = $state.raw<LanguagePlan>({ kind: "selected", file: null, note: null });
+  let notice = $state<string | null>(null);
 
   const mics = $derived(devices.filter((d) => d.flow === "capture"));
   const outputs = $derived(devices.filter((d) => d.flow === "render"));
@@ -114,7 +114,7 @@
     close();
     app.toast(
       "info",
-      `Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.${plan.kind === "switch" && plan.note ? ` ${plan.note}` : ""}`,
+      `Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.${notice ? ` ${notice}` : ""}`,
     );
   }
 </script>
@@ -143,7 +143,7 @@
       id="rec-language"
       bind:language
       bind:blocked
-      bind:plan
+      bind:notice
       active={live.sheetOpen}
       onchange={(lang) => prepare(lang)}
     />

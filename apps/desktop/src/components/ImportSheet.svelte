@@ -5,14 +5,14 @@
   // sheet offers Nemotron 3.5 and Import waits for it.
   import { tick } from "svelte";
   import { importSheet } from "../lib/importSheet.svelte";
-  import { canonical, type LanguagePlan } from "../lib/languages";
+  import { canonical } from "../lib/languages";
   import { app } from "../lib/state.svelte";
   import LanguageField from "./LanguageField.svelte";
 
   let dialog: HTMLDialogElement | undefined = $state();
   let language = $state("en");
   let blocked = $state(false);
-  let plan = $state.raw<LanguagePlan>({ kind: "selected", file: null, note: null });
+  let notice = $state<string | null>(null);
   let starting = $state(false);
 
   const names = $derived(importSheet.paths.map((p) => p.split(/[\\/]/).pop() || p));
@@ -34,12 +34,12 @@
     if (starting || blocked) return;
     starting = true;
     const paths = importSheet.paths;
-    const notice = plan.kind === "switch" ? plan.note : null;
+    const switched = notice;
     importSheet.last = language;
     importSheet.close();
     await app.importPaths(paths, language);
     starting = false;
-    if (notice && !app.readiness) app.toast("info", notice);
+    if (switched && !app.readiness) app.toast("info", switched);
   }
 </script>
 
@@ -63,7 +63,7 @@
       {#if names.length > 5}<li class="more">and {names.length - 5} more</li>{/if}
     </ul>
 
-    <LanguageField id="import-language" bind:language bind:blocked bind:plan active={importSheet.isOpen} />
+    <LanguageField id="import-language" bind:language bind:blocked bind:notice active={importSheet.isOpen} />
 
     <div class="buttons">
       <span class="hint"><kbd>Enter</kbd> import · <kbd>Esc</kbd> cancel</span>
