@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Diarist icon v2, candidate A: paper tile</title>
+  <!-- Paper tile (the social card paper), same outline and 32-unit grid as logo.svg -->
+  <path fill="#f6f3ec" d="M112 0H384L512 128V400A112 112 0 0 1 400 512H112A112 112 0 0 1 0 400V112A112 112 0 0 1 112 0Z"/>
+  <!-- Dog-ear in the "me" slate -->
+  <path fill="#64748b" d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+  <!-- Three ink lines: the orange speaker colour fails 3:1 on paper, so all three are ink -->
+  <rect x="96" y="96" width="224" height="64" rx="16" fill="#1b1f27"/>
+  <rect x="96" y="224" width="320" height="64" rx="16" fill="#1b1f27"/>
+  <rect x="96" y="352" width="160" height="64" rx="16" fill="#1b1f27"/>
+</svg>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Diarist icon v2, candidate B: brand-blue tile</title>
+  <!-- Tile in speaker 1 blue, same outline and 32-unit grid as logo.svg -->
+  <path fill="#4e79a7" d="M112 0H384L512 128V400A112 112 0 0 1 400 512H112A112 112 0 0 1 0 400V112A112 112 0 0 1 112 0Z"/>
+  <!-- Dog-ear: the back of the page, paper mixed half and half with the tile blue -->
+  <path fill="#a2b6ca" d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+  <!-- Lines: paper where the blue line was, then speakers 2 and 3 -->
+  <rect x="96" y="96" width="224" height="64" rx="16" fill="#f6f3ec"/>
+  <rect x="96" y="224" width="320" height="64" rx="16" fill="#f28e2b"/>
+  <rect x="96" y="352" width="160" height="64" rx="16" fill="#e15759"/>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Diarist icon v2, candidate C2: ink tile with a slate edge</title>
+  <!-- As C, with the edge in the dog-ear slate, which clears 3:1 on #202020 -->
+  <path fill="#64748b" d="M112 0H384L512 128V400A112 112 0 0 1 400 512H112A112 112 0 0 1 0 400V112A112 112 0 0 1 112 0Z"/>
+  <path fill="#1b1f27" d="M112 16H377.37L496 134.63V400A96 96 0 0 1 400 496H112A96 96 0 0 1 16 400V112A96 96 0 0 1 112 16Z"/>
+  <path fill="#64748b" d="M384 0V96A32 32 0 0 0 416 128H512Z"/>
+  <rect x="96" y="96" width="224" height="80" rx="16" fill="#5b86b5"/>
+  <rect x="96" y="224" width="320" height="80" rx="16" fill="#ffa446"/>
+  <rect x="96" y="352" width="160" height="80" rx="16" fill="#f26767"/>
+</svg>
