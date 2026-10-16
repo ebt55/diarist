@@ -9,6 +9,7 @@
   import type { SpeakerId } from "../lib/generated/SpeakerId";
   import type { SpeakerView } from "../lib/generated/SpeakerView";
   import { SPEAKER_PALETTE as PALETTE } from "../lib/generated/palette";
+  import { isAuto, languageLabel } from "../lib/languages";
   import { live } from "../lib/live.svelte";
   import { Player } from "../lib/player.svelte";
   import { app, isTyping } from "../lib/state.svelte";
@@ -521,7 +522,7 @@
           <span>{formatDate(meeting.started_at)}</span>
           {#if !isLive}<span>{formatDuration(meeting.duration_ms)}</span>{/if}
           <span>{meeting.source === "live" ? "Recorded live" : "Imported file"}</span>
-          <span>{meeting.language}</span>
+          <span>{isAuto(meeting.language) ? "Language detected automatically" : languageLabel(meeting.language)}</span>
           {#if detail?.current_run}<span>{detail.current_run.kind.replace("_", "-")} run</span>{/if}
           {#if isLive}
             <span class="chip status-recording">recording</span>
