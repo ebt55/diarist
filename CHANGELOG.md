@@ -4,6 +4,7 @@ All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [Unreleased]
 
+- Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
 - Fixed: the live view did not open for the second and later recordings of
   a session until Stop. A recording made after deleting the previous one
   gets that meeting id again, and the app took it for the recording it had
