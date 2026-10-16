@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/cli", "apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 # Minimum supported Rust: Tauri 2.12 needs 1.90. `.cargo/config.toml` makes the
 # resolver prefer dependency versions that support this rust-version.
