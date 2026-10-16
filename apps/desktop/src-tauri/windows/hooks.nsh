@@ -8,11 +8,14 @@
 ;
 ; Uninstall (never during an update, $UpdateMode = 1):
 ; - "Delete app data" ticked: the template has already removed
-;   %LOCALAPPDATA%\app.diarist.desktop. For a moved data root this hook also
-;   removes Diarist's items there (database, audio, engine, models,
-;   manifests, logs, WebView profile, window state), then the folder itself if
-;   that leaves it empty, and finally the registry key. Other files in a moved
-;   folder are never touched.
+;   %LOCALAPPDATA%\app.diarist.desktop and %APPDATA%\app.diarist.desktop (a
+;   roaming folder the WebView creates, empty); this hook removes the
+;   roaming one again so it goes even if a template update drops that line.
+;   For a moved data root it also removes Diarist's items there (database
+;   and its pre-upgrade copy, audio, engine, models, manifests, logs, WebView
+;   profile, window state), then the folder itself if that leaves it empty,
+;   and finally the registry key. Other files in a moved folder are never
+;   touched.
 ; - Unticked: it asks "Remove the downloaded engine and models (N MB)?
 ;   Transcripts and recordings are kept" and removes only engine\ and models\.
 ;
@@ -47,6 +50,8 @@
   !insertmacro DIARIST_RemoveItem "${ROOT}\diarist.db"
   !insertmacro DIARIST_RemoveItem "${ROOT}\diarist.db-wal"
   !insertmacro DIARIST_RemoveItem "${ROOT}\diarist.db-shm"
+  ; The copy made before a database upgrade (diarist.db.bak-<old version>).
+  Delete "${ROOT}\diarist.db.bak-*"
   !insertmacro DIARIST_RemoveItem "${ROOT}\audio"
   !insertmacro DIARIST_RemoveItem "${ROOT}\engine"
   !insertmacro DIARIST_RemoveItem "${ROOT}\models"
@@ -79,6 +84,9 @@
     ${EndIf}
 
     ${If} $DeleteAppDataCheckboxState = 1
+      ; Ticked only: unticked keeps it, like the rest of the app data.
+      SetShellVarContext current
+      RMDir /r "$APPDATA\${BUNDLEID}"
       ${If} $R6 = 1
         DetailPrint "Removing Diarist data from $R7"
         !insertmacro DIARIST_RemoveDataItems "$R7"

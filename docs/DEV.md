@@ -241,8 +241,11 @@ Startup and import timings: "Release measurements" below.
 `apps/desktop/src-tauri/windows/hooks.nsh` hooks Tauri's NSIS template
 (per-user install, `downloadBootstrapper` for WebView2). The POSTUNINSTALL
 hook reads `HKCU\Software\Diarist\DataRoot`: with "Delete the application
-data" ticked it also removes Diarist's items from a moved data root and
-the key; unticked it asks whether to remove `engine\` and `models\`. For
+data" ticked it also removes Diarist's items from a moved data root
+(with the pre-upgrade `diarist.db.bak-*`), the key and the empty roaming
+folder `%APPDATA%\app.diarist.desktop` the WebView leaves (the template
+removes that one too; the hook makes sure); unticked it asks whether to
+remove `engine\` and `models\` and leaves the rest. For
 tests, `uninstall.exe /S /DELETEAPPDATA` acts as if the box were ticked and
 `/S /REMOVEMODELS` answers Yes to the question. **The ticked box (and
 `/DELETEAPPDATA`) always removes `%LOCALAPPDATA%\app.diarist.desktop`**:
