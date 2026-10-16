@@ -27,7 +27,8 @@ All notable changes to Diarist. Versions follow semantic versioning.
 - Changed: imports and the post-pass after Stop use the speech model's full
   lookahead (about 1 to 2 WER points better on the hand-labelled meeting,
   and faster); live recording keeps the low-latency setting.
-- Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
+- Changed: a new app icon in a light and a dark variant; the installer icon is
+  the dark-background one, and the running app follows the taskbar theme.
 - Fixed: the taskbar button showed the icon blurred (a 32 px image
   enlarged). The window, its taskbar button and the tray now take the
   icon's frame for the display's scale, including the 16, 20 and 24 px

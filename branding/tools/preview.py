@@ -1,7 +1,8 @@
-"""Draws branding/preview.png: the mark (logo.svg) and the app icon (icon.svg) side by side at
-16 to 256 px on a light and a dark field, the mono and tray marks at 16 to 48 px, and the
-16 px renderings at 8x. The icon's small sizes come from branding/icon-sizes/ where a
-pixel-snapped drawing exists, as in icon.ico.
+"""Draws branding/preview.png: the mark (logo.svg) and the app icon pair (icon.svg for light
+backgrounds, icon-dark.svg for dark) side by side at 16 to 128 px on a light and a dark
+field, the mono and tray marks at 16 to 48 px, and the 16 px renderings at 8x. The icons'
+small sizes come from branding/icon-sizes/ where a pixel-snapped drawing exists, as in
+icon.ico and the theme frame sets.
 
     uv run --with pillow python -I branding/tools/preview.py
 """
@@ -14,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 BRANDING = Path(__file__).resolve().parent.parent
 FIELDS = (("#ffffff", "#1b1f27", "#64748b"), ("#0f1115", "#f3f4f6", "#8b95a7"))  # field, ink, label
-BIG = (16, 24, 32, 48, 128, 256)
+BIG = (16, 24, 32, 48, 128)
 SMALL = (16, 24, 32, 48)
 W, PAD, GAP = 1400, 40, 24
 
@@ -38,9 +39,10 @@ def render(svg, size, tmp, colour=None):
     return Image.open(png).convert("RGBA")
 
 
-def icon_svg(size):
-    snapped = BRANDING / "icon-sizes" / f"icon-{size}.svg"
-    return snapped if snapped.exists() else BRANDING / "icon.svg"
+def icon_svg(variant, size):
+    snapped = BRANDING / "icon-sizes" / f"{variant}-{size}.svg"
+    master = BRANDING / ("icon-dark.svg" if variant == "dark" else "icon.svg")
+    return snapped if snapped.exists() else master
 
 
 def row(canvas, x, base, images, label_colour):
@@ -60,26 +62,28 @@ def zoom(im, field):
 
 
 def panel(field, ink, label, tmp):
-    h = 620
+    h = 500
     im = Image.new("RGB", (W, h), field)
     d = ImageDraw.Draw(im)
-    half = (W - 2 * PAD) // 2
+    third = (W - 2 * PAD) // 3
     d.text((PAD, 28), f"logo.svg, the mark, on {field}", fill=ink, font=font(20, True))
-    d.text((PAD + half, 28), f"icon.svg, the app icon, on {field}", fill=ink, font=font(20, True))
-    base = 80 + 256
+    d.text((PAD + third, 28), "icon.svg, app icon for light backgrounds", fill=ink, font=font(20, True))
+    d.text((PAD + 2 * third, 28), "icon-dark.svg, app icon for dark", fill=ink, font=font(20, True))
+    base = 80 + 128
     row(im, PAD, base, [(s, render(BRANDING / "logo.svg", s, tmp)) for s in BIG], label)
-    row(im, PAD + half, base, [(s, render(icon_svg(s), s, tmp)) for s in BIG], label)
+    row(im, PAD + third, base, [(s, render(icon_svg("light", s), s, tmp)) for s in BIG], label)
+    row(im, PAD + 2 * third, base, [(s, render(icon_svg("dark", s), s, tmp)) for s in BIG], label)
 
     y = base + 70
     mono = "#1b1f27" if field == "#ffffff" else "#ffffff"
     d.text((PAD, y), "logo-mono.svg", fill=ink, font=font(20, True))
     d.text((PAD + 300, y), "tray-recording.svg", fill=ink, font=font(20, True))
-    d.text((PAD + 600, y), "16 px, 8x: mark, icon, mono, tray", fill=ink, font=font(20, True))
+    d.text((PAD + 600, y), "16 px, 8x: mark, icon, icon-dark, mono, tray", fill=ink, font=font(20, True))
     base2 = y + 50 + 48
     row(im, PAD, base2, [(s, render(BRANDING / "logo-mono.svg", s, tmp, mono)) for s in SMALL], label)
     row(im, PAD + 300, base2, [(s, render(BRANDING / "tray-recording.svg", s, tmp, mono)) for s in SMALL], label)
     x = PAD + 600
-    for svg, colour in ((BRANDING / "logo.svg", None), (icon_svg(16), None),
+    for svg, colour in ((BRANDING / "logo.svg", None), (icon_svg("light", 16), None), (icon_svg("dark", 16), None),
                         (BRANDING / "logo-mono.svg", mono), (BRANDING / "tray-recording.svg", mono)):
         im.paste(zoom(render(svg, 16, tmp, colour), field), (x, y + 44))
         x += 128 + 16
