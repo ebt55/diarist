@@ -60,14 +60,15 @@ Rules:
 
 One child process per file, exact command line and output schema in `docs/research/08-runtime-cli-contract.md` section 1:
 
-`nemo-speech.exe transcribe <wav> --model <selected ASR .gguf> [--language <lang>] --stream --endpointing --diarize --diar-model <Nemotron-3-Diarization.q8_0.gguf> --device cuda:0 --json --output <words.json> --force`
+`nemo-speech.exe transcribe <wav> --model <selected ASR .gguf> [--language <lang>] --stream --endpointing --diarize --diar-model <Nemotron-3-Diarization.q8_0.gguf> --device <device> --json --output <words.json> --force`
 
+- Device: the selected runtime package's (`models::device_for`): `cuda:0` for the CUDA package, `vulkan:0` for Vulkan, `cpu` for CPU, from the engine manifest's `backend` (for a folder the manifest does not know, the folder name's suffix or `doctor`'s `features.backend_*`; `auto` when nothing tells). The Vulkan and CPU packages refuse `cuda:0` with exit code 2. The live server and the diarize pass take the same device; `EngineInfo.device` and each run's `engine_info.device` record it. The free-VRAM start gate reads NVML (CUDA: else `doctor`); it is skipped on the CPU package and on the Vulkan one without NVML.
 - Environment: `NEMO_SPEECH_MODEL_DIR` set to our models dir; `PATH` = engine `bin`, System32, Windows. Model paths are always absolute (a short name triggers a download).
 - The selected ASR model is the EN model by default (measured best on English, docs/eval) or Nemotron 3.5 when the user selects it. `--language` is passed only for 3.5: the meeting's language (default `en`), omitted for `auto`, which costs about a second of the first utterance.
 - Output `words[{word, start, end, confidence, speaker?}]` (seconds on an 80 ms grid; confidence always 1.0 in v0.2.0, stored as `None`; `speaker` 1-based, absent when untagged). Normalized to `spk_N` in order of first appearance; `Utterance` per contiguous same-speaker stretch; then `TextFinalUntil`, `SpeakersFinalUntil`, `Done`.
 - Errors: exit codes 0 ok, 1 runtime, 2 invalid argument, 3 missing model, 4 unsupported; with `--json` a one-line `{"error":{...}}` object on stderr. Mapped to `Error { code }`.
 - No progress output exists; the adapter emits `Progress` from elapsed time against the expected duration (27x real time measured).
-- Optional second pass when requested (eval harness, `keep_diarization_segments` setting): `nemo-speech.exe diarize <wav> --model <diar.gguf> --device cuda:0 --format rttm --output <seg.rttm> --force` (streaming preset; never `--offline`). Kept for the eval harness and re-fusion.
+- Optional second pass when requested (eval harness, `keep_diarization_segments` setting): `nemo-speech.exe diarize <wav> --model <diar.gguf> --device <device> --format rttm --output <seg.rttm> --force` (streaming preset; never `--offline`). Kept for the eval harness and re-fusion.
 
 Rules learned the hard way (research/03 and 08): never plain `transcribe --diarize` without `--stream --endpointing` (first ten minutes mislabelled); never Parakeet as the only ASR on long files (silent drops); at most 8 labels per stream for a whole recording.
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::classify::{classify, Classification, Sidecar};
+use super::device::Backend;
 use super::doctor::doctor;
 use super::gguf::read_header;
 use super::manifest::{version_cmp, Manifest, TESTED_ENGINE_VERSIONS};
@@ -350,27 +351,43 @@ fn scan_engine(
         .map(|m| m.len())
         .unwrap_or(0);
     let mut problem = None;
+    let entry = manifest.engines.iter().find(|e| e.name == name);
+    // The package backend (`--device` follows it, `models::device`): the
+    // manifest entry's, else the folder name's suffix, else what the last
+    // scan or the doctor report below found.
+    let mut backend = entry
+        .map(|e| e.backend.clone())
+        .or_else(|| Backend::of_name(&name).map(|b| b.as_str().to_owned()));
     // Re-use the version from the last scan when the binary did not change:
     // `doctor` initialises CUDA and takes a second or two.
-    let cached = previous
+    let prev = previous
         .get(&rel)
-        .filter(|f| f.size_bytes == size as i64 && !f.missing)
-        .and_then(|f| f.architecture.clone());
+        .filter(|f| f.size_bytes == size as i64 && !f.missing);
+    backend = backend.or_else(|| prev.and_then(|f| f.quant.clone()));
+    // A folder whose backend nothing told yet asks the runtime once.
+    let cached = prev
+        .and_then(|f| f.architecture.clone())
+        .filter(|_| backend.is_some());
     let version = cached.or_else(|| match doctor(dir) {
-        Ok(r) => Some(r.version),
+        Ok(r) => {
+            backend = backend
+                .take()
+                .or_else(|| r.backend().map(|b| b.as_str().to_owned()));
+            Some(r.version)
+        }
         Err(e) => {
             problem = Some(format!("{}: {e}", dir.display()));
-            version_from_name(&name)
+            prev.and_then(|f| f.architecture.clone())
+                .or_else(|| version_from_name(&name))
         }
     });
-    let entry = manifest.engines.iter().find(|e| e.name == name);
     (
         ScannedModelFile {
             path: rel,
             role: ModelRole::Engine,
             architecture: version,
             display_name: name,
-            quant: entry.map(|e| e.backend.clone()),
+            quant: backend,
             size_bytes: size as i64,
             sha256: None,
             source: if entry.is_some() {
@@ -733,6 +750,42 @@ mod tests {
             Some("0.2.0")
         );
         assert_eq!(version_from_name("custom"), None);
+    }
+
+    #[test]
+    fn engine_rows_carry_the_package_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        for name in [
+            "nemo-speech-0.2.0-windows-x86_64-vulkan",
+            "nemo-speech-0.3.0-windows-x86_64-cpu",
+            "custom",
+        ] {
+            let e = paths.engine().join(name);
+            std::fs::create_dir_all(e.join("bin")).unwrap();
+            // Not a real runtime: doctor fails, so only the name tells.
+            std::fs::write(process::exe_path(&e), b"MZ").unwrap();
+        }
+        let store = MemoryStore::new();
+        let r = scan(&paths, &store, &Manifest::builtin()).unwrap();
+        let backend = |name: &str| {
+            r.files
+                .iter()
+                .find(|f| f.display_name == name)
+                .and_then(|f| f.quant.clone())
+        };
+        // The manifest's entry, a release-style name, and nothing.
+        assert_eq!(
+            backend("nemo-speech-0.2.0-windows-x86_64-vulkan").as_deref(),
+            Some("vulkan")
+        );
+        assert_eq!(
+            backend("nemo-speech-0.3.0-windows-x86_64-cpu").as_deref(),
+            Some("cpu")
+        );
+        assert_eq!(backend("custom"), None);
+        let custom = r.files.iter().find(|f| f.display_name == "custom").unwrap();
+        assert_eq!(crate::models::engine_backend(custom), None);
     }
 
     #[test]

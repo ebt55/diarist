@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::device::Backend;
 use crate::engine::process;
 use crate::error::{CoreError, Result};
 use crate::views::DeviceInfo;
@@ -33,6 +34,9 @@ pub struct DoctorReport {
     pub version: String,
     #[serde(default)]
     pub accelerator_available: bool,
+    /// A GPU backend is compiled in (`false` for the CPU package).
+    #[serde(default)]
+    pub accelerator_compiled: Option<bool>,
     #[serde(default)]
     pub driver_runtime_compatible: bool,
     #[serde(default)]
@@ -57,11 +61,35 @@ impl DoctorReport {
         self.devices.iter().find(|d| d.kind == "gpu")
     }
 
-    /// `driver_runtime_compatible && features.backend_cuda && a GPU is present`.
+    /// The build's backend from `features.backend_*`: CUDA, Vulkan, or CPU
+    /// when no GPU backend is compiled in (every `backend_*` flag false, or
+    /// `accelerator_compiled` false). `None` for Metal or a report without
+    /// those fields.
+    pub fn backend(&self) -> Option<Backend> {
+        let flag = |k: &str| self.features.get(k).copied();
+        if flag("backend_cuda") == Some(true) {
+            return Some(Backend::Cuda);
+        }
+        if flag("backend_vulkan") == Some(true) {
+            return Some(Backend::Vulkan);
+        }
+        if flag("backend_metal") == Some(true) {
+            return None;
+        }
+        let flags = self.features.keys().any(|k| k.starts_with("backend_"));
+        (flags || self.accelerator_compiled == Some(false)).then_some(Backend::Cpu)
+    }
+
+    /// The runtime can run its package: the driver and runtime are
+    /// compatible and, for a GPU build (CUDA, Vulkan), a GPU is present.
+    /// The CPU build needs no GPU.
     pub fn healthy(&self) -> bool {
         self.driver_runtime_compatible
-            && self.features.get("backend_cuda").copied().unwrap_or(false)
-            && self.gpu().is_some()
+            && match self.backend() {
+                Some(Backend::Cpu) => true,
+                Some(_) => self.gpu().is_some(),
+                None => false,
+            }
     }
 
     pub fn free_vram_mb(&self) -> Option<u32> {
@@ -124,6 +152,46 @@ mod tests {
         let cpu_only = DoctorReport::parse(&SAMPLE.replace("\"gpu\"", "\"cpu\"")).unwrap();
         assert!(!cpu_only.healthy());
         assert!(DoctorReport::parse("nope").is_err());
+        assert_eq!(r.backend(), Some(Backend::Cuda));
+    }
+
+    /// The 0.2.0 Vulkan and CPU packages' reports on the reference PC (16
+    /// Oct 2026), shortened: each says its backend and is healthy.
+    #[test]
+    fn vulkan_and_cpu_packages_say_their_backend() {
+        let vulkan = DoctorReport::parse(
+            r#"{"accelerator_available": true, "accelerator_compiled": true,
+              "devices": [{"description": "NVIDIA GeForce RTX 3080", "index": 0,
+                "memory_free": 9733931008, "memory_total": 10539237376, "name": "Vulkan0", "type": "gpu"}],
+              "driver_runtime_compatible": true,
+              "features": {"asr": true, "backend_cuda": false, "backend_metal": false, "backend_vulkan": true},
+              "version": "0.2.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(vulkan.backend(), Some(Backend::Vulkan));
+        assert!(vulkan.healthy());
+        let cpu = DoctorReport::parse(
+            r#"{"accelerator_available": false, "accelerator_compiled": false,
+              "devices": [{"description": "AMD Ryzen 9 5900X", "index": 0,
+                "memory_free": 17834729472, "memory_total": 34280767488, "name": "CPU", "type": "cpu"}],
+              "driver_runtime_compatible": true,
+              "features": {"asr": true, "backend_cuda": false, "backend_metal": false, "backend_vulkan": false},
+              "version": "0.2.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(cpu.backend(), Some(Backend::Cpu));
+        assert!(cpu.healthy(), "the CPU package needs no GPU");
+        assert_eq!(cpu.free_vram_mb(), None);
+        // A Vulkan build without a GPU cannot run.
+        let no_gpu = DoctorReport {
+            devices: cpu.devices.clone(),
+            ..vulkan.clone()
+        };
+        assert!(!no_gpu.healthy());
+        // An old report without the flags: unknown.
+        let bare = DoctorReport::parse(r#"{"version": "0.1.0"}"#).unwrap();
+        assert_eq!(bare.backend(), None);
+        assert!(!bare.healthy());
     }
 
     /// The real runtime when `DIARIST_ENGINE_DIR` is set.

@@ -223,8 +223,9 @@ pub fn readiness(
             ),
         }),
         Some(e) => {
-            // `quant` holds the package backend for manifest runtimes.
-            let cuda = e.quant.as_deref() == Some("cuda") || e.display_name.ends_with("-cuda");
+            // Only the CUDA package needs an NVIDIA GPU with CUDA 13; the
+            // Vulkan and CPU ones run on their own device.
+            let cuda = super::engine_backend(e) == Some(super::Backend::Cuda);
             if cuda && !gpu.is_some_and(|g| g.cuda_ok) {
                 missing.push(MissingPart {
                     what: "gpu".into(),
@@ -497,5 +498,40 @@ mod tests {
             r.missing[0].item.as_ref().unwrap().backend.as_deref(),
             Some("vulkan")
         );
+
+        // The Vulkan and CPU packages need neither CUDA nor an NVIDIA GPU.
+        let mut files = vec![
+            row("models/en.gguf", ModelRole::Asr, "fastconformer", None),
+            row("models/d.gguf", ModelRole::Diarizer, "sortformer", None),
+        ];
+        for b in ["cuda", "vulkan", "cpu"] {
+            let mut e = row(
+                &format!("engine/nemo-speech-0.2.0-windows-x86_64-{b}"),
+                ModelRole::Engine,
+                "0.2.0",
+                None,
+            );
+            e.quant = Some(b.into());
+            files.push(e);
+        }
+        store.sync_model_files(&files, 2).unwrap();
+        select(&store, ModelRole::Asr, "en.gguf").unwrap();
+        for (b, gpu) in [
+            ("vulkan", Some(&old)),
+            ("vulkan", None),
+            ("cpu", None),
+            ("cuda", Some(&g)),
+        ] {
+            select(
+                &store,
+                ModelRole::Engine,
+                &format!("engine/nemo-speech-0.2.0-windows-x86_64-{b}"),
+            )
+            .unwrap();
+            let r = readiness(&paths, &store, &manifest, gpu, &[], "record").unwrap();
+            assert!(r.ok, "{b} with {gpu:?}: {:?}", r.missing);
+        }
+        let r = readiness(&paths, &store, &manifest, None, &[], "record").unwrap();
+        assert_eq!(r.missing[0].what, "gpu", "the CUDA package without NVIDIA");
     }
 }

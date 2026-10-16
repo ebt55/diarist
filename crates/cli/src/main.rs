@@ -68,9 +68,11 @@ enum Command {
         /// Keep the 16 kHz intermediate WAV.
         #[arg(long)]
         keep_wav: bool,
-        /// Compute device for the engine.
-        #[arg(long, default_value = "cuda:0")]
-        device: String,
+        /// Compute device for the engine (default: the selected runtime
+        /// package's: cuda:0 for CUDA, vulkan:0 for Vulkan, cpu for CPU;
+        /// `auto` lets the runtime choose).
+        #[arg(long)]
+        device: Option<String>,
         /// Export the transcript here afterwards (format from --format or the extension).
         #[arg(long)]
         out: Option<PathBuf>,
@@ -189,9 +191,11 @@ enum Command {
         /// output, following the endpoint meeting apps play to).
         #[arg(long)]
         loopback: Option<String>,
-        /// Compute device for the engine.
-        #[arg(long, default_value = "cuda:0")]
-        device: String,
+        /// Compute device for the engine (default: the selected runtime
+        /// package's: cuda:0 for CUDA, vulkan:0 for Vulkan, cpu for CPU;
+        /// `auto` lets the runtime choose).
+        #[arg(long)]
+        device: Option<String>,
     },
     /// Reproduce a crash to test the local reports in <data root>\logs
     /// (docs/plans/11-hardening.md 8a).
@@ -375,6 +379,7 @@ fn run(cli: &Cli) -> CliResult {
                 asr: asr_model.clone(),
                 diarizer: diar_model.clone(),
                 extra_args: engine_args.clone(),
+                device: device.clone(),
             };
             transcribe(
                 &ctx,
@@ -384,7 +389,6 @@ fn run(cli: &Cli) -> CliResult {
                 !no_diarize,
                 *rttm,
                 *keep_wav,
-                device,
                 export,
                 &overrides,
                 *json,
@@ -575,7 +579,6 @@ fn transcribe(
     diarize: bool,
     rttm: bool,
     keep_wav: bool,
-    device: &str,
     export_to: Option<(ExportFormat, Option<PathBuf>)>,
     overrides: &models::EngineOverrides,
     json: bool,
@@ -595,7 +598,10 @@ fn transcribe(
     let language = table.canonical(language);
     let language = language.as_str();
     let (built, switched) =
-        models::select_engine_for(&ctx.paths, &*ctx.store, device, language, false, overrides)?;
+        models::select_engine_for(&ctx.paths, &*ctx.store, language, false, overrides)?;
+    if let Some(n) = models::cpu_notice_once(&built.device) {
+        eprintln!("warning: {n}");
+    }
     let sel = built.selection;
     if let Some(reason) = switched {
         if let Some(selected) = models::selected_file(&*ctx.store, ModelRole::Asr)? {
@@ -635,9 +641,18 @@ fn transcribe(
         title,
         diarize,
     };
+    // The device the engine passes (EngineInfo; the run stores it too): the
+    // runtime package's, or --device.
+    let device = engine.info().device;
     eprintln!(
-        "engine {} | asr {} | diarizer {} | lookahead {} | diar preset {}{}",
+        "engine {} | device {}{} | asr {} | diarizer {} | lookahead {} | diar preset {}{}",
         sel.engine_version.as_deref().unwrap_or("?"),
+        device,
+        if overrides.device.is_some() {
+            " (--device)"
+        } else {
+            ""
+        },
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
         diarist_core::protocol::lookahead_text(engine.info().right_context),
@@ -691,6 +706,7 @@ fn transcribe(
         format!("  speakers  {speakers}"),
         format!("  segments  {segments}"),
         format!("  words     {words}"),
+        format!("  device    {device}"),
         format!(
             "  wall      {wall:.1} s ({:.1}x real time, RTF {:.4})",
             duration_ms as f64 / 1_000.0 / wall.max(1e-9),
@@ -736,6 +752,7 @@ fn transcribe(
             "wall_s": (wall * 1_000.0).round() / 1_000.0,
             "decoder": decoder.last_decoder(),
             "engine_version": sel.engine_version,
+            "device": device,
             "right_context": detail
                 .current_run
                 .as_ref()
@@ -828,8 +845,12 @@ fn show(ctx: &Ctx, id: MeetingId, all: bool) -> CliResult {
             Some(p) => format!(", diar preset {p}"),
             None => String::new(),
         };
+        let device = match run.engine_info.get("device").and_then(|v| v.as_str()) {
+            Some(d) => format!(", device {d}"),
+            None => String::new(),
+        };
         println!(
-            "  run       {} {} ({}{lookahead}{preset})",
+            "  run       {} {} ({}{device}{lookahead}{preset})",
             run.kind.as_str(),
             run.status.as_str(),
             run.engine_info
@@ -1246,9 +1267,21 @@ fn doctor(ctx: &Ctx) -> CliResult {
         }
     }
     if let Some(engine) = models::selected_file(&*ctx.store, ModelRole::Engine)? {
+        let backend = models::engine_backend(&engine);
+        println!(
+            "device      {} ({})",
+            models::device_for(backend),
+            backend.map_or(
+                "package backend unknown; the runtime chooses".to_owned(),
+                |b| format!("{b} package")
+            )
+        );
         match models::doctor(&ctx.paths.absolute(&engine.path)) {
             Ok(r) => {
                 println!("runtime     nemo-speech {}", r.version);
+                if let Some(b) = r.backend() {
+                    println!("backend     {b} (doctor)");
+                }
                 if let Some(g) = r.device_info() {
                     println!(
                         "gpu         {} ({} MB free of {} MB)",
@@ -1311,6 +1344,12 @@ mod tests {
             cli.command,
             Command::Transcribe { rttm: true, .. }
         ));
+        let cli =
+            Cli::try_parse_from(["diarist-cli", "transcribe", "a.wav", "--device", "cpu"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Transcribe { device: Some(ref d), .. } if d == "cpu"
+        ));
         let cli = Cli::try_parse_from([
             "diarist-cli",
             "transcribe",
@@ -1331,9 +1370,11 @@ mod tests {
                 asr_model,
                 diar_model,
                 engine_args,
+                device,
                 ..
             } => {
                 assert!(json);
+                assert_eq!(device, None, "the package's device unless --device");
                 assert_eq!(asr_model.as_deref(), Some("nemotron-3.5"));
                 assert_eq!(diar_model.as_deref(), Some("D:/m/diar.gguf"));
                 assert_eq!(engine_args, ["--verbatim", "--foo=1"]);
@@ -1402,7 +1443,12 @@ mod tests {
         assert!(diarize_mic);
         assert_eq!(mic.as_deref(), Some("CABLE Output"));
         assert_eq!(loopback.as_deref(), Some("Speakers"));
-        assert_eq!(device, "cuda:0");
+        // No --device: the selected runtime package's device.
+        assert_eq!(device, None);
+        let cli = Cli::try_parse_from(["diarist-cli", "record", "--device", "vulkan:0"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Record { device: Some(ref d), .. } if d == "vulkan:0")
+        );
         let bare = Cli::try_parse_from(["diarist-cli", "record"]).unwrap();
         assert!(matches!(
             bare.command,

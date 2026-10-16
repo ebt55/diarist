@@ -54,9 +54,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::events::emit_job;
 use crate::{tray, AppPaths, AppStore, GpuCache, Jobs};
 
-/// Where live sessions and post-passes run.
-const DEVICE: &str = "cuda:0";
-
 /// The global shortcut that toggles recording.
 pub const SHORTCUT: &str = "Ctrl+Alt+R";
 /// A doctor reading (free VRAM) younger than this is reused at Start.
@@ -109,6 +106,8 @@ struct ServeKey {
     engine_dir: PathBuf,
     asr: PathBuf,
     diar: PathBuf,
+    /// `--device`: the runtime package's (`cuda:0`, `vulkan:0`, `cpu`).
+    device: String,
 }
 
 struct Serve {
@@ -398,7 +397,6 @@ fn select(paths: &DataPaths, store: &dyn RunStore, language: &str) -> CmdResult<
     let (built, switched) = models::select_engine_for(
         paths,
         store,
-        DEVICE,
         language,
         false,
         &models::EngineOverrides::default(),
@@ -463,24 +461,33 @@ fn vram_reading(app: &AppHandle, max_age: Duration) -> (Option<u32>, Instant) {
     (free, at)
 }
 
-/// Free VRAM now: NVML, else a doctor reading younger than `max_age`.
-fn free_vram(app: &AppHandle, max_age: Duration) -> Option<VramReading> {
-    gpu::nvml_vram(gpu::device_index(DEVICE)).or_else(|| {
-        let (free, _) = vram_reading(app, max_age);
-        free.map(|free_mb| VramReading {
-            free_mb,
-            total_mb: None,
-            source: VramSource::Doctor,
-        })
-    })
+/// Free VRAM now for jobs on `device` ([`models::VramCheck`]): CUDA reads
+/// NVML, else a doctor reading younger than `max_age`; Vulkan reads NVML
+/// only (none on AMD or Intel: no gate); CPU reads nothing (no gate).
+fn free_vram(app: &AppHandle, max_age: Duration, device: &str) -> Option<VramReading> {
+    models::VramCheck::for_device(device).read_with(
+        || gpu::nvml_vram(gpu::device_index(device)),
+        || {
+            let (free, _) = vram_reading(app, max_age);
+            free.map(|free_mb| VramReading {
+                free_mb,
+                total_mb: None,
+                source: VramSource::Doctor,
+            })
+        },
+    )
 }
 
-/// The supervisor for `sel`, started (a no-op when it runs). A server for
-/// another selection (another ASR model for another language) is stopped
-/// first. The first launch measures how much VRAM the idle server holds, in
-/// the background.
-fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, bool) {
-    ensure_server_if(app, sel, false).expect("ensure_server swaps unconditionally")
+/// The supervisor for `sel` on `device`, started (a no-op when it runs). A
+/// server for another selection (another ASR model for another language)
+/// is stopped first. The first launch measures how much VRAM the idle
+/// server holds, in the background.
+fn ensure_server(
+    app: &AppHandle,
+    sel: &ResolvedSelection,
+    device: &str,
+) -> (ServeSupervisor, bool) {
+    ensure_server_if(app, sel, device, false).expect("ensure_server swaps unconditionally")
 }
 
 /// [`ensure_server`]; with `idle_only`, a server for another selection is
@@ -489,12 +496,14 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
 fn ensure_server_if(
     app: &AppHandle,
     sel: &ResolvedSelection,
+    device: &str,
     idle_only: bool,
 ) -> Option<(ServeSupervisor, bool)> {
     let key = ServeKey {
         engine_dir: sel.engine_dir.clone(),
         asr: sel.asr.clone(),
         diar: sel.diarizer.clone(),
+        device: device.to_owned(),
     };
     let live = handle(app);
     let mut serve = lock(&live.serve);
@@ -525,7 +534,8 @@ fn ensure_server_if(
     }
     let (_, paths, _, _) = app_parts(app);
     let mut cfg = ServeConfig::new(&sel.engine_dir, paths.models(), &sel.asr, &sel.diarizer);
-    cfg.device = DEVICE.into();
+    // The runtime package's device: the Vulkan and CPU packages refuse `cuda:0`.
+    cfg.device = key.device.clone();
     // Stopped after `engine.idle_minutes` without a recording (frees its VRAM).
     let store = Arc::clone(&app.state::<AppStore>().0);
     cfg.idle_timeout = settings::effective(&*store)
@@ -545,10 +555,11 @@ fn ensure_server_if(
     });
     drop(serve);
     // Free VRAM before the models load, then once the server is ready.
-    let before = free_vram(app, Duration::from_secs(5)).map(|r| r.free_mb);
+    let before = free_vram(app, Duration::from_secs(5), &key.device).map(|r| r.free_mb);
     supervisor.start();
     log::info!(
-        "live server starting: asr {} | diarizer {} | free VRAM before {} | idle stop {}",
+        "live server starting: device {} | asr {} | diarizer {} | free VRAM before {} | idle stop {}",
+        key.device,
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
         before.map_or("unknown".into(), |m| format!("{m} MB")),
@@ -581,7 +592,7 @@ fn watch_ready(
                 Ok(ep) => {
                     let secs = t.elapsed().as_secs_f64();
                     let resident = before.map(|b| {
-                        let after = free_vram(&app, Duration::ZERO).map(|r| r.free_mb);
+                        let after = free_vram(&app, Duration::ZERO, &key.device).map(|r| r.free_mb);
                         b.zip(after)
                             .map(|(b, a)| b.saturating_sub(a))
                             // doctor may not see the server's allocations: 0 is unknown.
@@ -611,10 +622,11 @@ fn watch_ready(
     }
 }
 
-/// Free VRAM for the start gate, as NVML (or doctor) reports it: nothing is
-/// added or subtracted for the live server.
-fn gate_vram(app: &AppHandle) -> Option<VramReading> {
-    free_vram(app, VRAM_READING_TTL)
+/// Free VRAM for the start gate on `device`, as NVML (or doctor) reports it:
+/// nothing is added or subtracted for the live server. `None` (no gate) on
+/// the CPU package, and on the Vulkan one without NVML.
+fn gate_vram(app: &AppHandle, device: &str) -> Option<VramReading> {
+    free_vram(app, VRAM_READING_TTL, device)
 }
 
 /// Records post-pass events and forwards them as `job:*`. `meeting`
@@ -658,12 +670,12 @@ fn job_event_fn(
     })
 }
 
-fn engine_info(sel: &ResolvedSelection) -> serde_json::Value {
+fn engine_info(sel: &ResolvedSelection, device: &str) -> serde_json::Value {
     serde_json::json!({
         "runtime": format!("nemo-speech {}", sel.engine_version.as_deref().unwrap_or("unknown")),
         "adapter": "nemo-ws",
         "models": {"asr": sel.asr_file.display_name, "diarizer": sel.diarizer_file.display_name},
-        "device": DEVICE,
+        "device": device,
         "app": format!("Diarist {}", diarist_core::VERSION),
     })
 }
@@ -735,8 +747,11 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
         let devices = capture::list_devices().map_err(|e| e.to_string())?;
         let mic = resolve_device(&devices, DeviceFlow::Capture, req.mic.clone(), strict)?;
         let loopback = resolve_device(&devices, DeviceFlow::Render, req.loopback.clone(), strict)?;
-        let (supervisor, multilingual) = ensure_server(app, &built.selection);
-        let reading = gate_vram(app);
+        if let Some(n) = models::cpu_notice_once(&built.device) {
+            log::warn!("recording: {n}");
+        }
+        let (supervisor, multilingual) = ensure_server(app, &built.selection, &built.device);
+        let reading = gate_vram(app, &built.device);
         let free = reading.map(|r| r.free_mb);
         let ctx = LiveContext {
             store: Arc::clone(&store),
@@ -752,7 +767,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             vram_free_mb: Arc::new(move || free),
             min_free_vram_mb: MIN_FREE_VRAM_MB,
             min_free_bytes: MIN_FREE_BYTES,
-            live_engine_info: engine_info(&built.selection),
+            live_engine_info: engine_info(&built.selection, &built.device),
             on_job_event: Some(job_event_fn(app, Arc::clone(&meeting_slot))),
         };
         let title = req
@@ -767,8 +782,9 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             levels: Mutex::new(LevelThrottle::default()),
         });
         log::info!(
-            "recording start: title {title:?}, language {language} on {}, diarize_mic {}, mic {:?}, loopback {:?}, free VRAM {}",
+            "recording start: title {title:?}, language {language} on {} ({}), diarize_mic {}, mic {:?}, loopback {:?}, free VRAM {}",
             built.selection.asr_file.display_name,
+            built.device,
             req.diarize_mic,
             mic,
             loopback,
@@ -1090,7 +1106,7 @@ pub(crate) fn startup(app: &AppHandle) {
                 &recording_language(&*store, &paths.root, None),
             ) {
                 Ok(built) => {
-                    ensure_server(&app, &built.selection);
+                    ensure_server(&app, &built.selection, &built.device);
                 }
                 Err(e) => log::info!("live server not preloaded: {e}"),
             }
@@ -1199,7 +1215,7 @@ fn offline_context(
     let (store, paths, queue, _) = app_parts(app);
     let built = match language {
         Some(l) => select(&paths, &*store, l)?,
-        None => models::select_engine(&paths, &*store, DEVICE).map_err(|e| e.to_string())?,
+        None => models::select_engine(&paths, &*store).map_err(|e| e.to_string())?,
     };
     Ok(LiveContext {
         store,
@@ -1211,7 +1227,7 @@ fn offline_context(
         vram_free_mb: Arc::new(|| None),
         min_free_vram_mb: MIN_FREE_VRAM_MB,
         min_free_bytes: MIN_FREE_BYTES,
-        live_engine_info: engine_info(&built.selection),
+        live_engine_info: engine_info(&built.selection, &built.device),
         on_job_event: Some(job_event_fn(app, meeting)),
     })
 }
@@ -1375,11 +1391,13 @@ pub async fn prepare_recording(app: AppHandle, language: Option<String>) -> CmdR
         }
         let language = recording_language(&*store, &paths.root, language.as_deref());
         let built = select(&paths, &*store, &language)?;
-        if ensure_server_if(&app, &built.selection, true).is_none() {
+        if ensure_server_if(&app, &built.selection, &built.device, true).is_none() {
             return Ok(());
         }
-        if gpu::nvml_vram(gpu::device_index(DEVICE)).is_none() {
-            // Without NVML the gate reads doctor (seconds): refresh it now.
+        if models::VramCheck::for_device(&built.device) == models::VramCheck::NvmlOrDoctor
+            && gpu::nvml_vram(gpu::device_index(&built.device)).is_none()
+        {
+            // Without NVML the CUDA gate reads doctor (seconds): refresh it now.
             vram_reading(&app, VRAM_READING_TTL);
         }
         Ok(())

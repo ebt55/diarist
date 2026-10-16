@@ -35,8 +35,6 @@ use crate::asset::asset_url;
 use crate::events::{emit_download, emit_job};
 use crate::{demo, AppPaths, AppStore, GpuCache, Jobs, Legacy, Startup};
 
-/// Where imports run.
-const DEVICE: &str = "cuda:0";
 /// How long a `nemo-speech doctor` report (GPU, free VRAM) is reused.
 const DOCTOR_TTL: Duration = Duration::from_secs(20);
 /// Bytes of the last engine log shown in Diagnostics.
@@ -179,11 +177,14 @@ fn run_import(
         .canonical(&language.unwrap_or_else(|| settings::default_language(&settings)));
     // A language the selected model does not cover runs on Nemotron 3.5, or
     // fails here naming it (the readiness check offers the download first).
-    let (built, switched) =
-        match models::select_import_engine(paths, store, DEVICE, low_vram, &language) {
-            Ok(b) => b,
-            Err(e) => return fail(e.to_string()),
-        };
+    // The device follows the runtime package (`cuda:0`, `vulkan:0`, `cpu`).
+    let (built, switched) = match models::select_import_engine(paths, store, low_vram, &language) {
+        Ok(b) => b,
+        Err(e) => return fail(e.to_string()),
+    };
+    if let Some(n) = models::cpu_notice_once(&built.device) {
+        log::warn!("import: {n}");
+    }
     let notice = switched.and_then(|reason| {
         let selected = models::selected_file(store, ModelRole::Asr)
             .ok()
@@ -196,8 +197,9 @@ fn run_import(
         ))
     });
     log::info!(
-        "import {job_id}: engine {} | asr {}{} | diarizer {}{} | language {language}",
+        "import {job_id}: engine {} | device {} | asr {}{} | diarizer {}{} | language {language}",
         built.selection.engine_version.as_deref().unwrap_or("?"),
+        built.device,
         built.selection.asr_file.display_name,
         notice.map(|n| format!(" ({n})")).unwrap_or_default(),
         built.selection.diarizer_file.display_name,
@@ -1772,56 +1774,18 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         (Some(_), None) => unreachable!(),
     });
 
-    // 2. GPU and driver.
+    // 2. GPU and driver, for the selected runtime package (else the one
+    // this PC should install): only the CUDA package needs CUDA 13.
     let backend = engine
         .as_ref()
-        .and_then(|e| e.quant.clone())
-        .unwrap_or_else(|| gpu::recommended_backend(gpu_info.as_ref(), &adapters).to_owned());
-    out.push(match &gpu_info {
-        Some(g) if g.cuda_ok => HealthCheck::new(
-            "gpu",
-            "GPU and driver",
-            "pass",
-            format!(
-                "{}, {} MB, driver {}, CUDA {}",
-                g.name,
-                g.vram_total_mb,
-                g.driver_version,
-                g.cuda_version.as_deref().unwrap_or("?")
-            ),
-        ),
-        Some(g) => HealthCheck::new(
-            "gpu",
-            "GPU and driver",
-            if backend == "cuda" { "fail" } else { "warn" },
-            format!(
-                "{} with driver {} supports CUDA {}; the CUDA engine needs CUDA 13 (R580 or newer). \
-                 Update the driver from nvidia.com, or install the Vulkan runtime.",
-                g.name,
-                g.driver_version,
-                g.cuda_version.as_deref().unwrap_or("?")
-            ),
-        )
-        .fix("setup", "Choose a runtime"),
-        None if !adapters.is_empty() => HealthCheck::new(
-            "gpu",
-            "GPU and driver",
-            if backend == "cuda" { "fail" } else { "warn" },
-            format!(
-                "No NVIDIA GPU; found {}. Use the Vulkan runtime (untested by us) or the CPU \
-                 runtime (slow).",
-                adapters[0].name
-            ),
-        )
-        .fix("setup", "Choose a runtime"),
-        None => HealthCheck::new(
-            "gpu",
-            "GPU and driver",
-            "warn",
-            "No GPU found. Only the CPU runtime works, much slower than real time.",
-        )
-        .fix("setup", "Choose a runtime"),
-    });
+        .and_then(models::engine_backend)
+        .or_else(|| models::Backend::parse(gpu::recommended_backend(gpu_info.as_ref(), &adapters)))
+        .unwrap_or(models::Backend::Cuda);
+    out.push(diagnostics::gpu_check(
+        backend,
+        gpu_info.as_ref(),
+        &adapters,
+    ));
 
     // 3 and 4. Selected models present, hashes as published.
     let model_check = |role: ModelRole, id: &str, label: &str| -> HealthCheck {
@@ -1897,74 +1861,21 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         "Speaker model",
     ));
 
-    // 5 and 6. Free VRAM for live and for file mode.
-    match gpu::nvml_vram(0) {
-        Some(r) => {
-            out.push(if r.free_mb >= diarist_core::live::MIN_FREE_VRAM_MB {
-                HealthCheck::new(
-                    "vram_live",
-                    "GPU memory for live",
-                    "pass",
-                    format!(
-                        "{} MB free, live needs {} MB",
-                        r.free_mb,
-                        diarist_core::live::MIN_FREE_VRAM_MB
-                    ),
-                )
-            } else {
-                HealthCheck::new(
-                    "vram_live",
-                    "GPU memory for live",
-                    "warn",
-                    format!(
-                        "{} MB free, live needs {} MB. Close GPU-heavy apps (games, video editors, \
-                         other AI tools) before recording.",
-                        r.free_mb,
-                        diarist_core::live::MIN_FREE_VRAM_MB
-                    ),
-                )
-            });
-            let need = models::selected_file(store, ModelRole::Asr)
-                .ok()
-                .flatten()
-                .and_then(|f| {
-                    f.capabilities
-                        .vram_mb_measured
-                        .or(f.capabilities.vram_mb_estimate)
-                });
-            out.push(match need {
-                Some(n) if r.free_mb >= n => HealthCheck::new(
-                    "vram_file",
-                    "GPU memory for files",
-                    "pass",
-                    format!("{} MB free, the selected model peaks at about {n} MB", r.free_mb),
-                ),
-                Some(n) => HealthCheck::new(
-                    "vram_file",
-                    "GPU memory for files",
-                    "warn",
-                    format!(
-                        "{} MB free, the selected model peaks at about {n} MB. Close GPU-heavy apps \
-                         or turn on low-VRAM mode.",
-                        r.free_mb
-                    ),
-                )
-                .fix("settings", "Low-VRAM mode"),
-                None => HealthCheck::new(
-                    "vram_file",
-                    "GPU memory for files",
-                    "skip",
-                    format!("{} MB free; the selected model's need is unknown", r.free_mb),
-                ),
-            });
-        }
-        None => out.push(HealthCheck::new(
-            "vram_live",
-            "GPU memory",
-            "skip",
-            "Free GPU memory is only known on NVIDIA GPUs.",
-        )),
-    }
+    // 5 and 6. Free VRAM for live and for file mode (NVML; none for the
+    // CPU package, which uses no GPU memory).
+    let free = (backend != models::Backend::Cpu)
+        .then(|| gpu::nvml_vram(0))
+        .flatten()
+        .map(|r| r.free_mb);
+    let need = models::selected_file(store, ModelRole::Asr)
+        .ok()
+        .flatten()
+        .and_then(|f| {
+            f.capabilities
+                .vram_mb_measured
+                .or(f.capabilities.vram_mb_estimate)
+        });
+    out.extend(diagnostics::vram_checks(backend, free, need));
 
     // 7. Free disk.
     out.push(match models::free_disk_bytes(&paths.root) {

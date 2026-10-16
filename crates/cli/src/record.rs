@@ -29,7 +29,8 @@ pub struct RecordArgs {
     pub diarize_mic: bool,
     pub mic: Option<String>,
     pub loopback: Option<String>,
-    pub device: String,
+    /// `--device` instead of the runtime package's.
+    pub device: Option<String>,
 }
 
 fn clock(ms: i64) -> String {
@@ -182,11 +183,18 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
     let (built, switched) = models::select_engine_for(
         &ctx.paths,
         &*ctx.store,
-        &args.device,
         &language,
         false,
-        &models::EngineOverrides::default(),
+        &models::EngineOverrides {
+            device: args.device.clone(),
+            ..Default::default()
+        },
     )?;
+    // The runtime package's device (`cuda:0`, `vulkan:0`, `cpu`), or --device.
+    let device = built.device.clone();
+    if let Some(n) = models::cpu_notice_once(&device) {
+        eprintln!("warning: {n}");
+    }
     let sel = built.selection.clone();
     if let Some(reason) = switched {
         if let Some(selected) = models::selected_file(&*ctx.store, ModelRole::Asr)? {
@@ -202,10 +210,12 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
             sel.asr_file.display_name
         )));
     }
-    let reading = gpu::free_vram(gpu::device_index(&args.device), Some(&sel.engine_dir));
+    // The start gate: CUDA reads NVML, else doctor; Vulkan NVML only; CPU
+    // never (models::VramCheck).
+    let reading = models::gate_vram(&device, Some(&sel.engine_dir));
     let free = reading.map(|r| r.free_mb);
     eprintln!(
-        "engine {} | asr {} | diarizer {} | free VRAM {}",
+        "engine {} | device {device} | asr {} | diarizer {} | free VRAM {}",
         sel.engine_version.as_deref().unwrap_or("?"),
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
@@ -219,7 +229,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
         gpu::check_free_vram(f, MIN_FREE_VRAM_MB).map_err(|e| CliError::Failed(e.to_string()))?;
     }
     let mut cfg = ServeConfig::new(&sel.engine_dir, ctx.paths.models(), &sel.asr, &sel.diarizer);
-    cfg.device = args.device.clone();
+    cfg.device = device.clone();
     cfg.idle_timeout = None;
     cfg.log_path = Some(ctx.paths.logs().join("serve.log"));
     let supervisor = ServeSupervisor::new(cfg);
@@ -248,7 +258,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
             "runtime": format!("nemo-speech {}", sel.engine_version.as_deref().unwrap_or("unknown")),
             "adapter": "nemo-ws",
             "models": {"asr": sel.asr_file.display_name, "diarizer": sel.diarizer_file.display_name},
-            "device": args.device,
+            "device": device,
         }),
         on_job_event: Some(Arc::new(|e| {
             if let JobEvent::Progress {

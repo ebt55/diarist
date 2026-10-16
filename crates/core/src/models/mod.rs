@@ -25,9 +25,13 @@
 //!   [`select_for_language`] runs a job whose language the selected model
 //!   does not cover on Nemotron 3.5, and [`select_engine_for`] builds the
 //!   engine for a job in a language.
+//! - [`device`]: the `--device` every job passes follows the selected
+//!   runtime package's backend ([`device_for`]: `cuda:0`, `vulkan:0`,
+//!   `cpu`), and so do the free-VRAM checks ([`VramCheck`]).
 
 pub mod add;
 pub mod classify;
+pub mod device;
 pub mod doctor;
 pub mod download;
 pub mod gguf;
@@ -46,6 +50,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use classify::{classify, Classification, Sidecar};
+pub use device::{
+    cpu_notice_once, device_for, device_uses_gpu, engine_backend, gate_vram, Backend, VramCheck,
+    AUTO_DEVICE, CPU_SLOW_NOTICE,
+};
 pub use doctor::{doctor, DoctorReport};
 pub use download::{download_file, install_engine, sha256_file, verify_file};
 pub use gguf::{read_header, GgufHeader, GgufValue};
@@ -74,6 +82,9 @@ pub(crate) fn now_ms() -> i64 {
 pub struct ResolvedSelection {
     pub engine_dir: PathBuf,
     pub engine_version: Option<String>,
+    /// The runtime package's backend ([`engine_backend`]); `None` when
+    /// nothing tells, and jobs then pass `--device auto`.
+    pub backend: Option<Backend>,
     pub asr: PathBuf,
     pub asr_file: ModelFile,
     pub diarizer: PathBuf,
@@ -124,11 +135,19 @@ pub fn resolve_selection(paths: &DataPaths, store: &dyn Store) -> Result<Resolve
     Ok(ResolvedSelection {
         engine_dir: paths.absolute(&engine.path),
         engine_version: engine.architecture.clone(),
+        backend: engine_backend(&engine),
         asr: paths.absolute(&asr.path),
         asr_file: asr,
         diarizer: paths.absolute(&diar.path),
         diarizer_file: diar,
     })
+}
+
+impl ResolvedSelection {
+    /// The `--device` the selected runtime package takes ([`device_for`]).
+    pub fn device(&self) -> &'static str {
+        device_for(self.backend)
+    }
 }
 
 /// The file engine for the current selection.
@@ -137,6 +156,10 @@ pub struct SelectedEngine {
     /// The standalone diarization pass with the same runtime and diarizer.
     pub diarize_runner: DiarizeRunner,
     pub selection: ResolvedSelection,
+    /// The `--device` the engine, the diarization pass and a live server
+    /// for this selection pass: [`EngineOverrides::device`], else the
+    /// package's ([`ResolvedSelection::device`]).
+    pub device: String,
     /// The ASR model is not a streaming one, so the experimental cascade
     /// (`NemoCascadeEngine`, may drop speech) runs instead of `NemoCliEngine`.
     pub experimental: bool,
@@ -148,30 +171,40 @@ pub struct SelectedEngine {
     pub diar_preset: Option<String>,
 }
 
+impl SelectedEngine {
+    /// Jobs run on a GPU (not the CPU package or `--device cpu`), so the
+    /// free-VRAM checks and low-VRAM mode apply.
+    pub fn uses_gpu(&self) -> bool {
+        device_uses_gpu(&self.device)
+    }
+}
+
 /// Per-invocation changes to the stored selection (the CLI's `--asr-model`,
-/// `--diar-model`, `--engine-arg`). Models are a file path or anything
-/// [`find_file`] accepts; nothing is persisted.
+/// `--diar-model`, `--engine-arg`, `--device`). Models are a file path or
+/// anything [`find_file`] accepts; nothing is persisted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EngineOverrides {
     pub asr: Option<String>,
     pub diarizer: Option<String>,
     /// Flags appended verbatim to `nemo-speech transcribe`.
     pub extra_args: Vec<String>,
+    /// `--device` instead of the package's (`cuda:1`, `cpu`, `auto`).
+    pub device: Option<String>,
 }
 
 /// Builds the engine for the selected runtime, ASR model and diarizer on
-/// `device` (`cuda:0`, `cpu`). When nothing usable is selected, scans the
-/// models and engine folders first (which also picks the recommended
-/// files: the EN model and Nemotron 3 Diarization).
-pub fn select_engine(paths: &DataPaths, store: &dyn Store, device: &str) -> Result<SelectedEngine> {
-    select_engine_with(paths, store, device, &EngineOverrides::default())
+/// the runtime package's device ([`ResolvedSelection::device`]: `cuda:0`,
+/// `vulkan:0`, `cpu`). When nothing usable is selected, scans the models
+/// and engine folders first (which also picks the recommended files: the
+/// EN model and Nemotron 3 Diarization).
+pub fn select_engine(paths: &DataPaths, store: &dyn Store) -> Result<SelectedEngine> {
+    select_engine_with(paths, store, &EngineOverrides::default())
 }
 
 /// [`select_engine`] with per-invocation overrides.
 pub fn select_engine_with(
     paths: &DataPaths,
     store: &dyn Store,
-    device: &str,
     overrides: &EngineOverrides,
 ) -> Result<SelectedEngine> {
     let mut sel = match resolve_selection(paths, store) {
@@ -188,6 +221,14 @@ pub fn select_engine_with(
     if let Some(q) = &overrides.diarizer {
         (sel.diarizer, sel.diarizer_file) = resolve_model(paths, store, ModelRole::Diarizer, q)?;
     }
+    // The Vulkan and CPU packages refuse `--device cuda:0` (exit code 2).
+    let device = overrides
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or(sel.device())
+        .to_owned();
     let models_dir = paths.models();
     // A file the header did not identify is tried as a streaming model; the
     // runtime's own error is shown if it is not one.
@@ -205,13 +246,13 @@ pub fn select_engine_with(
     };
     let inner: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
-        e.device = device.to_owned();
+        e.device = device.clone();
         e.version = sel.engine_version.clone();
         e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     } else {
         let mut e = NemoCliEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
-        e.device = device.to_owned();
+        e.device = device.clone();
         e.version = sel.engine_version.clone();
         // `--language` only for multilingual models (Nemotron 3.5); the EN
         // model ignores it. The meeting keeps its language either way.
@@ -227,11 +268,12 @@ pub fn select_engine_with(
         sel.asr_file.capabilities.languages.clone(),
     ));
     let mut diarize_runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
-    diarize_runner.device = device.to_owned();
+    diarize_runner.device = device.clone();
     Ok(SelectedEngine {
         engine,
         diarize_runner,
         selection: sel,
+        device,
         experimental,
         right_context,
         diar_preset,
@@ -543,20 +585,20 @@ pub fn select_for_language(
 
 /// The engine for a job in `language` (imports, recordings, `diarist-cli
 /// transcribe`): the selection, or the installed Nemotron 3.5 as
-/// [`select_for_language`] decides (`low_vram`: also for low-VRAM mode).
-/// An ASR model given in `overrides` wins: nothing switches. Returns the
-/// engine and why it switched; a language nothing installed covers is an
-/// error naming the model to install.
+/// [`select_for_language`] decides (`low_vram`: also for low-VRAM mode,
+/// which the CPU package ignores: it uses no GPU memory). An ASR model
+/// given in `overrides` wins: nothing switches. Returns the engine and why
+/// it switched; a language nothing installed covers is an error naming the
+/// model to install.
 pub fn select_engine_for(
     paths: &DataPaths,
     store: &dyn Store,
-    device: &str,
     language: &str,
     low_vram: bool,
     overrides: &EngineOverrides,
 ) -> Result<(SelectedEngine, Option<SwitchReason>)> {
     // Built first: it scans when nothing usable is selected.
-    let built = select_engine_with(paths, store, device, overrides)?;
+    let built = select_engine_with(paths, store, overrides)?;
     if overrides.asr.is_some() {
         return Ok((built, None));
     }
@@ -566,7 +608,7 @@ pub fn select_engine_for(
         &built.selection.asr_file,
         &files,
         language,
-        low_vram,
+        low_vram && built.uses_gpu(),
         &table,
     )?;
     let Some(reason) = choice.reason() else {
@@ -575,7 +617,8 @@ pub fn select_engine_for(
     let mut ov = choice.overrides();
     ov.diarizer = overrides.diarizer.clone();
     ov.extra_args = overrides.extra_args.clone();
-    Ok((select_engine_with(paths, store, device, &ov)?, Some(reason)))
+    ov.device = overrides.device.clone();
+    Ok((select_engine_with(paths, store, &ov)?, Some(reason)))
 }
 
 /// The engine for a file import in `language`: [`select_engine_for`] with
@@ -583,14 +626,12 @@ pub fn select_engine_for(
 pub fn select_import_engine(
     paths: &DataPaths,
     store: &dyn Store,
-    device: &str,
     low_vram: bool,
     language: &str,
 ) -> Result<(SelectedEngine, Option<SwitchReason>)> {
     select_engine_for(
         paths,
         store,
-        device,
         language,
         low_vram,
         &EngineOverrides::default(),
@@ -981,20 +1022,20 @@ mod tests {
         let paths = DataPaths::at("D:/data");
         let store = language_store(false);
         // Not installed: low-VRAM mode runs the selection; German cannot run.
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "en").unwrap();
+        let (b, switched) = select_import_engine(&paths, &store, true, "en").unwrap();
         assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
-        let err = select_import_engine(&paths, &store, "cpu", false, "de")
+        let err = select_import_engine(&paths, &store, false, "de")
             .err()
             .unwrap();
         assert!(err.to_string().contains("nemotron-3.5"), "{err}");
 
         let store = language_store(true);
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "en").unwrap();
+        let (b, switched) = select_import_engine(&paths, &store, true, "en").unwrap();
         assert_eq!(switched, Some(SwitchReason::LowVram));
         assert_eq!(b.selection.asr_file.display_name, "n35");
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", false, "en").unwrap();
+        let (b, switched) = select_import_engine(&paths, &store, false, "en").unwrap();
         assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "de").unwrap();
+        let (b, switched) = select_import_engine(&paths, &store, true, "de").unwrap();
         assert_eq!(switched, Some(SwitchReason::Language));
         assert_eq!(b.selection.asr_file.display_name, "n35");
         // An explicit model (the CLI's --asr-model) is never switched.
@@ -1002,7 +1043,7 @@ mod tests {
             asr: Some("en".into()),
             ..Default::default()
         };
-        let (b, switched) = select_engine_for(&paths, &store, "cpu", "de", true, &ov).unwrap();
+        let (b, switched) = select_engine_for(&paths, &store, "de", true, &ov).unwrap();
         assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
         assert_eq!(
             selected_file(&store, ModelRole::Asr)
@@ -1011,6 +1052,91 @@ mod tests {
                 .display_name,
             "en"
         );
+    }
+
+    /// The three 0.2.0 packages as the scan stores them (the manifest's
+    /// backend in `quant`), the EN model, Nemotron 3.5 and the diarizer.
+    fn package_store() -> MemoryStore {
+        let store = MemoryStore::new();
+        let mut files = Vec::new();
+        for backend in ["cuda", "vulkan", "cpu"] {
+            let name = format!("nemo-speech-0.2.0-windows-x86_64-{backend}");
+            let mut e = scanned(&format!("engine/{name}"), ModelRole::Engine, &name);
+            e.quant = Some(backend.into());
+            e.manifest_name = Some(name);
+            files.push(e);
+        }
+        files.push(speaks(
+            scanned("models/en.gguf", ModelRole::Asr, "en"),
+            &["en"],
+        ));
+        let mut n35 = speaks(
+            scanned("models/n35.gguf", ModelRole::Asr, "n35"),
+            &["en", "de", "auto"],
+        );
+        n35.manifest_name = Some(MULTILINGUAL_MODEL.into());
+        files.push(n35);
+        files.push(scanned("models/d.gguf", ModelRole::Diarizer, "diar"));
+        store.sync_model_files(&files, 1).unwrap();
+        select(&store, ModelRole::Asr, "en").unwrap();
+        select(&store, ModelRole::Diarizer, "diar").unwrap();
+        store
+    }
+
+    #[test]
+    fn jobs_take_the_device_of_the_selected_package() {
+        let paths = DataPaths::at("D:/data");
+        let store = package_store();
+        for (backend, device) in [("cuda", "cuda:0"), ("vulkan", "vulkan:0"), ("cpu", "cpu")] {
+            select(
+                &store,
+                ModelRole::Engine,
+                &format!("nemo-speech-0.2.0-windows-x86_64-{backend}"),
+            )
+            .unwrap();
+            let sel = resolve_selection(&paths, &store).unwrap();
+            assert_eq!(sel.backend.map(Backend::as_str), Some(backend));
+            assert_eq!(sel.device(), device);
+            let built = select_engine(&paths, &store).unwrap();
+            assert_eq!(built.device, device, "{backend}");
+            // The file job, its EngineInfo (runs store it) and the
+            // standalone diarization pass all pass it.
+            assert_eq!(built.engine.info().device, device, "{backend}");
+            let args: Vec<String> = built
+                .diarize_runner
+                .args(Path::new("a.wav"), Path::new("a.rttm"))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let at = args.iter().position(|a| a == "--device").unwrap();
+            assert_eq!(args[at + 1], device, "{args:?}");
+            assert_eq!(built.uses_gpu(), backend != "cpu");
+            // A recording or import in a language switched to Nemotron
+            // 3.5 keeps the package's device.
+            let (b, switched) =
+                select_engine_for(&paths, &store, "de", false, &EngineOverrides::default())
+                    .unwrap();
+            assert_eq!(switched, Some(SwitchReason::Language));
+            assert_eq!(b.device, device);
+            // Low-VRAM mode switches imports on a GPU package only.
+            let (b, switched) = select_import_engine(&paths, &store, true, "en").unwrap();
+            if backend == "cpu" {
+                assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
+            } else {
+                assert_eq!(switched, Some(SwitchReason::LowVram));
+                assert_eq!(b.selection.asr_file.display_name, "n35");
+            }
+            // The CLI's --device wins, through a language switch too.
+            let ov = EngineOverrides {
+                device: Some("cuda:1".into()),
+                ..Default::default()
+            };
+            let (b, _) = select_engine_for(&paths, &store, "de", false, &ov).unwrap();
+            assert_eq!(
+                (b.device.as_str(), b.engine.info().device.as_str()),
+                ("cuda:1", "cuda:1")
+            );
+        }
     }
 
     #[test]
@@ -1043,7 +1169,7 @@ mod tests {
                 asr: asr.map(Into::into),
                 ..Default::default()
             };
-            select_engine_with(&paths, &store, "cpu", &ov)
+            select_engine_with(&paths, &store, &ov)
                 .unwrap()
                 .right_context
         };
@@ -1112,9 +1238,7 @@ mod tests {
                 diarizer: diarizer.map(Into::into),
                 ..Default::default()
             };
-            select_engine_with(&paths, &store, "cpu", &ov)
-                .unwrap()
-                .diar_preset
+            select_engine_with(&paths, &store, &ov).unwrap().diar_preset
         };
         assert_eq!(preset(None, None).as_deref(), Some("v3-offline"));
         // A diarizer without a value gets no flag; the cascade never.
@@ -1235,9 +1359,12 @@ mod tests {
         assert!(select_by_id(&store, ModelRole::Unknown, one).is_err());
         assert!(select_by_id(&store, ModelRole::Asr, ModelFileId(9_999)).is_err());
         // Engines that cannot run are reported, not built: the paths do not exist.
-        let built = select_engine(&paths, &store, "cpu").unwrap();
+        let built = select_engine(&paths, &store).unwrap();
         assert!(!built.experimental);
-        assert_eq!(built.diarize_runner.device, "cpu");
+        // A runtime folder whose backend nothing tells: the runtime chooses.
+        assert_eq!(built.selection.backend, None);
+        assert_eq!(built.diarize_runner.device, "auto");
+        assert_eq!(built.engine.info().device, "auto");
         assert!(built.engine.info().runtime.contains("0.2.0"));
 
         // Per-invocation overrides: by name, or a file that was never scanned.
@@ -1248,12 +1375,17 @@ mod tests {
             asr: Some(loose.display().to_string()),
             diarizer: Some("diar".into()),
             extra_args: vec!["--verbatim".into()],
+            device: Some("cpu".into()),
         };
-        let built = select_engine_with(&paths, &store, "cpu", &ov).unwrap();
+        let built = select_engine_with(&paths, &store, &ov).unwrap();
         assert_eq!(built.selection.asr, loose);
         assert_eq!(built.selection.asr_file.id, ModelFileId(0));
         assert_eq!(built.selection.asr_file.display_name, "loose-asr");
         assert_eq!(built.selection.diarizer_file.display_name, "diar");
+        assert_eq!(
+            (built.device.as_str(), built.diarize_runner.device.as_str()),
+            ("cpu", "cpu")
+        );
         assert!(
             built.experimental,
             "an unclassified file is not known to stream"
@@ -1261,7 +1393,6 @@ mod tests {
         assert!(select_engine_with(
             &paths,
             &store,
-            "cpu",
             &EngineOverrides {
                 asr: Some("diar".into()),
                 ..Default::default()

@@ -5,8 +5,10 @@
 
 use std::fmt::Write as _;
 
-use crate::gpu::GpuInfo;
-use crate::models::{selected_file, DataPaths, DataRootSource};
+use crate::gpu::{GpuAdapter, GpuInfo};
+use crate::models::{
+    device_for, engine_backend, selected_file, Backend, DataPaths, DataRootSource,
+};
 use crate::store::Store;
 use crate::types::ModelRole;
 
@@ -44,6 +46,186 @@ impl HealthCheck {
         self.fix_label = Some(label.into());
         self
     }
+}
+
+/// The "GPU and driver" row for the runtime package of `backend` (the
+/// selected one, else the one this PC should install), with `gpu` from
+/// NVML and `adapters` from DXGI. Only the CUDA package needs an NVIDIA GPU
+/// with CUDA 13; the Vulkan one runs on any GPU, the CPU one on none (a
+/// warning: it is slow).
+pub fn gpu_check(backend: Backend, gpu: Option<&GpuInfo>, adapters: &[GpuAdapter]) -> HealthCheck {
+    let (id, label) = ("gpu", "GPU and driver");
+    let nvidia = |g: &GpuInfo| {
+        format!(
+            "{}, {} MB, driver {}, CUDA {}",
+            g.name,
+            g.vram_total_mb,
+            g.driver_version,
+            g.cuda_version.as_deref().unwrap_or("?")
+        )
+    };
+    let adapter = |a: &GpuAdapter| format!("{}, {} MB", a.name, a.vram_mb);
+    let found = gpu.map(nvidia).or_else(|| adapters.first().map(adapter));
+    match backend {
+        Backend::Cuda => match gpu {
+            Some(g) if g.cuda_ok => HealthCheck::new(id, label, "pass", nvidia(g)),
+            Some(g) => HealthCheck::new(
+                id,
+                label,
+                "fail",
+                format!(
+                    "{} with driver {} supports CUDA {}; the CUDA engine needs CUDA 13 (R580 or \
+                     newer). Update the driver from nvidia.com, or install the Vulkan runtime.",
+                    g.name,
+                    g.driver_version,
+                    g.cuda_version.as_deref().unwrap_or("?")
+                ),
+            )
+            .fix("setup", "Choose a runtime"),
+            None => HealthCheck::new(
+                id,
+                label,
+                "fail",
+                match adapters.first() {
+                    Some(a) => format!(
+                        "No NVIDIA GPU; found {}. The CUDA runtime needs one: use the Vulkan \
+                         runtime (untested by us) or the CPU runtime (slow).",
+                        a.name
+                    ),
+                    None => "No GPU found. The CUDA runtime needs an NVIDIA GPU: use the CPU \
+                             runtime (slow)."
+                        .into(),
+                },
+            )
+            .fix("setup", "Choose a runtime"),
+        },
+        Backend::Vulkan => match found {
+            Some(f) => HealthCheck::new(
+                id,
+                label,
+                "pass",
+                format!("{f}; the Vulkan runtime runs on it ({})", backend.device()),
+            ),
+            None => HealthCheck::new(
+                id,
+                label,
+                "fail",
+                "No GPU found. The Vulkan runtime needs one: use the CPU runtime (slow).",
+            )
+            .fix("setup", "Choose a runtime"),
+        },
+        Backend::Cpu => HealthCheck::new(
+            id,
+            label,
+            "warn",
+            format!(
+                "{}{}",
+                cpu_sentence(),
+                match (&found, gpu.is_some_and(|g| g.cuda_ok)) {
+                    (Some(f), true) =>
+                        format!(" This PC has {f}: the CUDA runtime is much faster."),
+                    (Some(f), false) => {
+                        format!(" This PC has {f}: the Vulkan runtime is much faster.")
+                    }
+                    (None, _) => String::new(),
+                }
+            ),
+        )
+        .fix("setup", "Choose a runtime"),
+    }
+}
+
+/// [`crate::models::CPU_SLOW_NOTICE`] as a sentence.
+fn cpu_sentence() -> String {
+    let n = crate::models::CPU_SLOW_NOTICE;
+    let mut c = n.chars();
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
+}
+
+/// The "GPU memory" rows for jobs on `backend`, with `free_mb` from NVML
+/// and `model_need_mb` the selected speech model's peak: the live start
+/// gate's 2.5 GB and the file model's need. The CPU package uses no GPU
+/// memory (skipped); without NVML (an AMD or Intel GPU) the free memory is
+/// unknown and recording starts without the check (skipped).
+pub fn vram_checks(
+    backend: Backend,
+    free_mb: Option<u32>,
+    model_need_mb: Option<u32>,
+) -> Vec<HealthCheck> {
+    let need_live = crate::live::MIN_FREE_VRAM_MB;
+    let free = match (backend, free_mb) {
+        (Backend::Cpu, _) => {
+            return vec![HealthCheck::new(
+                "vram_live",
+                "GPU memory",
+                "skip",
+                "The CPU runtime uses system memory, not GPU memory.",
+            )]
+        }
+        (_, Some(f)) => f,
+        (Backend::Vulkan, None) => {
+            return vec![HealthCheck::new(
+                "vram_live",
+                "GPU memory",
+                "skip",
+                "Free GPU memory is only known on NVIDIA GPUs; recording on the Vulkan runtime \
+                 starts without the check.",
+            )]
+        }
+        (Backend::Cuda, None) => {
+            return vec![HealthCheck::new(
+                "vram_live",
+                "GPU memory",
+                "skip",
+                "Free GPU memory is only known on NVIDIA GPUs.",
+            )]
+        }
+    };
+    let live = if free >= need_live {
+        HealthCheck::new(
+            "vram_live",
+            "GPU memory for live",
+            "pass",
+            format!("{free} MB free, live needs {need_live} MB"),
+        )
+    } else {
+        HealthCheck::new(
+            "vram_live",
+            "GPU memory for live",
+            "warn",
+            format!(
+                "{free} MB free, live needs {need_live} MB. Close GPU-heavy apps (games, video \
+                 editors, other AI tools) before recording."
+            ),
+        )
+    };
+    let file = match model_need_mb {
+        Some(n) if free >= n => HealthCheck::new(
+            "vram_file",
+            "GPU memory for files",
+            "pass",
+            format!("{free} MB free, the selected model peaks at about {n} MB"),
+        ),
+        Some(n) => HealthCheck::new(
+            "vram_file",
+            "GPU memory for files",
+            "warn",
+            format!(
+                "{free} MB free, the selected model peaks at about {n} MB. Close GPU-heavy apps \
+                 or turn on low-VRAM mode."
+            ),
+        )
+        .fix("settings", "Low-VRAM mode"),
+        None => HealthCheck::new(
+            "vram_file",
+            "GPU memory for files",
+            "skip",
+            format!("{free} MB free; the selected model's need is unknown"),
+        ),
+    };
+    vec![live, file]
 }
 
 /// Everything the report needs that `diarist-core` cannot look up itself.
@@ -308,7 +490,7 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
                 if g.cuda_ok {
                     ""
                 } else {
-                    " (older than the CUDA 13 the runtime needs)"
+                    " (older than the CUDA 13 the CUDA runtime needs)"
                 }
             );
         }
@@ -380,6 +562,12 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
                             )
                         })
                         .unwrap_or_default(),
+                    // The `--device` every job passes follows the package.
+                    ModelRole::Engine => format!(
+                        " | device {}{}",
+                        device_for(engine_backend(&f)),
+                        engine_backend(&f).map_or(String::new(), |b| format!(" ({b} package)"))
+                    ),
                     _ => String::new(),
                 };
                 format!(
@@ -543,8 +731,124 @@ mod tests {
             text.contains("diarizer: d.gguf | models/d.gguf | 42 bytes | sha256 d1 | file preset v3-offline\n"),
             "{text}"
         );
+        // The device jobs pass, from the package; `auto` when nothing tells.
+        assert!(
+            text.contains("engine/nemo-speech-0.2.0 | 42 bytes | device auto\n"),
+            "{text}"
+        );
+        let mut vulkan = row(
+            "engine/nemo-speech-0.2.0-windows-x86_64-vulkan",
+            ModelRole::Engine,
+            "0.2.0",
+            None,
+        );
+        vulkan.quant = Some("vulkan".into());
+        store.sync_model_files(&[vulkan], 3).unwrap();
+        select(
+            &store,
+            ModelRole::Engine,
+            "nemo-speech-0.2.0-windows-x86_64-vulkan",
+        )
+        .unwrap();
+        let text = report(&DataPaths::at("D:/data"), &store, &input);
+        assert!(
+            text.contains("| 42 bytes | device vulkan:0 (vulkan package)\n"),
+            "{text}"
+        );
         if cfg!(windows) {
             assert!(os_version().starts_with("Windows"), "{}", os_version());
+        }
+    }
+
+    fn rtx(cuda_ok: bool) -> GpuInfo {
+        GpuInfo {
+            name: "NVIDIA GeForce RTX 3080".into(),
+            vram_total_mb: 10_240,
+            vram_free_mb: 8_000,
+            driver_version: "610.88".into(),
+            cuda_version: Some(if cuda_ok { "13.1" } else { "12.4" }.into()),
+            cuda_ok,
+        }
+    }
+
+    #[test]
+    fn the_gpu_row_follows_the_selected_package() {
+        let amd = [GpuAdapter {
+            name: "AMD Radeon RX 7800 XT".into(),
+            vendor: "amd".into(),
+            vram_mb: 16_368,
+        }];
+        let status = |b, g: Option<&GpuInfo>, a: &[GpuAdapter]| gpu_check(b, g, a).status;
+        let (new, old) = (rtx(true), rtx(false));
+        // CUDA: an NVIDIA GPU with CUDA 13, else a failure naming the fix.
+        assert_eq!(status(Backend::Cuda, Some(&new), &[]), "pass");
+        assert_eq!(status(Backend::Cuda, Some(&old), &[]), "fail");
+        assert_eq!(status(Backend::Cuda, None, &amd), "fail");
+        assert_eq!(status(Backend::Cuda, None, &[]), "fail");
+        // Vulkan: any GPU passes, the old NVIDIA driver and AMD included;
+        // "no CUDA" is not a failure.
+        for (g, a) in [
+            (Some(&new), &[][..]),
+            (Some(&old), &[][..]),
+            (None, &amd[..]),
+        ] {
+            let c = gpu_check(Backend::Vulkan, g, a);
+            assert_eq!(c.status, "pass", "{c:?}");
+            assert!(c.detail.contains("vulkan:0"), "{c:?}");
+            assert!(!c.detail.contains("needs CUDA 13"), "{c:?}");
+        }
+        assert!(gpu_check(Backend::Vulkan, None, &amd)
+            .detail
+            .starts_with("AMD Radeon RX 7800 XT, 16368 MB"));
+        assert_eq!(status(Backend::Vulkan, None, &[]), "fail");
+        // CPU: a warning that it is slow, never a CUDA failure.
+        for (g, a) in [(None, &[][..]), (Some(&old), &[][..]), (None, &amd[..])] {
+            let c = gpu_check(Backend::Cpu, g, a);
+            assert_eq!(c.status, "warn", "{c:?}");
+            assert!(c.detail.starts_with("The CPU runtime is slow"), "{c:?}");
+            assert!(!c.detail.contains("needs CUDA 13"), "{c:?}");
+        }
+        assert!(gpu_check(Backend::Cpu, Some(&new), &[])
+            .detail
+            .ends_with("the CUDA runtime is much faster."));
+        assert!(gpu_check(Backend::Cpu, None, &amd)
+            .detail
+            .ends_with("the Vulkan runtime is much faster."));
+    }
+
+    #[test]
+    fn the_vram_rows_skip_for_cpu_and_without_nvml() {
+        let ids = |v: Vec<HealthCheck>| -> Vec<(String, String)> {
+            v.into_iter().map(|c| (c.id, c.status)).collect()
+        };
+        let pair = |a: &str, b: &str, c: &str, d: &str| {
+            vec![(a.to_owned(), b.to_owned()), (c.to_owned(), d.to_owned())]
+        };
+        // A GPU package with NVML: the live gate and the file model's need.
+        for b in [Backend::Cuda, Backend::Vulkan] {
+            assert_eq!(
+                ids(vram_checks(b, Some(9_000), Some(2_600))),
+                pair("vram_live", "pass", "vram_file", "pass")
+            );
+            assert_eq!(
+                ids(vram_checks(b, Some(2_000), Some(2_600))),
+                pair("vram_live", "warn", "vram_file", "warn")
+            );
+        }
+        // Without NVML (AMD, Intel): unknown, skipped; never a block.
+        let v = vram_checks(Backend::Vulkan, None, Some(2_600));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].status, "skip");
+        assert!(v[0].detail.contains("without the check"), "{v:?}");
+        // CPU: no GPU memory, whatever NVML says.
+        for free in [None, Some(500), Some(9_000)] {
+            let v = vram_checks(Backend::Cpu, free, Some(2_600));
+            assert_eq!(v.len(), 1);
+            assert_eq!(
+                (v[0].id.as_str(), v[0].status.as_str()),
+                ("vram_live", "skip")
+            );
+            assert!(v[0].detail.contains("system memory"), "{v:?}");
         }
     }
 

@@ -4,7 +4,7 @@
 //! Launch line, with `NEMO_SPEECH_HTTP_API_KEY` set to a per-launch random
 //! key, the reduced `PATH` and `NEMO_SPEECH_MODEL_DIR`:
 //!
-//! `nemo-speech --json serve --asr-model <asr> --diar-model <diar> --device cuda:0
+//! `nemo-speech --json serve --asr-model <asr> --diar-model <diar> --device <device>
 //!  --host 127.0.0.1 --port <free> --no-ui --asr.batching.state_arena_slots 2
 //!  --asr.endpointing.enable=true`
 //!
@@ -38,7 +38,9 @@ pub struct ServeConfig {
     pub models_dir: PathBuf,
     pub asr_model: PathBuf,
     pub diar_model: PathBuf,
-    /// `cuda:0`, `cpu`.
+    /// `cuda:0`, `vulkan:0`, `cpu`: the runtime package's
+    /// ([`crate::models::device`]; the default from the folder name, else
+    /// `auto`). The Vulkan and CPU packages refuse `cuda:0`.
     pub device: String,
     /// `--asr.batching.state_arena_slots` (one per live session).
     pub slots: u32,
@@ -59,12 +61,13 @@ impl ServeConfig {
         asr_model: impl Into<PathBuf>,
         diar_model: impl Into<PathBuf>,
     ) -> Self {
+        let engine_dir: PathBuf = engine_dir.into();
         Self {
-            engine_dir: engine_dir.into(),
+            device: crate::models::device::device_for_dir(&engine_dir).into(),
+            engine_dir,
             models_dir: models_dir.into(),
             asr_model: asr_model.into(),
             diar_model: diar_model.into(),
-            device: "cuda:0".into(),
             slots: 2,
             idle_timeout: Some(Duration::from_secs(30 * 60)),
             ready_timeout: Duration::from_secs(90),
@@ -586,6 +589,62 @@ mod tests {
             .realtime_url(),
             "ws://127.0.0.1:9/v1/audio/transcriptions/realtime"
         );
+    }
+
+    /// The live server on the Vulkan or CPU package passes that package's
+    /// device: they refuse `cuda:0` (exit code 2).
+    #[test]
+    fn serve_line_takes_the_package_device() {
+        for (package, device) in [
+            ("nemo-speech-0.2.0-windows-x86_64-cuda", "cuda:0"),
+            ("nemo-speech-0.2.0-windows-x86_64-vulkan", "vulkan:0"),
+            ("nemo-speech-0.2.0-windows-x86_64-cpu", "cpu"),
+            ("custom", "auto"),
+        ] {
+            let cfg = ServeConfig::new(
+                format!("E:/engine/{package}"),
+                "E:/models",
+                "E:/m/asr.gguf",
+                "E:/m/diar.gguf",
+            );
+            let args: Vec<String> = cfg
+                .args(8766)
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args,
+                [
+                    "--json",
+                    "serve",
+                    "--asr-model",
+                    "E:/m/asr.gguf",
+                    "--diar-model",
+                    "E:/m/diar.gguf",
+                    "--device",
+                    device,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8766",
+                    "--no-ui",
+                    "--asr.batching.state_arena_slots",
+                    "2",
+                    "--asr.endpointing.enable=true"
+                ],
+                "{package}"
+            );
+        }
+        // The app and the CLI set the selection's device.
+        let mut cfg = ServeConfig::new("E:/engine", "E:/models", "a.gguf", "d.gguf");
+        cfg.device = "vulkan:0".into();
+        let joined = cfg
+            .args(1)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("--device vulkan:0 --host"), "{joined}");
     }
 
     #[test]

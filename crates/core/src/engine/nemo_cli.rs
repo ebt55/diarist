@@ -4,7 +4,11 @@
 //!
 //! `transcribe <wav> --model <asr.gguf> [--language <lang>] --stream --endpointing
 //!  [--asr.streaming.rnnt_right_context <N>] --diarize --diar-model <diar.gguf>
-//!  [--asr.diar.preset <preset>] --device cuda:0 --json --output <words.json> --force`
+//!  [--asr.diar.preset <preset>] --device <device> --json --output <words.json> --force`
+//!
+//! `device` follows the selected runtime package ([`crate::models::device`]):
+//! `cuda:0` for the CUDA package, `vulkan:0` for Vulkan, `cpu` for CPU (the
+//! Vulkan and CPU packages refuse `cuda:0` with exit code 2).
 //!
 //! `N` is the selected model's file lookahead (13 frames, 1.12 s, for both
 //! manifest Nemotron models) and `preset` the diarizer's file preset
@@ -481,7 +485,8 @@ pub struct NemoCliEngine {
     pub engine_dir: PathBuf,
     /// `NEMO_SPEECH_MODEL_DIR`.
     pub models_dir: PathBuf,
-    /// `cuda:0`, `cpu`, ...
+    /// `cuda:0`, `vulkan:0`, `cpu`, ...: the package's ([`crate::models::device`];
+    /// the default from the folder name, else `auto`).
     pub device: String,
     /// Nemotron 3.5 (default) or the EN fallback; always an absolute path.
     pub asr_model: PathBuf,
@@ -520,10 +525,11 @@ impl NemoCliEngine {
         asr_model: impl Into<PathBuf>,
         diar_model: impl Into<PathBuf>,
     ) -> Self {
+        let engine_dir: PathBuf = engine_dir.into();
         Self {
-            engine_dir: engine_dir.into(),
+            device: crate::models::device::device_for_dir(&engine_dir).into(),
+            engine_dir,
             models_dir: models_dir.into(),
-            device: "cuda:0".into(),
             asr_model: asr_model.into(),
             diar_model: diar_model.into(),
             version: None,
@@ -760,10 +766,11 @@ impl DiarizeRunner {
         models_dir: impl Into<PathBuf>,
         diar_model: impl Into<PathBuf>,
     ) -> Self {
+        let engine_dir: PathBuf = engine_dir.into();
         Self {
-            engine_dir: engine_dir.into(),
+            device: crate::models::device::device_for_dir(&engine_dir).into(),
+            engine_dir,
             models_dir: models_dir.into(),
-            device: "cuda:0".into(),
             diar_model: diar_model.into(),
             preset: DiarPreset::Streaming,
         }
@@ -872,10 +879,11 @@ impl NemoCascadeEngine {
         asr_model: impl Into<PathBuf>,
         diar_model: impl Into<PathBuf>,
     ) -> Self {
+        let engine_dir: PathBuf = engine_dir.into();
         Self {
-            engine_dir: engine_dir.into(),
+            device: crate::models::device::device_for_dir(&engine_dir).into(),
+            engine_dir,
             models_dir: models_dir.into(),
-            device: "cuda:0".into(),
             asr_model: asr_model.into(),
             diar_model: diar_model.into(),
             version: None,
@@ -1061,6 +1069,9 @@ impl Engine for NemoCascadeEngine {
 mod tests {
     use super::*;
 
+    /// The CUDA package's folder, as the setup screen installs it.
+    const CUDA_PACKAGE: &str = "E:/engine/nemo-speech-0.2.0-windows-x86_64-cuda";
+
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(format!(
             "{}/tests/fixtures/{name}",
@@ -1193,7 +1204,7 @@ mod tests {
     #[test]
     fn exact_command_line() {
         let e = NemoCliEngine::new(
-            "E:/engine",
+            CUDA_PACKAGE,
             "E:/models",
             "E:/models/asr.gguf",
             "E:/models/diar.gguf",
@@ -1243,7 +1254,7 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--language" || a == "--diarize"));
         // A single-language model (the default EN one) gets no `--language`;
         // extra flags go last, verbatim.
-        let mut en = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/en.gguf", "d.gguf");
+        let mut en = NemoCliEngine::new(CUDA_PACKAGE, "E:/models", "E:/models/en.gguf", "d.gguf");
         en.pass_language = false;
         en.extra_args = vec!["--verbatim".into()];
         let args = en.args(&auto, &out);
@@ -1262,9 +1273,83 @@ mod tests {
         assert_eq!(info.device, "cuda:0");
     }
 
+    /// The Vulkan and CPU packages refuse `--device cuda:0` (exit code 2),
+    /// so a file job on them passes their own device.
+    #[test]
+    fn the_device_follows_the_package() {
+        let job = FileJob {
+            job_id: JobId("j".into()),
+            wav_path: "E:/audio/u/source.wav".into(),
+            diarize: true,
+            language: "en".into(),
+            diar_preset: DiarPreset::Streaming,
+        };
+        let out = NemoCliEngine::output_path(&job.wav_path);
+        for (package, device) in [
+            ("nemo-speech-0.2.0-windows-x86_64-cuda", "cuda:0"),
+            ("nemo-speech-0.2.0-windows-x86_64-vulkan", "vulkan:0"),
+            ("nemo-speech-0.2.0-windows-x86_64-cpu", "cpu"),
+            ("my-own-build", "auto"),
+        ] {
+            let dir = format!("E:/engine/{package}");
+            let mut e = NemoCliEngine::new(&dir, "E:/models", "E:/models/asr.gguf", "d.gguf");
+            e.pass_language = false;
+            e.right_context = Some(13);
+            e.diar_preset = Some("v3-offline".into());
+            let args: Vec<String> = e
+                .args(&job, &out)
+                .iter()
+                .map(|a| a.to_string_lossy().replace('\\', "/"))
+                .collect();
+            assert_eq!(
+                args,
+                [
+                    "transcribe",
+                    "E:/audio/u/source.wav",
+                    "--model",
+                    "E:/models/asr.gguf",
+                    "--stream",
+                    "--endpointing",
+                    "--asr.streaming.rnnt_right_context",
+                    "13",
+                    "--diarize",
+                    "--diar-model",
+                    "d.gguf",
+                    "--asr.diar.preset",
+                    "v3-offline",
+                    "--device",
+                    device,
+                    "--json",
+                    "--output",
+                    "E:/audio/u/source.words.json",
+                    "--force"
+                ],
+                "{package}"
+            );
+            assert_eq!(e.info().device, device);
+            let runner = DiarizeRunner::new(&dir, "E:/models", "d.gguf");
+            let args = runner.args(Path::new("a.wav"), Path::new("a.rttm"));
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "--device" && w[1] == device),
+                "{package}: {args:?}"
+            );
+            let cascade = NemoCascadeEngine::new(&dir, "E:/models", "p.gguf", "d.gguf");
+            assert_eq!(cascade.device, device);
+        }
+        // The selection's device (models::select_engine) replaces the default.
+        let mut e = NemoCliEngine::new(CUDA_PACKAGE, "E:/models", "a.gguf", "d.gguf");
+        e.device = "vulkan:0".into();
+        let args = e.args(&job, &out);
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--device" && w[1] == "vulkan:0"));
+        assert!(!args.iter().any(|a| a == "cuda:0"));
+    }
+
     #[test]
     fn lookahead_flag_follows_the_model() {
-        let mut e = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/asr.gguf", "d.gguf");
+        let mut e = NemoCliEngine::new(CUDA_PACKAGE, "E:/models", "E:/models/asr.gguf", "d.gguf");
         let job = FileJob {
             job_id: JobId("j".into()),
             wav_path: "E:/audio/u/source.wav".into(),
@@ -1338,7 +1423,7 @@ mod tests {
 
     #[test]
     fn diarizer_preset_flag_follows_the_model() {
-        let mut e = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/asr.gguf", "d.gguf");
+        let mut e = NemoCliEngine::new(CUDA_PACKAGE, "E:/models", "E:/models/asr.gguf", "d.gguf");
         let job = FileJob {
             job_id: JobId("j".into()),
             wav_path: "E:/audio/u/source.wav".into(),
