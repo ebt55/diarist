@@ -1,7 +1,9 @@
 // App-wide state: route, meeting list, open meeting, jobs, toasts, theme.
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, errorText, onEvent, onJobEvent } from "./api";
+import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
+import { importSheet } from "./importSheet.svelte";
+import { languageName } from "./languages";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
 import type { MeetingId } from "./generated/MeetingId";
@@ -310,10 +312,15 @@ class AppState {
 
   // ---- Import jobs ---------------------------------------------------------
 
-  async importPaths(paths: string[]): Promise<void> {
+  /** Imports `paths` in `language`; without one, the import sheet asks for it first. */
+  async importPaths(paths: string[], language?: string): Promise<void> {
+    if (language === undefined) {
+      importSheet.show(paths);
+      return;
+    }
     // Checked at click time: what is missing shows inline with its fix.
     try {
-      const r = await api.checkReady("import");
+      const r = await langApi.checkReady("import", language);
       if (!r.ok) {
         this.readiness = { action: "import", missing: r.missing, pending: paths };
         return;
@@ -323,8 +330,8 @@ class AppState {
     }
     for (const path of paths) {
       try {
-        const id = await api.importFile(path);
-        this.#upsertJob(id, { name: baseName(path) });
+        const id = await langApi.importFile(path, language);
+        this.#upsertJob(id, { name: `${baseName(path)} · ${languageName(language)}` });
       } catch (e) {
         this.error(`Could not import ${baseName(path)} (${errorText(e)}); check that it plays in a media player, then drop it again`);
       }

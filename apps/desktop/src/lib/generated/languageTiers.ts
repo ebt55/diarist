@@ -48,10 +48,17 @@ export const LANGUAGE_TIERS: readonly { code: string; name: string; tier: Langua
   { code: "nn", name: "Norwegian Nynorsk", tier: "adaptation", bare: true },
 ];
 
+/** The name of each tier. */
+export const TIER_TITLES: Record<LanguageTier, string> = {
+  ready: "Transcription-ready",
+  broad: "Broad coverage",
+  adaptation: "Adaptation-ready",
+};
+
 /** The one-line expectation per tier. */
 export const TIER_EXPECTATIONS: Record<LanguageTier, string> = {
-  ready: "transcription-ready: 4 to 13 percent word error rate (FLEURS)",
-  broad: "broad coverage, reduced accuracy: 15 to 29 percent word error rate (FLEURS)",
+  ready: "4 to 13 percent word error rate (FLEURS)",
+  broad: "15 to 29 percent word error rate (FLEURS): reduced accuracy",
   adaptation: "needs fine-tuning; not offered",
 };
 

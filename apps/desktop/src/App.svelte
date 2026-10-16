@@ -15,6 +15,7 @@
   import Overlays from "./components/Overlays.svelte";
   import ReadinessPanel from "./components/ReadinessPanel.svelte";
   import RecordSheet from "./components/RecordSheet.svelte";
+  import ImportSheet from "./components/ImportSheet.svelte";
 
   // Settings, Diagnostics and the first-run screen are split into their own chunks.
   let settingsPage = $state.raw<Component | null>(null);
@@ -249,6 +250,7 @@
 
 <Overlays />
 <RecordSheet />
+<ImportSheet />
 <LegacyMove />
 <CrashNotice />
 

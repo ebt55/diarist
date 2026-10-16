@@ -1,14 +1,18 @@
 <script lang="ts">
   // The start sheet: title, language, room mode and the two devices.
   // Enter starts, Esc cancels. Device choices are remembered in settings.
+  // The language decides the model: the live server is (re)started with the
+  // one that covers it while the sheet is open, and Start waits for a
+  // download when no installed model does.
   import { tick } from "svelte";
-  import { api, errorText } from "../lib/api";
+  import { api, errorText, langApi } from "../lib/api";
   import { formatDate } from "../lib/format";
   import type { SettingKey } from "../lib/generated/settingDefaults";
-  import { LANGUAGES, languageLabel } from "../lib/languages";
+  import { canonical, OTHER, type LanguagePlan } from "../lib/languages";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
   import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
+  import LanguageField from "./LanguageField.svelte";
 
   const MIC_KEY: SettingKey = "record.mic_device";
   const LOOPBACK_KEY: SettingKey = "record.loopback_device";
@@ -25,6 +29,8 @@
   let devicesError = $state<string | null>(null);
   let error = $state<string | null>(null);
   let starting = $state(false);
+  let blocked = $state(false);
+  let plan = $state.raw<LanguagePlan>({ kind: "selected", file: null, note: null });
 
   const mics = $derived(devices.filter((d) => d.flow === "capture"));
   const outputs = $derived(devices.filter((d) => d.flow === "render"));
@@ -42,7 +48,7 @@
 
   async function openSheet() {
     title = `Meeting ${formatDate(Date.now())}`;
-    language = app.setting("default_language");
+    language = canonical(app.setting("default_language"));
     diarizeMic = app.settingBool(DIARIZE_KEY);
     error = null;
     starting = false;
@@ -50,8 +56,8 @@
     await tick();
     titleEl?.focus();
     titleEl?.select();
-    // Warm the live engine while the user decides.
-    void api.prepareRecording().catch((e: unknown) => void api.log("warn", `prepare_recording: ${errorText(e)}`));
+    // Warm the live engine, with the model for this language, while the user decides.
+    prepare(language);
     try {
       devices = await api.listAudioDevices();
       devicesError = null;
@@ -71,13 +77,21 @@
     live.sheetOpen = false;
   }
 
+  /** Starts the live server with the model for `lang` (an idle one with another model is replaced). */
+  function prepare(lang: string) {
+    if (lang === OTHER) return;
+    void langApi
+      .prepareRecording(lang)
+      .catch((e: unknown) => void api.log("info", `prepare_recording(${lang}): ${errorText(e)}`));
+  }
+
   async function remember(key: SettingKey, value: string) {
     if (app.setting(key) !== value) await app.setSetting(key, value);
   }
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
-    if (starting) return;
+    if (starting || blocked) return;
     starting = true;
     error = null;
     await Promise.all([
@@ -98,7 +112,10 @@
       return;
     }
     close();
-    app.toast("info", "Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.");
+    app.toast(
+      "info",
+      `Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.${plan.kind === "switch" && plan.note ? ` ${plan.note}` : ""}`,
+    );
   }
 </script>
 
@@ -122,18 +139,18 @@
       <input bind:this={titleEl} type="text" bind:value={title} spellcheck="false" autocomplete="off" />
     </label>
 
-    <div class="grid">
-      <label class="field">
-        <span class="label">Language</span>
-        <select bind:value={language}>
-          {#each LANGUAGES as [code, name] (code)}<option value={code}>{languageLabel(code, name)}</option>{/each}
-        </select>
-      </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={diarizeMic} />
-        <span>This mic hears a room with several people <span class="help">(find speakers on the mic too)</span></span>
-      </label>
-    </div>
+    <LanguageField
+      id="rec-language"
+      bind:language
+      bind:blocked
+      bind:plan
+      active={live.sheetOpen}
+      onchange={(lang) => prepare(lang)}
+    />
+    <label class="check">
+      <input type="checkbox" bind:checked={diarizeMic} />
+      <span>This mic hears a room with several people <span class="help">(find speakers on the mic too)</span></span>
+    </label>
 
     <label class="field">
       <span class="label">Microphone</span>
@@ -168,7 +185,7 @@
     <div class="buttons">
       <span class="hint"><kbd>Enter</kbd> start · <kbd>Esc</kbd> cancel</span>
       <button type="button" class="btn" onclick={close} disabled={starting}>Cancel</button>
-      <button type="submit" class="btn btn-rec" disabled={starting}>
+      <button type="submit" class="btn btn-rec" disabled={starting || blocked}>
         <span class="dot" aria-hidden="true"></span>{starting ? "Starting…" : "Start recording"}
       </button>
     </div>
@@ -214,12 +231,6 @@
   }
   .label {
     font-weight: 600;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: minmax(0, 200px) minmax(0, 1fr);
-    gap: 12px;
-    align-items: end;
   }
   .check {
     display: flex;
