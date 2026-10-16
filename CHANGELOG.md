@@ -13,6 +13,11 @@ All notable changes to Diarist. Versions follow semantic versioning.
   goes to the final speaker who covers most of that speech, marked "new
   label" to check, and renaming from the legend no longer forgets where an
   earlier rename from a line placed the name.
+- Changed: R in the live transcript with no line selected renames the
+  newest finished line of a known speaker instead of the newest line,
+  which was usually the provisional "Unknown speaker" whose name was lost
+  at Stop. With no such line it says to select a line (j/k) or rename from
+  the speaker legend.
 
 ## [0.1.0-beta.2] - 2026-10-16
 
