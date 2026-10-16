@@ -2,6 +2,7 @@
   import type { Waveform } from "../lib/api";
   import { formatClock } from "../lib/format";
   import { SPEEDS, type Player } from "../lib/player.svelte";
+  import { VOLUME_STEP, clampVolume } from "../lib/playerGain";
   import { app } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -108,6 +109,39 @@
     seekFromPointer(e);
   }
 
+  const volumePct = $derived(Math.round(player.volume * 100));
+  const raisedDb = $derived(player.normalize ? Math.round(player.level.normalizeDb) : 0);
+  const levelTitle = $derived(
+    !player.normalize
+      ? "Auto level off: the recording plays as stored"
+      : raisedDb > 0
+        ? `Auto level: this recording plays ${raisedDb} dB louder than stored, with a limiter on the loudest moments. The file and the waveform do not change`
+        : "Auto level: this recording is already loud enough, it plays as stored",
+  );
+
+  function saveVolume() {
+    void app.setSetting("playback.volume", String(player.volume));
+  }
+
+  function toggleNormalize() {
+    const on = !player.normalize;
+    player.setNormalize(on);
+    void app.setSetting("playback.normalize", on ? "true" : "false");
+  }
+
+  /** The slider takes its own keys: the meeting's arrow shortcuts would seek instead. */
+  function onvolumekey(e: KeyboardEvent) {
+    const steps: Record<string, number> = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: 4, PageDown: -4 };
+    let next: number;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = 1;
+    else if (e.key in steps) next = player.volume + (steps[e.key] ?? 0) * VOLUME_STEP;
+    else return;
+    e.preventDefault();
+    player.setVolume(clampVolume(Math.round(next / VOLUME_STEP) * VOLUME_STEP));
+    saveVolume();
+  }
+
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "Home") player.seek(0);
     else if (e.key === "End") player.seek(duration);
@@ -170,6 +204,38 @@
       {#each SPEEDS as s (s)}<option value={s}>{s}×</option>{/each}
     </select>
   </label>
+
+  <div class="level">
+    <button
+      type="button"
+      class="btn auto"
+      aria-pressed={player.normalize}
+      disabled={!player.ready}
+      onclick={toggleNormalize}
+      title={levelTitle}
+    >
+      Auto level{#if raisedDb > 0}<span class="db mono">+{raisedDb} dB</span>{/if}
+    </button>
+    <label class="volume" title="Volume {volumePct}%">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d={player.volume === 0 ? "M4 9h4l5-4v14l-5-4H4zM17 10l4 4m0-4-4 4" : "M4 9h4l5-4v14l-5-4H4zM16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"} />
+      </svg>
+      <span class="sr-only">Volume</span>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step={VOLUME_STEP}
+        value={player.volume}
+        disabled={!player.ready}
+        aria-valuetext="{volumePct} percent"
+        oninput={(e) => player.setVolume(Number((e.currentTarget as HTMLInputElement).value))}
+        onchange={saveVolume}
+        onkeydown={onvolumekey}
+      />
+    </label>
+  </div>
 
   {#if stereo}
     <div class="seg-control" role="group" aria-label="Channels (M cycles)">
@@ -273,6 +339,34 @@
   }
   .speed select {
     padding: 3px 4px;
+  }
+  .level {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .auto {
+    padding: 3px 8px;
+    font-size: 12px;
+  }
+  .auto[aria-pressed="true"] {
+    color: var(--accent);
+  }
+  .auto[aria-pressed="false"] {
+    color: var(--fg-muted);
+  }
+  .db {
+    font-size: 11px;
+  }
+  .volume {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    color: var(--fg-muted);
+  }
+  .volume input {
+    width: 76px;
+    accent-color: var(--accent);
   }
   @container meeting (max-width: 620px) {
     .track {

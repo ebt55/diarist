@@ -24,6 +24,8 @@ export const SETTING_DEFAULTS = {
   "engine.file_lookahead": "",
   "setup.later": "false",
   "setup.language_seeded": "false",
+  "playback.volume": "1.0",
+  "playback.normalize": "true",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

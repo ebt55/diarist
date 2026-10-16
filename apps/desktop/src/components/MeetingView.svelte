@@ -12,6 +12,7 @@
   import { isAuto, languageLabel } from "../lib/languages";
   import { live } from "../lib/live.svelte";
   import { Player } from "../lib/player.svelte";
+  import { parseVolume, playbackGain } from "../lib/playerGain";
   import { app, isTyping } from "../lib/state.svelte";
   import AudioBar from "./AudioBar.svelte";
   import Icon from "./Icon.svelte";
@@ -110,6 +111,20 @@
     return speakers
       .filter((s) => talk.has(s.id) || (s.merged_into === null && rootTalk.has(s.id)))
       .map((s) => ({ ...s, talk_ms: s.merged_into === null ? (rootTalk.get(s.id) ?? 0) : (talk.get(s.id) ?? 0) }));
+  });
+
+  // Playback level: the settings (shared by every meeting) and this track's peaks.
+  $effect(() => {
+    const normalize = app.settingBool("playback.normalize");
+    const volume = parseVolume(app.setting("playback.volume"));
+    untrack(() => {
+      player.setNormalize(normalize);
+      player.setVolume(volume);
+    });
+  });
+  $effect(() => {
+    const peaks = waveform?.peaks ?? null;
+    untrack(() => player.setPeaks(peaks));
   });
 
   $effect(() => {
@@ -226,7 +241,14 @@
       waveform = await api.getWaveform(id, 1600);
     } catch {
       waveform = null; // Undecodable here: play without peaks.
+      return;
     }
+    const on = app.settingBool("playback.normalize");
+    const level = playbackGain(waveform.peaks, player.mode, on, 1);
+    void api.log(
+      "info",
+      `meeting ${id}: playback auto level ${on ? `${level.normalizeDb >= 0 ? "+" : ""}${level.normalizeDb.toFixed(1)} dB, limiter ${level.limit ? "on" : "off"}` : "off"}, volume ${Math.round(player.volume * 100)}%`,
+    );
   }
 
   async function reload(focus?: SegmentId) {

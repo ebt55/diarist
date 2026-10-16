@@ -60,6 +60,12 @@ pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
 /// The first-run screen has set `default_language` from the system
 /// language (done once).
 pub const SETUP_LANGUAGE_SEEDED: &str = "setup.language_seeded";
+/// Player volume, 0 to 1, for every meeting (times the normalisation).
+pub const PLAYBACK_VOLUME: &str = "playback.volume";
+/// The player raises a quiet track so its loud passages peak near -1 dBFS
+/// (from the waveform peaks, at most +24 dB, with a limiter); the stored
+/// audio does not change.
+pub const PLAYBACK_NORMALIZE: &str = "playback.normalize";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
@@ -87,6 +93,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_FILE_LOOKAHEAD, ""),
     (SETUP_LATER, "false"),
     (SETUP_LANGUAGE_SEEDED, "false"),
+    (PLAYBACK_VOLUME, "1.0"),
+    (PLAYBACK_NORMALIZE, "true"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -241,6 +249,8 @@ mod tests {
         assert_eq!(get(&s, RECORD_MIC_DEVICE), "");
         assert!(get_bool(&s, CAPTURE_AUTOCONVERT) && get_bool(&s, CAPTURE_LOOPBACK_AGC));
         assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
+        assert!(get_bool(&s, PLAYBACK_NORMALIZE));
+        assert_eq!(get(&s, PLAYBACK_VOLUME), "1.0");
         // A value that is not a boolean falls back to the default.
         store.set_setting(CAPTURE_AUTOCONVERT, "maybe").unwrap();
         assert!(get_bool(&effective(&store).unwrap(), CAPTURE_AUTOCONVERT));

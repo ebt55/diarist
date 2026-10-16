@@ -1,9 +1,21 @@
 // Playback: one <audio crossorigin="anonymous"> per open meeting, fed by the
 // asset protocol and routed through a Web Audio gain matrix so a hard-panned
 // stereo track (left mic, right loopback) is a mono mix by default, with
-// solo-left and solo-right toggles. The file is never fetched into JS.
+// solo-left and solo-right toggles, then a level gain (normalisation from the
+// waveform peaks times the volume, `playerGain.ts`) and a safety limiter. The
+// file is never fetched into JS.
 
-export type ChannelMode = "mix" | "left" | "right";
+import {
+  EAR_WEIGHTS,
+  LIMITER,
+  clampVolume,
+  playbackGain,
+  softClipCurve,
+  type ChannelMode,
+  type PlaybackGain,
+} from "./playerGain";
+
+export type { ChannelMode } from "./playerGain";
 
 export const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
@@ -16,14 +28,26 @@ export class Player {
   rate = $state(1);
   soloLeft = $state(false);
   soloRight = $state(false);
+  /** 0..1 (`playback.volume`), times the normalisation. */
+  volume = $state(1);
+  /** Raise a quiet track so its peak sits near -1 dBFS (`playback.normalize`). */
+  normalize = $state(true);
+  /** The waveform's `peaks[channel][bucket]` (0..255), for the normalisation. */
+  #peaks = $state.raw<readonly (readonly number[])[] | null>(null);
 
   mode: ChannelMode = $derived(
     this.soloLeft && !this.soloRight ? "left" : this.soloRight && !this.soloLeft ? "right" : "mix",
   );
+  /** The gain now applied: normalisation for this mode, volume, limiter. */
+  level: PlaybackGain = $derived(playbackGain(this.#peaks, this.mode, this.normalize, this.volume));
 
   #el: HTMLAudioElement | null = null;
   #ctx: AudioContext | null = null;
   #gains: GainNode[] = [];
+  #master: GainNode | null = null;
+  #limiter: DynamicsCompressorNode | null = null;
+  #clip: WaveShaperNode | null = null;
+  #clipCurve: Float32Array<ArrayBuffer> | null = null;
   #raf = 0;
   #cleanup: (() => void) | null = null;
 
@@ -62,6 +86,9 @@ export class Player {
     this.#el?.pause();
     void this.#ctx?.close().catch(() => {});
     this.#ctx = null;
+    this.#master = null;
+    this.#limiter = null;
+    this.#clip = null;
   }
 
   get ready(): boolean {
@@ -121,6 +148,23 @@ export class Player {
       if (this.soloRight) this.soloLeft = false;
     }
     this.#applyMatrix();
+    this.#applyLevel();
+  }
+
+  setVolume(volume: number): void {
+    this.volume = clampVolume(volume);
+    this.#applyLevel();
+  }
+
+  setNormalize(on: boolean): void {
+    this.normalize = on;
+    this.#applyLevel();
+  }
+
+  /** The waveform peaks of the track (null: none, no normalisation). */
+  setPeaks(peaks: readonly (readonly number[])[] | null): void {
+    this.#peaks = peaks;
+    this.#applyLevel();
   }
 
   /** mix -> left -> right -> mix. */
@@ -159,18 +203,42 @@ export class Player {
       g.connect(merge, 0, k & 1);
       return g;
     });
-    merge.connect(ctx.destination);
+    // The level gain, then a limiter and a soft clip that only work when the
+    // gain raises the track past -1 dBFS (ratio 1 and no curve pass the audio
+    // unchanged).
+    const master = ctx.createGain();
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = LIMITER.thresholdDb;
+    limiter.knee.value = LIMITER.kneeDb;
+    limiter.attack.value = LIMITER.attackS;
+    limiter.release.value = LIMITER.releaseS;
+    limiter.ratio.value = 1;
+    const clip = ctx.createWaveShaper();
+    merge.connect(master).connect(limiter).connect(clip).connect(ctx.destination);
+    this.#master = master;
+    this.#limiter = limiter;
+    this.#clip = clip;
     this.#ctx = ctx;
     this.#applyMatrix();
+    this.#applyLevel();
   }
 
   #applyMatrix(): void {
-    const m: Record<ChannelMode, number[]> = {
-      mix: [0.5, 0.5, 0.5, 0.5],
-      left: [1, 1, 0, 0],
-      right: [0, 0, 1, 1],
-    };
-    const values = m[this.mode];
+    // gains[in * 2 + out]: each input channel feeds both ears at its weight.
+    const [wl, wr] = EAR_WEIGHTS[this.mode];
+    const values = [wl, wl, wr, wr];
     this.#gains.forEach((g, i) => g.gain.setTargetAtTime(values[i] ?? 0, g.context.currentTime, 0.01));
+  }
+
+  #applyLevel(): void {
+    const master = this.#master;
+    const limiter = this.#limiter;
+    const clip = this.#clip;
+    if (!master || !limiter || !clip) return;
+    const { gain, limit } = this.level;
+    const t = master.context.currentTime;
+    master.gain.setTargetAtTime(gain, t, 0.02);
+    limiter.ratio.setValueAtTime(limit ? LIMITER.ratio : 1, t);
+    if ((clip.curve !== null) !== limit) clip.curve = limit ? (this.#clipCurve ??= softClipCurve()) : null;
   }
 }
