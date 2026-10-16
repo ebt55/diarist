@@ -92,6 +92,8 @@ bug report.
   always asked for the CUDA device; the device now follows the installed
   package (Vulkan measured at 25 times real time on an RTX 3080, CPU at 3
   times).
+- Changed: Nemotron 3.5 drops far fewer phrases on public language clips at
+  the file setting (measured on FLEURS slices).
 
 ## [0.1.0-beta.1] - 2026-10-15
 
