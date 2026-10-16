@@ -118,6 +118,12 @@ fn open_store(
     let store = SqliteStore::open(paths.db())
         .map_err(|e| format!("cannot open {}: {e}", paths.db().display()))?
         .with_audio_root(paths.audio());
+    if let Some(backup) = store.migration_backup() {
+        log::info!(
+            "database upgraded; the copy from before is {}",
+            backup.display()
+        );
+    }
     Ok(Arc::new(store))
 }
 
