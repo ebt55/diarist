@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelFile } from "../src/lib/generated/ModelFile";
 import {
+  LANGUAGE_TIERS,
   OTHER,
+  TYPED,
   canonical,
+  isTag,
   languageLabel,
+  languageName,
   languageOptions,
   planFor,
   systemLanguage,
@@ -88,6 +92,7 @@ describe("lists", () => {
     expect(codes).toEqual([
       ["en", false],
       [OTHER, true],
+      [TYPED, false],
     ]);
   });
 
@@ -106,12 +111,52 @@ describe("lists", () => {
   test("an uncovered stored language stays listed", () => {
     const opts = languageOptions([EN], 1, "de", true);
     expect(opts[0]).toEqual({ code: "de", label: "German (needs Nemotron 3.5)", disabled: false });
-    expect(opts.at(-1)).toEqual({ code: OTHER, label: "Other languages: install Nemotron 3.5", disabled: false });
+    expect(opts.at(-2)).toEqual({ code: OTHER, label: "Other languages: install Nemotron 3.5", disabled: false });
+    expect(opts.at(-1)).toEqual({ code: TYPED, label: "Other tag…", disabled: false });
   });
 
   test("a model with no language list gets the full list", () => {
     const codes = languageOptions([PARAKEET], 3, "en", false).map((o) => o.code);
-    expect(codes.length).toBe(1 + 30);
+    expect(codes.length).toBe(1 + 30 + 1);
     expect(codes).not.toContain(OTHER);
+    expect(codes).not.toContain("el");
+  });
+
+  test("every language a model declares is offered, unknown ones by name or tag", () => {
+    const wide = asr(4, ["en", "de", "el-GR", "ta-IN", "qq-ZZ", "auto"]);
+    const opts = languageOptions([wide], 4, "en", false);
+    const ta = opts.find((o) => o.code === "ta");
+    expect(ta).toBeDefined();
+    expect(ta!.label).toBe(languageName("ta")); // "Tamil" from the platform, else "ta"
+    expect(opts.find((o) => o.code === "qq")?.label).toBe("qq");
+    // The adaptation tier shows, marked, because the model lists it.
+    expect(opts.find((o) => o.code === "el")?.label).toBe("Greek (needs fine-tuning)");
+    // Untiered languages come after the tiers.
+    const codes = opts.map((o) => o.code);
+    expect(codes.indexOf("ta")).toBeGreaterThan(codes.indexOf("el"));
+  });
+
+  test("the effective table names and marks languages", () => {
+    const table = [...LANGUAGE_TIERS, { code: "ta", name: "Tamil (user)", tier: null, bare: true }];
+    const wide = asr(4, ["en", "ta-IN"]);
+    expect(languageOptions([wide], 4, "en", false, table).find((o) => o.code === "ta")?.label).toBe("Tamil (user)");
+  });
+});
+
+describe("typed tags", () => {
+  test("a typed tag round-trips and passes through unchecked when nothing lists it", () => {
+    expect(isTag("sw-KE") && isTag("x-klingon") && !isTag("not a tag")).toBe(true);
+    expect(canonical(" sw-KE ")).toBe("sw-KE");
+    const p = planFor([EN], 1, "sw-KE");
+    expect(p.kind).toBe("unchecked");
+    expect(p.note).toContain("Not checked for this model");
+    // Listed as typed, with the plan's label.
+    const opts = languageOptions([EN], 1, "sw-KE", true);
+    expect(opts[0]?.code).toBe("sw-KE");
+    // A typed known language still asks for Nemotron 3.5.
+    expect(planFor([EN], 1, canonical("ja")).kind).toBe("install");
+    // A typed tag that an installed model lists switches like a chosen one.
+    expect(planFor([EN, N35], 1, "pl").kind).toBe("switch");
+    expect(planFor([EN], 1, TYPED).kind).toBe("selected");
   });
 });

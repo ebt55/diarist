@@ -162,11 +162,13 @@ export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<Unli
 
 /**
  * The language-aware forms of `import_file`, `check_ready` and
- * `prepare_recording` (the import and start sheets, `lib/languages.ts`).
+ * `prepare_recording` (the import and start sheets, `lib/languages.ts`),
+ * and the effective language table.
  */
 export const langApi = {
   importFile: (path: string, language: string) => invoke<JobId>("import_file", { path, title: null, language }),
   checkReady: (action: "import" | "record", language: string) =>
     invoke<Readiness>("check_ready", { action, language }),
   prepareRecording: (language: string) => invoke<void>("prepare_recording", { language }),
+  languageTable: () => invoke<import("./generated/LanguageEntry").LanguageEntry[]>("language_table"),
 };

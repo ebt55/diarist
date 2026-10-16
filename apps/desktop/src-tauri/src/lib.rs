@@ -314,6 +314,7 @@ pub fn run() {
             live::recording_status,
             live::live_snapshot,
             live::rerun_post_pass,
+            commands::language_table,
         ])
         .setup(move |app| {
             let store = open_store(&paths, demo, legacy.as_ref())?;

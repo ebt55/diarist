@@ -175,9 +175,8 @@ fn run_import(
         Err(e) => return fail(e.to_string()),
     };
     let low_vram = settings::get_bool(&settings, settings::ENGINE_LOW_VRAM);
-    let language = models::languages::canonical(
-        &language.unwrap_or_else(|| settings::default_language(&settings)),
-    );
+    let language = models::languages::LanguageTable::load(&paths.root)
+        .canonical(&language.unwrap_or_else(|| settings::default_language(&settings)));
     // A language the selected model does not cover runs on Nemotron 3.5, or
     // fails here naming it (the readiness check offers the download first).
     let (built, switched) =
@@ -1036,7 +1035,10 @@ pub async fn check_ready(
             let asr = models::selected_file(s, ModelRole::Asr)?;
             if let (Some(language), Some(asr)) = (language, asr) {
                 let files = s.list_model_files()?;
-                if let Err(need) = models::select_for_language(&asr, &files, &language, false) {
+                let table = languages_logged(&data_paths.root);
+                if let Err(need) =
+                    models::select_for_language(&asr, &files, &language, false, &table)
+                {
                     let backend = gpu::recommended_backend(gpu.as_ref(), &adapters);
                     let item = models::download_items(&data_paths, &manifest, &files, backend)
                         .into_iter()
@@ -1062,6 +1064,26 @@ pub async fn check_ready(
         },
     )
     .await
+}
+
+/// The effective language table (`manifests/languages.json` with the data
+/// root's `languages.user.json`), skipped files logged.
+fn languages_logged(root: &Path) -> models::languages::LanguageTable {
+    let table = models::languages::LanguageTable::load(root);
+    for n in &table.notes {
+        log::warn!("languages: {n}");
+    }
+    table
+}
+
+/// The language table the lists are built from (the front end falls back
+/// to the generated copy of the shipped one).
+#[tauri::command]
+pub async fn language_table(
+    paths: State<'_, AppPaths>,
+) -> CmdResult<Vec<models::languages::LanguageEntry>> {
+    let root = paths.paths.root.clone();
+    blocking(move || Ok(languages_logged(&root).entries)).await
 }
 
 /// Every manifest download (engine first, then required, optional and

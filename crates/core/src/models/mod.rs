@@ -334,7 +334,7 @@ fn not_covered(selected: &ModelFile, language: &str) -> String {
     match languages::only_language(selected) {
         Some(only) => format!(
             "the selected model is {}-only",
-            languages::find(&only).map_or(only.as_str(), |l| l.name)
+            languages::find(&only).map_or(only.as_str(), |l| l.name.as_str())
         ),
         None if languages::is_auto(language) => {
             "the selected model cannot detect the language".into()
@@ -455,7 +455,9 @@ pub fn asr_for_language<'a>(
 ///   installed Nemotron 3.5 for low-VRAM mode. One switch whichever asks
 ///   (the language wins as the reason);
 /// - [`LanguageModelMissing`], naming the model to install (Nemotron 3.5),
-///   when no installed model covers the language.
+///   when no installed model covers a language `table` knows (or `auto`);
+/// - the selection, not checked, for a tag nothing installed lists and the
+///   table does not know (one the user typed): it is passed through.
 ///
 /// The stored selection never changes.
 pub fn select_for_language(
@@ -463,6 +465,7 @@ pub fn select_for_language(
     files: &[ModelFile],
     language: &str,
     low_vram: bool,
+    table: &languages::LanguageTable,
 ) -> std::result::Result<AsrChoice, LanguageModelMissing> {
     if !languages::covers(selected, language) {
         return match asr_for_language(selected, files, language) {
@@ -470,6 +473,7 @@ pub fn select_for_language(
                 file: Box::new(f.clone()),
                 reason: SwitchReason::Language,
             }),
+            None if !table.knows(language) => Ok(AsrChoice::Selected),
             None => Err(LanguageModelMissing {
                 language: language.trim().to_owned(),
                 selected: selected.display_name.clone(),
@@ -513,7 +517,14 @@ pub fn select_engine_for(
         return Ok((built, None));
     }
     let files = store.list_model_files()?;
-    let choice = select_for_language(&built.selection.asr_file, &files, language, low_vram)?;
+    let table = languages::LanguageTable::load(&paths.root);
+    let choice = select_for_language(
+        &built.selection.asr_file,
+        &files,
+        language,
+        low_vram,
+        &table,
+    )?;
     let Some(reason) = choice.reason() else {
         return Ok((built, None));
     };
@@ -750,6 +761,10 @@ mod tests {
         }
     }
 
+    fn table() -> languages::LanguageTable {
+        languages::LanguageTable::fallback()
+    }
+
     fn speaks(mut f: ScannedModelFile, langs: &[&str]) -> ScannedModelFile {
         f.capabilities.languages = langs.iter().map(|s| (*s).to_owned()).collect();
         f
@@ -789,17 +804,17 @@ mod tests {
     fn english_on_the_en_model_keeps_the_selection() {
         let (en, files) = asr_files(&language_store(true));
         assert_eq!(
-            select_for_language(&en, &files, "en", false),
+            select_for_language(&en, &files, "en", false, &table()),
             Ok(AsrChoice::Selected)
         );
         assert_eq!(
-            select_for_language(&en, &files, "en-GB", false),
+            select_for_language(&en, &files, "en-GB", false, &table()),
             Ok(AsrChoice::Selected)
         );
         // Without Nemotron 3.5 too: nothing is missing for English.
         let (en, files) = asr_files(&language_store(false));
         assert_eq!(
-            select_for_language(&en, &files, "en", false),
+            select_for_language(&en, &files, "en", false, &table()),
             Ok(AsrChoice::Selected)
         );
     }
@@ -808,7 +823,7 @@ mod tests {
     fn german_on_the_en_model_switches_to_installed_nemotron_35() {
         let (en, files) = asr_files(&language_store(true));
         for lang in ["de", "de-DE", "auto"] {
-            let choice = select_for_language(&en, &files, lang, false).unwrap();
+            let choice = select_for_language(&en, &files, lang, false, &table()).unwrap();
             let AsrChoice::Switch { file, reason } = &choice else {
                 panic!("{lang}: {choice:?}");
             };
@@ -831,7 +846,7 @@ mod tests {
         // Nemotron 3.5 selected: it covers German and detection itself.
         for lang in ["de", "auto", "en"] {
             assert_eq!(
-                select_for_language(n35, &files, lang, false),
+                select_for_language(n35, &files, lang, false, &table()),
                 Ok(AsrChoice::Selected)
             );
         }
@@ -840,14 +855,14 @@ mod tests {
     #[test]
     fn german_without_nemotron_35_names_the_model_to_install() {
         let (en, files) = asr_files(&language_store(false));
-        let err = select_for_language(&en, &files, "de", false).unwrap_err();
+        let err = select_for_language(&en, &files, "de", false, &table()).unwrap_err();
         assert_eq!(err.install, "nemotron-3.5");
         assert_eq!(err.language, "de");
         assert_eq!(err.reason, "the selected model is English-only");
         let text = err.to_string();
         assert!(text.starts_with("German (de) needs Nemotron 3.5"), "{text}");
         assert!(text.contains("models pull nemotron-3.5"), "{text}");
-        let err = select_for_language(&en, &files, "auto", true).unwrap_err();
+        let err = select_for_language(&en, &files, "auto", true, &table()).unwrap_err();
         assert!(err
             .to_string()
             .starts_with("Automatic language detection needs"));
@@ -855,7 +870,7 @@ mod tests {
         let mut odd = en.clone();
         odd.capabilities.languages.clear();
         assert_eq!(
-            select_for_language(&odd, &files, "de", false),
+            select_for_language(&odd, &files, "de", false, &table()),
             Ok(AsrChoice::Selected)
         );
     }
@@ -864,20 +879,20 @@ mod tests {
     fn low_vram_and_language_switch_once() {
         let (en, files) = asr_files(&language_store(true));
         // Low-VRAM mode alone switches, as before.
-        let choice = select_for_language(&en, &files, "en", true).unwrap();
+        let choice = select_for_language(&en, &files, "en", true, &table()).unwrap();
         assert_eq!(choice.reason(), Some(SwitchReason::LowVram));
         // Both ask for Nemotron 3.5: one switch, the language as the reason.
-        let choice = select_for_language(&en, &files, "de", true).unwrap();
+        let choice = select_for_language(&en, &files, "de", true, &table()).unwrap();
         assert_eq!(choice.reason(), Some(SwitchReason::Language));
         assert_eq!(choice.overrides().asr.as_deref(), Some("models/n35.gguf"));
         // Without Nemotron 3.5 low-VRAM mode falls back to the selection,
         // and the language still says what to install.
         let (en, files) = asr_files(&language_store(false));
         assert_eq!(
-            select_for_language(&en, &files, "en", true),
+            select_for_language(&en, &files, "en", true, &table()),
             Ok(AsrChoice::Selected)
         );
-        assert!(select_for_language(&en, &files, "de", true).is_err());
+        assert!(select_for_language(&en, &files, "de", true, &table()).is_err());
     }
 
     #[test]
@@ -893,15 +908,21 @@ mod tests {
         offline.capabilities.streaming = false;
         files.push(offline);
         files.push(dropped);
-        let choice = select_for_language(&en, &files, "de", false).unwrap();
+        let choice = select_for_language(&en, &files, "de", false, &table()).unwrap();
         assert_eq!(
             choice.overrides().asr.as_deref(),
             Some("models/user/n35-reconverted.gguf")
         );
         assert_eq!(choice.reason(), Some(SwitchReason::Language));
+        // A tag nothing lists and the table does not know (typed by the
+        // user) runs on the selection, unchecked.
+        assert_eq!(
+            select_for_language(&en, &files, "x-klingon", false, &table()),
+            Ok(AsrChoice::Selected)
+        );
         // Nothing lists French: the download offer names Nemotron 3.5.
         assert_eq!(
-            select_for_language(&en, &files, "fr", false)
+            select_for_language(&en, &files, "fr", false, &table())
                 .unwrap_err()
                 .install,
             MULTILINGUAL_MODEL

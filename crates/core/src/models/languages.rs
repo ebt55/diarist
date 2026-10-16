@@ -13,12 +13,22 @@
 //! Spanish and Portuguese are listed per locale ([`canonical`] maps the
 //! bare tags the same way).
 //!
-//! The table is exported to TypeScript as `generated/languageTiers.ts`
-//! ([`typescript_module`]); `apps/desktop/src/lib/languages.ts` builds the
-//! language lists from it.
+//! The table is data: `manifests/languages.json` (compiled in, equal to
+//! [`LANGUAGES`], the fallback), replaced by a data-root copy in
+//! `manifests\languages.json` and extended by `languages.user.json`
+//! ([`LanguageTable::load`], like `models.user.json`). The app gets the
+//! effective table from the `language_table` command; the TypeScript module
+//! `generated/languageTiers.ts` ([`typescript_module`]) is its fallback, and
+//! `apps/desktop/src/lib/languages.ts` builds the language lists from it.
+//! A language a model lists that the table does not know is still offered,
+//! named by its tag.
 
+use std::path::Path;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::engine::{Engine, LiveEngine, LiveSession};
 use crate::error::Result;
@@ -26,14 +36,16 @@ use crate::protocol::{EngineEvent, EngineInfo, FileJob, LiveOpts};
 use crate::types::{Channel, JobId, ModelFile};
 
 /// How well Nemotron 3.5 transcribes a language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum LanguageTier {
     /// FLEURS WER 4 to 13: listed plainly.
     Ready,
     /// FLEURS WER 15 to 29: listed with "(reduced accuracy)".
     Broad,
-    /// The model knows the language but needs fine-tuning for it: never
-    /// offered.
+    /// The model knows the language but needs fine-tuning for it: offered
+    /// only for a model that lists it, marked.
     Adaptation,
 }
 
@@ -143,6 +155,220 @@ pub const LANGUAGES: &[Language] = {
     ]
 };
 
+/// One language of the effective table: [`LANGUAGES`] as shipped in
+/// `manifests/languages.json`, with the data root's overrides
+/// ([`LanguageTable::load`]). What the `language_table` command returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LanguageEntry {
+    /// The tag offered and stored (`de`, `ja-JP`, `es-ES`).
+    pub code: String,
+    /// English name.
+    pub name: String,
+    /// Expected quality on Nemotron 3.5; `None` for a language added
+    /// without one (no "reduced accuracy" or other mark).
+    #[serde(default)]
+    pub tier: Option<LanguageTier>,
+    /// The entry a bare primary subtag stands for (`ja` means `ja-JP`).
+    pub bare: bool,
+}
+
+impl From<&Language> for LanguageEntry {
+    fn from(l: &Language) -> Self {
+        Self {
+            code: l.code.to_owned(),
+            name: l.name.to_owned(),
+            tier: Some(l.tier),
+            bare: l.bare,
+        }
+    }
+}
+
+/// An entry as `languages.user.json` (or a data-root copy of
+/// `languages.json`) may write it: `bare` defaults to true for a bare code,
+/// `tier` to none.
+#[derive(Debug, Deserialize)]
+struct RawEntry {
+    code: String,
+    name: String,
+    #[serde(default)]
+    tier: Option<LanguageTier>,
+    #[serde(default)]
+    bare: Option<bool>,
+}
+
+impl From<RawEntry> for LanguageEntry {
+    fn from(r: RawEntry) -> Self {
+        let code = r.code.trim().to_owned();
+        Self {
+            bare: r.bare.unwrap_or(!code.contains(['-', '_'])),
+            code,
+            name: r.name.trim().to_owned(),
+            tier: r.tier,
+        }
+    }
+}
+
+/// The shipped table, compiled in.
+const LANGUAGES_JSON: &str = include_str!("../../../../manifests/languages.json");
+
+/// Languages added or changed by the user, in the data root (like
+/// `models.user.json`): entries matched on `code` replace the shipped one,
+/// new ones are added.
+pub const USER_LANGUAGES: &str = "languages.user.json";
+
+/// The effective language table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageTable {
+    pub entries: Vec<LanguageEntry>,
+    /// Files that could not be read and were skipped, for the log.
+    pub notes: Vec<String>,
+}
+
+static BUILTIN: LazyLock<LanguageTable> = LazyLock::new(LanguageTable::builtin);
+
+fn parse_entries(text: &str) -> std::result::Result<Vec<LanguageEntry>, String> {
+    let raw: Vec<RawEntry> =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
+    let mut out: Vec<LanguageEntry> = Vec::new();
+    for r in raw {
+        let e = LanguageEntry::from(r);
+        if e.code.is_empty() || e.name.is_empty() {
+            return Err(format!("an entry needs a code and a name ({e:?})"));
+        }
+        merge(&mut out, e);
+    }
+    Ok(out)
+}
+
+fn merge(into: &mut Vec<LanguageEntry>, e: LanguageEntry) {
+    match into
+        .iter_mut()
+        .find(|x| x.code.eq_ignore_ascii_case(&e.code))
+    {
+        Some(x) => *x = e,
+        None => into.push(e),
+    }
+}
+
+impl LanguageTable {
+    /// [`LANGUAGES`], the compiled-in fallback.
+    pub fn fallback() -> Self {
+        Self {
+            entries: LANGUAGES.iter().map(LanguageEntry::from).collect(),
+            notes: Vec::new(),
+        }
+    }
+
+    /// The shipped `manifests/languages.json`, else [`Self::fallback`].
+    pub fn builtin() -> Self {
+        match parse_entries(LANGUAGES_JSON) {
+            Ok(entries) if !entries.is_empty() => Self {
+                entries,
+                notes: Vec::new(),
+            },
+            Ok(_) => Self::fallback(),
+            Err(e) => {
+                let mut t = Self::fallback();
+                t.notes.push(format!(
+                    "manifests/languages.json (built in): {e}; using the table compiled in"
+                ));
+                t
+            }
+        }
+    }
+
+    /// The built-in table, replaced by `<root>/manifests/languages.json`
+    /// when present, then `<root>/languages.user.json` merged over it
+    /// (matched on `code`). A file that cannot be read or parsed is skipped
+    /// with a note; this never fails.
+    pub fn load(data_root: &Path) -> Self {
+        let mut t = Self::builtin();
+        let copy = data_root.join("manifests").join("languages.json");
+        if let Ok(text) = std::fs::read_to_string(&copy) {
+            match parse_entries(&text) {
+                Ok(entries) if !entries.is_empty() => t.entries = entries,
+                Ok(_) => t.notes.push(format!(
+                    "{} is empty; using the built-in table",
+                    copy.display()
+                )),
+                Err(e) => t.notes.push(format!(
+                    "{}: {e}; using the built-in table (fix or remove the file)",
+                    copy.display()
+                )),
+            }
+        }
+        let user = data_root.join(USER_LANGUAGES);
+        if let Ok(text) = std::fs::read_to_string(&user) {
+            match parse_entries(&text) {
+                Ok(entries) => {
+                    for e in entries {
+                        merge(&mut t.entries, e);
+                    }
+                }
+                Err(e) => t.notes.push(format!(
+                    "{}: {e}; ignored (fix or remove the file)",
+                    user.display()
+                )),
+            }
+        }
+        t
+    }
+
+    /// The entry `tag` stands for: its own, or for a bare subtag the one
+    /// marked [`LanguageEntry::bare`] (`ja` is Japanese, `es` Spanish of the
+    /// Americas). Another region (`zh-TW`) has no entry.
+    pub fn find(&self, tag: &str) -> Option<&LanguageEntry> {
+        let tag = tag.trim();
+        if let Some(l) = self
+            .entries
+            .iter()
+            .find(|l| l.code.eq_ignore_ascii_case(tag))
+        {
+            return Some(l);
+        }
+        if tag.contains(['-', '_']) {
+            return None;
+        }
+        let p = primary_subtag(tag);
+        self.entries
+            .iter()
+            .find(|l| l.bare && primary_subtag(&l.code) == p)
+    }
+
+    /// Whether the table has `tag` or its language (any locale of it), or
+    /// `tag` is `auto`: a language Nemotron 3.5 is the answer for when no
+    /// installed model lists it.
+    pub fn knows(&self, tag: &str) -> bool {
+        let p = primary_subtag(tag);
+        is_auto(tag) || self.entries.iter().any(|l| primary_subtag(&l.code) == p)
+    }
+
+    /// The tag to store and offer for `tag`: the table's code (`ja` and
+    /// beta.1's stored `ja` give `ja-JP`), `auto`, or `tag` unchanged (a tag
+    /// typed by the user that the table does not know).
+    pub fn canonical(&self, tag: &str) -> String {
+        let tag = tag.trim();
+        if is_auto(tag) {
+            return AUTO.into();
+        }
+        self.find(tag)
+            .map_or_else(|| tag.to_owned(), |l| l.code.clone())
+    }
+
+    /// `German (de)`, `automatic detection`, or the tag itself.
+    pub fn label(&self, tag: &str) -> String {
+        let tag = tag.trim();
+        if is_auto(tag) {
+            return "automatic detection".into();
+        }
+        match self.find(tag) {
+            Some(l) => format!("{} ({tag})", l.name),
+            None => tag.to_owned(),
+        }
+    }
+}
+
 /// The job language that asks the model to detect the language (costs
 /// about a second of the first utterance, docs/04 section 6). Never the
 /// default.
@@ -162,43 +388,19 @@ pub fn primary_subtag(tag: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// The tier table entry `tag` stands for: its own entry, or for a bare
-/// subtag the entry marked [`Language::bare`] (`ja` is Japanese, `es`
-/// Spanish of the Americas). Another region (`zh-TW`) has no entry.
-pub fn find(tag: &str) -> Option<&'static Language> {
-    let tag = tag.trim();
-    if let Some(l) = LANGUAGES.iter().find(|l| l.code.eq_ignore_ascii_case(tag)) {
-        return Some(l);
-    }
-    if tag.contains(['-', '_']) {
-        return None;
-    }
-    let p = primary_subtag(tag);
-    LANGUAGES
-        .iter()
-        .find(|l| l.bare && primary_subtag(l.code) == p)
+/// [`LanguageTable::find`] on the built-in table.
+pub fn find(tag: &str) -> Option<&'static LanguageEntry> {
+    BUILTIN.find(tag)
 }
 
-/// The tag to store and offer for `tag`: the tier table's code (`ja` and
-/// beta.1's stored `ja` give `ja-JP`), `auto`, or `tag` unchanged.
+/// [`LanguageTable::canonical`] on the built-in table.
 pub fn canonical(tag: &str) -> String {
-    let tag = tag.trim();
-    if is_auto(tag) {
-        return AUTO.into();
-    }
-    find(tag).map_or_else(|| tag.to_owned(), |l| l.code.to_owned())
+    BUILTIN.canonical(tag)
 }
 
-/// `German (de)`, `automatic detection`, or the tag itself.
+/// [`LanguageTable::label`] on the built-in table.
 pub fn label(tag: &str) -> String {
-    let tag = tag.trim();
-    if is_auto(tag) {
-        return "automatic detection".into();
-    }
-    match find(tag) {
-        Some(l) => format!("{} ({tag})", l.name),
-        None => tag.to_owned(),
-    }
+    BUILTIN.label(tag)
 }
 
 /// The distinct primary subtags `file` lists (`auto` excluded).
@@ -328,14 +530,16 @@ impl LiveEngine for TaggedLiveEngine {
 /// The TypeScript module with [`LANGUAGES`]
 /// (`apps/desktop/src/lib/generated/languageTiers.ts`).
 pub fn typescript_module() -> String {
-    let entries = LANGUAGES
+    let entries = BUILTIN
+        .entries
         .iter()
         .map(|l| {
             format!(
-                "  {{ code: {:?}, name: {:?}, tier: {:?}, bare: {} }},",
+                "  {{ code: {:?}, name: {:?}, tier: {}, bare: {} }},",
                 l.code,
                 l.name,
-                l.tier.as_str(),
+                l.tier
+                    .map_or("null".to_owned(), |t| format!("{:?}", t.as_str())),
                 l.bare
             )
         })
@@ -359,11 +563,12 @@ pub fn typescript_module() -> String {
     );
     format!(
         "// This file was generated from diarist_core::models::languages. Do not edit this file manually.\n\n\
-         /** How well Nemotron 3.5 transcribes a language (FLEURS, docs/04 section 6). */\n\
-         export type LanguageTier = \"ready\" | \"broad\" | \"adaptation\";\n\n\
-         /**\n * Every evaluated language, best first within a tier; `adaptation` ones are never offered.\n \
-         * `code` is the tag offered and stored; `bare` marks the entry a bare primary subtag stands for.\n */\n\
-         export const LANGUAGE_TIERS: readonly {{ code: string; name: string; tier: LanguageTier; bare: boolean }}[] = [\n{entries}\n];\n\n\
+         import type {{ LanguageEntry }} from \"./LanguageEntry\";\n\
+         import type {{ LanguageTier }} from \"./LanguageTier\";\n\n\
+         /**\n * The shipped table (`manifests/languages.json`), best first within a tier: the fallback for\n \
+         * the `language_table` command. `code` is the tag offered and stored; `bare` marks the entry a\n \
+         * bare primary subtag stands for.\n */\n\
+         export const LANGUAGE_TIERS: readonly LanguageEntry[] = [\n{entries}\n];\n\n\
          /** The name of each tier. */\n\
          export const TIER_TITLES: Record<LanguageTier, string> = {{\n{titles}\n}};\n\n\
          /** The one-line expectation per tier. */\n\
@@ -428,15 +633,86 @@ mod tests {
                 .count();
             assert_eq!(bare, 1, "{p}: one entry for the bare subtag");
         }
-        assert_eq!(find("de-DE").map(|l| l.name), None, "no de-DE entry");
-        assert_eq!(find("de").map(|l| l.name), Some("German"));
-        assert_eq!(find("zh").map(|l| l.code), Some("zh-CN"));
+        assert_eq!(
+            find("de-DE").map(|l| l.name.as_str()),
+            None,
+            "no de-DE entry"
+        );
+        assert_eq!(find("de").map(|l| l.name.as_str()), Some("German"));
+        assert_eq!(find("zh").map(|l| l.code.as_str()), Some("zh-CN"));
         assert_eq!(find("zh-TW"), None);
         assert_eq!(find("xx"), None);
         assert_eq!(label("de"), "German (de)");
         assert_eq!(label("ja"), "Japanese (ja)");
         assert_eq!(label("auto"), "automatic detection");
         assert_eq!(primary_subtag(" EN-gb "), "en");
+    }
+
+    #[test]
+    fn the_shipped_json_is_the_compiled_table() {
+        let t = LanguageTable::builtin();
+        assert!(t.notes.is_empty(), "{:?}", t.notes);
+        assert_eq!(t.entries, LanguageTable::fallback().entries);
+    }
+
+    #[test]
+    fn the_data_root_extends_and_overrides_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Nothing there: the shipped table.
+        assert_eq!(LanguageTable::load(root).entries, BUILTIN.entries);
+        std::fs::write(
+            root.join(USER_LANGUAGES),
+            "\u{feff}[{\"code\": \"ta\", \"name\": \"Tamil\"},
+              {\"code\": \"DE\", \"name\": \"Deutsch\", \"tier\": \"ready\"},
+              {\"code\": \"es-MX\", \"name\": \"Spanish, Mexico\"}]",
+        )
+        .unwrap();
+        let t = LanguageTable::load(root);
+        assert!(t.notes.is_empty(), "{:?}", t.notes);
+        assert_eq!(t.entries.len(), LANGUAGES.len() + 2);
+        let ta = t.find("ta").unwrap();
+        assert_eq!((ta.name.as_str(), ta.tier, ta.bare), ("Tamil", None, true));
+        assert_eq!(t.label("de"), "Deutsch (de)");
+        assert_eq!(t.find("es-MX").map(|l| l.bare), Some(false));
+        assert_eq!(
+            t.canonical("es"),
+            "es-US",
+            "the bare subtag still means es-US"
+        );
+        assert!(t.knows("ta-IN") && !t.knows("xx"));
+        // A data-root copy of the manifest replaces the shipped list; a
+        // broken user file is skipped with a note, never an error.
+        std::fs::create_dir_all(root.join("manifests")).unwrap();
+        std::fs::write(
+            root.join("manifests").join("languages.json"),
+            r#"[{"code": "en", "name": "English", "tier": "ready", "bare": true}]"#,
+        )
+        .unwrap();
+        std::fs::write(root.join(USER_LANGUAGES), "{not json").unwrap();
+        let t = LanguageTable::load(root);
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.notes.len(), 1);
+        assert!(t.notes[0].contains(USER_LANGUAGES), "{:?}", t.notes);
+        std::fs::write(root.join("manifests").join("languages.json"), "[").unwrap();
+        let t = LanguageTable::load(root);
+        assert_eq!(t.entries, BUILTIN.entries, "a broken copy falls back");
+        assert_eq!(t.notes.len(), 2);
+    }
+
+    #[test]
+    fn a_typed_tag_round_trips() {
+        // Unknown to the table: stored and given to the runtime as typed,
+        // or as the model's locale for it.
+        assert_eq!(canonical(" sw-KE "), "sw-KE");
+        assert_eq!(canonical("ta"), "ta");
+        let n35: Vec<String> = ["en", "de", "sw-KE", "ta-IN", "auto"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(runtime_tag(&n35, &canonical("sw-KE")), "sw-KE");
+        assert_eq!(runtime_tag(&n35, &canonical("ta")), "ta-IN");
+        assert_eq!(runtime_tag(&n35, &canonical("x-klingon")), "x-klingon");
     }
 
     #[test]
@@ -508,6 +784,7 @@ mod tests {
             module.contains("  { code: \"de\", name: \"German\", tier: \"ready\", bare: true },")
         );
         assert!(module.contains("export const MULTILINGUAL_MODEL = \"nemotron-3.5\";"));
+        assert!(module.contains("import type { LanguageEntry } from \"./LanguageEntry\";"));
         if let Some(dir) = std::env::var_os("TS_RS_EXPORT_DIR") {
             let path = std::path::PathBuf::from(dir).join("languageTiers.ts");
             if std::fs::read_to_string(&path).ok().as_deref() != Some(module.as_str()) {

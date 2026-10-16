@@ -1,21 +1,27 @@
 <script lang="ts">
-  // The meeting-language control of the start and import sheets: the
-  // languages the installed models cover (lib/languages.ts), what the job
-  // will run on, and, when nothing installed covers the language, the
-  // Nemotron 3.5 download (the same row as Settings and Setup). `blocked`
-  // is set while the job cannot start in this language.
-  import { api, errorText } from "../lib/api";
+  // The meeting-language control of the start sheet, the import sheet and
+  // Settings: every language the installed models declare (lib/languages.ts,
+  // with the backend's language table), a typed tag ("Other tag…"), what the
+  // job will run on, and, when nothing installed covers a known language,
+  // the Nemotron 3.5 download (the same row as Settings and Setup).
+  // `blocked` is set while the job cannot start in this language.
+  import { api, errorText, langApi } from "../lib/api";
   import { downloads, sizeMb } from "../lib/downloads.svelte";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
   import type { ModelFile } from "../lib/generated/ModelFile";
   import {
     AUTO_NOTE,
+    LANGUAGE_TIERS,
     MULTILINGUAL_MODEL,
     OTHER,
+    TYPED,
+    canonical,
     isAuto,
+    isTag,
     languageOptions,
     planFor,
     type LanguagePlan,
+    type LanguageTable,
   } from "../lib/languages";
   import { app } from "../lib/state.svelte";
   import DownloadRow from "./DownloadRow.svelte";
@@ -24,18 +30,20 @@
   interface Props {
     id: string;
     language: string;
-    /** The sheet is open: the model list is read again each time it opens. */
+    /** The field is shown: models and the table are read again each time. */
     active: boolean;
+    label?: string;
     /** Set while the job cannot start in this language (nothing installed covers it). */
     blocked?: boolean;
     plan?: LanguagePlan;
-    /** The language changed, or a download made it runnable. */
+    /** The language changed (also a typed tag), or a download made it runnable. */
     onchange?: (language: string) => void;
   }
   let {
     id,
     language = $bindable(),
     active,
+    label = "Language",
     blocked = $bindable(false),
     plan = $bindable({ kind: "selected", file: null, note: null }),
     onchange,
@@ -43,14 +51,16 @@
 
   let files = $state.raw<ModelFile[]>([]);
   let selectedId = $state<number | null>(null);
+  let table = $state.raw<LanguageTable>(LANGUAGE_TIERS);
   let item = $state.raw<DownloadItem | null>(null);
   let loadError = $state<string | null>(null);
+  let typed = $state("");
 
-  const options = $derived(languageOptions(files, selectedId, language, true));
+  const options = $derived(languageOptions(files, selectedId, language, true, table));
 
   $effect(() => {
-    plan = planFor(files, selectedId, language);
-    blocked = plan.kind === "install";
+    plan = planFor(files, selectedId, language, table);
+    blocked = plan.kind === "install" || language === TYPED;
   });
 
   $effect(() => {
@@ -64,6 +74,8 @@
         api.getSettings(),
         api.recommendedDownloads(),
       ]);
+      // The shipped table stays when the command fails (an older backend).
+      table = await langApi.languageTable().catch(() => LANGUAGE_TIERS);
       files = f;
       const sel = Number(settings["selected_model.asr"] ?? "");
       selectedId = Number.isFinite(sel) && sel > 0 ? sel : null;
@@ -83,23 +95,53 @@
       onchange?.(language);
     }
   }
+
+  function useTyped(): void {
+    if (!isTag(typed)) return;
+    language = canonical(typed, table);
+    typed = "";
+    onchange?.(language);
+  }
 </script>
 
 <div class="lang">
   <label class="field">
-    <span class="label">Language</span>
+    <span class="label">{label}</span>
     <select
       {id}
       bind:value={language}
       onchange={(e) => {
         // The element's value: the binding may update after this handler.
         const v = e.currentTarget.value;
-        if (v !== OTHER) onchange?.(v);
+        if (v !== OTHER && v !== TYPED) onchange?.(v);
       }}
     >
       {#each options as o (o.code)}<option value={o.code} disabled={o.disabled}>{o.label}</option>{/each}
     </select>
   </label>
+  {#if language === TYPED}
+    <div class="typed">
+      <input
+        type="text"
+        bind:value={typed}
+        placeholder="A language tag, for example sw-KE"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Language tag"
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            useTyped();
+          }
+        }}
+      />
+      <button type="button" class="btn" onclick={useTyped} disabled={!isTag(typed)}>Use</button>
+    </div>
+    <p class="help">
+      Any BCP-47 tag the model may know. A tag no installed model lists is passed to the selected model as it is, not
+      checked.
+    </p>
+  {/if}
   {#if isAuto(language)}<p class="help">{AUTO_NOTE}</p>{/if}
   {#if plan.note && plan.kind !== "install"}<p class="help">{plan.note}</p>{/if}
   {#if loadError}<p class="help">Could not read the installed models ({loadError}); the job checks again when it starts.</p>{/if}
@@ -135,6 +177,14 @@
   }
   .label {
     font-weight: 600;
+  }
+  .typed {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .typed input {
+    flex: 1;
   }
   .help {
     margin: 4px 0 0;

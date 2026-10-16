@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { api, errorText, onEvent } from "../lib/api";
+  import { api, errorText, langApi, onEvent } from "../lib/api";
   import { copyLinks, downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
   import DownloadRow from "./DownloadRow.svelte";
   import RuntimeReleases from "./RuntimeReleases.svelte";
@@ -19,14 +19,14 @@
   import type { ModelSource } from "../lib/generated/ModelSource";
   import { SETTING_DEFAULTS, type SettingKey } from "../lib/generated/settingDefaults";
   import {
-    AUTO_NOTE,
+    LANGUAGE_TIERS,
     TIER_EXPECTATIONS,
     TIER_TITLES,
     canonical,
-    languageOptions,
     offeredLanguages,
-    planFor,
+    type LanguageTable,
   } from "../lib/languages";
+  import LanguageField from "./LanguageField.svelte";
   import { live } from "../lib/live.svelte";
   import { app, type Theme } from "../lib/state.svelte";
   import { updateBlocker } from "../lib/updateBlocker";
@@ -69,14 +69,12 @@
 
   const pinned = $derived(app.meetings.filter((m) => m.audio_keep));
   // Default language: what the installed speech-to-text models cover.
-  const asrFiles = $derived(status?.models_by_role.asr ?? []);
-  const defaultLanguage = $derived(canonical(app.setting("default_language")));
-  const languageChoices = $derived(languageOptions(asrFiles, status?.selected.asr ?? null, defaultLanguage, false));
-  const languagePlan = $derived(planFor(asrFiles, status?.selected.asr ?? null, defaultLanguage));
+  let defaultLanguage = $state(canonical(app.setting("default_language")));
+  let languageTable = $state.raw<LanguageTable>(LANGUAGE_TIERS);
   /** "Portuguese (Brazil, Portugal)": locale entries grouped under their language. */
   const tierNames = (tier: "ready" | "broad") => {
     const groups = new Map<string, string[]>();
-    for (const l of offeredLanguages().filter((x) => x.tier === tier)) {
+    for (const l of offeredLanguages(languageTable).filter((x) => x.tier === tier)) {
       const [base = l.name, region] = l.name.split(", ");
       const g = groups.get(base) ?? [];
       if (region) g.push(region);
@@ -219,6 +217,10 @@
   }
 
   onMount(() => {
+    langApi
+      .languageTable()
+      .then((t) => (languageTable = t))
+      .catch(() => {});
     void loadDevices();
     void loadStatus();
     void loadItems();
@@ -578,18 +580,14 @@
       </div>
     </fieldset>
     <div class="field">
-      <label class="label" for="language">Default language</label>
-      <select
+      <LanguageField
         id="language"
-        value={defaultLanguage}
-        onchange={(e) => app.setSetting("default_language", (e.currentTarget as HTMLSelectElement).value)}
-      >
-        {#each languageChoices as o (o.code)}<option value={o.code} disabled={o.disabled}>{o.label}</option>{/each}
-      </select>
-      <p class="help">
-        Preselected for new recordings and imports; each sheet can change it. {AUTO_NOTE}
-        {#if languagePlan.kind === "install"}{languagePlan.note} Download it under Models below.{:else if languagePlan.note}{languagePlan.note}{/if}
-      </p>
+        label="Default language"
+        bind:language={defaultLanguage}
+        active={true}
+        onchange={(v) => void app.setSetting("default_language", v)}
+      />
+      <p class="help">Preselected for new recordings and imports; each sheet can change it.</p>
     </div>
   </section>
 

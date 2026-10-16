@@ -426,8 +426,12 @@ fn select(paths: &DataPaths, store: &dyn RunStore, language: &str) -> CmdResult<
 }
 
 /// The language a recording runs in: `requested`, else `default_language`,
-/// as the tier table spells it (`ja` -> `ja-JP`).
-fn recording_language(store: &dyn RunStore, requested: Option<&str>) -> String {
+/// as the language table spells it (`ja` -> `ja-JP`).
+fn recording_language(
+    store: &dyn RunStore,
+    root: &std::path::Path,
+    requested: Option<&str>,
+) -> String {
     let language = requested
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -435,7 +439,7 @@ fn recording_language(store: &dyn RunStore, requested: Option<&str>) -> String {
         .unwrap_or_else(|| {
             settings::default_language(&settings::effective(store).unwrap_or_default())
         });
-    models::languages::canonical(&language)
+    models::languages::LanguageTable::load(root).canonical(&language)
 }
 
 /// Free VRAM from `nemo-speech doctor`, reusing a reading younger than
@@ -726,7 +730,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
         if demo {
             return Err("Recording is not available in the demo.".into());
         }
-        let language = recording_language(&*store, req.language.as_deref());
+        let language = recording_language(&*store, &paths.root, req.language.as_deref());
         let built = select(&paths, &*store, &language)?;
         let devices = capture::list_devices().map_err(|e| e.to_string())?;
         let mic = resolve_device(&devices, DeviceFlow::Capture, req.mic.clone(), strict)?;
@@ -1080,7 +1084,11 @@ pub(crate) fn startup(app: &AppHandle) {
                 log::info!("live server starts on the first Record (engine.preload is off)");
                 return;
             }
-            match select(&paths, &*store, &recording_language(&*store, None)) {
+            match select(
+                &paths,
+                &*store,
+                &recording_language(&*store, &paths.root, None),
+            ) {
                 Ok(built) => {
                     ensure_server(&app, &built.selection);
                 }
@@ -1365,7 +1373,7 @@ pub async fn prepare_recording(app: AppHandle, language: Option<String>) -> CmdR
         if demo || handle(&app).is_recording() {
             return Ok(());
         }
-        let language = recording_language(&*store, language.as_deref());
+        let language = recording_language(&*store, &paths.root, language.as_deref());
         let built = select(&paths, &*store, &language)?;
         if ensure_server_if(&app, &built.selection, true).is_none() {
             return Ok(());

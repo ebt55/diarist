@@ -586,9 +586,13 @@ fn transcribe(
             file.display()
         )));
     }
-    // As the tier table spells it (`ja` -> `ja-JP`); the engine then gives
-    // the runtime a tag the model's prompt dictionary has.
-    let language = models::languages::canonical(language);
+    // As the language table spells it (`ja` -> `ja-JP`); the engine then
+    // gives the runtime a tag the model's prompt dictionary has.
+    let table = models::languages::LanguageTable::load(&ctx.paths.root);
+    for n in &table.notes {
+        eprintln!("warning: languages: {n}");
+    }
+    let language = table.canonical(language);
     let language = language.as_str();
     let (built, switched) =
         models::select_engine_for(&ctx.paths, &*ctx.store, device, language, false, overrides)?;
@@ -600,11 +604,16 @@ fn transcribe(
                 models::switch_notice(reason, &selected, &sel.asr_file, language)
             );
         }
-    } else if overrides.asr.is_some() && !models::languages::covers(&sel.asr_file, language) {
+    } else if !models::languages::covers(&sel.asr_file, language) {
         eprintln!(
-            "warning: {} does not list {}; transcribing with it as asked (--asr-model)",
+            "warning: {} does not list {}; transcribing with it, not checked{}",
             sel.asr_file.display_name,
-            models::languages::label(language)
+            table.label(language),
+            if overrides.asr.is_some() {
+                " (--asr-model)"
+            } else {
+                ""
+            }
         );
     }
     if built.experimental {

@@ -5,13 +5,21 @@
   // folder. Nothing here is a gate: "Set up later" goes to the library, and
   // Import and Record say again what they miss when they are used.
   import { onMount } from "svelte";
-  import { api, errorText } from "../lib/api";
+  import { api, errorText, langApi } from "../lib/api";
   import { copyLinks, downloads, sizeMb } from "../lib/downloads.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
   import type { SetupStatus } from "../lib/generated/SetupStatus";
   import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
-  import { MULTILINGUAL_MODEL, canonical, offeredLanguages, primarySubtag, systemLanguage } from "../lib/languages";
+  import {
+    LANGUAGE_TIERS,
+    MULTILINGUAL_MODEL,
+    canonical,
+    offeredLanguages,
+    primarySubtag,
+    systemLanguage,
+    type LanguageTable,
+  } from "../lib/languages";
   import { app } from "../lib/state.svelte";
   import DownloadRow from "./DownloadRow.svelte";
   import Icon from "./Icon.svelte";
@@ -25,6 +33,7 @@
   let showReleases = $state(false);
   /** The meetings' usual language: English gets the EN model, any other Nemotron 3.5. */
   let meetingLanguage = $state(canonical(app.setting("default_language")));
+  let languageTable = $state.raw<LanguageTable>(LANGUAGE_TIERS);
   /** Manifest name of the default English model (`manifests/models.json`). */
   const EN_MODEL = "nemotron-en";
   const english = $derived(primarySubtag(meetingLanguage) === "en");
@@ -68,7 +77,11 @@
   }
 
   onMount(() => {
-    void refresh().then(seedLanguage);
+    void langApi
+      .languageTable()
+      .then((t) => (languageTable = t))
+      .catch(() => {})
+      .finally(() => void refresh().then(seedLanguage));
     const onRefresh = () => void refresh();
     window.addEventListener("app:refresh", onRefresh);
     return () => window.removeEventListener("app:refresh", onRefresh);
@@ -112,7 +125,10 @@
     await app.ready;
     if (!status?.needs_setup || app.settingBool("setup.language_seeded")) return;
     if (app.setting("default_language") === SETTING_DEFAULTS.default_language) {
-      meetingLanguage = systemLanguage(navigator.languages?.length ? navigator.languages : [navigator.language]);
+      meetingLanguage = systemLanguage(
+        navigator.languages?.length ? navigator.languages : [navigator.language],
+        languageTable,
+      );
       await app.setSetting("default_language", meetingLanguage);
     }
     await app.setSetting("setup.language_seeded", "true");
@@ -251,7 +267,7 @@
               bind:value={meetingLanguage}
               onchange={() => void app.setSetting("default_language", meetingLanguage)}
             >
-              {#each offeredLanguages() as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
+              {#each offeredLanguages(languageTable) as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
             </select>
           </label>
           <p class="help">
