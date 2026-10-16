@@ -27,7 +27,9 @@
     offeredLanguages,
     planFor,
   } from "../lib/languages";
+  import { live } from "../lib/live.svelte";
   import { app, type Theme } from "../lib/state.svelte";
+  import { updateBlocker } from "../lib/updateBlocker";
   import Icon from "./Icon.svelte";
 
   let status = $state.raw<EngineStatus | null>(null);
@@ -96,6 +98,8 @@
   let checkingUpdate = $state(false);
   let installingUpdate = $state(false);
   let version = $state("");
+  /** Why Install and restart waits (a recording, an import or a post-pass). */
+  const updateWait = $derived(updateBlocker(live.active || live.phase === "starting", app.jobs));
 
   const required = $derived(items?.filter((d) => d.required) ?? []);
   const optional = $derived(items?.filter((d) => !d.required) ?? []);
@@ -338,12 +342,19 @@
   }
 
   async function installUpdate() {
+    if (updateWait) {
+      app.toast("info", updateWait);
+      return;
+    }
     installingUpdate = true;
     try {
       await api.installUpdate();
     } catch (e) {
       installingUpdate = false;
-      app.error(`${errorText(e)}. Download the installer from the project page and run it; your data is kept`);
+      // The backend refuses while the job queue is busy (a job this window
+      // did not list yet): its message says what runs.
+      if (/still running|in the queue|Stop the recording/.test(errorText(e))) app.toast("info", errorText(e));
+      else app.error(`${errorText(e)}. Download the installer from the project page and run it; your data is kept`);
     }
   }
 
@@ -695,6 +706,10 @@
         />
         <span><strong>Only on issues</strong>: when the live session reported a degraded feed, engine restarts or gaps</span>
       </label>
+      <p class="help">
+        Only on issues keeps the live transcript, which uses the lower-latency setting; Always re-transcribes with the
+        file settings.
+      </p>
     </fieldset>
     <label class="radio block">
       <input
@@ -940,11 +955,18 @@
       </button>
       {#if update?.available}
         <span>Version {update.available} is available.</span>
-        <button type="button" class="btn btn-primary" onclick={installUpdate} disabled={installingUpdate}>
+        <button
+          type="button"
+          class="btn btn-primary"
+          onclick={installUpdate}
+          disabled={installingUpdate || updateWait !== null}
+          title={updateWait ?? undefined}
+        >
           <Icon name="download" />{installingUpdate ? "Installing…" : "Install and restart"}
         </button>
       {/if}
     </div>
+    {#if update?.available && updateWait}<p class="help">{updateWait}</p>{/if}
     {#if update?.notes}<pre class="notes">{update.notes}</pre>{/if}
   </section>
 </div>

@@ -1522,13 +1522,62 @@ pub async fn check_for_update(app: AppHandle) -> CmdResult<UpdateCheck> {
     })
 }
 
+/// Why an update must wait for the job queue: `running` names the job that
+/// runs (`None`: none), `queued` counts the ones waiting. The update
+/// restarts the app, which would end them. `None` when the queue is empty.
+fn update_busy_message(running: Option<&str>, queued: usize) -> Option<String> {
+    let waiting = match queued {
+        1 => "1 job waits".to_owned(),
+        n => format!("{n} jobs wait"),
+    };
+    match (running, queued) {
+        (None, 0) => None,
+        (Some(what), 0) => Some(format!(
+            "{what} is still running, and updating restarts Diarist. Wait for it to finish or \
+             cancel it, then update."
+        )),
+        (Some(what), _) => Some(format!(
+            "{what} is still running and {} in the queue, and updating restarts Diarist. \
+             Wait for them to finish or cancel them, then update.",
+            waiting.replacen(" job", " more job", 1)
+        )),
+        (None, 1) => Some(format!(
+            "{waiting} in the queue, and updating restarts Diarist. Wait for it to finish or \
+             cancel it, then update."
+        )),
+        (None, _) => Some(format!(
+            "{waiting} in the queue, and updating restarts Diarist. Wait for them to finish or \
+             cancel them, then update."
+        )),
+    }
+}
+
+/// Why an update cannot start now: a recording, or an import or post-pass
+/// queued or running (the restart would end it).
+fn update_blocker(app: &AppHandle) -> Option<String> {
+    if crate::live::handle(app).is_recording() {
+        return Some("Stop the recording before updating.".into());
+    }
+    let jobs = &app.state::<Jobs>().0;
+    let running = jobs
+        .running()
+        .map(|id| match crate::live::post_pass_title(app, &id) {
+            Some(t) if !t.is_empty() => format!("Finalizing \"{t}\""),
+            Some(_) => "Finalizing a recording".to_owned(),
+            None => "An import".to_owned(),
+        });
+    update_busy_message(running.as_deref(), jobs.queued().len())
+}
+
 /// Downloads and installs the available update (signature-checked by the
-/// updater), then restarts.
+/// updater), then restarts. Refused while recording or while the job queue
+/// is busy.
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     use tauri_plugin_updater::UpdaterExt;
-    if crate::live::handle(&app).is_recording() {
-        return Err("Stop the recording before updating.".into());
+    if let Some(why) = update_blocker(&app) {
+        log::info!("update refused: {why}");
+        return Err(why);
     }
     let update = app
         .updater()
@@ -2066,4 +2115,33 @@ pub async fn open_microphone_privacy() -> CmdResult<()> {
         "privacy-microphone",
         "Settings, Privacy & security, Microphone",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_busy_message;
+
+    #[test]
+    fn update_waits_for_the_queue_and_names_what_runs() {
+        assert_eq!(update_busy_message(None, 0), None);
+        let one = update_busy_message(Some("An import"), 0).unwrap();
+        assert!(one.starts_with("An import is still running"), "{one}");
+        assert!(one.contains("restarts Diarist"), "{one}");
+        assert!(one.contains("cancel it"), "{one}");
+        let more = update_busy_message(Some("Finalizing \"Standup\""), 2).unwrap();
+        assert!(
+            more.starts_with("Finalizing \"Standup\" is still running and 2 more jobs wait"),
+            "{more}"
+        );
+        assert!(more.contains("cancel them"), "{more}");
+        assert!(update_busy_message(Some("An import"), 1)
+            .unwrap()
+            .contains("1 more job wait"));
+        let waiting = update_busy_message(None, 1).unwrap();
+        assert!(waiting.starts_with("1 job waits in the queue"), "{waiting}");
+        assert!(waiting.contains("cancel it"), "{waiting}");
+        assert!(update_busy_message(None, 3)
+            .unwrap()
+            .starts_with("3 jobs wait in the queue"));
+    }
 }

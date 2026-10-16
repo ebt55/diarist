@@ -1246,6 +1246,14 @@ pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResul
     Ok(job_id)
 }
 
+/// The title of the meeting whose post-pass is job `job` (`None`: not a
+/// post-pass; an empty title is `Some("")`).
+pub(crate) fn post_pass_title(app: &AppHandle, job: &JobId) -> Option<String> {
+    lock(&handle(app).post_passes)
+        .get(&job.0)
+        .map(|p| p.title.clone())
+}
+
 /// Why meeting `meeting` cannot be deleted now: it is recording, or its
 /// post-pass is queued or running.
 pub(crate) fn delete_blocker(app: &AppHandle, meeting: MeetingId) -> Option<&'static str> {

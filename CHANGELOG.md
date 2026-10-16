@@ -22,6 +22,8 @@ All notable changes to Diarist. Versions follow semantic versioning.
   same way.
 - Fixed: Japanese and Chinese were transcribed with automatic language
   detection; the language is now passed to the model.
+- Fixed: Install and restart ended an import or a post-pass in progress.
+  It now waits, and says which job is running.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
 - Fixed: the taskbar button showed the icon blurred (a 32 px image
   enlarged). The window, its taskbar button and the tray now take the
