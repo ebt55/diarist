@@ -34,6 +34,9 @@ RUNNING = {"file-explorer", "firefox", "diarist", "visual-studio-code"}
 PALETTE = ("#4e79a7", "#f28e2b", "#e15759")
 BRIGHT = ("#5b86b5", "#ffa446", "#f26767")
 INK, PAPER, SLATE = "#1b1f27", "#f6f3ec", "#64748b"
+# Speaker 2 orange deepened to clear 3:1 on paper: same OKLCH hue (59.4), the most saturated
+# sRGB colour at that hue with relative luminance at or below 0.263.
+AMBER = "#d27401"
 
 # name, file, label, tile, edge, dog-ear, lines
 CANDIDATES = [
@@ -41,10 +44,13 @@ CANDIDATES = [
     ("v2-a-paper", EXPLORATIONS / "v2-a-paper.svg", "A: paper tile, ink lines", PAPER, None, SLATE, (INK,) * 3),
     ("v2-a2-paper-colour", EXPLORATIONS / "v2-a2-paper-colour.svg", "A2: paper tile, speaker lines", PAPER, None, SLATE, PALETTE),
     ("v2-a3-paper-slate-edge", EXPLORATIONS / "v2-a3-paper-slate-edge.svg", "A3: paper tile, slate edge, ink lines", PAPER, SLATE, SLATE, (INK,) * 3),
+    ("v2-a4-paper-colour-edge", EXPLORATIONS / "v2-a4-paper-colour-edge.svg", "A4: paper tile, slate edge, speaker lines", PAPER, SLATE, SLATE, ("#4e79a7", AMBER, "#e15759")),
     ("v2-b-blue", EXPLORATIONS / "v2-b-blue.svg", "B: brand-blue tile", "#4e79a7", None, "#a2b6ca", (PAPER, "#f28e2b", "#e15759")),
     ("v2-c-ink-edge", EXPLORATIONS / "v2-c-ink-edge.svg", "C: ink tile, #2a3040 edge, thicker lines", INK, "#2a3040", SLATE, BRIGHT),
     ("v2-c2-ink-slate-edge", EXPLORATIONS / "v2-c2-ink-slate-edge.svg", "C2: ink tile, slate edge, thicker lines", INK, SLATE, SLATE, BRIGHT),
 ]
+# The short list for the pick (taskbar-sheet-final.png).
+FINAL = ("current", "v2-a3-paper-slate-edge", "v2-a4-paper-colour-edge", "v2-c2-ink-slate-edge")
 
 
 def luminance(hex_colour):
@@ -71,7 +77,7 @@ def font(size, bold=False):
 
 def rasterise(svg, work, name):
     out = {}
-    for px in (16, 24, 32, 48):
+    for px in (16, 20, 24, 32, 48):
         png = work / f"{name}-{px}.png"
         subprocess.run(["resvg", "-w", str(px), "-h", str(px), str(svg), str(png)], check=True)
         out[px] = Image.open(png).convert("RGBA")
@@ -97,10 +103,11 @@ def strip(icon, neighbours, size, bg):
     return im
 
 
-def zoom16(icon, bg):
-    field = Image.new("RGB", (20, 20), bg)
-    field.paste(icon[16], (2, 2), icon[16])
-    return field.resize((160, 160), Image.NEAREST)
+def zoom(icon, bg, px=16):
+    """The icon at px on a 2 px margin of taskbar colour, at 8x."""
+    field = Image.new("RGB", (px + 4, px + 4), bg)
+    field.paste(icon[px], (2, 2), icon[px])
+    return field.resize((field.width * 8, field.height * 8), Image.NEAREST)
 
 
 def framed(canvas, im, xy):
@@ -141,38 +148,49 @@ def candidate_sheet(c, icon, neighbours):
             framed(sheet, st, (x0 + label_w, y))
             y += st.height + 18
         d.text((zx, top - 30), "16 px, 8x", fill="#444444", font=font(15))
-        framed(sheet, zoom16(icon, bg), (zx, top))
+        framed(sheet, zoom(icon, bg), (zx, top))
     d.text((x0, H - 26), "Neighbours: the apps pinned on this PC, as the shell renders them at each size. "
            f"Dark is {DARK}, the colour sampled from this PC's taskbar; light is {LIGHT}.",
            fill="#777777", font=font(13))
     return sheet
 
 
-def all_sheet(cands, icons, neighbours):
+def matrix_sheet(cands, icons, neighbours, title, zooms=(16,)):
+    """One row per candidate: the three taskbar strips, then the zoomed small sizes; dark block, then light."""
     x0, label_w, gap = 24, 300, 24
     widths = [strip(icons["current"], neighbours, s, DARK).width for s in SIZES]
-    W = x0 + label_w + sum(widths) + gap * len(SIZES) + 2 * 160 + gap + x0
-    row_h = 160 + 16
+    zw = [(z + 4) * 8 for z in zooms]
+    W = x0 + label_w + sum(widths) + gap * len(SIZES) + sum(zw) + gap * len(zooms) + x0
+    row_h = max(zw) + 16
     H = 70 + 2 * (40 + row_h * len(cands)) + 30
     sheet = Image.new("RGB", (W, H), "#ffffff")
     d = ImageDraw.Draw(sheet)
-    d.text((x0, 16), "Icon v2 candidates in the taskbar: 24, 32 and 48 px, and 16 px at 8x",
-           fill="#111111", font=font(22, True))
+    d.text((x0, 16), title, fill="#111111", font=font(22, True))
     y = 70
     for theme, bg in (("Dark taskbar", DARK), ("Light taskbar", LIGHT)):
         d.text((x0, y), f"{theme} ({bg})", fill="#111111", font=font(17, True))
+        x = x0 + label_w + sum(widths) + gap * len(SIZES)
+        for z, w in zip(zooms, zw):
+            d.text((x, y + 4), f"{z} px, 8x", fill="#444444", font=font(13))
+            x += w + gap
         y += 40
         for c in cands:
-            name, _, label, tile, *_ = c
-            d.text((x0, y + 50), name, fill="#111111", font=font(16, True))
-            d.text((x0, y + 74), label, fill="#444444", font=font(13))
-            d.text((x0, y + 94), f"tile {contrast(tile, bg):.2f}:1 on {bg}", fill="#444444", font=font(13))
+            name, _, label, tile, edge, _, lines = c
+            mid = y + (row_h - 16) // 2
+            d.text((x0, mid - 44), name, fill="#111111", font=font(16, True))
+            d.text((x0, mid - 20), label, fill="#444444", font=font(13))
+            rim = f"edge {contrast(edge, bg):.2f}:1, " if edge else ""
+            d.text((x0, mid), f"{rim}tile {contrast(tile, bg):.2f}:1 on {bg}", fill="#444444", font=font(13))
+            d.text((x0, mid + 20), "lines " + " / ".join(f"{contrast(l, tile):.2f}" for l in lines) + " on tile",
+                   fill="#444444", font=font(13))
             x = x0 + label_w
             for s, w in zip(SIZES, widths):
                 st = strip(icons[name], neighbours, s, bg)
-                framed(sheet, st, (x, y + (160 - st.height) // 2))
+                framed(sheet, st, (x, y + (row_h - 16 - st.height) // 2))
                 x += w + gap
-            framed(sheet, zoom16(icons[name], bg), (x, y))
+            for z, w in zip(zooms, zw):
+                framed(sheet, zoom(icons[name], bg, z), (x, y + (row_h - 16 - w) // 2))
+                x += w + gap
             y += row_h
     d.text((x0, H - 26), "Neighbours: the apps pinned on this PC, as the shell renders them at each size. "
            f"Dark is {DARK}, sampled from this PC's taskbar; light is {LIGHT}.", fill="#777777", font=font(13))
@@ -198,7 +216,14 @@ def main():
 
     for c in CANDIDATES:
         save(candidate_sheet(c, icons[c[0]], neighbours), EXPLORATIONS / f"taskbar-sheet-{c[0]}.png")
-    save(all_sheet(CANDIDATES, icons, neighbours), EXPLORATIONS / "taskbar-sheet-all.png")
+    save(matrix_sheet(CANDIDATES, icons, neighbours,
+                      "Icon v2 candidates in the taskbar: 24, 32 and 48 px, and 16 px at 8x"),
+         EXPLORATIONS / "taskbar-sheet-all.png")
+    final = [c for c in CANDIDATES if c[0] in FINAL]
+    save(matrix_sheet(final, icons, neighbours,
+                      "Icon v2 short list: taskbar at 24, 32 and 48 px; 16 px (100%) and 20 px (125%) tray sizes at 8x",
+                      zooms=(16, 20)),
+         EXPLORATIONS / "taskbar-sheet-final.png")
 
     print()
     print(f"| Candidate | Tile on {DARK} | Tile on {LIGHT} | Edge on {DARK} / {LIGHT} | Line 1 / 2 / 3 on tile | Dog-ear on tile |")
