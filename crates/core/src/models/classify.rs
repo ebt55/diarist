@@ -122,6 +122,9 @@ pub struct Sidecar {
     pub diarize: Option<bool>,
     pub languages: Option<Vec<String>>,
     pub vram_mb: Option<u32>,
+    /// Decoder lookahead for file jobs (`--asr.streaming.rnnt_right_context`,
+    /// 80 ms frames); wins over the manifest's value.
+    pub file_right_context: Option<u32>,
 }
 
 impl Sidecar {
@@ -163,6 +166,9 @@ impl Sidecar {
         }
         if let Some(v) = self.vram_mb {
             c.capabilities.vram_mb_measured = Some(v);
+        }
+        if let Some(v) = self.file_right_context {
+            c.capabilities.file_right_context = Some(v);
         }
     }
 }
@@ -258,7 +264,7 @@ mod tests {
         assert_eq!(Sidecar::read(&model).unwrap(), None);
         std::fs::write(
             Sidecar::path_for(&model),
-            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900}"#,
+            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900,"file_right_context":13}"#,
         )
         .unwrap();
         let sc = Sidecar::read(&model).unwrap().unwrap();
@@ -268,6 +274,11 @@ mod tests {
         assert!(c.capabilities.streaming);
         assert_eq!(c.capabilities.languages, ["fr"]);
         assert_eq!(c.capabilities.vram_mb_measured, Some(900));
+        assert_eq!(c.capabilities.file_right_context, Some(13));
+        // A hand-dropped model without the key gets no lookahead flag.
+        let mut c = classify(&header(&[("general.architecture", s("asr"))]), 1);
+        Sidecar::default().apply(&mut c);
+        assert_eq!(c.capabilities.file_right_context, None);
         std::fs::write(Sidecar::path_for(&model), "{not json").unwrap();
         assert!(Sidecar::read(&model).is_err());
     }

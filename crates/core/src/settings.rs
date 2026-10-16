@@ -52,6 +52,11 @@ pub const SETUP_LATER: &str = "setup.later";
 /// Low-VRAM mode: file imports use Nemotron 3.5 when it is installed (it
 /// peaks at 1.8 GB against 2.6 GB for the EN model).
 pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
+/// Decoder lookahead of file jobs and the post-pass, no UI (docs/04 section
+/// 5): "" or `model` = the ASR model's own value, `low` = none (the runtime
+/// default, the low-latency setting live keeps), a number = that many 80 ms
+/// frames for every model ([`file_lookahead`]).
+pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
 /// The first-run screen has set `default_language` from the system
 /// language (done once).
 pub const SETUP_LANGUAGE_SEEDED: &str = "setup.language_seeded";
@@ -79,6 +84,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_PRELOAD, "false"),
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
+    (ENGINE_FILE_LOOKAHEAD, ""),
     (SETUP_LATER, "false"),
     (SETUP_LANGUAGE_SEEDED, "false"),
 ];
@@ -150,6 +156,41 @@ pub fn engine_idle_timeout(settings: &Settings) -> Option<std::time::Duration> {
     match get_u64(settings, ENGINE_IDLE_MINUTES) {
         0 => None,
         m => Some(std::time::Duration::from_secs(m.min(7 * 24 * 60) * 60)),
+    }
+}
+
+/// The `engine.file_lookahead` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLookahead {
+    /// The ASR model's `file_right_context` (manifest entry or sidecar).
+    Model,
+    /// No flag: the runtime default.
+    Low,
+    /// This value for every model.
+    Frames(u32),
+}
+
+impl FileLookahead {
+    /// The lookahead to pass for a model whose own value is `model`.
+    pub fn resolve(self, model: Option<u32>) -> Option<u32> {
+        match self {
+            Self::Model => model,
+            Self::Low => None,
+            Self::Frames(n) => Some(n),
+        }
+    }
+}
+
+/// `engine.file_lookahead`: `low` (any case), a non-negative integer, else
+/// (`""`, `model`, anything unreadable) the model's own value.
+pub fn file_lookahead(settings: &Settings) -> FileLookahead {
+    let v = get(settings, ENGINE_FILE_LOOKAHEAD).trim();
+    if v.eq_ignore_ascii_case("low") {
+        FileLookahead::Low
+    } else if let Ok(n) = v.parse::<u32>() {
+        FileLookahead::Frames(n)
+    } else {
+        FileLookahead::Model
     }
 }
 
@@ -226,6 +267,42 @@ mod tests {
             10
         );
         assert_eq!(get(&Settings::default(), "unknown"), "");
+    }
+
+    #[test]
+    fn file_lookahead_forms() {
+        let store = MemoryStore::new();
+        let read = |v: Option<&str>| {
+            match v {
+                Some(v) => store.set_setting(ENGINE_FILE_LOOKAHEAD, v).unwrap(),
+                None => store.remove_setting(ENGINE_FILE_LOOKAHEAD).unwrap(),
+            }
+            file_lookahead(&effective(&store).unwrap())
+        };
+        // The default, `model` and anything unreadable: the model's value.
+        for v in [
+            None,
+            Some(""),
+            Some("model"),
+            Some(" Model "),
+            Some("-1"),
+            Some("high"),
+        ] {
+            let got = read(v);
+            assert_eq!(got, FileLookahead::Model, "{v:?}");
+            assert_eq!(got.resolve(Some(13)), Some(13));
+            assert_eq!(got.resolve(None), None, "no value, no flag");
+        }
+        // `low`: no flag for any model.
+        let low = read(Some("LOW"));
+        assert_eq!(low, FileLookahead::Low);
+        assert_eq!(low.resolve(Some(13)), None);
+        // A number: that value for every model, also one without its own.
+        let six = read(Some(" 6 "));
+        assert_eq!(six, FileLookahead::Frames(6));
+        assert_eq!(six.resolve(Some(13)), Some(6));
+        assert_eq!(six.resolve(None), Some(6));
+        assert_eq!(read(Some("0")).resolve(Some(13)), Some(0));
     }
 
     /// Writes `generated/settingDefaults.ts` (name matches the `export_bindings`

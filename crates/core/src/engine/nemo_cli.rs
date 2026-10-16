@@ -3,7 +3,12 @@
 //! One `nemo-speech.exe` child per job:
 //!
 //! `transcribe <wav> --model <asr.gguf> [--language <lang>] --stream --endpointing
-//!  --diarize --diar-model <diar.gguf> --device cuda:0 --json --output <words.json> --force`
+//!  [--asr.streaming.rnnt_right_context <N>] --diarize --diar-model <diar.gguf>
+//!  --device cuda:0 --json --output <words.json> --force`
+//!
+//! `N` is the selected model's file lookahead (13 frames, 1.12 s, for both
+//! manifest Nemotron models): latency does not matter here, while live keeps
+//! the runtime's low-latency default.
 //!
 //! with the reduced `PATH` and `NEMO_SPEECH_MODEL_DIR` from
 //! [`super::process`]. The runtime prints no progress, so `Progress` is
@@ -46,6 +51,9 @@ use crate::types::{Channel, JobId};
 pub const EXPECTED_REALTIME_FACTOR: f64 = 26.0;
 /// Bytes of stderr kept for error messages.
 const STDERR_TAIL: usize = 2_048;
+/// The runtime key for the decoder lookahead of cache-aware RNNT models
+/// (80 ms frames; runtime default 1, `-1` = the GGUF header's value).
+pub const RIGHT_CONTEXT_FLAG: &str = "--asr.streaming.rnnt_right_context";
 
 // ---- output parsing ---------------------------------------------------------------
 
@@ -484,7 +492,13 @@ pub struct NemoCliEngine {
     /// model, which ignores it; [`crate::models::select_engine`] decides from
     /// the model's languages.
     pub pass_language: bool,
+    /// Decoder lookahead (`--asr.streaming.rnnt_right_context N`, 80 ms
+    /// frames): the model's `file_right_context` or the
+    /// `engine.file_lookahead` setting ([`crate::models::select_engine`]
+    /// decides). `None` passes no flag: the runtime default, 1.
+    pub right_context: Option<u32>,
     /// Extra flags appended verbatim to `transcribe` (e.g. `--verbatim`).
+    /// One that sets the lookahead itself replaces [`Self::right_context`].
     pub extra_args: Vec<String>,
     running: Running,
 }
@@ -505,6 +519,7 @@ impl NemoCliEngine {
             version: None,
             realtime_factor: EXPECTED_REALTIME_FACTOR,
             pass_language: true,
+            right_context: None,
             extra_args: Vec::new(),
             running: Running::default(),
         }
@@ -523,6 +538,16 @@ impl NemoCliEngine {
         }
         a.push("--stream".into());
         a.push("--endpointing".into());
+        // An `--engine-arg` lookahead (the eval harness) is the only one.
+        let in_extra = self.extra_args.iter().any(|x| {
+            x == RIGHT_CONTEXT_FLAG
+                || x.strip_prefix(RIGHT_CONTEXT_FLAG)
+                    .is_some_and(|r| r.starts_with('='))
+        });
+        if let Some(r) = self.right_context.filter(|_| !in_extra) {
+            a.push(RIGHT_CONTEXT_FLAG.into());
+            a.push(r.to_string().into());
+        }
         if job.diarize {
             a.push("--diarize".into());
             a.push("--diar-model".into());
@@ -1169,6 +1194,74 @@ mod tests {
         let info = e.info();
         assert_eq!(info.models["asr"], "asr.gguf");
         assert_eq!(info.device, "cuda:0");
+    }
+
+    #[test]
+    fn lookahead_flag_follows_the_model() {
+        let mut e = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/asr.gguf", "d.gguf");
+        let job = FileJob {
+            job_id: JobId("j".into()),
+            wav_path: "E:/audio/u/source.wav".into(),
+            diarize: true,
+            language: "de".into(),
+            diar_preset: DiarPreset::Streaming,
+        };
+        let out = NemoCliEngine::output_path(&job.wav_path);
+        let args = |e: &NemoCliEngine| -> Vec<String> {
+            e.args(&job, &out)
+                .iter()
+                .map(|a| a.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        // A model without a file lookahead: no flag, the runtime default.
+        assert!(!args(&e).iter().any(|a| a.contains("rnnt_right_context")));
+        // With one: after `--endpointing`, before the diarizer and the extras.
+        e.right_context = Some(13);
+        e.extra_args = vec!["--verbatim".into()];
+        assert_eq!(
+            args(&e),
+            [
+                "transcribe",
+                "E:/audio/u/source.wav",
+                "--model",
+                "E:/models/asr.gguf",
+                "--language",
+                "de",
+                "--stream",
+                "--endpointing",
+                "--asr.streaming.rnnt_right_context",
+                "13",
+                "--diarize",
+                "--diar-model",
+                "d.gguf",
+                "--device",
+                "cuda:0",
+                "--json",
+                "--output",
+                "E:/audio/u/source.words.json",
+                "--force",
+                "--verbatim"
+            ]
+        );
+        // A lookahead among the extra flags (`--engine-arg`) is the only one.
+        for extra in [
+            vec!["--asr.streaming.rnnt_right_context".to_owned(), "1".into()],
+            vec!["--asr.streaming.rnnt_right_context=1".to_owned()],
+        ] {
+            e.extra_args = extra.clone();
+            let a = args(&e);
+            assert_eq!(
+                a.iter()
+                    .filter(|a| a.contains("rnnt_right_context"))
+                    .count(),
+                1,
+                "{a:?}"
+            );
+            assert!(a.ends_with(&extra), "{a:?}");
+        }
+        // Another `--asr.streaming.*` key does not count.
+        e.extra_args = vec!["--asr.streaming.rnnt_right_context_x".into(), "2".into()];
+        assert!(args(&e).iter().any(|a| a == "13"));
     }
 
     #[test]

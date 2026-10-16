@@ -57,6 +57,7 @@ pub use setup::{download_items, readiness, setup_status, MissingPart, Readiness,
 
 use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
+use crate::settings::{self, FileLookahead};
 use crate::store::{Store, StoreError};
 use crate::types::{ModelFile, ModelFileId, ModelRole, ModelSource};
 use crate::views::{selection_key, EngineStatus};
@@ -139,6 +140,9 @@ pub struct SelectedEngine {
     /// The ASR model is not a streaming one, so the experimental cascade
     /// (`NemoCascadeEngine`, may drop speech) runs instead of `NemoCliEngine`.
     pub experimental: bool,
+    /// The decoder lookahead the file engine passes ([`file_right_context`];
+    /// `None`: the runtime default, always for the cascade).
+    pub right_context: Option<u32>,
 }
 
 /// Per-invocation changes to the stored selection (the CLI's `--asr-model`,
@@ -186,6 +190,17 @@ pub fn select_engine_with(
     // runtime's own error is shown if it is not one.
     let experimental =
         sel.asr_file.role != ModelRole::Unknown && !sel.asr_file.capabilities.streaming;
+    // File jobs and the post-pass run at the model's full lookahead; live
+    // keeps the runtime's low-latency default (`engine::live_ws`).
+    let right_context = if experimental {
+        None
+    } else {
+        file_right_context(
+            &sel.asr_file,
+            settings::file_lookahead(&store.get_settings()?),
+            Manifest::load(&paths.root).ok().as_ref(),
+        )
+    };
     let inner: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
@@ -199,6 +214,7 @@ pub fn select_engine_with(
         // `--language` only for multilingual models (Nemotron 3.5); the EN
         // model ignores it. The meeting keeps its language either way.
         e.pass_language = is_multilingual(&sel.asr_file);
+        e.right_context = right_context;
         e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     };
@@ -214,7 +230,26 @@ pub fn select_engine_with(
         diarize_runner,
         selection: sel,
         experimental,
+        right_context,
     })
+}
+
+/// The decoder lookahead file jobs and the post-pass run `file` at: the
+/// `engine.file_lookahead` setting when it is `low` (none) or a number,
+/// else the model's own `file_right_context` (its manifest entry or
+/// `<file>.meet.json`; for a row scanned before the field existed, the
+/// `manifest` entry it matched). A model without one gets no flag, so an
+/// unknown model is never pushed past what it supports.
+pub fn file_right_context(
+    file: &ModelFile,
+    setting: FileLookahead,
+    manifest: Option<&Manifest>,
+) -> Option<u32> {
+    let own = file.capabilities.file_right_context.or_else(|| {
+        let name = file.manifest_name.as_deref()?;
+        manifest?.model(name)?.file_right_context
+    });
+    setting.resolve(own)
 }
 
 /// The manifest model low-VRAM mode switches file imports to: Nemotron 3.5,
@@ -896,6 +931,75 @@ mod tests {
                 .unwrap()
                 .display_name,
             "en"
+        );
+    }
+
+    #[test]
+    fn file_jobs_run_at_the_model_lookahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let mut en = scanned("models/en.gguf", ModelRole::Asr, "en");
+        en.capabilities.file_right_context = Some(13);
+        let mut tdt = scanned("models/tdt.gguf", ModelRole::Asr, "tdt");
+        tdt.capabilities.streaming = false;
+        tdt.capabilities.file_right_context = Some(13);
+        store
+            .sync_model_files(
+                &[
+                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
+                    en,
+                    scanned("models/mine.gguf", ModelRole::Asr, "mine"),
+                    tdt,
+                    scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
+                ],
+                1,
+            )
+            .unwrap();
+        select(&store, ModelRole::Engine, "e").unwrap();
+        select(&store, ModelRole::Asr, "en").unwrap();
+        select(&store, ModelRole::Diarizer, "diar").unwrap();
+        let rc = |asr: Option<&str>| {
+            let ov = EngineOverrides {
+                asr: asr.map(Into::into),
+                ..Default::default()
+            };
+            select_engine_with(&paths, &store, "cpu", &ov)
+                .unwrap()
+                .right_context
+        };
+        assert_eq!(rc(None), Some(13));
+        // A hand-dropped model without a value gets no flag; the cascade never.
+        assert_eq!(rc(Some("mine")), None);
+        assert_eq!(rc(Some("tdt")), None);
+        // `low` drops the flag; a number applies to every streaming model.
+        store
+            .set_setting(settings::ENGINE_FILE_LOOKAHEAD, "low")
+            .unwrap();
+        assert_eq!(rc(None), None);
+        store
+            .set_setting(settings::ENGINE_FILE_LOOKAHEAD, "6")
+            .unwrap();
+        assert_eq!((rc(None), rc(Some("mine"))), (Some(6), Some(6)));
+        assert_eq!(rc(Some("tdt")), None);
+        store
+            .set_setting(settings::ENGINE_FILE_LOOKAHEAD, "model")
+            .unwrap();
+        assert_eq!(rc(None), Some(13));
+
+        // A row scanned before the field existed: the manifest entry it matched.
+        let mut old = selected_file(&store, ModelRole::Asr).unwrap().unwrap();
+        old.capabilities.file_right_context = None;
+        old.manifest_name = Some("nemotron-3.5".into());
+        let builtin = Manifest::builtin();
+        assert_eq!(
+            file_right_context(&old, FileLookahead::Model, Some(&builtin)),
+            Some(13)
+        );
+        assert_eq!(file_right_context(&old, FileLookahead::Model, None), None);
+        assert_eq!(
+            file_right_context(&old, FileLookahead::Low, Some(&builtin)),
+            None
         );
     }
 

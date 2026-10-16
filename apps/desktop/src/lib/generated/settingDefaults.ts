@@ -21,6 +21,7 @@ export const SETTING_DEFAULTS = {
   "engine.preload": "false",
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",
+  "engine.file_lookahead": "",
   "setup.later": "false",
   "setup.language_seeded": "false",
 } as const;

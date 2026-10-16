@@ -299,6 +299,12 @@ pub struct ModelCapabilities {
     pub vram_mb_measured: Option<u32>,
     /// Estimated from file size when nothing was measured.
     pub vram_mb_estimate: Option<u32>,
+    /// Decoder lookahead for file jobs and the post-pass
+    /// (`--asr.streaming.rnnt_right_context`, 80 ms frames), from the
+    /// manifest entry or the `<file>.meet.json` sidecar. `None`: no flag,
+    /// the runtime default (the low-latency setting live keeps).
+    #[serde(default)]
+    pub file_right_context: Option<u32>,
 }
 
 /// A file the model scanner found (`model_files`).

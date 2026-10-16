@@ -529,6 +529,7 @@ fn seed_model_files(st: &mut State) {
                 languages: f.languages.iter().map(|l| (*l).to_owned()).collect(),
                 vram_mb_measured: f.vram_measured,
                 vram_mb_estimate: f.vram_estimate,
+                file_right_context: None,
             },
             manifest_name: f.manifest.map(str::to_owned),
         };

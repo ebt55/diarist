@@ -276,6 +276,10 @@ fn scan_model(
         if c.capabilities.vram_mb_measured.is_none() {
             c.capabilities.vram_mb_measured = m.vram_mb;
         }
+        // The sidecar's value wins, as for VRAM.
+        if c.capabilities.file_right_context.is_none() {
+            c.capabilities.file_right_context = m.file_right_context;
+        }
         if c.role == ModelRole::Unknown {
             c.role = m.role;
         }
@@ -524,6 +528,7 @@ mod tests {
             languages: vec![],
             vram_mb: Some(100),
             vram_note: None,
+            file_right_context: None,
         };
         let manifest = Manifest {
             models: vec![entry],
@@ -689,6 +694,12 @@ mod tests {
             f.sha256.as_deref(),
             Some(manifest.models[0].sha256.as_str())
         );
+        // The manifest's file lookahead reaches the capabilities; a sidecar wins.
+        assert_eq!(f.capabilities.file_right_context, Some(13));
+        std::fs::write(Sidecar::path_for(&p), r#"{"file_right_context": 6}"#).unwrap();
+        let r = scan(&paths, &store, &manifest).unwrap();
+        assert_eq!(r.files[0].capabilities.file_right_context, Some(6));
+        assert_eq!(r.files[0].manifest_name.as_deref(), Some("nemotron-3.5"));
     }
 
     #[test]

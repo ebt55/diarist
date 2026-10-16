@@ -15,4 +15,11 @@ vram_mb_measured: number | null,
 /**
  * Estimated from file size when nothing was measured.
  */
-vram_mb_estimate: number | null, };
+vram_mb_estimate: number | null, 
+/**
+ * Decoder lookahead for file jobs and the post-pass
+ * (`--asr.streaming.rnnt_right_context`, 80 ms frames), from the
+ * manifest entry or the `<file>.meet.json` sidecar. `None`: no flag,
+ * the runtime default (the low-latency setting live keeps).
+ */
+file_right_context: number | null, };

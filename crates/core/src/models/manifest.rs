@@ -63,6 +63,13 @@ pub struct ModelEntry {
     pub vram_mb: Option<u32>,
     #[serde(default)]
     pub vram_note: Option<String>,
+    /// Decoder lookahead for file jobs and the post-pass
+    /// (`--asr.streaming.rnnt_right_context`, 80 ms frames), copied into the
+    /// matching file's capabilities. Explicit, because `-1` (the GGUF
+    /// header's value) is 13 for the EN model but 3 for the pinned Nemotron
+    /// 3.5. Absent: no flag, the runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_right_context: Option<u32>,
 }
 
 impl ModelEntry {
@@ -246,6 +253,24 @@ mod tests {
         assert_eq!(engine.version, "0.2.0");
         assert_eq!(engine.sha256.len(), 64);
         assert!(TESTED_ENGINE_VERSIONS.contains(&engine.version.as_str()));
+    }
+
+    #[test]
+    fn file_lookahead_is_explicit_for_both_nemotron_models() {
+        let m = Manifest::builtin();
+        let rc = |n: &str| m.model(n).unwrap().file_right_context;
+        // 13 frames (1.12 s) for both, never `-1`: the pinned 3.5 GGUF's
+        // header says 3 (docs/plans/12, section 1).
+        assert_eq!(rc("nemotron-en"), Some(13));
+        assert_eq!(rc("nemotron-3.5"), Some(13));
+        assert_eq!(rc("nemotron-3-diarization"), None);
+        assert_eq!(rc("parakeet-tdt"), None, "offline TDT: no such key");
+        // Round trip: written where set, left out elsewhere.
+        let json = serde_json::to_string(&m.models).unwrap();
+        assert_eq!(json.matches(r#""file_right_context":13"#).count(), 2);
+        assert_eq!(json.matches("file_right_context").count(), 2);
+        let back: Vec<ModelEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m.models);
     }
 
     #[test]

@@ -24,6 +24,9 @@ All notable changes to Diarist. Versions follow semantic versioning.
   detection; the language is now passed to the model.
 - Fixed: Install and restart ended an import or a post-pass in progress.
   It now waits, and says which job is running.
+- Changed: imports and the post-pass after Stop use the speech model's full
+  lookahead (about 1 to 2 WER points better on the hand-labelled meeting,
+  and faster); live recording keeps the low-latency setting.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
 - Fixed: the taskbar button showed the icon blurred (a 32 px image
   enlarged). The window, its taskbar button and the tray now take the

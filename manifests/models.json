@@ -16,6 +16,7 @@
     "licence": "NVIDIA Open Model License (OpenMDW 1.1)",
     "streaming": true,
     "languages": ["multi"],
+    "file_right_context": 13,
     "vram_mb": 1820,
     "vram_note": "peak delta of the file pass with the diarizer, 77-minute recording, RTX 3080 (research/08 section 7)"
   },
@@ -54,6 +55,7 @@
     "licence": "NVIDIA Open Model License",
     "streaming": true,
     "languages": ["en"],
+    "file_right_context": 13,
     "vram_mb": 2580,
     "vram_note": "peak delta of the file pass with the diarizer, 77-minute recording, RTX 3080 (research/08 section 7)"
   },
