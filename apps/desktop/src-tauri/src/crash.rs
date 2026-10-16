@@ -91,7 +91,7 @@ pub(crate) const WEBVIEW_ERRORS_JS: &str = r#"(() => {
     const r = e.reason;
     if (r instanceof Error) send("unhandledrejection", `${r.name}: ${r.message}`, r.stack);
     else if (typeof r === "string") send("unhandledrejection", r, null);
-    else send("unhandledrejection", `a ${r === null ? "null" : typeof r} value`, null);
+    else send("unhandledrejection", `a value of type ${r === null ? "null" : typeof r} (not logged)`, null);
   });
 })();"#;
 
