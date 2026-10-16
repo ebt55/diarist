@@ -158,3 +158,14 @@ export async function onJobEvent(cb: (event: JobEvent) => void): Promise<Unliste
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<UnlistenFn> {
   return listen<T>(name, (e) => cb(e.payload));
 }
+
+/**
+ * The language-aware forms of `import_file`, `check_ready` and
+ * `prepare_recording` (the import and start sheets, `lib/languages.ts`).
+ */
+export const langApi = {
+  importFile: (path: string, language: string) => invoke<JobId>("import_file", { path, title: null, language }),
+  checkReady: (action: "import" | "record", language: string) =>
+    invoke<Readiness>("check_ready", { action, language }),
+  prepareRecording: (language: string) => invoke<void>("prepare_recording", { language }),
+};
