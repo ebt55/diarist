@@ -88,6 +88,10 @@ bug report.
   import or post-pass whose words come back mostly unknown tokens stops
   with "The model could not transcribe this language (unknown tokens)" and
   keeps the meeting.
+- Fixed: the Vulkan and CPU runtime packages did not run because the app
+  always asked for the CUDA device; the device now follows the installed
+  package (Vulkan measured at 25 times real time on an RTX 3080, CPU at 3
+  times).
 
 ## [0.1.0-beta.1] - 2026-10-15
 
