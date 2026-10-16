@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
-  <title>Diarist (16 px frame)</title>
-  <!-- icon.svg at 16 px with the edge widened from half a pixel to a whole one, so the
-       outline stays crisp on a light taskbar or tray; the rest is the master's geometry,
-       which already lands on whole pixels at 16 px. -->
+  <title>Diarist, for dark backgrounds (16 px frame)</title>
+  <!-- icon-dark.svg redrawn on the 16 px pixel grid, for the 16 px frame of
+       icon.ico and theme/dark: the master's geometry, which already lands on whole pixels
+       at 16 px, with the edge widened from half a pixel to a whole one. -->
   <path fill="#64748b" d="M3.5 0H12L16 4V12.5A3.5 3.5 0 0 1 12.5 16H3.5A3.5 3.5 0 0 1 0 12.5V3.5A3.5 3.5 0 0 1 3.5 0Z"/>
   <path fill="#f6f3ec" d="M3.5 1H11.586L15 4.414V12.5A2.5 2.5 0 0 1 12.5 15H3.5A2.5 2.5 0 0 1 1 12.5V3.5A2.5 2.5 0 0 1 3.5 1Z"/>
   <path fill="#64748b" d="M12 0V3A1 1 0 0 0 13 4H16Z"/>
