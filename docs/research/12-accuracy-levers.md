@@ -185,14 +185,48 @@ Command per row: `uv run python -I nemo_direct.py .work/clips/ami_050-350.wav --
 | 3.5 `ea30d66` | 3 | 1 | 2 | **11** | 111 | **36.5** | none |
 | 3.5 `ea30d66` | 5 | 0 | 1 | **52** | 414 | **83.4** | none |
 | 3.5 `ea30d66`, 20 names not in the audio | 3 | 1 | 0 | 0 | 170 | **45.7** | none |
-LOWBOOST
+| 3.5 `ea30d66` | 0.5 | 1 | 2 | 0 | 2 | 23.0 | none |
+| 3.5 `ea30d66` | 1 | 1 | 2 | 0 | 7 | 23.5 | none |
+| 3.5 `ea30d66`, 20 names not in the audio | 1 | 1 | 2 | 0 | 9 | 23.5 | none |
+
+The boost 0.5 and 1 rows were added after the plan's 2, 3 and 5 to look for a harmless level: at 1 the output still says "I'm Greg" and "plant at the amps", and both lists cost half a point of WER. No level on this clip fixes a target word without damage elsewhere.
 
 What it looks like at boost 3 (AMI 265 s): "a small cute in Planet of the Apes at the Planet of the Apes becomes real I Planet of the Apes with them"; with the 20 absent names: "Svensson uh when Petrov Svensson Ramire I Ramirez with them you can take as Lindqvist as you like". The greedy RNNT boosting in 0.2.0 fixes neither Craig nor beagle at any level; "Planet of the Apes" only shows up once it is inserted all over the clip. It inserts boosted phrases wherever their first tokens are plausible, and the more phrases and the higher the boost, the more it inserts. The plan's G default (boost 3, speaker names from the library) would wreck transcripts: a list of 20 names the meeting never mentions takes the clip from 23.0 to 45.7 % WER.
+
+## 5. Languages (FLEURS slices, WER only)
+
+### Data and method
+
+`fleurs_fetch.py` takes about 10 minutes of the FLEURS test split per language (`google/fleurs`, CC-BY-4.0): one recording per sentence in archive order, 37 to 55 utterances, joined with 1.5 s of silence into one WAV, so each language is one 10-minute "meeting" with a new speaker every 10 to 15 s. It streams the dataset's own `data/<config>/audio/test.tar.gz` and stops early (26 to 30 MB per language). The parquet conversion the plan named cannot be read in part: each language is one row group whose audio column is a single 0.3 to 0.7 GB dictionary page. `run.py --fleurs` runs `diarist-cli transcribe --no-diarize --language <tag>` on it and scores the whole slice: for en the harness normaliser; for the others NFKC, casefold and punctuation and symbols removed with combining marks kept (whisper's BasicTextNormalizer would split Hindi words at every vowel sign); CER for ja. Tags are the ones the runtime honours (section 6): `de`, `fr`, `it`, `hi`, `en`, `ja-JP`, `es-US` (FLEURS es_419 is Latin American), `pt-BR`. zh was not in the plan's list and was not fetched.
+
+Commands: `uv run python -I run.py --config <nemotron35|n35_rc_13> --fleurs all --fleurs-language <given|auto>`, the EN control with `--config <nemotron_en|en_rc_13> --fleurs en`, the report with `uv run python -I run.py --fleurs-report` (written to `docs/eval/2026-10-16-fleurs.md`, which also has substitutions, deletions and insertions per run).
+
+### Results
+
+WER in percent (CER for ja). Card: the Nemotron 3.5 model card's FLEURS numbers (full test split, NVIDIA's normaliser) at the same lookahead, language given / auto-detect.
+
+| Lang | Units | 160 ms given | 160 ms auto | **1.12 s given** | **1.12 s auto** | Card 160 ms given / auto | Card 1.12 s given / auto |
+|---|---|---|---|---|---|---|---|
+| de | 878 | 12.3 | 12.4 | 10.6 | 10.3 | 9.21 / 9.37 | 8.31 / 8.22 |
+| es (`es-US`) | 1,178 | 16.5 | 25.4 | **6.8** | 9.5 | 4.64 / 4.82 | 4.11 / 4.13 |
+| fr | 1,360 | 14.0 | 14.2 | 11.8 | 11.8 | 10.60 / 10.60 | 9.03 / 9.02 |
+| it | 989 | 7.7 | 7.7 | 6.4 | 6.1 | 4.85 / 4.89 | 4.25 / 4.32 |
+| pt (`pt-BR`) | 1,046 | 9.2 | 9.2 | 9.1 | 8.7 | 6.10 / 6.19 | 5.48 / 5.47 |
+| hi | 1,168 | 15.7 | 15.1 | 14.2 | 14.9 | 7.97 / 10.83 | 6.81 / 8.23 |
+| ja (`ja-JP`, CER) | 2,072 | 23.5 | 24.7 | 20.9 | 21.1 | 12.90 / 13.85 | 11.48 / 11.66 |
+| en | 1,186 | 12.9 | 14.6 | **8.8** | 8.8 | 8.88 / 9.34 | 7.91 / 8.84 |
+| en, **Nemotron EN** (control) | 1,186 | 23.3 | – | 21.5 | – | – | – |
+
+- **Lookahead 13 helps every language**, by 0.1 (pt) to 9.7 (es) points with the language given, and it is three times faster (4.4 to 6.0 s per 10-minute slice against 13.9 to 16.6 s). This is the same lever as section 1, measured on eight languages.
+- **At the default lookahead the runtime drops speech on these slices.** Deletions dominate the 160 ms errors (es: 114 deletions given, 241 auto, against 12 and 58 at 1.12 s). `levers.py fleurs-utts --langs es --configs nemotron35,n35_rc_13 --mode auto` lists 12 Spanish utterances that lose half or more of their words at 160 ms, at normal levels (peaks −15 to 0 dBFS), and 2 at 1.12 s. Running the same Spanish WAV directly at 160 ms reproduces it (one utterance gone, the opening phrase of another missing), while a 40 s cut around the same utterance is transcribed completely: it depends on the long stream, not on the audio of the utterance. The meeting recordings do not show it (no 30 s window in AMI, Aug 2, Sep 5 or Aug 14 where 160 ms has under 60 % of the 1.12 s words), so it seems tied to these slices' rapid speaker changes and digital silence; but it is one more reason not to run file jobs at 160 ms.
+- **Auto-detect against a given language**: at 1.12 s they are within 0.7 points except Spanish (9.5 against 6.8; detection picks es-ES for Latin American audio). At 160 ms auto costs more (en 14.6 against 12.9, es 25.4 against 16.5). Detection itself was right for every language at the language level; for Spanish and Portuguese it picks the European locale (es-ES, pt-PT) on Latin American and Brazilian audio.
+- **Our numbers sit 1.5 to 7 points above the card's.** The slices are small (one or two points of noise), FLEURS writes numbers as digits while the runtime, with no ITN grammars, writes them as words (15 to 20 % of the English and German edit operations involve a digit), and the normalisers differ. Two of the 42 Japanese recordings are near-silent in the source (peak −41 and −43 dBFS) and cost about 2.5 CER points by themselves; Hindi has the largest gap to the card and was not investigated further. Read the table for the direction of each lever, not as Diarist's published WER.
+- **The EN model is not a usable control on FLEURS English**: 23.3 % at 160 ms and 21.5 % at 1.12 s, nearly all deletions (195 and 189). 36 of the 55 English recordings peak below −30 dBFS, and the EN model returns nothing, or a fraction, for eight of them (`fleurs-utts --langs en --configs nemotron_en,en_rc_13`), where Nemotron 3.5 transcribes all 55. So the EN model drops quiet speech that 3.5 hears. Diarist's Zoom recordings are louder, which is why EN still wins on AMI and Zoom cpWER (section 1); a quiet participant on a far microphone would not.
 
 ## 6. Other findings
 
 - **`--verbatim` changes nothing here.** In nemo-speech 0.2.0 it sets `verbatim_transcripts`, which only skips inverse text normalisation (`src/asr/postproc/pipeline.cpp`, the ITN stage); fillers are dropped by the model itself, not by a post-processor. With no ITN grammars configured, `nemotron35_verbatim` (now runnable: `engine_args = ["--verbatim"]`) gives word-for-word and time-for-time identical output to `nemotron35` on AMI, Aug 2 and Sep 5 (`levers.py diff --a nemotron35 --b nemotron35_verbatim`: 0 edit operations). docs/05's hope that it brings fillers back does not hold.
-- **The 3.5 prompt dictionary** (`asr.rnnt.prompt_dictionary` in the GGUF, 121 entries) maps bare `en`, `es` (to es-US), `fr`, `de`, `hi`, `pt` (to **pt-PT**), `it`, `nl`, `pl`, `ru`, `ko`, `tr`, `uk`, `ro` and others, but has no bare `ja`, `zh`, `vi`, `th` or `he`; those need the locale form (`ja-JP`, `zh-CN`, ...). LANGTAG_RESULT
+- **The 3.5 prompt dictionary** (`asr.rnnt.prompt_dictionary` in the GGUF, 121 entries) maps bare `en`, `es` (to es-US), `fr`, `de`, `hi`, `pt` (to **pt-PT**), `it`, `nl`, `pl`, `ru`, `ko`, `tr`, `uk`, `ro` and others, but has no bare `ja`, `zh`, `vi`, `th` or `he`; those need the locale form (`ja-JP`, `zh-CN`, ...). Checked on the FLEURS slices with Nemotron 3.5 at the default lookahead (`run.py --config nemotron35 --fleurs ja,pt --fleurs-language short`): bare `ja`, which the app's language list offers today, gives output identical to `auto` (0 edit operations; CER 24.7 % against 23.5 % with `ja-JP`), so a user who picks Japanese silently gets detection. Bare `pt` runs the pt-PT prompt on Brazilian audio (the runtime reports `pt-PT`): 150 words differ from the `pt-BR` run, at the same WER (9.2 %) on this slice. The app needs the locale mapping that chunk C adds (ja to ja-JP, zh to zh-CN, separate pt-BR and pt-PT, es-ES and es-US).
 - **GPU sharing during evals.** Another agent's debug build of the desktop app with a live `nemo-speech serve` held 2 GB and 20 to 40 % utilisation for part of the afternoon. run.py's idle check (`tools/eval/gpu.py`) now waits only while another job keeps the GPU busy (median utilisation of 25 % or more over 5 s) or holds more than 1.2 GB above the idle level; before, it waited on memory alone and a desktop at 1.7 to 1.9 GB of browser and app windows blocked it.
 
 ## 8. Reproducing (all from `tools/eval`, after the README setup)
