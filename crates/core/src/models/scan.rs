@@ -134,9 +134,11 @@ pub fn engine_dirs(engine_root: &Path) -> Vec<PathBuf> {
         return vec![engine_root.to_path_buf()];
     }
     if let Ok(entries) = std::fs::read_dir(engine_root) {
+        // A runtime folder junctioned or linked in directly under
+        // `engine\` counts too (`file_type().is_dir()` is false for one).
         let mut dirs: Vec<PathBuf> = entries
             .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(entry_is_dir)
             .map(|e| e.path())
             .collect();
         dirs.sort();
@@ -750,6 +752,56 @@ mod tests {
             Some("0.2.0")
         );
         assert_eq!(version_from_name("custom"), None);
+    }
+
+    /// Links `link` to the folder `target`: a junction on Windows (`mklink
+    /// /J`, no privilege needed), a symlink elsewhere. `false` when the
+    /// environment does not allow it.
+    fn link_dir(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let made = false;
+        made && process::is_engine_dir(link)
+    }
+
+    #[test]
+    fn finds_a_runtime_junctioned_into_the_engine_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        // The runtime lives elsewhere (another drive, the eval harness).
+        let real = dir
+            .path()
+            .join("elsewhere")
+            .join("nemo-speech-0.2.0-windows-x86_64-vulkan");
+        std::fs::create_dir_all(real.join("bin")).unwrap();
+        std::fs::write(process::exe_path(&real), b"MZ").unwrap();
+        let root = dir.path().join("engine");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let top = root.join("nemo-speech-0.2.0-windows-x86_64-vulkan");
+        let nested = root.join("nested").join("rt");
+        if !link_dir(&top, &real) || !link_dir(&nested, &real) {
+            eprintln!("skipped: cannot create a junction here");
+            return;
+        }
+        // Directly under engine\ and one level down.
+        assert_eq!(engine_dirs(&root), vec![top.clone(), nested.clone()]);
+        // Removing the links leaves the runtime (a junction is removed as
+        // an empty folder, a symlink as a file).
+        for l in [&top, &nested] {
+            std::fs::remove_dir(l)
+                .or_else(|_| std::fs::remove_file(l))
+                .unwrap();
+        }
+        assert!(process::is_engine_dir(&real));
     }
 
     #[test]
