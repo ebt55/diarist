@@ -52,6 +52,9 @@ pub const SETUP_LATER: &str = "setup.later";
 /// Low-VRAM mode: file imports use Nemotron 3.5 when it is installed (it
 /// peaks at 1.8 GB against 2.6 GB for the EN model).
 pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
+/// The first-run screen has set `default_language` from the system
+/// language (done once).
+pub const SETUP_LANGUAGE_SEEDED: &str = "setup.language_seeded";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
@@ -77,6 +80,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
     (SETUP_LATER, "false"),
+    (SETUP_LANGUAGE_SEEDED, "false"),
 ];
 
 /// The default of `key`, if it is a known key.

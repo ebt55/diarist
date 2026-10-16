@@ -18,7 +18,15 @@
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
   import { SETTING_DEFAULTS, type SettingKey } from "../lib/generated/settingDefaults";
-  import { LANGUAGES, languageLabel } from "../lib/languages";
+  import {
+    AUTO_NOTE,
+    TIER_EXPECTATIONS,
+    TIER_TITLES,
+    canonical,
+    languageOptions,
+    offeredLanguages,
+    planFor,
+  } from "../lib/languages";
   import { app, type Theme } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
@@ -58,6 +66,16 @@
   ];
 
   const pinned = $derived(app.meetings.filter((m) => m.audio_keep));
+  // Default language: what the installed speech-to-text models cover.
+  const asrFiles = $derived(status?.models_by_role.asr ?? []);
+  const defaultLanguage = $derived(canonical(app.setting("default_language")));
+  const languageChoices = $derived(languageOptions(asrFiles, status?.selected.asr ?? null, defaultLanguage, false));
+  const languagePlan = $derived(planFor(asrFiles, status?.selected.asr ?? null, defaultLanguage));
+  const tierNames = (tier: "ready" | "broad") =>
+    offeredLanguages()
+      .filter((l) => l.tier === tier)
+      .map((l) => l.name)
+      .join(", ");
   const unknown = $derived(status?.models_by_role.unknown ?? []);
 
   let devices = $state.raw<AudioDevice[]>([]);
@@ -546,12 +564,15 @@
       <label class="label" for="language">Default language</label>
       <select
         id="language"
-        value={app.settings.default_language ?? SETTING_DEFAULTS.default_language}
+        value={defaultLanguage}
         onchange={(e) => app.setSetting("default_language", (e.currentTarget as HTMLSelectElement).value)}
       >
-        {#each LANGUAGES as [code, name] (code)}<option value={code}>{languageLabel(code, name)}</option>{/each}
+        {#each languageChoices as o (o.code)}<option value={o.code} disabled={o.disabled}>{o.label}</option>{/each}
       </select>
-      <p class="help">Used for new recordings and imports. Automatic detection loses about a second of the first utterance.</p>
+      <p class="help">
+        Preselected for new recordings and imports; each sheet can change it. {AUTO_NOTE}
+        {#if languagePlan.kind === "install"}{languagePlan.note} Download it under Models below.{:else if languagePlan.note}{languagePlan.note}{/if}
+      </p>
     </div>
   </section>
 
@@ -735,8 +756,17 @@
         <button type="button" class="link" onclick={() => (app.route = "setup")}>Open the first-run screen</button>
       </div>
       <p class="help">
-        English meetings: the EN model (default). Other or mixed languages: Nemotron 3.5 (40+ languages, less VRAM),
-        then select it below. Power users can list more downloads in <code>models.user.json</code> in the data folder.
+        The EN model (default) transcribes English only. Nemotron 3.5 covers the other languages and needs less VRAM;
+        once it is installed, a meeting in a language the selected model does not cover runs on it automatically, so
+        there is no need to select it. Expected quality on Nemotron 3.5:
+      </p>
+      <ul class="help tiers">
+        <li><strong>{TIER_TITLES.ready}</strong>, {TIER_EXPECTATIONS.ready}: {tierNames("ready")}.</li>
+        <li><strong>{TIER_TITLES.broad}</strong>, {TIER_EXPECTATIONS.broad}: {tierNames("broad")}.</li>
+      </ul>
+      <p class="help">
+        A model that lists no languages (Parakeet, most added files) is not checked: it gets every language as
+        selected. Power users can list more downloads in <code>models.user.json</code> in the data folder.
       </p>
       <details class="add">
         <summary>Add a model the app does not list</summary>
@@ -1017,6 +1047,9 @@
   }
   .help.error {
     color: var(--danger);
+  }
+  .help.tiers {
+    padding-left: 18px;
   }
   .pins {
     margin-top: 6px;

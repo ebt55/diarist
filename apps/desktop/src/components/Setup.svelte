@@ -10,6 +10,8 @@
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
   import type { SetupStatus } from "../lib/generated/SetupStatus";
+  import { SETTING_DEFAULTS } from "../lib/generated/settingDefaults";
+  import { MULTILINGUAL_MODEL, canonical, offeredLanguages, primarySubtag, systemLanguage } from "../lib/languages";
   import { app } from "../lib/state.svelte";
   import DownloadRow from "./DownloadRow.svelte";
   import Icon from "./Icon.svelte";
@@ -21,6 +23,11 @@
   let manual = $state(false);
   let chosen = $state<string | null>(null);
   let showReleases = $state(false);
+  /** The meetings' usual language: English gets the EN model, any other Nemotron 3.5. */
+  let meetingLanguage = $state(canonical(app.setting("default_language")));
+  /** Manifest name of the default English model (`manifests/models.json`). */
+  const EN_MODEL = "nemotron-en";
+  const english = $derived(primarySubtag(meetingLanguage) === "en");
 
   const engines = $derived(status?.items.filter((i) => i.kind === "engine") ?? []);
   const engine = $derived(
@@ -30,7 +37,13 @@
       null,
   );
   const engineInstalled = $derived(status?.engine_ready ?? false);
-  const models = $derived(status?.items.filter((i) => i.kind === "model" && i.required) ?? []);
+  const models = $derived(
+    status?.items.filter(
+      (i) =>
+        i.kind === "model" &&
+        (english ? i.required : (i.required && i.name !== EN_MODEL) || i.name === MULTILINGUAL_MODEL),
+    ) ?? [],
+  );
   const modelsBytes = $derived(models.reduce((n, m) => n + m.size_bytes, 0));
   const modelsMissing = $derived(models.filter((m) => !m.installed));
   const missingAll = $derived([...(engine && !engineInstalled ? [engine] : []), ...modelsMissing]);
@@ -55,7 +68,7 @@
   }
 
   onMount(() => {
-    void refresh();
+    void refresh().then(seedLanguage);
     const onRefresh = () => void refresh();
     window.addEventListener("app:refresh", onRefresh);
     return () => window.removeEventListener("app:refresh", onRefresh);
@@ -63,6 +76,7 @@
 
   async function install(items: DownloadItem[]): Promise<void> {
     const failed = await downloads.install(items);
+    if (!english && items.some((i) => i.name === MULTILINGUAL_MODEL)) await selectMultilingual();
     await refresh();
     if (failed > 0) {
       app.error(`${plural(failed, "download")} failed. Each row has Retry, Copy link and Open folder`);
@@ -87,6 +101,30 @@
       app.toast("info", `${plural(n, "link")} copied. Put each file into the folder its row shows, then press Check again.`);
     } catch (e) {
       app.error(`Could not copy the links (${errorText(e)}); copy them from each row`);
+    }
+  }
+
+  /**
+   * Once, on a first run (nothing installed yet): the meeting language from
+   * the system language, unless the default was changed already.
+   */
+  async function seedLanguage(): Promise<void> {
+    await app.ready;
+    if (!status?.needs_setup || app.settingBool("setup.language_seeded")) return;
+    if (app.setting("default_language") === SETTING_DEFAULTS.default_language) {
+      meetingLanguage = systemLanguage(navigator.languages?.length ? navigator.languages : [navigator.language]);
+      await app.setSetting("default_language", meetingLanguage);
+    }
+    await app.setSetting("setup.language_seeded", "true");
+  }
+
+  /** Meetings in another language: Nemotron 3.5 becomes the selected speech-to-text model. */
+  async function selectMultilingual(): Promise<void> {
+    try {
+      const n35 = (await api.listModelFiles()).find((f) => f.manifest_name === MULTILINGUAL_MODEL && !f.missing);
+      if (n35) await api.selectModel("asr", n35.id);
+    } catch (e) {
+      void api.log("warn", `setup: selecting Nemotron 3.5 failed: ${errorText(e)}`);
     }
   }
 
@@ -207,9 +245,18 @@
         <span class="num" class:done={modelsMissing.length === 0}>2</span>
         <div class="step-text">
           <h2>Speech and speaker models</h2>
+          <label class="lang-step">
+            <span>Meetings are mostly in</span>
+            <select
+              bind:value={meetingLanguage}
+              onchange={() => void app.setSetting("default_language", meetingLanguage)}
+            >
+              {#each offeredLanguages() as l (l.code)}<option value={l.code}>{l.name}</option>{/each}
+            </select>
+          </label>
           <p class="help">
-            Who spoke when (up to 8 speakers), and English speech to text. For other or mixed languages add Nemotron 3.5 in
-            Settings, Models.
+            Who spoke when (up to 8 speakers), and speech to text: the EN model for English, Nemotron 3.5 (40+
+            languages) for any other.
           </p>
         </div>
         {#if modelsMissing.length > 0}
@@ -220,7 +267,9 @@
             disabled={downloads.busy}
             title={engine && !engineInstalled ? "Installs the engine first: it fetches the models" : ""}
           >
-            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: diarizer and the EN model)
+            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: diarizer and {english
+              ? "the EN model"
+              : "Nemotron 3.5"})
           </button>
         {/if}
       </div>
@@ -294,6 +343,13 @@
   h2 {
     margin: 0 0 4px;
     font-size: 15px;
+  }
+  .lang-step {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 4px 0;
   }
   .hint,
   .muted {
