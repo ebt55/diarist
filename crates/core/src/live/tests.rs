@@ -212,6 +212,7 @@ impl Engine for FakeFile {
         EngineInfo {
             runtime: "fake 1".into(),
             right_context: Some(13),
+            diar_preset: Some("v3-offline".into()),
             ..Default::default()
         }
     }
@@ -386,6 +387,10 @@ fn records_streams_and_runs_the_post_pass() {
     let run = d.current_run.unwrap();
     assert_eq!(run.kind, RunKind::PostPass);
     assert_eq!(run.engine_info["right_context"], 13, "the lookahead passed");
+    assert_eq!(
+        run.engine_info["diar_preset"], "v3-offline",
+        "the preset passed"
+    );
     assert_eq!(run.id, report.current_run);
     assert!(report.live_run_deleted);
     assert!(store.get_run(out.live_run).is_err());

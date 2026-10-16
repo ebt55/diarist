@@ -125,6 +125,9 @@ pub struct Sidecar {
     /// Decoder lookahead for file jobs (`--asr.streaming.rnnt_right_context`,
     /// 80 ms frames); wins over the manifest's value.
     pub file_right_context: Option<u32>,
+    /// Diarizer preset for file jobs (`--asr.diar.preset`); wins over the
+    /// manifest's value.
+    pub file_preset: Option<String>,
 }
 
 impl Sidecar {
@@ -169,6 +172,9 @@ impl Sidecar {
         }
         if let Some(v) = self.file_right_context {
             c.capabilities.file_right_context = Some(v);
+        }
+        if let Some(v) = &self.file_preset {
+            c.capabilities.file_preset = Some(v.clone());
         }
     }
 }
@@ -264,7 +270,7 @@ mod tests {
         assert_eq!(Sidecar::read(&model).unwrap(), None);
         std::fs::write(
             Sidecar::path_for(&model),
-            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900,"file_right_context":13}"#,
+            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900,"file_right_context":13,"file_preset":"v3-offline"}"#,
         )
         .unwrap();
         let sc = Sidecar::read(&model).unwrap().unwrap();
@@ -275,10 +281,12 @@ mod tests {
         assert_eq!(c.capabilities.languages, ["fr"]);
         assert_eq!(c.capabilities.vram_mb_measured, Some(900));
         assert_eq!(c.capabilities.file_right_context, Some(13));
-        // A hand-dropped model without the key gets no lookahead flag.
+        assert_eq!(c.capabilities.file_preset.as_deref(), Some("v3-offline"));
+        // A hand-dropped model without the keys gets no lookahead or preset flag.
         let mut c = classify(&header(&[("general.architecture", s("asr"))]), 1);
         Sidecar::default().apply(&mut c);
         assert_eq!(c.capabilities.file_right_context, None);
+        assert_eq!(c.capabilities.file_preset, None);
         std::fs::write(Sidecar::path_for(&model), "{not json").unwrap();
         assert!(Sidecar::read(&model).is_err());
     }

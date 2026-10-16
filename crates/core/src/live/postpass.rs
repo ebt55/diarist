@@ -247,6 +247,7 @@ pub fn run_post_pass(
                 "models": info.models,
                 "device": info.device,
                 "right_context": crate::protocol::lookahead_json(info.right_context),
+                "diar_preset": crate::protocol::diar_preset_text(info.diar_preset.as_deref()),
                 "language": job.language,
                 "diarize_mic": job.diarize_mic,
                 "live_run": job.live_run.0,

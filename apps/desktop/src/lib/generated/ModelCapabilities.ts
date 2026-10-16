@@ -22,4 +22,10 @@ vram_mb_estimate: number | null,
  * manifest entry or the `<file>.meet.json` sidecar. `None`: no flag,
  * the runtime default (the low-latency setting live keeps).
  */
-file_right_context: number | null, };
+file_right_context: number | null, 
+/**
+ * Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
+ * e.g. `v3-offline`), from the manifest entry or the sidecar. `None`: no
+ * flag, the runtime's streaming default (which live keeps).
+ */
+file_preset: string | null, };

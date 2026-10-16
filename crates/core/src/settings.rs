@@ -57,6 +57,11 @@ pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
 /// default, the low-latency setting live keeps), a number = that many 80 ms
 /// frames for every model ([`file_lookahead`]).
 pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
+/// Diarizer preset of file jobs and the post-pass, no UI (docs/04 section
+/// 5): "" or `model` = the diarizer's own value, `streaming` = none (the
+/// runtime default, the setting live keeps), any other text = that preset
+/// name for every diarizer ([`file_diar_preset`]).
+pub const ENGINE_FILE_DIAR_PRESET: &str = "engine.file_diar_preset";
 /// The first-run screen has set `default_language` from the system
 /// language (done once).
 pub const SETUP_LANGUAGE_SEEDED: &str = "setup.language_seeded";
@@ -91,6 +96,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
     (ENGINE_FILE_LOOKAHEAD, ""),
+    (ENGINE_FILE_DIAR_PRESET, ""),
     (SETUP_LATER, "false"),
     (SETUP_LANGUAGE_SEEDED, "false"),
     (PLAYBACK_VOLUME, "1.0"),
@@ -199,6 +205,41 @@ pub fn file_lookahead(settings: &Settings) -> FileLookahead {
         FileLookahead::Frames(n)
     } else {
         FileLookahead::Model
+    }
+}
+
+/// The `engine.file_diar_preset` setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileDiarPreset {
+    /// The diarizer's `file_preset` (manifest entry or sidecar).
+    Model,
+    /// No flag: the runtime's streaming default.
+    Streaming,
+    /// This preset for every diarizer, passed verbatim.
+    Named(String),
+}
+
+impl FileDiarPreset {
+    /// The preset to pass for a diarizer whose own value is `model`.
+    pub fn resolve(&self, model: Option<String>) -> Option<String> {
+        match self {
+            Self::Model => model,
+            Self::Streaming => None,
+            Self::Named(n) => Some(n.clone()),
+        }
+    }
+}
+
+/// `engine.file_diar_preset`: `""` or `model` (any case), `streaming` (any
+/// case), else the trimmed text as a preset name.
+pub fn file_diar_preset(settings: &Settings) -> FileDiarPreset {
+    let v = get(settings, ENGINE_FILE_DIAR_PRESET).trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("model") {
+        FileDiarPreset::Model
+    } else if v.eq_ignore_ascii_case("streaming") {
+        FileDiarPreset::Streaming
+    } else {
+        FileDiarPreset::Named(v.to_owned())
     }
 }
 
@@ -313,6 +354,35 @@ mod tests {
         assert_eq!(six.resolve(Some(13)), Some(6));
         assert_eq!(six.resolve(None), Some(6));
         assert_eq!(read(Some("0")).resolve(Some(13)), Some(0));
+    }
+
+    #[test]
+    fn file_diar_preset_forms() {
+        let store = MemoryStore::new();
+        let read = |v: Option<&str>| {
+            match v {
+                Some(v) => store.set_setting(ENGINE_FILE_DIAR_PRESET, v).unwrap(),
+                None => store.remove_setting(ENGINE_FILE_DIAR_PRESET).unwrap(),
+            }
+            file_diar_preset(&effective(&store).unwrap())
+        };
+        let own = || Some("v3-offline".to_owned());
+        // The default and `model`: the diarizer's value, none without one.
+        for v in [None, Some(""), Some("model"), Some(" MODEL ")] {
+            let got = read(v);
+            assert_eq!(got, FileDiarPreset::Model, "{v:?}");
+            assert_eq!(got.resolve(own()).as_deref(), Some("v3-offline"));
+            assert_eq!(got.resolve(None), None);
+        }
+        // `streaming`: no flag for any diarizer.
+        let streaming = read(Some("Streaming"));
+        assert_eq!(streaming, FileDiarPreset::Streaming);
+        assert_eq!(streaming.resolve(own()), None);
+        // Anything else: that name, verbatim, for every diarizer.
+        let named = read(Some(" v3-streaming "));
+        assert_eq!(named, FileDiarPreset::Named("v3-streaming".into()));
+        assert_eq!(named.resolve(own()).as_deref(), Some("v3-streaming"));
+        assert_eq!(named.resolve(None).as_deref(), Some("v3-streaming"));
     }
 
     /// Writes `generated/settingDefaults.ts` (name matches the `export_bindings`

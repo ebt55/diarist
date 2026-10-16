@@ -70,6 +70,12 @@ pub struct ModelEntry {
     /// 3.5. Absent: no flag, the runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_right_context: Option<u32>,
+    /// Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
+    /// `v3-offline` for Nemotron 3 Diarization: the streaming algorithm with
+    /// 21 s chunks), copied into the matching file's capabilities. Absent: no
+    /// flag, the runtime's streaming default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_preset: Option<String>,
 }
 
 impl ModelEntry {
@@ -269,6 +275,25 @@ mod tests {
         let json = serde_json::to_string(&m.models).unwrap();
         assert_eq!(json.matches(r#""file_right_context":13"#).count(), 2);
         assert_eq!(json.matches("file_right_context").count(), 2);
+        let back: Vec<ModelEntry> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m.models);
+    }
+
+    #[test]
+    fn file_preset_is_offline_for_the_diarizer() {
+        let m = Manifest::builtin();
+        let preset = |n: &str| m.model(n).unwrap().file_preset.clone();
+        assert_eq!(
+            preset("nemotron-3-diarization").as_deref(),
+            Some("v3-offline")
+        );
+        for asr in ["nemotron-en", "nemotron-3.5", "parakeet-tdt"] {
+            assert_eq!(preset(asr), None, "{asr}");
+        }
+        // Round trip: written where set, left out elsewhere.
+        let json = serde_json::to_string(&m.models).unwrap();
+        assert_eq!(json.matches(r#""file_preset":"v3-offline""#).count(), 1);
+        assert_eq!(json.matches("file_preset").count(), 1);
         let back: Vec<ModelEntry> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m.models);
     }

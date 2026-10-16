@@ -36,6 +36,7 @@
     "licence": "NVIDIA Open Model License (OpenMDW 1.1)",
     "streaming": true,
     "languages": [],
+    "file_preset": "v3-offline",
     "vram_mb": 850,
     "vram_note": "standalone diarize pass, 0.7 to 0.85 GB (docs/04 section 4)"
   },

@@ -636,11 +636,12 @@ fn transcribe(
         diarize,
     };
     eprintln!(
-        "engine {} | asr {} | diarizer {} | lookahead {}{}",
+        "engine {} | asr {} | diarizer {} | lookahead {} | diar preset {}{}",
         sel.engine_version.as_deref().unwrap_or("?"),
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
         diarist_core::protocol::lookahead_text(engine.info().right_context),
+        diarist_core::protocol::diar_preset_text(engine.info().diar_preset.as_deref()),
         if overrides.extra_args.is_empty() {
             String::new()
         } else {
@@ -739,6 +740,10 @@ fn transcribe(
                 .current_run
                 .as_ref()
                 .and_then(|r| r.engine_info.get("right_context").cloned()),
+            "diar_preset": detail
+                .current_run
+                .as_ref()
+                .and_then(|r| r.engine_info.get("diar_preset").cloned()),
             "asr_model": sel.asr.display().to_string(),
             "diar_model": sel.diarizer.display().to_string(),
             "language": language,
@@ -819,8 +824,12 @@ fn show(ctx: &Ctx, id: MeetingId, all: bool) -> CliResult {
             Some(v) => format!(", lookahead {v}"),
             None => String::new(),
         };
+        let preset = match run.engine_info.get("diar_preset").and_then(|v| v.as_str()) {
+            Some(p) => format!(", diar preset {p}"),
+            None => String::new(),
+        };
         println!(
-            "  run       {} {} ({}{lookahead})",
+            "  run       {} {} ({}{lookahead}{preset})",
             run.kind.as_str(),
             run.status.as_str(),
             run.engine_info

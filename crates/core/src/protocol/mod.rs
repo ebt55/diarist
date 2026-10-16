@@ -68,9 +68,14 @@ pub struct EngineInfo {
     /// flag). `None`: no flag, the runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_context: Option<i64>,
+    /// Diarizer preset a diarized file job passes (`--asr.diar.preset`, e.g.
+    /// `v3-offline`). `None`: no flag, the runtime's streaming default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diar_preset: Option<String>,
 }
 
-/// What runs and Copy diagnostics say for a job that passes no lookahead flag.
+/// What runs and Copy diagnostics say for a job that passes no lookahead or
+/// preset flag.
 pub const LOOKAHEAD_RUNTIME_DEFAULT: &str = "runtime default";
 
 /// A lookahead as a run's `engine_info` stores it (`right_context`): the
@@ -82,6 +87,12 @@ pub fn lookahead_json(right_context: Option<i64>) -> serde_json::Value {
 /// The same as text: `13`, or `runtime default`.
 pub fn lookahead_text(right_context: Option<i64>) -> String {
     right_context.map_or_else(|| LOOKAHEAD_RUNTIME_DEFAULT.to_owned(), |n| n.to_string())
+}
+
+/// A diarizer preset as runs (`diar_preset`) and Copy diagnostics show it:
+/// its name, or [`LOOKAHEAD_RUNTIME_DEFAULT`].
+pub fn diar_preset_text(preset: Option<&str>) -> String {
+    preset.unwrap_or(LOOKAHEAD_RUNTIME_DEFAULT).to_owned()
 }
 
 /// An event from an engine job or live session.
@@ -249,6 +260,21 @@ mod tests {
         assert_eq!(serde_json::from_str::<EngineInfo>(&json).unwrap(), info);
         let none = serde_json::to_string(&EngineInfo::default()).unwrap();
         assert!(!none.contains("right_context"), "{none}");
+    }
+
+    #[test]
+    fn diar_preset_reads_as_a_name_or_the_runtime_default() {
+        assert_eq!(diar_preset_text(Some("v3-offline")), "v3-offline");
+        assert_eq!(diar_preset_text(None), "runtime default");
+        let info = EngineInfo {
+            diar_preset: Some("v3-offline".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(r#""diar_preset":"v3-offline""#), "{json}");
+        assert_eq!(serde_json::from_str::<EngineInfo>(&json).unwrap(), info);
+        let none = serde_json::to_string(&EngineInfo::default()).unwrap();
+        assert!(!none.contains("diar_preset"), "{none}");
     }
 
     #[test]

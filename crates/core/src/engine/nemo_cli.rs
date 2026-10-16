@@ -4,11 +4,13 @@
 //!
 //! `transcribe <wav> --model <asr.gguf> [--language <lang>] --stream --endpointing
 //!  [--asr.streaming.rnnt_right_context <N>] --diarize --diar-model <diar.gguf>
-//!  --device cuda:0 --json --output <words.json> --force`
+//!  [--asr.diar.preset <preset>] --device cuda:0 --json --output <words.json> --force`
 //!
 //! `N` is the selected model's file lookahead (13 frames, 1.12 s, for both
-//! manifest Nemotron models): latency does not matter here, while live keeps
-//! the runtime's low-latency default.
+//! manifest Nemotron models) and `preset` the diarizer's file preset
+//! (`v3-offline` for Nemotron 3 Diarization: the streaming algorithm with
+//! 21 s chunks): latency does not matter here, while live keeps the
+//! runtime's low-latency defaults.
 //!
 //! with the reduced `PATH` and `NEMO_SPEECH_MODEL_DIR` from
 //! [`super::process`]. The runtime prints no progress, so `Progress` is
@@ -54,6 +56,8 @@ const STDERR_TAIL: usize = 2_048;
 /// The runtime key for the decoder lookahead of cache-aware RNNT models
 /// (80 ms frames; runtime default 1, `-1` = the GGUF header's value).
 pub const RIGHT_CONTEXT_FLAG: &str = "--asr.streaming.rnnt_right_context";
+/// The runtime key for the diarizer preset of the fused pass, and its alias.
+pub const DIAR_PRESET_FLAGS: [&str; 2] = ["--asr.diar.preset", "--diar-preset"];
 
 // ---- output parsing ---------------------------------------------------------------
 
@@ -497,8 +501,14 @@ pub struct NemoCliEngine {
     /// `engine.file_lookahead` setting ([`crate::models::select_engine`]
     /// decides). `None` passes no flag: the runtime default, 1.
     pub right_context: Option<u32>,
+    /// Diarizer preset of diarized jobs (`--asr.diar.preset <name>`): the
+    /// diarizer's `file_preset` or the `engine.file_diar_preset` setting
+    /// ([`crate::models::select_engine`] decides). `None` passes no flag: the
+    /// runtime's streaming default.
+    pub diar_preset: Option<String>,
     /// Extra flags appended verbatim to `transcribe` (e.g. `--verbatim`).
-    /// One that sets the lookahead itself replaces [`Self::right_context`].
+    /// One that sets the lookahead or the diarizer preset itself replaces
+    /// [`Self::right_context`] or [`Self::diar_preset`].
     pub extra_args: Vec<String>,
     running: Running,
 }
@@ -520,6 +530,7 @@ impl NemoCliEngine {
             realtime_factor: EXPECTED_REALTIME_FACTOR,
             pass_language: true,
             right_context: None,
+            diar_preset: None,
             extra_args: Vec::new(),
             running: Running::default(),
         }
@@ -550,6 +561,14 @@ impl NemoCliEngine {
             a.push("--diarize".into());
             a.push("--diar-model".into());
             a.push(process::path_arg(&self.diar_model));
+            if let Some(p) = self
+                .diar_preset
+                .as_deref()
+                .filter(|_| self.extra_diar_preset().is_none())
+            {
+                a.push(DIAR_PRESET_FLAGS[0].into());
+                a.push(p.into());
+            }
         }
         for s in ["--device", &self.device, "--json", "--output"] {
             a.push(s.into());
@@ -560,18 +579,38 @@ impl NemoCliEngine {
         a
     }
 
-    /// The lookahead among [`Self::extra_args`] (`FLAG N` or `FLAG=N`):
-    /// `Some` when one is there, holding its value if it has one.
-    fn extra_right_context(&self) -> Option<Option<&str>> {
+    /// The value of one of `flags` among [`Self::extra_args`] (`FLAG V` or
+    /// `FLAG=V`): `Some` when one is there, holding its value if it has one.
+    fn extra_value(&self, flags: &[&str]) -> Option<Option<&str>> {
         self.extra_args.iter().enumerate().find_map(|(i, x)| {
-            if x == RIGHT_CONTEXT_FLAG {
-                Some(self.extra_args.get(i + 1).map(String::as_str))
-            } else {
-                x.strip_prefix(RIGHT_CONTEXT_FLAG)?
-                    .strip_prefix('=')
-                    .map(Some)
-            }
+            flags.iter().find_map(|f| {
+                if x == f {
+                    Some(self.extra_args.get(i + 1).map(String::as_str))
+                } else {
+                    x.strip_prefix(f)?.strip_prefix('=').map(Some)
+                }
+            })
         })
+    }
+
+    /// The lookahead among [`Self::extra_args`].
+    fn extra_right_context(&self) -> Option<Option<&str>> {
+        self.extra_value(&[RIGHT_CONTEXT_FLAG])
+    }
+
+    /// The diarizer preset among [`Self::extra_args`].
+    fn extra_diar_preset(&self) -> Option<Option<&str>> {
+        self.extra_value(&DIAR_PRESET_FLAGS)
+    }
+
+    /// The diarizer preset a diarized job's command line carries: one among
+    /// the extra flags, else [`Self::diar_preset`]; `None` when there is no
+    /// flag.
+    pub fn effective_diar_preset(&self) -> Option<String> {
+        match self.extra_diar_preset() {
+            Some(v) => v.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()),
+            None => self.diar_preset.clone(),
+        }
     }
 
     /// The lookahead a job's command line carries: one among the extra
@@ -697,6 +736,7 @@ impl Engine for NemoCliEngine {
             models,
             device: self.device.clone(),
             right_context: self.effective_right_context(),
+            diar_preset: self.effective_diar_preset(),
         }
     }
 }
@@ -1009,8 +1049,10 @@ impl Engine for NemoCascadeEngine {
             ),
             models,
             device: self.device.clone(),
-            // Offline TDT: no streaming lookahead.
+            // Offline TDT: no streaming lookahead; its `diarize` pass keeps
+            // the streaming preset.
             right_context: None,
+            diar_preset: None,
         }
     }
 }
@@ -1292,6 +1334,80 @@ mod tests {
         e.extra_args = vec!["--asr.streaming.rnnt_right_context_x".into(), "2".into()];
         assert!(args(&e).iter().any(|a| a == "13"));
         assert_eq!(e.info().right_context, Some(13));
+    }
+
+    #[test]
+    fn diarizer_preset_flag_follows_the_model() {
+        let mut e = NemoCliEngine::new("E:/engine", "E:/models", "E:/models/asr.gguf", "d.gguf");
+        let job = FileJob {
+            job_id: JobId("j".into()),
+            wav_path: "E:/audio/u/source.wav".into(),
+            diarize: true,
+            language: "en".into(),
+            diar_preset: DiarPreset::Streaming,
+        };
+        let out = NemoCliEngine::output_path(&job.wav_path);
+        let args = |e: &NemoCliEngine, job: &FileJob| -> Vec<String> {
+            e.args(job, &out)
+                .iter()
+                .map(|a| a.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        // A diarizer without a file preset: no flag, the streaming default.
+        assert!(!args(&e, &job).iter().any(|a| a.contains("diar.preset")));
+        assert_eq!(e.info().diar_preset, None);
+        // With one: right after the diarizer's path; the lookahead before it.
+        e.pass_language = false;
+        e.right_context = Some(13);
+        e.diar_preset = Some("v3-offline".into());
+        assert_eq!(
+            args(&e, &job),
+            [
+                "transcribe",
+                "E:/audio/u/source.wav",
+                "--model",
+                "E:/models/asr.gguf",
+                "--stream",
+                "--endpointing",
+                "--asr.streaming.rnnt_right_context",
+                "13",
+                "--diarize",
+                "--diar-model",
+                "d.gguf",
+                "--asr.diar.preset",
+                "v3-offline",
+                "--device",
+                "cuda:0",
+                "--json",
+                "--output",
+                "E:/audio/u/source.words.json",
+                "--force"
+            ]
+        );
+        assert_eq!(e.info().diar_preset.as_deref(), Some("v3-offline"));
+        // A job without diarization passes no preset (the mic channel).
+        let mic = FileJob {
+            diarize: false,
+            ..job.clone()
+        };
+        assert!(!args(&e, &mic).iter().any(|a| a.contains("diar")));
+        // A preset among the extra flags (`--engine-arg`), in any of its
+        // spellings, is the only one, and the one the info reports.
+        for extra in [
+            vec!["--asr.diar.preset".to_owned(), "v3-streaming".into()],
+            vec!["--asr.diar.preset=v3-streaming".to_owned()],
+            vec!["--diar-preset".to_owned(), "v3-streaming".into()],
+        ] {
+            e.extra_args = extra.clone();
+            let a = args(&e, &job);
+            assert!(!a.iter().any(|a| a == "v3-offline"), "{a:?}");
+            assert!(a.ends_with(&extra), "{a:?}");
+            assert_eq!(e.info().diar_preset.as_deref(), Some("v3-streaming"));
+        }
+        // Another `--asr.diar.*` key does not count.
+        e.extra_args = vec!["--asr.diar.right_context".into(), "2".into()];
+        assert!(args(&e, &job).iter().any(|a| a == "v3-offline"));
+        assert_eq!(e.info().diar_preset.as_deref(), Some("v3-offline"));
     }
 
     #[test]

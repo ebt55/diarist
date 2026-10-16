@@ -33,9 +33,11 @@ Independent check on AMI meetings by a noScribe contributor (*published*): 11.6 
 
 Limits you should know (*published* and **measured**):
 - At most 8 speakers per recording. A ninth person is merged into an existing label. Long multi-meeting recordings should be split.
-- Counting accuracy drops at very low latency; we use the 1.04 s setting for live and the same streaming algorithm for files.
-- The "offline" full-attention preset scored worse than streaming on our test clip (DER 43 versus 24) and is not used.
+- Counting accuracy drops at very low latency; live uses the 1.04 s setting, file jobs the same streaming algorithm with 21-second chunks (below).
+- The stateless `diarize --offline` pass scored worse than streaming on our test clip (DER 43 versus 24) and is not used; it is not the `v3-offline` preset below.
 - Hard cases listed on the model card: heavy overlap, far-field microphones, noisy rooms.
+
+Imports and the post-pass after Stop run the diarizer with its offline geometry, `--asr.diar.preset v3-offline`: the same cache-based streaming algorithm, in 21-second chunks instead of 1.04-second ones; live recording and the optional standalone diarization pass keep the streaming preset (**measured**, 16 Oct 2026, fast subset plus the 77-minute file, with the file lookahead of section 3; the full-set table follows in the release; docs/research/12 section 2). The words are identical; only who said them changes. Words within a second of a speaker change that land on the wrong speaker go from 8.2 to 5.5 percent on a dense Q&A meeting, from 41.2 to 18.0 on the 77-minute in-room recording and from 6.6 to 6.2 on AMI; one Zoom meeting goes from 7.1 to 7.8, where a speaker with only 7 words is merged into another (the speaker count stays within one). The pass runs 20 to 37 percent faster with the same or lower VRAM. The preset is set per diarizer in the manifest (`file_preset`).
 
 ## 3. Speech to text: why the Nemotron streaming models, which one, and why not Parakeet
 
@@ -124,6 +126,8 @@ Other requirements:
 - Models no list knows: "Add from URL" (optional SHA-256) and "Add from file" put them into `models\user\`; `models.user.json` in the data folder adds entries to the recommended list.
 - Selections are per role; the app remembers them and falls back to the recommended model with a notice if a selected file disappears.
 - Decoder lookahead for imports and the post-pass (section 3): the recommended Nemotron models carry theirs in the manifest (`"file_right_context": 13`). A model you add gets none, so it runs at the runtime's default (1, the live setting), unless its `<file>.meet.json` gives one, e.g. `{"file_right_context": 13}`; use the largest value its model card lists, since a larger one may not be supported.
+- Diarizer preset for imports and the post-pass (section 2): Nemotron 3 Diarization carries `"file_preset": "v3-offline"` in the manifest. A diarizer you add gets none, so it runs the runtime's streaming default, unless its `<file>.meet.json` names one, e.g. `{"file_preset": "v3-offline"}` (the runtime's names are `v3-streaming` and `v3-offline` for V3 models, `streaming` and `offline` for V2).
+- `engine.file_diar_preset`, the same kind of setting for the diarizer: empty or `model` (the default) uses each diarizer's value; `streaming` passes no preset flag, so file jobs tag speakers like live; any other text is passed as the preset name for every diarizer, e.g. `v3-streaming`. It is set like `engine.file_lookahead` below.
 - The escape hatch, a setting with no switch in the app, `engine.file_lookahead`: empty or `model` (the default) uses each model's value; `low` passes no lookahead flag, so file jobs run like live (for a 4 GB card that runs out of memory on imports, or to compare in a bug report); a number, e.g. `6`, uses that value for every model. Settings are stored in `diarist.db` in the data folder; with Diarist closed, `sqlite3 "<data folder>\diarist.db" "INSERT OR REPLACE INTO settings (key, value) VALUES ('engine.file_lookahead', 'low')"` sets it, and deleting the row restores the default.
 
 ## 6. Languages

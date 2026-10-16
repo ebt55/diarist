@@ -57,7 +57,7 @@ pub use setup::{download_items, readiness, setup_status, MissingPart, Readiness,
 
 use crate::engine::{DiarizeRunner, Engine, NemoCascadeEngine, NemoCliEngine};
 use crate::error::{CoreError, Result};
-use crate::settings::{self, FileLookahead};
+use crate::settings::{self, FileDiarPreset, FileLookahead};
 use crate::store::{Store, StoreError};
 use crate::types::{ModelFile, ModelFileId, ModelRole, ModelSource};
 use crate::views::{selection_key, EngineStatus};
@@ -143,6 +143,9 @@ pub struct SelectedEngine {
     /// The decoder lookahead the file engine passes ([`file_right_context`];
     /// `None`: the runtime default, always for the cascade).
     pub right_context: Option<u32>,
+    /// The diarizer preset diarized file jobs pass ([`file_diar_preset`];
+    /// `None`: the runtime's streaming default, always for the cascade).
+    pub diar_preset: Option<String>,
 }
 
 /// Per-invocation changes to the stored selection (the CLI's `--asr-model`,
@@ -193,6 +196,13 @@ pub fn select_engine_with(
     // File jobs and the post-pass run at the model's full lookahead; live
     // keeps the runtime's low-latency default (`engine::live_ws`).
     let right_context = asr_right_context(paths, store, &sel.asr_file)?;
+    // The diarizer runs its file preset there (`v3-offline`); live and the
+    // standalone `diarize` pass keep the streaming one.
+    let diar_preset = if experimental {
+        None
+    } else {
+        diarizer_file_preset(paths, store, &sel.diarizer_file)?
+    };
     let inner: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
@@ -207,6 +217,7 @@ pub fn select_engine_with(
         // model ignores it. The meeting keeps its language either way.
         e.pass_language = is_multilingual(&sel.asr_file);
         e.right_context = right_context;
+        e.diar_preset = diar_preset.clone();
         e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     };
@@ -223,7 +234,40 @@ pub fn select_engine_with(
         selection: sel,
         experimental,
         right_context,
+        diar_preset,
     })
+}
+
+/// The preset diarized file jobs run diarizer `file` with, from the stored
+/// `engine.file_diar_preset` and the data root's manifest
+/// ([`file_diar_preset`]). Copy diagnostics shows it for the selection.
+pub fn diarizer_file_preset(
+    paths: &DataPaths,
+    store: &dyn Store,
+    file: &ModelFile,
+) -> Result<Option<String>> {
+    Ok(file_diar_preset(
+        file,
+        &settings::file_diar_preset(&store.get_settings()?),
+        Manifest::load(&paths.root).ok().as_ref(),
+    ))
+}
+
+/// The diarizer preset of file jobs and the post-pass for `file`: the
+/// `engine.file_diar_preset` setting when it is `streaming` (none) or a
+/// name, else the diarizer's own `file_preset` (its manifest entry or
+/// `<file>.meet.json`; for a row scanned before the field existed, the
+/// `manifest` entry it matched). A diarizer without one gets no flag.
+pub fn file_diar_preset(
+    file: &ModelFile,
+    setting: &FileDiarPreset,
+    manifest: Option<&Manifest>,
+) -> Option<String> {
+    let own = file.capabilities.file_preset.clone().or_else(|| {
+        let name = file.manifest_name.as_deref()?;
+        manifest?.model(name)?.file_preset.clone()
+    });
+    setting.resolve(own)
 }
 
 /// The decoder lookahead file jobs on ASR model `file` pass, with the
@@ -1034,6 +1078,74 @@ mod tests {
         assert_eq!(file_right_context(&old, FileLookahead::Model, None), None);
         assert_eq!(
             file_right_context(&old, FileLookahead::Low, Some(&builtin)),
+            None
+        );
+    }
+
+    #[test]
+    fn file_jobs_run_the_diarizer_file_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let mut diar = scanned("models/d.gguf", ModelRole::Diarizer, "diar");
+        diar.capabilities.file_preset = Some("v3-offline".into());
+        let mut tdt = scanned("models/tdt.gguf", ModelRole::Asr, "tdt");
+        tdt.capabilities.streaming = false;
+        store
+            .sync_model_files(
+                &[
+                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
+                    scanned("models/en.gguf", ModelRole::Asr, "en"),
+                    tdt,
+                    diar,
+                    scanned("models/d2.gguf", ModelRole::Diarizer, "plain"),
+                ],
+                1,
+            )
+            .unwrap();
+        select(&store, ModelRole::Engine, "e").unwrap();
+        select(&store, ModelRole::Asr, "en").unwrap();
+        select(&store, ModelRole::Diarizer, "diar").unwrap();
+        let preset = |asr: Option<&str>, diarizer: Option<&str>| {
+            let ov = EngineOverrides {
+                asr: asr.map(Into::into),
+                diarizer: diarizer.map(Into::into),
+                ..Default::default()
+            };
+            select_engine_with(&paths, &store, "cpu", &ov)
+                .unwrap()
+                .diar_preset
+        };
+        assert_eq!(preset(None, None).as_deref(), Some("v3-offline"));
+        // A diarizer without a value gets no flag; the cascade never.
+        assert_eq!(preset(None, Some("plain")), None);
+        assert_eq!(preset(Some("tdt"), None), None);
+        // `streaming` drops the flag; a name applies to every diarizer.
+        store
+            .set_setting(settings::ENGINE_FILE_DIAR_PRESET, "streaming")
+            .unwrap();
+        assert_eq!(preset(None, None), None);
+        store
+            .set_setting(settings::ENGINE_FILE_DIAR_PRESET, "v3-streaming")
+            .unwrap();
+        assert_eq!(preset(None, Some("plain")).as_deref(), Some("v3-streaming"));
+        store
+            .set_setting(settings::ENGINE_FILE_DIAR_PRESET, "model")
+            .unwrap();
+        assert_eq!(preset(None, None).as_deref(), Some("v3-offline"));
+
+        // A row scanned before the field existed: the manifest entry it matched.
+        let mut old = selected_file(&store, ModelRole::Diarizer).unwrap().unwrap();
+        old.capabilities.file_preset = None;
+        old.manifest_name = Some("nemotron-3-diarization".into());
+        let builtin = Manifest::builtin();
+        assert_eq!(
+            file_diar_preset(&old, &FileDiarPreset::Model, Some(&builtin)).as_deref(),
+            Some("v3-offline")
+        );
+        assert_eq!(file_diar_preset(&old, &FileDiarPreset::Model, None), None);
+        assert_eq!(
+            file_diar_preset(&old, &FileDiarPreset::Streaming, Some(&builtin)),
             None
         );
     }

@@ -372,6 +372,14 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
                             )
                         })
                         .unwrap_or_default(),
+                    ModelRole::Diarizer => crate::models::diarizer_file_preset(paths, store, &f)
+                        .map(|p| {
+                            format!(
+                                " | file preset {}",
+                                crate::protocol::diar_preset_text(p.as_deref())
+                            )
+                        })
+                        .unwrap_or_default(),
                     _ => String::new(),
                 };
                 format!(
@@ -516,10 +524,23 @@ mod tests {
         asr.capabilities.streaming = true;
         asr.capabilities.file_right_context = Some(13);
         let engine = row("engine/nemo-speech-0.2.0", ModelRole::Engine, "0.2.0", None);
-        store.sync_model_files(&[engine, asr], 2).unwrap();
+        // And a diarizer with a file preset, the one imports pass.
+        let mut diar = row(
+            "models/d.gguf",
+            ModelRole::Diarizer,
+            "sortformer",
+            Some("d1"),
+        );
+        diar.capabilities.file_preset = Some("v3-offline".into());
+        store.sync_model_files(&[engine, asr, diar], 2).unwrap();
+        select(&store, ModelRole::Diarizer, "d.gguf").unwrap();
         let text = report(&DataPaths::at("D:/data"), &store, &input);
         assert!(
             text.contains("sha256 abc123 | file lookahead 13\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("diarizer: d.gguf | models/d.gguf | 42 bytes | sha256 d1 | file preset v3-offline\n"),
             "{text}"
         );
         if cfg!(windows) {

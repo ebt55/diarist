@@ -276,9 +276,12 @@ fn scan_model(
         if c.capabilities.vram_mb_measured.is_none() {
             c.capabilities.vram_mb_measured = m.vram_mb;
         }
-        // The sidecar's value wins, as for VRAM.
+        // The sidecar's values win, as for VRAM.
         if c.capabilities.file_right_context.is_none() {
             c.capabilities.file_right_context = m.file_right_context;
+        }
+        if c.capabilities.file_preset.is_none() {
+            c.capabilities.file_preset = m.file_preset.clone();
         }
         if c.role == ModelRole::Unknown {
             c.role = m.role;
@@ -529,6 +532,7 @@ mod tests {
             vram_mb: Some(100),
             vram_note: None,
             file_right_context: None,
+            file_preset: None,
         };
         let manifest = Manifest {
             models: vec![entry],
@@ -666,6 +670,7 @@ mod tests {
         let bytes = build::header(3, 0, &asr_kv());
         manifest.models[0].size_bytes = bytes.len() as u64;
         manifest.models[0].file = "tiny.gguf".into();
+        manifest.models[0].file_preset = Some("v3-offline".into());
         let p = paths
             .models()
             .join("nvidia")
@@ -694,11 +699,21 @@ mod tests {
             f.sha256.as_deref(),
             Some(manifest.models[0].sha256.as_str())
         );
-        // The manifest's file lookahead reaches the capabilities; a sidecar wins.
+        // The manifest's file lookahead and preset reach the capabilities; a
+        // sidecar wins.
         assert_eq!(f.capabilities.file_right_context, Some(13));
-        std::fs::write(Sidecar::path_for(&p), r#"{"file_right_context": 6}"#).unwrap();
+        assert_eq!(f.capabilities.file_preset.as_deref(), Some("v3-offline"));
+        std::fs::write(
+            Sidecar::path_for(&p),
+            r#"{"file_right_context": 6, "file_preset": "v3-streaming"}"#,
+        )
+        .unwrap();
         let r = scan(&paths, &store, &manifest).unwrap();
         assert_eq!(r.files[0].capabilities.file_right_context, Some(6));
+        assert_eq!(
+            r.files[0].capabilities.file_preset.as_deref(),
+            Some("v3-streaming")
+        );
         assert_eq!(r.files[0].manifest_name.as_deref(), Some("nemotron-3.5"));
     }
 
