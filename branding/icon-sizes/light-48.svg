@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <title>Diarist, for light backgrounds (48 px frame)</title>
+  <!-- icon.svg on the 48 px pixel grid, for the 48 px frame of theme/light: the master's
+       80-unit lines are 7.5 px here, so they become 7 px at y 9, 21 and 33 and every line
+       edge lands on a whole pixel; the outline, edge and dog-ear are the master's. -->
+  <path fill="#64748b" d="M10.5 0H36L48 12V37.5A10.5 10.5 0 0 1 37.5 48H10.5A10.5 10.5 0 0 1 0 37.5V10.5A10.5 10.5 0 0 1 10.5 0Z"/>
+  <path fill="#1b1f27" d="M10.5 1.5H35.379L46.5 12.621V37.5A9 9 0 0 1 37.5 46.5H10.5A9 9 0 0 1 1.5 37.5V10.5A9 9 0 0 1 10.5 1.5Z"/>
+  <path fill="#64748b" d="M36 0V9A3 3 0 0 0 39 12H48Z"/>
+  <rect x="9" y="9" width="21" height="7" rx="1.5" fill="#5b86b5"/>
+  <rect x="9" y="21" width="30" height="7" rx="1.5" fill="#ffa446"/>
+  <rect x="9" y="33" width="15" height="7" rx="1.5" fill="#f26767"/>
+</svg>

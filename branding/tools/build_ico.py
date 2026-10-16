@@ -7,8 +7,8 @@
   icon-dark.svg and icon.svg, for the running app to follow the taskbar theme.
 
 Each image is rendered with resvg at its own size. Where branding/icon-sizes/<variant>-<size>.svg
-exists (16, 20 and 24 px), that pixel-snapped drawing is used instead of the 512 master,
-whose 32-unit grid falls on half pixels at 20 and 24 px. Run it after
+exists (16, 20 and 24 px, and 48 px for icon.svg), that pixel-snapped drawing is used
+instead of the 512 master, whose 32-unit grid falls on half pixels at 20 and 24 px. Run it after
 `bunx tauri icon ../../branding/icon-dark.svg -o src-tauri/icons`, which writes the other files.
 
     uv run --with pillow python -I branding/tools/build_ico.py

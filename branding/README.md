@@ -14,7 +14,7 @@ does not.
 | `logo.svg` | Master mark, colour: the wordmark, the social card. |
 | `icon.svg` | App icon for light backgrounds: the ink page with a slate edge and brighter lines. |
 | `icon-dark.svg` | App icon for dark backgrounds: the page on paper with a slate edge. The installer and exe icon (`icon.ico`) is `icon-dark`. |
-| `icon-sizes/` | Both icons redrawn on the pixel grid at 16, 20 and 24 px (`light-*`, `dark-*`), used for those frames. |
+| `icon-sizes/` | Both icons redrawn on the pixel grid at 16, 20 and 24 px (`light-*`, `dark-*`), and `icon.svg` at 48 px, used for those frames. |
 | `logo-mono.svg` | One colour (`currentColor`): favicons, monochrome tray, embossing, single-ink print. |
 | `tray-recording.svg` | One-colour mark with the red recording dot. |
 | `wordmark.svg` | Mark plus the name, for light backgrounds. |
@@ -81,7 +81,8 @@ with the ink or paper tile inset 16 units on top (1 px at 32 px); no strokes.
 the grid. The 32-unit grid does not land on whole pixels at 20 or 24 px, and the edge is
 half a pixel at 16 px, so `icon-sizes/` redraws both icons on the pixel grid at those sizes,
 in one geometry (a 1 px edge; 2 px lines at 16 px, 3 px at 20 and 24 px), and `icon.ico`
-and the theme frame sets take their 16, 20 and 24 px frames from those files.
+and the theme frame sets take their 16, 20 and 24 px frames from those files. `icon.svg`'s
+thicker lines are 7.5 px at 48 px, so `light-48.svg` sets them at 7 px.
 
 ## Clear space and minimum size
 
