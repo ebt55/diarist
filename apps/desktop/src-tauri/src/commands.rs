@@ -342,8 +342,17 @@ pub async fn set_audio_keep(
     with_store(&store, move |s| s.set_audio_keep(id, keep)).await
 }
 
+/// Deletes a meeting, unless it is still recording or its post-pass is
+/// queued or running (the recorder and the job hold its id).
 #[tauri::command(rename_all = "snake_case")]
-pub async fn delete_meeting(store: State<'_, AppStore>, id: MeetingId) -> CmdResult<()> {
+pub async fn delete_meeting(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    id: MeetingId,
+) -> CmdResult<()> {
+    if let Some(why) = crate::live::delete_blocker(&app, id) {
+        return Err(why.into());
+    }
     with_store(&store, move |s| s.delete_meeting(id)).await?;
     log::info!("deleted meeting {id}");
     Ok(())

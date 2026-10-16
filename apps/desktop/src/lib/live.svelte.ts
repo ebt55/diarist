@@ -164,6 +164,7 @@ class LiveStore {
   }
 
   init(): void {
+    app.onMeetingDeleted((id) => this.#forget(id));
     void onEvent<LiveStateView>("live:state", (v) => this.#apply(v));
     void onEvent<WordsUpdate>("live:words", (u) => this.#onWords(u));
     void onEvent<TextFinal>("live:text_final", (t) => {
@@ -288,6 +289,15 @@ class LiveStore {
     this.mic = null;
     this.loopback = null;
     this.#lag = {};
+  }
+
+  /** A deleted meeting was the last recording: its rows and id go. */
+  #forget(id: MeetingId): void {
+    if (this.active || this.meetingId !== id) return;
+    this.meetingId = null;
+    this.title = null;
+    this.startedAt = null;
+    this.#reset();
   }
 
   #apply(v: LiveStateView): void {

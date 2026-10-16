@@ -2,6 +2,7 @@
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
+import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
 import { languageName } from "./languages";
 import type { JobEvent } from "./generated/JobEvent";
@@ -34,6 +35,8 @@ export type Theme = "system" | "light" | "dark";
 export interface ToastAction {
   label: string;
   run: () => void;
+  /** The meeting the action opens (the toast goes when that meeting is deleted). */
+  meetingId?: MeetingId;
 }
 
 export interface Toast {
@@ -111,6 +114,7 @@ class AppState {
   #toastId = 0;
   #nonce = 0;
   #jobListeners = new Set<(e: JobEvent) => void>();
+  #deleteListeners = new Set<(id: MeetingId) => void>();
   /** Resolves once the first meeting list and settings are in. */
   ready: Promise<void> = Promise.resolve();
 
@@ -208,6 +212,58 @@ class AppState {
     this.route = "library";
     this.openId = id;
     this.focus = at ? { meetingId: id, ...at, nonce: ++this.#nonce } : null;
+  }
+
+  /** Asks, deletes the meeting, and forgets what the window kept for it. */
+  async deleteMeeting(m: { id: MeetingId; title: string }): Promise<void> {
+    const name = m.title || "Untitled meeting";
+    const ok = await this.confirm({
+      title: "Delete meeting?",
+      message: `"${name}" and its transcript will be deleted. Audio files are removed too.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteMeeting(m.id);
+    } catch (e) {
+      // The row can be gone with its audio folder left behind.
+      await this.refreshMeetings();
+      const gone = !this.meetings.some((x) => x.id === m.id);
+      if (gone) this.forgetMeeting(m.id);
+      this.error(
+        gone
+          ? `Deleted "${name}", but not all of its audio (${errorText(e)}); close any program using it`
+          : `Could not delete "${name}": ${errorText(e)}`,
+      );
+      return;
+    }
+    this.forgetMeeting(m.id);
+    await this.refreshMeetings();
+    this.toast("info", `Deleted "${name}"`);
+  }
+
+  /**
+   * Drops every meeting id the window kept for a deleted meeting (open
+   * meeting, search focus, post-pass errors, toasts that open it, the live
+   * view's last recording), so a later meeting with the same id starts clean.
+   */
+  forgetMeeting(id: MeetingId): void {
+    const next = forgetMeeting(
+      { openId: this.openId, focus: this.focus, postPassErrors: this.postPassErrors, toasts: this.toasts },
+      id,
+    );
+    if (next.openId !== this.openId) this.openId = next.openId;
+    if (next.focus !== this.focus) this.focus = next.focus;
+    if (next.postPassErrors !== this.postPassErrors) this.postPassErrors = new Map(next.postPassErrors);
+    if (next.toasts !== this.toasts) this.toasts = [...next.toasts];
+    for (const cb of this.#deleteListeners) cb(id);
+  }
+
+  /** Called with each deleted meeting's id, after the app's own state is cleared. */
+  onMeetingDeleted(cb: (id: MeetingId) => void): () => void {
+    this.#deleteListeners.add(cb);
+    return () => this.#deleteListeners.delete(cb);
   }
 
   // ---- Toasts and dialogs --------------------------------------------------
@@ -394,7 +450,7 @@ class AppState {
       const meetingId = e.meeting_id;
       void this.refreshMeetings().then(() => {
         const title = this.meetings.find((m) => m.id === meetingId)?.title || name;
-        this.toast("success", `Imported "${title}"`, { label: "Open", run: () => this.open(meetingId) });
+        this.toast("success", `Imported "${title}"`, { label: "Open", run: () => this.open(meetingId), meetingId });
       });
       return;
     }
@@ -417,7 +473,7 @@ class AppState {
     const open = id !== null && this.openId === id && this.route === "library";
     if (e.type === "done") {
       if (!open && id !== null) {
-        this.toast("success", `"${title}" is final`, { label: "Open", run: () => this.open(id) });
+        this.toast("success", `"${title}" is final`, { label: "Open", run: () => this.open(id), meetingId: id });
       }
     } else if (e.type === "cancelled") {
       this.toast("info", `Post-pass of "${title}" cancelled; the live transcript stays`);
@@ -427,6 +483,7 @@ class AppState {
         this.toast("error", `Finalizing "${title}" failed; the live transcript stays`, {
           label: id !== null ? "Open" : "Show log",
           run: () => (id !== null ? this.open(id) : (this.route = "diagnostics")),
+          meetingId: id ?? undefined,
         });
       }
     }

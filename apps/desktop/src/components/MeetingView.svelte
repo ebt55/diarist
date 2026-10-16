@@ -318,23 +318,7 @@
   }
 
   async function deleteMeeting() {
-    if (!meeting) return;
-    const m = meeting;
-    const ok = await app.confirm({
-      title: "Delete meeting?",
-      message: `"${m.title || "Untitled meeting"}" and its transcript will be deleted. Audio files are removed too.`,
-      confirmLabel: "Delete",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await api.deleteMeeting(m.id);
-      app.openId = null;
-      await app.refreshMeetings();
-      app.toast("info", `Deleted "${m.title || "Untitled meeting"}"`);
-    } catch (e) {
-      app.error(`Delete failed (${errorText(e)}); close any program using its audio and try again`);
-    }
+    if (meeting) await app.deleteMeeting(meeting);
   }
 
   async function exportAs(format: ExportFormat) {

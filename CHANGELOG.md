@@ -35,7 +35,10 @@ All notable changes to Diarist. Versions follow semantic versioning.
   next one, so anything that remembered the old one by id saw the new one.
   Ids now come from a counter and are never reused. Before a database
   upgrade the app copies `diarist.db` to `diarist.db.bak-<old version>` next
-  to it, keeping only the newest copy.
+  to it, keeping only the newest copy. The window also forgets what it kept
+  for a deleted meeting (its post-pass error, a search hit's scroll, an
+  Open button in a notice, the last recording's live text), and a meeting
+  that is still recording or being finalized cannot be deleted.
 - Fixed: the live view did not open for the second and later recordings of
   a session until Stop. A recording made after deleting the previous one
   gets that meeting id again, and the app took it for the recording it had

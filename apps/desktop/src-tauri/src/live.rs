@@ -1246,6 +1246,28 @@ pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResul
     Ok(job_id)
 }
 
+/// Why meeting `meeting` cannot be deleted now: it is recording, or its
+/// post-pass is queued or running.
+pub(crate) fn delete_blocker(app: &AppHandle, meeting: MeetingId) -> Option<&'static str> {
+    let live = handle(app);
+    if lock(&live.slot)
+        .session
+        .as_ref()
+        .is_some_and(|s| s.meeting_id == meeting)
+    {
+        return Some("it is still recording; stop the recording first");
+    }
+    if lock(&live.post_passes)
+        .values()
+        .any(|p| p.meeting_id == Some(meeting))
+    {
+        return Some(
+            "its transcript is still being finalized; wait for it, or cancel it in the job list",
+        );
+    }
+    None
+}
+
 /// A post-pass was taken off the queue before it ran (`cancel_job`): the
 /// live transcript stays, so the meeting is done. Returns its meeting.
 pub(crate) fn dequeued_post_pass(app: &AppHandle, job: &JobId) -> Option<MeetingId> {

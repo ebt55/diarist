@@ -101,23 +101,13 @@
     app.open(hit.meeting_id, { segmentId: hit.segment_id, startMs: hit.start_ms });
   }
 
-  async function deleteMeeting(m: MeetingSummary | undefined) {
+  function deleteMeeting(m: MeetingSummary | undefined) {
     if (!m) return;
-    const ok = await app.confirm({
-      title: "Delete meeting?",
-      message: `"${m.title || "Untitled meeting"}" and its transcript will be deleted. Audio files are removed too.`,
-      confirmLabel: "Delete",
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await api.deleteMeeting(m.id);
-      if (app.openId === m.id) app.openId = null;
-      await app.refreshMeetings();
-      app.toast("info", `Deleted "${m.title || "Untitled meeting"}"`);
-    } catch (e) {
-      app.error(`Delete failed (${errorText(e)}); close any program using its audio and try again`);
+    if (live.active && live.meetingId === m.id) {
+      app.toast("info", "This meeting is still recording; stop the recording before deleting it");
+      return;
     }
+    void app.deleteMeeting(m);
   }
 
   function listKeys(e: KeyboardEvent, kind: "meetings" | "hits") {
@@ -155,7 +145,7 @@
         }
         break;
       case "Delete":
-        if (kind === "meetings") void deleteMeeting(app.meetings[cursor]);
+        if (kind === "meetings") deleteMeeting(app.meetings[cursor]);
         break;
       case "/":
         document.getElementById("search-input")?.focus();
