@@ -595,7 +595,10 @@ fn transcribe(
     let sel = built.selection;
     if let Some(reason) = switched {
         if let Some(selected) = models::selected_file(&*ctx.store, ModelRole::Asr)? {
-            eprintln!("{}", models::switch_notice(reason, &selected, language));
+            eprintln!(
+                "{}",
+                models::switch_notice(reason, &selected, &sel.asr_file, language)
+            );
         }
     } else if overrides.asr.is_some() && !models::languages::covers(&sel.asr_file, language) {
         eprintln!(

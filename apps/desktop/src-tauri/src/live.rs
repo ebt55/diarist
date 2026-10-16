@@ -411,7 +411,7 @@ fn select(paths: &DataPaths, store: &dyn RunStore, language: &str) -> CmdResult<
         if let Ok(Some(selected)) = models::selected_file(store, ModelRole::Asr) {
             log::info!(
                 "live, language {language}: {}",
-                models::switch_notice(reason, &selected, language)
+                models::switch_notice(reason, &selected, &built.selection.asr_file, language)
             );
         }
     }

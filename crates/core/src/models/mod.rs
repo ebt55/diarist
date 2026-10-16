@@ -300,16 +300,28 @@ fn not_covered(selected: &ModelFile, language: &str) -> String {
     }
 }
 
-/// The notice for a job that switched: "Transcribing with Nemotron 3.5:
-/// the selected model is English-only".
-pub fn switch_notice(reason: SwitchReason, selected: &ModelFile, language: &str) -> String {
-    match reason {
-        SwitchReason::LowVram => "Transcribing with Nemotron 3.5: low-VRAM mode".into(),
-        SwitchReason::Language => format!(
-            "Transcribing with Nemotron 3.5: {}",
-            not_covered(selected, language)
-        ),
+/// "Nemotron 3.5" for the manifest's file, else the file's own name.
+pub fn model_name(file: &ModelFile) -> String {
+    if file.manifest_name.as_deref() == Some(MULTILINGUAL_MODEL) {
+        return "Nemotron 3.5".into();
     }
+    let name = file.display_name.trim_start_matches('.');
+    name.strip_suffix(".gguf").unwrap_or(name).to_owned()
+}
+
+/// The notice for a job that switched from `selected` to `to`:
+/// "Transcribing with Nemotron 3.5: the selected model is English-only".
+pub fn switch_notice(
+    reason: SwitchReason,
+    selected: &ModelFile,
+    to: &ModelFile,
+    language: &str,
+) -> String {
+    let why = match reason {
+        SwitchReason::LowVram => "low-VRAM mode".to_owned(),
+        SwitchReason::Language => not_covered(selected, language),
+    };
+    format!("Transcribing with {}: {why}", model_name(to))
 }
 
 /// A job's language that neither the selected ASR model nor any installed
@@ -758,12 +770,19 @@ mod tests {
             assert_eq!(*reason, SwitchReason::Language);
             assert_eq!(choice.overrides().asr.as_deref(), Some("models/n35.gguf"));
         }
+        let n35 = files.iter().find(|f| f.display_name == "n35").unwrap();
         assert_eq!(
-            switch_notice(SwitchReason::Language, &en, "de"),
+            switch_notice(SwitchReason::Language, &en, n35, "de"),
             "Transcribing with Nemotron 3.5: the selected model is English-only"
         );
+        let mut dropped = n35.clone();
+        dropped.manifest_name = None;
+        dropped.display_name = ".my-asr.q8_0.gguf".into();
+        assert_eq!(
+            switch_notice(SwitchReason::LowVram, &en, &dropped, "en"),
+            "Transcribing with my-asr.q8_0: low-VRAM mode"
+        );
         // Nemotron 3.5 selected: it covers German and detection itself.
-        let n35 = files.iter().find(|f| f.display_name == "n35").unwrap();
         for lang in ["de", "auto", "en"] {
             assert_eq!(
                 select_for_language(n35, &files, lang, false),

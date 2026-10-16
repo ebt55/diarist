@@ -189,7 +189,12 @@ fn run_import(
         let selected = models::selected_file(store, ModelRole::Asr)
             .ok()
             .flatten()?;
-        Some(models::switch_notice(reason, &selected, &language))
+        Some(models::switch_notice(
+            reason,
+            &selected,
+            &built.selection.asr_file,
+            &language,
+        ))
     });
     log::info!(
         "import {job_id}: engine {} | asr {}{} | diarizer {}{} | language {language}",
