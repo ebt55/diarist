@@ -33,7 +33,8 @@ Only when you ask it to, and only to fetch files or version lists:
 | Install or Download a model | `huggingface.co` and its download servers (through Windows' `curl.exe`) | an ordinary file download request |
 | Add from URL | the address you typed | an ordinary file download request |
 | Check for newer runtime | `api.github.com` | a request for the NeMo-Speech.cpp release list, with the user agent `diarist/<version>` |
-| Check for updates | `github.com` (the release's `latest.json`) | an ordinary file request |
+| Check for updates | `raw.githubusercontent.com` (the file `ebt55/diarist/main/updater/latest.json`) | an ordinary file request |
+| Install and restart, after Check for updates found a new version | `github.com` and GitHub's download servers (the release's installer) | an ordinary file download request |
 
 Like any download, these requests reveal your IP address to the server
 (GitHub, Hugging Face, or the site you chose). Nothing about your meetings,
