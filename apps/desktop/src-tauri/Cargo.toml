@@ -43,3 +43,13 @@ tauri-plugin-window-state = "2.5"
 tauri-plugin-updater = "2.14"
 # "Press again to stop" while the window is hidden.
 tauri-plugin-notification = "2.7"
+
+[target.'cfg(windows)'.dependencies]
+# Window and tray icons from the size-matched frames of icon.ico (icons.rs).
+# The version Tauri uses, so its HWND is this crate's type.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

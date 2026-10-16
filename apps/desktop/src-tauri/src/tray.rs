@@ -1,7 +1,8 @@
 //! Notification-area icon: a red dot while recording, Record/Stop, Open
 //! and Quit. Left click opens the window. Stop asks for a confirmation
 //! (`live::toggle`): the in-app dialog when the window is on screen, else
-//! a second Stop within 3 s.
+//! a second Stop within 3 s. The icon is the app icon's frame for the
+//! notification area's size (`icons.rs`), redone when the scale changes.
 
 use std::sync::Mutex;
 
@@ -20,8 +21,8 @@ const ID_QUIT: &str = "tray-quit";
 pub(crate) struct Tray {
     icon: TrayIcon<Wry>,
     toggle: MenuItem<Wry>,
-    idle: Image<'static>,
-    recording: Image<'static>,
+    /// Idle, and with the recording dot.
+    images: Mutex<(Image<'static>, Image<'static>)>,
     shown: Mutex<Option<Phase>>,
 }
 
@@ -59,11 +60,11 @@ pub(crate) fn show_main(app: &AppHandle) {
 
 /// Builds the tray (once, in setup). Failure leaves the app without a tray.
 pub(crate) fn build(app: &App) -> tauri::Result<()> {
-    let Some(base) = app.default_window_icon().cloned() else {
-        log::warn!("no window icon; the tray is not shown");
+    let Some(idle) = crate::icons::tray_image(app.handle()) else {
+        log::warn!("no app icon; the tray is not shown");
         return Ok(());
     };
-    let idle = base.to_owned();
+    log::info!("tray icon {} px", idle.width());
     let recording = with_red_dot(&idle);
     let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start recording", true, Some("Ctrl+Alt+R"))?;
     let open = MenuItem::with_id(app, ID_OPEN, "Open Diarist", true, None::<&str>)?;
@@ -95,11 +96,38 @@ pub(crate) fn build(app: &App) -> tauri::Result<()> {
     app.manage(Tray {
         icon,
         toggle,
-        idle,
-        recording,
+        images: Mutex::new((idle, recording)),
         shown: Mutex::new(None),
     });
     Ok(())
+}
+
+/// Reloads the icon for the current scale (the window's scale changed).
+pub(crate) fn rescale(app: &AppHandle) {
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
+    let Some(idle) = crate::icons::tray_image(app) else {
+        return;
+    };
+    let mut images = tray.images.lock().unwrap_or_else(|e| e.into_inner());
+    if images.0.width() == idle.width() {
+        return;
+    }
+    log::info!("tray icon {} px", idle.width());
+    let recording = with_red_dot(&idle);
+    *images = (idle, recording);
+    let shown = *tray.shown.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = tray.icon.set_icon(Some(icon_for(&images, shown)));
+}
+
+/// The image for a phase: with the dot while recording or stopping.
+fn icon_for(images: &(Image<'static>, Image<'static>), phase: Option<Phase>) -> Image<'static> {
+    if matches!(phase, Some(Phase::Recording | Phase::Stopping)) {
+        images.1.clone()
+    } else {
+        images.0.clone()
+    }
 }
 
 /// While a stop is armed (first press with the window hidden), the menu
@@ -131,12 +159,11 @@ pub(crate) fn update(app: &AppHandle, phase: Phase, started_at: Option<i64>) {
         }
         *shown = Some(phase);
     }
-    let recording = matches!(phase, Phase::Recording | Phase::Stopping);
-    let _ = tray.icon.set_icon(Some(if recording {
-        tray.recording.clone()
-    } else {
-        tray.idle.clone()
-    }));
+    let image = icon_for(
+        &tray.images.lock().unwrap_or_else(|e| e.into_inner()),
+        Some(phase),
+    );
+    let _ = tray.icon.set_icon(Some(image));
     let (text, enabled) = match phase {
         Phase::Idle => ("Start recording", true),
         Phase::Starting => ("Starting…", false),

@@ -23,6 +23,10 @@ All notable changes to Diarist. Versions follow semantic versioning.
 - Fixed: Japanese and Chinese were transcribed with automatic language
   detection; the language is now passed to the model.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
+- Fixed: the taskbar button showed the icon blurred (a 32 px image
+  enlarged). The window, its taskbar button and the tray now take the
+  icon's frame for the display's scale, including the 16, 20 and 24 px
+  frames drawn on the pixel grid.
 - Added: Diagnostics' checklist has a "Microphone privacy" row. When
   Windows' "Microphone access" or "Let desktop apps access your microphone"
   is off, Windows hands Diarist silence instead of the microphone; the row

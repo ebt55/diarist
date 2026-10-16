@@ -37,6 +37,7 @@ mod commands;
 mod crash;
 mod demo;
 pub mod events;
+mod icons;
 mod live;
 mod maintenance;
 mod tray;
@@ -385,6 +386,7 @@ pub fn run() {
                     "window.__DIARIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
                 ))
                 .build()?;
+            icons::apply_window_icons(&window.as_ref().window());
 
             if let Err(e) = tray::build(app) {
                 log::warn!("tray icon not available: {e}");
@@ -416,15 +418,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // Recording continues in the tray when the window is closed.
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            WindowEvent::CloseRequested { api, .. } => {
                 if live::handle(window.app_handle()).is_recording() {
                     api.prevent_close();
                     let _ = window.hide();
                     log::info!("window hidden to the tray while recording");
                 }
             }
+            // Icons for the new scale (another monitor, a changed setting).
+            WindowEvent::ScaleFactorChanged { .. } => {
+                icons::apply_window_icons(window);
+                tray::rescale(window.app_handle());
+            }
+            _ => {}
         })
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fatal(&format!("error while building Diarist: {e}")));
