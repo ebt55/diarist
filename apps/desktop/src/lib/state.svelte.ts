@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
 import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
-import { languageName } from "./languages";
+import { UNKNOWN_TOKENS_NOTICE, languageName } from "./languages";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
 import type { MeetingId } from "./generated/MeetingId";
@@ -102,7 +102,7 @@ class AppState {
   dragging = $state(false);
   /** Post-passes queued or running (from `live:state`). */
   postPasses = $state.raw<PostPassView[]>([]);
-  /** Why a meeting's post-pass failed (this session only). */
+  /** Why a meeting's post-pass or import failed (this session only). */
   postPassErrors = $state.raw(new Map<MeetingId, string>());
   /** No engine, speech model or diarizer (`setup_status`); null until known. */
   setupNeeded = $state<boolean | null>(null);
@@ -457,19 +457,29 @@ class AppState {
     void this.refreshMeetings();
     if (e.type === "cancelled") {
       this.toast("info", `Import of ${name} cancelled`);
+    } else if (e.message === UNKNOWN_TOKENS_NOTICE && e.meeting_id !== null) {
+      // The meeting stays (failed, with its audio); its page says why.
+      const id = e.meeting_id;
+      this.#noteFailure(id, e.message);
+      void api.log("warn", `import of ${name}: ${e.message}`);
+      this.toast("error", `${name}: ${e.message}`, { label: "Open", run: () => this.open(id), meetingId: id });
     } else {
+      if (e.meeting_id !== null) this.#noteFailure(e.meeting_id, e.message);
       this.error(`Import of ${name} failed: ${e.message}`);
     }
+  }
+
+  /** Keeps why a job for meeting `id` failed, for the meeting's banner (this session). */
+  #noteFailure(id: MeetingId, message: string): void {
+    const next = new Map(this.postPassErrors);
+    next.set(id, message);
+    this.postPassErrors = next;
   }
 
   #postPassEnded(e: JobEvent, meetingId: MeetingId | null, title: string): void {
     void this.refreshMeetings();
     const id = e.type === "done" ? e.meeting_id : (meetingId ?? ("meeting_id" in e ? e.meeting_id : null));
-    if (e.type === "error" && id !== null) {
-      const next = new Map(this.postPassErrors);
-      next.set(id, e.message);
-      this.postPassErrors = next;
-    }
+    if (e.type === "error" && id !== null) this.#noteFailure(id, e.message);
     const open = id !== null && this.openId === id && this.route === "library";
     if (e.type === "done") {
       if (!open && id !== null) {
@@ -477,6 +487,16 @@ class AppState {
       }
     } else if (e.type === "cancelled") {
       this.toast("info", `Post-pass of "${title}" cancelled; the live transcript stays`);
+    } else if (e.type === "error" && e.message === UNKNOWN_TOKENS_NOTICE) {
+      // The meeting's banner says it too, with Retry (the WAVs stay).
+      void api.log("warn", `post-pass of ${title}: ${e.message}`);
+      if (!open) {
+        this.toast("error", `"${title}": ${e.message} The live transcript stays.`, {
+          label: id !== null ? "Open" : "Show log",
+          run: () => (id !== null ? this.open(id) : (this.route = "diagnostics")),
+          meetingId: id ?? undefined,
+        });
+      }
     } else if (e.type === "error") {
       void api.log("error", `post-pass of ${title} failed: ${e.message}`);
       if (!open) {

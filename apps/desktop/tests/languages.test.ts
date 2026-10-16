@@ -4,11 +4,12 @@ import {
   LANGUAGE_TIERS,
   OTHER,
   TYPED,
+  UNSUPPORTED_NOTE,
   canonical,
   isTag,
   languageLabel,
-  languageName,
   languageOptions,
+  offeredLanguages,
   planFor,
   systemLanguage,
 } from "../src/lib/languages";
@@ -38,6 +39,20 @@ const N35 = asr(2, ["en-US", "en", "de-DE", "de", "es-ES", "es", "ja-JP", "zh-CN
   manifest_name: "nemotron-3.5",
 });
 const PARAKEET = asr(3, [], { capabilities: { ...EN.capabilities, languages: [], streaming: false } });
+
+/** Nemotron 3.5's whole prompt dictionary as `classify` reads it: 121 tags, far more than it was trained on. */
+const N35_TAGS = [
+  "en-US", "en", "en-GB", "enGB", "es-ES", "esES", "es-US", "es", "zh-CN", "zh-ZH", "zh-TW", "hi-IN", "hi", "hi-HI",
+  "ar-AR", "ar", "fr-FR", "fr", "de-DE", "de", "ja-JP", "ja-JA", "ru-RU", "ru", "pt-BR", "pt-PT", "pt", "ko-KR", "ko",
+  "ko-KO", "it-IT", "it", "nl-NL", "nl", "pl-PL", "pl", "tr-TR", "tr", "uk-UA", "uk", "ro-RO", "ro", "el-GR", "el",
+  "cs-CZ", "cs", "hu-HU", "hu", "sv-SE", "sv", "da-DK", "da", "fi-FI", "fi", "no-NO", "no", "nb-NO", "nb", "nn-NO",
+  "nn", "sk-SK", "sk", "hr-HR", "hr", "bg-BG", "bg", "lt-LT", "lt", "et-EE", "et", "lv-LV", "lv", "sl-SI", "sl",
+  "th-TH", "vi-VN", "id-ID", "ms-MY", "bn-IN", "ur-PK", "fa-IR", "ta-IN", "te-IN", "mr-IN", "gu-IN", "kn-IN", "ml-IN",
+  "si-LK", "ne-NP", "km-KH", "sw-KE", "am-ET", "ha-NG", "zu-ZA", "yo-NG", "ig-NG", "af-ZA", "rw-RW", "so-SO", "ny-MW",
+  "ln-CD", "or-KE", "he-IL", "ku-TR", "az-AZ", "ka-GE", "hy-AM", "uz-UZ", "tg-TJ", "ky-KG", "qu-PE", "ay-BO", "gn-PY",
+  "nah-MX", "mi-NZ", "haw-US", "sm-WS", "to-TO", "fr-CA", "mt-MT", "auto",
+];
+const N35_FULL = asr(5, N35_TAGS, { manifest_name: "nemotron-3.5" });
 
 describe("tags", () => {
   test("stored bare tags map to the table", () => {
@@ -122,24 +137,47 @@ describe("lists", () => {
     expect(codes).not.toContain("el");
   });
 
-  test("every language a model declares is offered, unknown ones by name or tag", () => {
-    const wide = asr(4, ["en", "de", "el-GR", "ta-IN", "qq-ZZ", "auto"]);
-    const opts = languageOptions([wide], 4, "en", false);
-    const ta = opts.find((o) => o.code === "ta");
-    expect(ta).toBeDefined();
-    expect(ta!.label).toBe(languageName("ta")); // "Tamil" from the platform, else "ta"
-    expect(opts.find((o) => o.code === "qq")?.label).toBe("qq");
-    // The adaptation tier shows, marked, because the model lists it.
-    expect(opts.find((o) => o.code === "el")?.label).toBe("Greek (needs fine-tuning)");
-    // Untiered languages come after the tiers.
+  test("Nemotron 3.5's 121 declared tags give only the table's ready and broad entries (no Malayalam)", () => {
+    expect(N35_TAGS.length).toBe(121);
+    const opts = languageOptions([N35_FULL], 5, "en", false);
     const codes = opts.map((o) => o.code);
-    expect(codes.indexOf("ta")).toBeGreaterThan(codes.indexOf("el"));
+    const offered = offeredLanguages().map((l) => l.code);
+    expect(offered.length).toBe(30);
+    expect(codes).toEqual(["auto", ...offered, TYPED]);
+    for (const c of ["ml", "ta", "sw", "no", "el", "th", "he", "mt"]) expect(codes).not.toContain(c);
+    expect(codes).toContain("de");
+    expect(codes).toContain("hi");
+    expect(opts.find((o) => o.code === "ja-JP")?.label).toBe("Japanese");
+    expect(opts.find((o) => o.code === "zh-CN")?.label).toBe("Chinese (reduced accuracy)");
+    // Every offered language is declared, so there is nothing to install.
+    expect(codes).not.toContain(OTHER);
+    // The same list when the EN model is selected and a switch can use Nemotron 3.5.
+    expect(languageOptions([EN, N35_FULL], 1, "en", false).map((o) => o.code)).toEqual(codes);
   });
 
-  test("the effective table names and marks languages", () => {
+  test("a declared language the table does not offer is not listed", () => {
+    const wide = asr(4, ["en", "de", "el-GR", "ta-IN", "qq-ZZ", "auto"]);
+    const codes = languageOptions([wide], 4, "en", false).map((o) => o.code);
+    expect(codes.slice(0, 3)).toEqual(["auto", "en", "de"]);
+    for (const c of ["el", "ta", "qq"]) expect(codes).not.toContain(c);
+    // Offered languages it does not declare: the install entry, then the typed tag.
+    expect(codes.slice(3)).toEqual([OTHER, TYPED]);
+  });
+
+  test("a languages.user.json entry promotes an adaptation language or adds one", () => {
+    const greek = { code: "el", name: "Greek", tier: "broad" as const, bare: true };
+    const promoted = [...LANGUAGE_TIERS.filter((l) => l.code !== "el"), greek];
+    expect(languageOptions([N35_FULL], 5, "en", false).some((o) => o.code === "el")).toBe(false);
+    const opts = languageOptions([N35_FULL], 5, "en", false, promoted);
+    expect(opts.find((o) => o.code === "el")?.label).toBe("Greek (reduced accuracy)");
+    expect(planFor([N35_FULL], 5, "el", promoted).note).toBeNull();
+    // Without a tier: listed plainly, after the tiers.
     const table = [...LANGUAGE_TIERS, { code: "ta", name: "Tamil (user)", tier: null, bare: true }];
-    const wide = asr(4, ["en", "ta-IN"]);
-    expect(languageOptions([wide], 4, "en", false, table).find((o) => o.code === "ta")?.label).toBe("Tamil (user)");
+    const tamil = languageOptions([N35_FULL], 5, "en", false, table);
+    expect(tamil.find((o) => o.code === "ta")?.label).toBe("Tamil (user)");
+    expect(tamil.at(-2)?.code).toBe("ta");
+    // Still listed only for a model that declares it.
+    expect(languageOptions([asr(4, ["en", "de"])], 4, "en", false, table).some((o) => o.code === "ta")).toBe(false);
   });
 });
 
@@ -158,5 +196,32 @@ describe("typed tags", () => {
     // A typed tag that an installed model lists switches like a chosen one.
     expect(planFor([EN, N35], 1, "pl").kind).toBe("switch");
     expect(planFor([EN], 1, TYPED).kind).toBe("selected");
+  });
+
+  test("Other tag with a declared tag the table does not offer warns that the output may be unusable", () => {
+    // Nemotron 3.5 declares ml-IN; typed ml runs on it, with the note.
+    const p = planFor([N35_FULL], 5, canonical("ml"));
+    expect(p.kind).toBe("selected");
+    expect(p.note).toBe(UNSUPPORTED_NOTE);
+    expect(UNSUPPORTED_NOTE).toBe("Not in this model's supported list; the output may be unusable.");
+    expect(planFor([N35_FULL], 5, "el").note).toBe(UNSUPPORTED_NOTE);
+    // A switch to the model that declares it says both.
+    const s = planFor([EN, N35_FULL], 1, "ml");
+    expect(s.kind).toBe("switch");
+    expect(s.note).toBe(`Transcribing with Nemotron 3.5: the selected model is English-only. ${UNSUPPORTED_NOTE}`);
+    // Listed as typed once chosen.
+    expect(languageOptions([N35_FULL], 5, "ml", false)[0]).toEqual({
+      code: "ml",
+      label: languageLabel("ml"),
+      disabled: false,
+    });
+    // Offered languages and automatic detection have no note.
+    expect(planFor([N35_FULL], 5, "de").note).toBeNull();
+    expect(planFor([N35_FULL], 5, "auto").note).toBeNull();
+    // Nothing declares it: the existing "not checked" note.
+    const none = planFor([N35_FULL], 5, "x-klingon");
+    expect(none.kind).toBe("unchecked");
+    expect(none.note).toContain("Not checked for this model");
+    expect(planFor([EN], 1, "ml").note).toContain("Not checked for this model");
   });
 });

@@ -89,6 +89,10 @@
       ? (app.postPassErrors.get(meetingId) ?? "The post-pass did not finish.")
       : null,
   );
+  /** Why an imported file failed (this session): unknown tokens, an engine error. */
+  const importError = $derived(
+    meeting?.source === "file" && meeting.status === "failed" ? (app.postPassErrors.get(meetingId) ?? null) : null,
+  );
 
   /**
    * While recording, talk time comes from the live words (there are no
@@ -625,6 +629,13 @@
             <span>{postPassError} The live transcript stays.</span>
           </div>
           <button type="button" class="btn" disabled={retrying} onclick={retryPostPass}>{retrying ? "Queuing…" : "Retry"}</button>
+        </div>
+      {:else if importError}
+        <div class="banner error" role="alert">
+          <div class="b-main">
+            <strong>Import failed.</strong>
+            <span>{importError} Import the file again to run it once more.</span>
+          </div>
         </div>
       {/if}
       <Transcript

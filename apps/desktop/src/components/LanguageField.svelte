@@ -1,9 +1,10 @@
 <script lang="ts">
   // The meeting-language control of the start sheet, the import sheet and
-  // Settings: every language the installed models declare (lib/languages.ts,
-  // with the backend's language table), a typed tag ("Other tag…"), what the
-  // job will run on, and, when nothing installed covers a known language,
-  // the Nemotron 3.5 download (the same row as Settings and Setup).
+  // Settings: the table's supported languages that the installed models
+  // declare (lib/languages.ts, with the backend's language table), a typed
+  // tag ("Other tag…", with a note on what the tag will give), what the job
+  // will run on, and, when nothing installed covers a known language, the
+  // Nemotron 3.5 download (the same row as Settings and Setup).
   // `blocked` is set while the job cannot start in this language.
   import { api, errorText, langApi } from "../lib/api";
   import { downloads, sizeMb } from "../lib/downloads.svelte";
@@ -58,6 +59,8 @@
 
   const options = $derived(languageOptions(files, selectedId, language, true, table));
   const current = $derived(planFor(files, selectedId, language, table));
+  /** What the tag being typed would give ("Not in this model's supported list…", "Not checked…"). */
+  const typedNote = $derived(isTag(typed) ? planFor(files, selectedId, canonical(typed, table), table).note : null);
 
   // Pushed to the parent's bindings as plain values. An object written to
   // a binding is a new value on every run, so an effect that wrote the plan
@@ -147,9 +150,10 @@
       <button type="button" class="btn" onclick={useTyped} disabled={!isTag(typed)}>Use</button>
     </div>
     <p class="help">
-      Any BCP-47 tag the model may know. A tag no installed model lists is passed to the selected model as it is, not
-      checked.
+      Any BCP-47 tag. A model may list a tag it was not trained on, which can give unusable output; a tag no installed
+      model lists is passed to the selected model as it is, not checked.
     </p>
+    {#if typedNote}<p class="help">{typedNote}</p>{/if}
   {/if}
   {#if isAuto(language)}<p class="help">{AUTO_NOTE}</p>{/if}
   {#if current.note && current.kind !== "install"}<p class="help">{current.note}</p>{/if}

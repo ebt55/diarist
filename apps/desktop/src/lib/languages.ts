@@ -1,9 +1,13 @@
 // Languages for recordings and imports (docs/04 section 6). The table is
 // data: the backend's `language_table` (manifests/languages.json plus the
 // data root's languages.user.json), with the generated copy of the shipped
-// table as the fallback. The lists offer every language an installed model
-// declares (named from the table, else by the platform's language names,
-// else by the tag), plus a typed tag. The decision mirrors the backend's
+// table as the fallback. The lists offer the table's ready and broad-coverage
+// languages (and entries languages.user.json adds or promotes) that an
+// installed model the job can run on declares, plus a typed tag. A model's
+// declaration is its GGUF prompt dictionary: every tag the tokenizer knows
+// (121 for Nemotron 3.5, Malayalam among them), not what it was trained on,
+// so a declared language the table does not offer is reachable only as a
+// typed tag, with UNSUPPORTED_NOTE. The decision mirrors the backend's
 // `models::select_for_language`, so a sheet shows what the job will do: run
 // on the selected model, switch to an installed model that lists the
 // language, offer the Nemotron 3.5 download for a known language nothing
@@ -12,9 +16,23 @@
 import type { LanguageEntry } from "./generated/LanguageEntry";
 import type { LanguageTier } from "./generated/LanguageTier";
 import type { ModelFile } from "./generated/ModelFile";
-import { LANGUAGE_TIERS, MULTILINGUAL_MODEL, TIER_EXPECTATIONS, TIER_TITLES } from "./generated/languageTiers";
+import {
+  LANGUAGE_TIERS,
+  MULTILINGUAL_MODEL,
+  TIER_EXPECTATIONS,
+  TIER_TITLES,
+  UNKNOWN_TOKENS_NOTICE,
+} from "./generated/languageTiers";
 
-export { LANGUAGE_TIERS, MULTILINGUAL_MODEL, TIER_EXPECTATIONS, TIER_TITLES, type LanguageEntry, type LanguageTier };
+export {
+  LANGUAGE_TIERS,
+  MULTILINGUAL_MODEL,
+  TIER_EXPECTATIONS,
+  TIER_TITLES,
+  UNKNOWN_TOKENS_NOTICE,
+  type LanguageEntry,
+  type LanguageTier,
+};
 
 /** A language table: the backend's effective one, or the shipped fallback. */
 export type LanguageTable = readonly LanguageEntry[];
@@ -26,6 +44,8 @@ export const OTHER = "other";
 /** The "Other tag…" entry: the user types a BCP-47 tag (not a language). */
 export const TYPED = "typed";
 export const AUTO_NOTE = "Automatic detection loses about a second of the first utterance.";
+/** A tag a model declares that the table does not offer (Nemotron 3.5 lists `ml`; its output is unknown tokens). */
+export const UNSUPPORTED_NOTE = "Not in this model's supported list; the output may be unusable.";
 
 export function primarySubtag(tag: string): string {
   return (tag.trim().split(/[-_]/)[0] ?? "").toLowerCase();
@@ -53,6 +73,22 @@ export function findLanguage(tag: string, table: LanguageTable = LANGUAGE_TIERS)
 export function knows(tag: string, table: LanguageTable = LANGUAGE_TIERS): boolean {
   const p = primarySubtag(tag);
   return isAuto(tag) || table.some((l) => primarySubtag(l.code) === p);
+}
+
+/**
+ * Whether the lists offer the entry: transcription-ready, broad coverage, or
+ * added without a tier by languages.user.json. The adaptation tier needs
+ * fine-tuning and is left out; a user entry with another tier (or none)
+ * promotes it.
+ */
+export function isOffered(l: LanguageEntry): boolean {
+  return l.tier !== "adaptation";
+}
+
+/** Whether the table offers the tag's language (any locale of it); `auto` counts. */
+export function offers(tag: string, table: LanguageTable = LANGUAGE_TIERS): boolean {
+  const p = primarySubtag(tag);
+  return isAuto(tag) || table.some((l) => isOffered(l) && primarySubtag(l.code) === p);
 }
 
 /** The tag to offer and store (a stored `ja` gives `ja-JP`; an unknown tag stays as typed), like `canonical`. */
@@ -193,13 +229,15 @@ export function planFor(
       note: "Not checked for this model: it does not list its languages, so it runs as selected.",
     };
   }
-  if (covers(selected, tag)) return { kind: "selected", file: selected, note: null };
+  // Declared but not offered: the dictionary has the tag, the model was not trained on it.
+  const unsupported = offers(tag, table) ? "" : UNSUPPORTED_NOTE;
+  if (covers(selected, tag)) return { kind: "selected", file: selected, note: unsupported || null };
   const other = asrForLanguage(selected, files, tag);
   if (other) {
     return {
       kind: "switch",
       file: other,
-      note: `Transcribing with ${modelName(other)}: ${notCovered(selected, tag, table)}.`,
+      note: `Transcribing with ${modelName(other)}: ${notCovered(selected, tag, table)}.${unsupported ? ` ${unsupported}` : ""}`,
     };
   }
   if (!knows(tag, table)) {
@@ -233,20 +271,21 @@ function byTierThenName(a: { tier: LanguageTier | null; name: string }, b: { tie
   return ta - tb || a.name.localeCompare(b.name);
 }
 
-/** The table's transcription-ready and broad-coverage languages, ready first, each by name. */
+/** The table's offered languages (`isOffered`: ready, broad, user-added), ready first, each by name. */
 export function offeredLanguages(table: LanguageTable = LANGUAGE_TIERS): LanguageEntry[] {
-  return table.filter((l) => l.tier === "ready" || l.tier === "broad").sort(byTierThenName);
+  return table.filter(isOffered).sort(byTierThenName);
 }
 
 /**
- * The language list for a sheet or Settings. Every language an installed
- * model that the job can run on declares (the selected one, and the
- * streaming models a switch can use), named from the table when it knows
- * the language, else by name or tag; with a model that lists no languages,
- * the table's ready and broad languages. Then "Detect automatically" when a
- * model detects, "Other languages: install Nemotron 3.5" when table
- * languages are left out (disabled unless `otherSelectable`), and
- * "Other tag…". `current` stays listed even when nothing covers it.
+ * The language list for a sheet or Settings: the table's offered languages
+ * (`offeredLanguages`) that an installed model the job can run on declares
+ * (the selected one, and the streaming models a switch can use); with a
+ * model that lists no languages, all of them. A declared language the table
+ * does not offer (Malayalam, Tamil, the adaptation tier) is not listed: its
+ * tag goes through "Other tag…". Then "Detect automatically" when a model
+ * detects, "Other languages: install Nemotron 3.5" when offered languages
+ * are left out (disabled unless `otherSelectable`), and "Other tag…".
+ * `current` stays listed even when nothing covers it.
  */
 export function languageOptions(
   files: ModelFile[],
@@ -267,13 +306,12 @@ export function languageOptions(
   } else {
     const models = [selected, ...switchable(selected, files)];
     detects = models.some((m) => lists(m, AUTO));
-    const declared = [...new Set(models.flatMap(subtags))];
-    for (const p of declared) {
-      const known = table.filter((l) => primarySubtag(l.code) === p);
-      if (known.length > 0) for (const l of known) add(l.code, l.name, l.tier, entryLabel(l));
-      else add(p, languageName(p, table), null, languageName(p, table));
+    const declared = new Set(models.flatMap(subtags));
+    for (const l of offeredLanguages(table)) {
+      if (declared.has(primarySubtag(l.code))) add(l.code, l.name, l.tier, entryLabel(l));
+      // A tier is Nemotron 3.5's rating: installing it would list the language.
+      else if (l.tier) hidden = true;
     }
-    hidden = offeredLanguages(table).some((l) => !declared.includes(primarySubtag(l.code)));
   }
   entries.sort(byTierThenName);
   const out: LanguageOption[] = entries.map((e) => ({ code: e.code, label: e.label, disabled: false }));
