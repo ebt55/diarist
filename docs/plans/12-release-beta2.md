@@ -1,6 +1,6 @@
 # 0.1.0-beta.2: accuracy, languages, icon, crash capture
 
-Status: proposed 16 Oct 2026, planner Fable 5.1, implementation Opus 5.5 agents. Replaces the "next" order in the handoff for one release: the items here are what a stranger installing Diarist from the website hits in the first ten minutes, and what the site can claim with numbers behind it. The rest of the hardening plan (`docs/plans/11-hardening.md`: bench, soak, CLI in the installer) follows in beta.3.
+Status: in progress, 16 Oct 2026 (evening), planner Fable 5.1, implementation Opus 5.5 agents. Landed on the branch: B icon pair, C languages (GPU check and a Svelte effect-loop fix pending), D crash capture, E lookahead with the carry-over alignment, H ids and polish. Open: A's last measurements (diarizer preset, boosting, per-language WER), then I release verification. F dropped (section 4), G moved to beta.3. Replaces the "next" order in the handoff for one release: the items here are what a stranger installing Diarist from the website hits in the first ten minutes, and what the site can claim with numbers behind it. The rest of the hardening plan (`docs/plans/11-hardening.md`: bench, soak, CLI in the installer) follows in beta.3.
 
 Every quality-affecting chunk ships only with a before-and-after table from `tools/eval` on the fixed set (`docs/05-eval-data.md`); nothing regresses any session beyond the noise band and nothing changes the live path without a latency number.
 
