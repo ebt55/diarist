@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <title>Diarist (24 px frame)</title>
+  <!-- icon.svg redrawn on the 24 px pixel grid for the 24 px frame of icon.ico. At 24 px the
+       512 master puts every line edge on a half pixel; here the edge is a whole pixel and the
+       lines are 3 px tall at y 4, 10, 16, starting at x 4, 11, 16 and 8 px long. -->
+  <path fill="#64748b" d="M5.25 0H18L24 6V18.75A5.25 5.25 0 0 1 18.75 24H5.25A5.25 5.25 0 0 1 0 18.75V5.25A5.25 5.25 0 0 1 5.25 0Z"/>
+  <path fill="#f6f3ec" d="M5.25 1H17.586L23 6.414V18.75A4.25 4.25 0 0 1 18.75 23H5.25A4.25 4.25 0 0 1 1 18.75V5.25A4.25 4.25 0 0 1 5.25 1Z"/>
+  <path fill="#64748b" d="M18 0V4.5A1.5 1.5 0 0 0 19.5 6H24Z"/>
+  <rect x="4" y="4" width="11" height="3" rx="0.75" fill="#4e79a7"/>
+  <rect x="4" y="10" width="16" height="3" rx="0.75" fill="#d27401"/>
+  <rect x="4" y="16" width="8" height="3" rx="0.75" fill="#e15759"/>
+</svg>

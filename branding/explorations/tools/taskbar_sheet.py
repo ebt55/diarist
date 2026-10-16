@@ -13,6 +13,9 @@ branding/explorations/, and the contrast table on stdout.
 
     powershell -ExecutionPolicy Bypass -File branding/explorations/tools/taskbar-icons.ps1 -Out <icons>
     uv run --with pillow python -I branding/explorations/tools/taskbar_sheet.py --neighbours <icons> --work <tmp>
+
+With --ico apps/desktop/src-tauri/icons/icon.ico it draws taskbar-sheet-ico.png instead: the
+frames read back from the finished icon file, in the strips at 20, 24, 32 and 48 px.
 """
 
 import argparse
@@ -197,6 +200,41 @@ def matrix_sheet(cands, icons, neighbours, title, zooms=(16,)):
     return sheet
 
 
+def ico_sheet(ico_path, neighbours):
+    """The frames of the finished icon.ico, read back from the file, in the strips at 20 to 48 px."""
+    ico = Image.open(ico_path)
+    frames = {s: ico.ico.getimage((s, s)).convert("RGBA") for s in (16, 20, 24, 32, 48)}
+    sizes, zooms = (20, 24, 32, 48), (16, 20, 24)
+    x0, label_w, gap = 24, 70, 24
+    widths = [strip(frames, neighbours, s, DARK).width for s in sizes]
+    zw = [(z + 4) * 8 for z in zooms]
+    W = x0 + label_w + max(widths) + 48 + sum(zw) + gap * (len(zooms) - 1) + x0
+    block = sum(round(48 * s / 24) + 16 for s in sizes)
+    H = 70 + 2 * (40 + max(block, max(zw) + 30)) + 30
+    sheet = Image.new("RGB", (W, H), "#ffffff")
+    d = ImageDraw.Draw(sheet)
+    d.text((x0, 16), f"{ico_path.name}: the frames read back from the file (16, 20 and 24 px are the snapped drawings)",
+           fill="#111111", font=font(20, True))
+    y = 70
+    for theme, bg in (("Dark taskbar", DARK), ("Light taskbar", LIGHT)):
+        d.text((x0, y), f"{theme} ({bg})", fill="#111111", font=font(17, True))
+        y += 40
+        top, zx = y, x0 + label_w + max(widths) + 48
+        for s in sizes:
+            st = strip(frames, neighbours, s, bg)
+            d.text((x0, y + st.height // 2 - 10), f"{s} px", fill="#444444", font=font(15))
+            framed(sheet, st, (x0 + label_w, y))
+            y += st.height + 16
+        for z, w in zip(zooms, zw):
+            d.text((zx, top - 24), f"{z} px frame, 8x", fill="#444444", font=font(13))
+            framed(sheet, zoom(frames, bg, z), (zx, top))
+            zx += w + gap
+        y = top + max(block, max(zw) + 30)
+    d.text((x0, H - 26), "Neighbours: the apps pinned on this PC, as the shell renders them at each size. "
+           f"Dark is {DARK}, sampled from this PC's taskbar; light is {LIGHT}.", fill="#777777", font=font(13))
+    return sheet
+
+
 def save(im, path):
     # Flat colours: an adaptive palette keeps the sheets small without visible loss.
     im.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).save(path, optimize=True)
@@ -206,12 +244,19 @@ def save(im, path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--neighbours", required=True, type=Path, help="folder written by taskbar-icons.ps1")
-    ap.add_argument("--work", required=True, type=Path, help="scratch folder for the rasterised icons")
+    ap.add_argument("--work", type=Path, help="scratch folder for the rasterised icons")
+    ap.add_argument("--ico", type=Path, help="only draw taskbar-sheet-ico.png from the frames of this .ico")
     args = ap.parse_args()
-    args.work.mkdir(parents=True, exist_ok=True)
 
     apps = (*NEIGHBOURS_LEFT, *NEIGHBOURS_RIGHT)
-    neighbours = {a: {s: Image.open(args.neighbours / f"{a}-{s}.png").convert("RGBA") for s in SIZES} for a in apps}
+    neighbours = {a: {s: Image.open(args.neighbours / f"{a}-{s}.png").convert("RGBA") for s in (20, *SIZES)}
+                  for a in apps}
+    if args.ico:
+        save(ico_sheet(args.ico, neighbours), EXPLORATIONS / "taskbar-sheet-ico.png")
+        return
+    if not args.work:
+        ap.error("--work is required unless --ico is given")
+    args.work.mkdir(parents=True, exist_ok=True)
     icons = {c[0]: rasterise(c[1], args.work, c[0]) for c in CANDIDATES}
 
     for c in CANDIDATES:

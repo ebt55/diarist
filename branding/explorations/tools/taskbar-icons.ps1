@@ -1,6 +1,6 @@
 # Collects the inputs for taskbar_sheet.py from this machine, without changing any setting:
-#   - the icons of the apps pinned to the taskbar, as the shell renders them, at 16, 24, 32
-#     and 48 px (IShellItemImageFactory, icon only), saved as <app>-<size>.png;
+#   - the icons of the apps pinned to the taskbar, as the shell renders them, at 16, 20, 24,
+#     32 and 48 px (IShellItemImageFactory, icon only), saved as <app>-<size>.png;
 #   - the taskbar strip itself (CopyFromScreen at native resolution) when it is on screen,
 #     saved as taskbar-capture.png; with an auto-hidden taskbar only the 2 px sliver at the
 #     bottom edge is visible, so its colour is sampled instead (taskbar-colour.txt).
@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
 foreach ($lnk in Get-ChildItem $pinned -Filter *.lnk) {
   $name = ($lnk.BaseName -replace '[^A-Za-z0-9]+', '-').ToLower()
-  foreach ($px in 16, 24, 32, 48) {
+  foreach ($px in 16, 20, 24, 32, 48) {
     $bmp = [TB]::Icon($lnk.FullName, $px)
     $bmp.Save((Join-Path $Out "$name-$px.png"), [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
