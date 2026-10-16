@@ -569,10 +569,13 @@ pub fn resolve_model(
     }
     let abs = std::path::absolute(p)?;
     let rel = paths.relative(&abs);
+    // A file outside the data root is stored by its absolute path, whose
+    // separators and case `std::path::absolute` may not keep.
+    let norm = |s: &str| s.replace('\\', "/").to_lowercase();
     if let Some(f) = store
         .list_model_files()?
         .into_iter()
-        .find(|f| f.path == rel)
+        .find(|f| f.path == rel || norm(&f.path) == norm(&rel))
     {
         if f.role != role {
             return Err(CoreError::Models(format!(
@@ -1033,6 +1036,31 @@ mod tests {
             file_right_context(&old, FileLookahead::Low, Some(&builtin)),
             None
         );
+    }
+
+    #[test]
+    fn a_model_outside_the_data_root_resolves_to_its_row() {
+        let store = MemoryStore::new();
+        let paths = DataPaths::at("D:/data");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("n35.gguf");
+        std::fs::write(&file, b"x").unwrap();
+        // Scanned with forward slashes (the CLI's --models-dir outside the root).
+        let stored = std::path::absolute(&file)
+            .unwrap()
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let mut f = scanned(&stored, ModelRole::Asr, "n35");
+        f.manifest_name = Some(MULTILINGUAL_MODEL.into());
+        store.sync_model_files(&[f], 1).unwrap();
+        let (_, row) = resolve_model(&paths, &store, ModelRole::Asr, &stored).unwrap();
+        assert_ne!(
+            row.id,
+            ModelFileId(0),
+            "the scanned row, not a synthetic one"
+        );
+        assert_eq!(row.manifest_name.as_deref(), Some(MULTILINGUAL_MODEL));
     }
 
     #[test]
