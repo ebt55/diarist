@@ -62,6 +62,10 @@ bug report.
   a session until Stop. A recording made after deleting the previous one
   gets that meeting id again, and the app took it for the recording it had
   already opened.
+- Changed: imports and the post-pass after Stop run the speaker model with
+  its offline geometry: fewer words land on the wrong speaker around a
+  change (measured 8 to 6 percent on a dense Q&A meeting, 41 to 18 on an
+  in-room recording); live recording keeps the streaming setting.
 - Fixed: playback was much quieter than the meeting itself (a video played
   on the PC and recorded came back faint, and the mix halved it again when
   the microphone channel was silent). The player now raises a quiet meeting
