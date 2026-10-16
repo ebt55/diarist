@@ -27,9 +27,14 @@
 //! start with Windows (`--autostart`: the window stays in the tray), window
 //! size and position remembered, and audio retention at launch and daily
 //! (`maintenance.rs`).
+//!
+//! Crash capture (`crash.rs`, docs/plans/11-hardening.md 8a) is installed
+//! before anything else: reports go to `<root>\logs`, the next launch shows
+//! a notice, and WebView errors are forwarded to the app log.
 
 mod asset;
 mod commands;
+mod crash;
 mod demo;
 pub mod events;
 mod live;
@@ -149,6 +154,8 @@ pub fn run() {
     if let Err(e) = std::fs::create_dir_all(paths.logs()) {
         fatal(&format!("cannot create {}: {e}", paths.logs().display()));
     }
+    // First, so anything after this that crashes leaves a report.
+    let crash_launch = crash::install(&paths);
     // The previous run moved the data folder here: delete the old copy now
     // that nothing holds its files open (logged in setup).
     let moved: Option<CleanupReport> = if demo {
@@ -182,6 +189,7 @@ pub fn run() {
         .manage(Legacy(legacy.clone()))
         .manage(commands::LastDownloadError::default())
         .manage(live::LiveHandle(Arc::new(live::LiveState::new())))
+        .manage(crash::CrashNotice(Mutex::new(crash_launch.notice.clone())))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .clear_targets()
@@ -285,6 +293,12 @@ pub fn run() {
             commands::check_ready,
             commands::health_check,
             commands::open_sound_settings,
+            crash::crash_notice,
+            crash::crash_reports,
+            crash::crash_report_text,
+            crash::acknowledge_crash,
+            crash::reveal_crash_report,
+            crash::webview_error,
             live::list_audio_devices,
             live::prepare_recording,
             live::start_recording,
@@ -310,6 +324,7 @@ pub fn run() {
                 paths.root.display(),
                 paths.source
             );
+            crash::log_launch(&crash_launch);
             {
                 let startup = app.state::<Startup>();
                 let mut report = startup.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -364,6 +379,7 @@ pub fn run() {
                 .ok_or("no main window in tauri.conf.json")?;
             let window = WebviewWindowBuilder::from_config(app.handle(), &config)?
                 .data_directory(paths.root.clone())
+                .initialization_script(crash::WEBVIEW_ERRORS_JS)
                 .initialization_script(format!(
                     "window.__DIARIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
                 ))
@@ -414,6 +430,8 @@ pub fn run() {
     app.run(|app, event| {
         if let RunEvent::Exit = event {
             live::handle(app).shutdown();
+            // Reports from panics this run survived: no notice next time.
+            diarist_core::crash::clean_exit();
         }
     });
 }

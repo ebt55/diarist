@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { api, errorText } from "../lib/api";
-  import { formatClock, formatDuration } from "../lib/format";
+  import { crashApi, CRASH_KIND_LABEL, DUMP_NOTE, type CrashReport } from "../lib/crash";
+  import { formatBytes, formatClock, formatDate, formatDuration } from "../lib/format";
   import { downloads } from "../lib/downloads.svelte";
   import type { HealthCheck } from "../lib/generated/HealthCheck";
   import type { LiveStatusView } from "../lib/generated/LiveStatusView";
@@ -20,6 +21,33 @@
   let checks = $state.raw<HealthCheck[] | null>(null);
   let checking = $state(false);
   let fixing = $state<string | null>(null);
+  let crashes = $state.raw<CrashReport[] | null>(null);
+
+  async function refreshCrashes() {
+    try {
+      crashes = await crashApi.list();
+    } catch (e) {
+      crashes = [];
+      void api.log("warn", `crash reports not listed: ${errorText(e)}`);
+    }
+  }
+
+  async function copyCrash(r: CrashReport) {
+    try {
+      await navigator.clipboard.writeText(await crashApi.text(r.name));
+      app.toast("info", `Copied ${r.name}, with your user folder shown as ~ (nothing was sent)`);
+    } catch (e) {
+      app.error(`Could not copy the report (${errorText(e)}); Show in folder and attach the .txt file instead`);
+    }
+  }
+
+  async function revealCrash(name: string) {
+    try {
+      await crashApi.reveal(name);
+    } catch (e) {
+      app.error(`${errorText(e)}; use Open log folder above`);
+    }
+  }
 
   async function runChecks() {
     checking = true;
@@ -80,10 +108,14 @@
     void refresh();
     void runChecks();
     void refreshLive();
+    void refreshCrashes();
     const tl = setInterval(() => void refreshLive(), 2000);
     void api.lastEngineStderr().then((s) => (stderr = s)).catch(() => {});
     const t = setInterval(() => auto && void refresh(), 2000);
-    const onRefresh = () => void refresh();
+    const onRefresh = () => {
+      void refresh();
+      void refreshCrashes();
+    };
     const onCopy = () => void copy();
     window.addEventListener("app:refresh", onRefresh);
     window.addEventListener("app:copy", onCopy);
@@ -189,6 +221,32 @@
       </ul>
     </section>
   {/if}
+
+  <section class="crashes">
+    <h2>Crash reports</h2>
+    {#if crashes && crashes.length > 0}
+      <ul>
+        {#each crashes as r (r.name)}
+          <li class="crash">
+            <span class="what">
+              <strong>{CRASH_KIND_LABEL[r.kind]}</strong> · {formatDate(r.at_ms)}
+              <span class="detail mono small">{r.name} ({formatBytes(r.bytes)}){r.dump ? ` + ${r.dump}` : ""}</span>
+            </span>
+            {#if r.name.endsWith(".txt")}
+              <button type="button" class="btn small" onclick={() => copyCrash(r)}><Icon name="copy" /> Copy</button>
+            {/if}
+            <button type="button" class="btn small" onclick={() => revealCrash(r.dump ?? r.name)}><Icon name="folder" /> Show in folder</button>
+          </li>
+        {/each}
+      </ul>
+      {#if crashes.some((r) => r.dump)}<p class="hint">{DUMP_NOTE}</p>{/if}
+    {:else}
+      <p class="placeholder">
+        {crashes ? "No crash reports." : "Reading…"} If Diarist or the engine crashes, a report is written to the log folder
+        (the newest five of each kind are kept). Nothing is sent anywhere; Copy shows your user folder as ~.
+      </p>
+    {/if}
+  </section>
 
   <section class="engine">
     <h2>Live engine</h2>
@@ -380,8 +438,28 @@
     color: var(--danger);
   }
   .engine h2,
-  .recovered h2 {
+  .recovered h2,
+  .crashes h2 {
     margin-bottom: 6px;
+  }
+  .crashes ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .crash {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .crash .detail {
+    display: block;
+    color: var(--fg-muted);
+    overflow-wrap: anywhere;
   }
   .checklist ul {
     margin: 0;
