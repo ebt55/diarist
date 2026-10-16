@@ -346,9 +346,12 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
 - **Ctrl+.** or the Stop button asks "Stop recording?" every time;
   **Enter** confirms, Esc keeps recording. **Ctrl+Alt+R** (global) and the
   tray's Stop ask too: with the window on screen they bring it forward and
-  show the same question (`live:toggled` `confirm_stop`); with the window
-  hidden the first press arms (Windows notification, tray item "choose again
-  to confirm", `stop_armed`) and a second press within 3 s stops.
+  show the same question (`live:toggled` `confirm_stop`), and a second
+  press while it is open answers it; with the window hidden or minimized
+  the first press arms (a Windows notification and the tray item ask "Stop
+  recording?", `stop_armed`) and a second press within 3 s stops. The
+  wording lives in `lib/stopConfirm.ts` (and `live.rs` for the
+  notification).
 - The live server starts when the start sheet opens or Ctrl+Alt+R starts a
   recording, not at launch (`engine.preload` = true starts it at launch), and
   stops after `engine.idle_minutes` (default 10, 0 = never) without a

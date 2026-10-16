@@ -18,7 +18,8 @@ import type { WarningNote } from "./generated/WarningNote";
 import type { WordsUpdate } from "./generated/WordsUpdate";
 import { ME_COLOR, SPEAKER_PALETTE } from "./generated/palette";
 import { OpenOnce } from "./openOnce";
-import { app } from "./state.svelte";
+import { armedNote, stopDialog, stopPress } from "./stopConfirm";
+import { app, type ConfirmRequest } from "./state.svelte";
 
 /** Text for a warning banner. */
 export function warningText(w: LiveWarning): string {
@@ -148,6 +149,8 @@ class LiveStore {
   #ticker: ReturnType<typeof setInterval> | undefined;
   #noticeTimer: ReturnType<typeof setTimeout> | undefined;
   #opener = new OpenOnce();
+  /** The open "Stop recording?" question, if any. */
+  #asking: ConfirmRequest | null = null;
   #lag: Record<string, Lag> = {};
 
   get active(): boolean {
@@ -245,16 +248,21 @@ class LiveStore {
     }
   }
 
-  /** Ctrl+. and the Stop buttons: always asks first (Enter confirms, Esc keeps recording). */
+  /**
+   * Ctrl+., the Stop buttons, and Ctrl+Alt+R or the tray with the window on
+   * screen: always asks first (Enter or a second Ctrl+Alt+R confirms, Esc
+   * keeps recording).
+   */
   async stop(): Promise<void> {
-    if (this.phase !== "recording") return;
-    const secs = Math.round(this.elapsedMs / 1000);
-    const ok = await app.confirm({
-      title: "Stop recording?",
-      message: `${secs < 120 ? `${secs} s` : `${Math.round(secs / 60)} min`} recorded. The transcript is finalized from the recording after you stop.`,
-      confirmLabel: "Stop",
-      danger: false,
-    });
+    if (this.phase !== "recording" || this.#asking) return;
+    const answer = app.confirm({ ...stopDialog(this.elapsedMs), danger: false });
+    this.#asking = app.confirmRequest;
+    let ok: boolean;
+    try {
+      ok = await answer;
+    } finally {
+      this.#asking = null;
+    }
     if (!ok || this.phase !== "recording") return;
     this.#logLag();
     try {
@@ -367,10 +375,13 @@ class LiveStore {
     if (t.action === "started") {
       app.toast("info", `Recording started from ${via}. ${via === "Ctrl+Alt+R" ? "Press it" : "Choose Stop"} again to stop (it asks first).`);
     } else if (t.action === "confirm_stop") {
-      // The window is on screen: the usual "Stop recording?" dialog.
-      void this.stop();
+      // The window is on screen: the usual "Stop recording?" dialog, or,
+      // when it is already open, the second press answers it.
+      const asking = this.#asking;
+      if (stopPress(asking !== null && app.confirmRequest === asking) === "confirm") asking?.resolve(true);
+      else void this.stop();
     } else if (t.action === "stop_armed") {
-      app.toast("info", `Press ${t.via === "shortcut" ? "Ctrl+Alt+R" : "Stop in the tray"} again within 3 s to stop.`);
+      app.toast("info", armedNote(t.via));
     } else if (t.action === "stopped") {
       app.toast("info", `Recording stopped from ${via}. Finalizing the transcript…`);
     } else {

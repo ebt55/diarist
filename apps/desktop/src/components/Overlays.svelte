@@ -10,7 +10,10 @@
   let help: HTMLDialogElement | undefined = $state();
 
   $effect(() => {
-    if (app.confirmRequest && dialog && !dialog.open) dialog.showModal();
+    if (!dialog) return;
+    if (app.confirmRequest && !dialog.open) dialog.showModal();
+    // Answered elsewhere (a second Ctrl+Alt+R confirms "Stop recording?").
+    else if (!app.confirmRequest && dialog.open) dialog.close();
   });
   $effect(() => {
     if (!help) return;

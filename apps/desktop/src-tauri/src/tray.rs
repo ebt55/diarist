@@ -141,7 +141,7 @@ pub(crate) fn set_stop_armed(app: &AppHandle, armed: bool) {
         return;
     }
     let _ = tray.toggle.set_text(if armed {
-        "Stop recording: choose again to confirm"
+        "Stop recording? Choose again to stop"
     } else {
         "Stop recording"
     });

@@ -944,8 +944,10 @@ fn confirm_stop(app: &AppHandle, via: ToggleVia) -> Option<Toggled> {
     notify(
         app,
         match via {
-            ToggleVia::Shortcut => "Still recording. Press Ctrl+Alt+R again within 3 s to stop.",
-            ToggleVia::Tray => "Still recording. Choose Stop again within 3 s to stop.",
+            ToggleVia::Shortcut => "Stop recording? Press Ctrl+Alt+R again within 3 s to stop.",
+            ToggleVia::Tray => {
+                "Stop recording? Choose Stop recording in the tray again within 3 s to stop."
+            }
         },
     );
     // Disarm after the window (unless a second press came first).
