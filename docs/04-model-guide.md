@@ -1,6 +1,6 @@
 # Model and hardware guide
 
-Status: v0.2, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. Remaining PENDING items are the Vulkan and CPU packages, untested by us.
+Status: v0.2, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
 
 ## 1. What runs inside Diarist
 
@@ -87,8 +87,8 @@ The runtime ships three Windows zips. The setup screen checks the GPU (NVML for 
 | Your GPU | Package | Status |
 |---|---|---|
 | NVIDIA, driver new enough for CUDA 13 (R580 or newer is the estimate; 610.88 **measured** working) | `windows-x86_64-cuda` | **Measured** on RTX 3080 10 GB; kernels built for Turing (sm_75), Ampere (sm_86), Ada (sm_89) and Blackwell (sm_120) |
-| AMD or Intel GPU, or older NVIDIA driver | `windows-x86_64-vulkan` | Shipped by the runtime; untested by us. Expect it to work for file mode; live is PENDING a test |
-| No usable GPU | `windows-x86_64-cpu` | Shipped by the runtime; untested by us. Speed unknown; file mode will be much slower than real time |
+| AMD or Intel GPU, or older NVIDIA driver | `windows-x86_64-vulkan` | **Not usable yet**: Diarist passes `--device cuda:0`, which this build refuses (docs/KNOWN-ISSUES.md). With `--device vulkan:0`, **measured** on the RTX 3080 only (nothing about AMD or Intel): 5-minute AMI clip in 11.0 to 12.1 s, 25 to 27 times real time (CUDA 44 to 46 times), the same word count as CUDA with 3.2 percent of words different; live ready in 3.6 s with finals and speakers, first text 0.8 s, no abort in 60 s |
+| No usable GPU | `windows-x86_64-cpu` | **Not usable yet**, for the same `--device` reason. With `--device cpu`, **measured** on a Ryzen 9 5900X (12 cores): the 5-minute AMI clip in 95 s, 3.1 times real time, 0.6 percent of words different from CUDA. Live not tested |
 
 VRAM needed (**measured** on the 3080, excluding the desktop's own 1.5 GB):
 
