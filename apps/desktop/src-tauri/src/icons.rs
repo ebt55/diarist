@@ -1,21 +1,45 @@
-//! Window and tray icons at the sizes Windows draws them, from the
-//! matching frames of `icons/icon.ico` (16, 20, 24, 32, 48, ... px; the
-//! 16, 20 and 24 px frames are drawn on the pixel grid, `branding/icon-sizes`).
+//! Window and tray icons that follow the taskbar: the app icon comes as a
+//! pair (`branding/icon.svg`, the ink page for light backgrounds, and
+//! `branding/icon-dark.svg`, the paper page for dark ones), each drawn at
+//! 16, 20, 24, 32 and 48 px (`icons/theme/<light|dark>/<size>.png`, the
+//! small ones on the pixel grid). The exe's own icon (`icon.ico`, the paper
+//! page) stays what Explorer, the Start menu and a pinned button show.
 //!
-//! Tauri gives the window one icon, loaded at the system's large-icon size
-//! before the process is DPI-aware (32 px), as the small icon only; the
-//! taskbar then scales that 32 px image to its button (48 px at 200
-//! percent) and the title bar and tray scale it to theirs. Here the window
-//! gets a small icon (title bar, the tray's size) and a big one (the taskbar
-//! button, which Windows 11 takes from the window's big icon while the app
-//! runs), both loaded from the exe's icon resource for the window's DPI with
-//! `LoadIconWithScaleDown`, and the tray an image of the small size for the
-//! taskbar's DPI. Both are redone when the window's scale changes.
+//! Tauri gives the window one 32 px icon as its small icon only, so the
+//! taskbar enlarges it to its button (48 px at 200 percent). Here the window
+//! gets a small icon (title bar) and a big one (the taskbar button, which
+//! Windows 11 takes from the window's big icon while the app runs, and
+//! Alt+Tab), and the tray an image of the notification area's size, from
+//! the set for the taskbar's theme (`SystemUsesLightTheme`) and the frame
+//! for the scale. They are chosen again when the window's scale or theme
+//! changes and when it gets the focus (a cheap registry read), so a taskbar
+//! switched between light and dark is followed at the latest the next time
+//! the window is used.
 
 /// Logical sizes: the small icon (title bar, notification area) and the
 /// taskbar button's icon.
 const SMALL: u32 = 16;
 const TASKBAR: u32 = 24;
+
+/// The frames of each set, smallest first.
+const FRAMES: [u32; 5] = [16, 20, 24, 32, 48];
+
+macro_rules! frames {
+    ($set:literal) => {
+        [
+            include_bytes!(concat!("../icons/theme/", $set, "/16.png")).as_slice(),
+            include_bytes!(concat!("../icons/theme/", $set, "/20.png")).as_slice(),
+            include_bytes!(concat!("../icons/theme/", $set, "/24.png")).as_slice(),
+            include_bytes!(concat!("../icons/theme/", $set, "/32.png")).as_slice(),
+            include_bytes!(concat!("../icons/theme/", $set, "/48.png")).as_slice(),
+        ]
+    };
+}
+
+/// `icon.svg`, the ink page, for a light taskbar.
+static LIGHT: [&[u8]; 5] = frames!("light");
+/// `icon-dark.svg`, the paper page, for a dark taskbar.
+static DARK: [&[u8]; 5] = frames!("dark");
 
 /// `(small, taskbar)` edge lengths in pixels for a DPI (96 = 100 percent):
 /// 16 and 24 at 100 percent, 20 and 30 at 125, 24 and 36 at 150, 32 and 48
@@ -26,61 +50,92 @@ pub(crate) fn icon_edges(dpi: u32) -> (u32, u32) {
     (at(SMALL), at(TASKBAR))
 }
 
+/// The frame drawn for `px`: the smallest one at least that big (Windows
+/// then only ever scales down), else the largest. Returns its size and PNG.
+pub(crate) fn frame(light: bool, px: u32) -> (u32, &'static [u8]) {
+    let set = if light { &LIGHT } else { &DARK };
+    let i = FRAMES
+        .iter()
+        .position(|&f| f >= px)
+        .unwrap_or(FRAMES.len() - 1);
+    (FRAMES[i], set[i])
+}
+
+/// RGBA pixels of an 8-bit RGBA PNG (the frames are written that way).
+fn decode_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; reader.output_buffer_size().ok_or("frame too large")?];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!(
+            "frame is {:?} {:?}, not 8-bit RGBA",
+            info.color_type, info.bit_depth
+        ));
+    }
+    buf.truncate(info.line_size * info.height as usize);
+    Ok((buf, info.width, info.height))
+}
+
+/// Whether the taskbar is light (`SystemUsesLightTheme` = 1); dark when
+/// the value is missing, as on Windows 10.
+pub(crate) fn taskbar_is_light() -> bool {
+    #[cfg(windows)]
+    {
+        win::system_uses_light_theme().unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(windows)]
 mod win {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
-    use windows::core::{s, w, HRESULT, PCWSTR};
-    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DestroyIcon, FindWindowW, LoadImageW, SendMessageW, HICON, ICON_BIG, ICON_SMALL,
-        IMAGE_ICON, LR_DEFAULTCOLOR, WM_SETICON,
+        CreateIconFromResourceEx, DestroyIcon, FindWindowW, SendMessageW, HICON, ICON_BIG,
+        ICON_SMALL, LR_DEFAULTCOLOR, WM_SETICON,
     };
 
-    type ScaleDown = unsafe extern "system" fn(HINSTANCE, PCWSTR, i32, i32, *mut HICON) -> HRESULT;
-
-    /// `LoadIconWithScaleDown`, from the Common Controls 6 the app's
-    /// manifest asks for. Looked up at run time: the comctl32 that a
-    /// process without that manifest gets (a test binary) does not have it.
-    fn scale_down() -> Option<ScaleDown> {
-        static F: OnceLock<Option<usize>> = OnceLock::new();
-        let f = *F.get_or_init(|| unsafe {
-            let module = LoadLibraryW(w!("comctl32.dll")).ok()?;
-            GetProcAddress(module, s!("LoadIconWithScaleDown")).map(|f| f as usize)
-        });
-        // SAFETY: the address of LoadIconWithScaleDown, whose signature is `ScaleDown`.
-        f.map(|f| unsafe { std::mem::transmute::<usize, ScaleDown>(f) })
+    pub(super) fn system_uses_light_theme() -> Option<bool> {
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+                w!("SystemUsesLightTheme"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut value as *mut u32).cast()),
+                Some(&mut size),
+            )
+        };
+        rc.is_ok().then_some(value != 0)
     }
 
-    /// The app icon (the exe's icon resource) at `size` px: the frame of
-    /// that size, else a larger one scaled down.
-    pub(super) fn load_app_icon(size: u32) -> Option<HICON> {
+    /// An icon from a PNG frame (Windows decodes PNG icon images itself).
+    fn icon_from_png(png: &[u8], size: u32) -> Option<HICON> {
         let size = size as i32;
-        unsafe {
-            let hinst: HINSTANCE = GetModuleHandleW(PCWSTR::null()).ok()?.into();
-            let id =
-                PCWSTR(tauri::utils::platform::WINDOWS_APP_ICON_RESOURCE_ID as usize as *const u16);
-            if let Some(f) = scale_down() {
-                let mut icon = HICON::default();
-                if f(hinst, id, size, size, &mut icon).is_ok() && !icon.is_invalid() {
-                    return Some(icon);
-                }
-            }
-            LoadImageW(Some(hinst), id, IMAGE_ICON, size, size, LR_DEFAULTCOLOR)
-                .ok()
-                .map(|h| HICON(h.0))
-        }
+        unsafe { CreateIconFromResourceEx(png, true, 0x0003_0000, size, size, LR_DEFAULTCOLOR) }
+            .ok()
     }
 
     /// The icons this module set last (small, big), destroyed when replaced.
     static SET: Mutex<Option<(isize, isize)>> = Mutex::new(None);
 
-    pub(super) fn apply(hwnd: HWND) -> Option<(u32, u32, u32)> {
+    /// Sets ICON_BIG and ICON_SMALL; returns the DPI and both frame sizes.
+    pub(super) fn apply(hwnd: HWND, light: bool) -> Option<(u32, u32, u32)> {
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         let (small, big) = super::icon_edges(dpi);
-        let (s, b) = (load_app_icon(small)?, load_app_icon(big)?);
+        let ((sf, sp), (bf, bp)) = (super::frame(light, small), super::frame(light, big));
+        let (s, b) = (icon_from_png(sp, sf)?, icon_from_png(bp, bf)?);
         let send = |kind: u32, icon: HICON| unsafe {
             SendMessageW(
                 hwnd,
@@ -102,7 +157,7 @@ mod win {
                 let _ = DestroyIcon(HICON(ob as *mut _));
             }
         }
-        Some((dpi, small, big))
+        Some((dpi, sf, bf))
     }
 
     /// The DPI of the taskbar that holds the notification area.
@@ -116,45 +171,57 @@ mod win {
     }
 }
 
-/// Sets the window's small and big icons for its DPI (Windows; elsewhere
-/// the default icon stays).
-pub(crate) fn apply_window_icons<R: tauri::Runtime>(window: &tauri::Window<R>) {
+/// What the icons were last chosen for: (light taskbar, window DPI).
+static CHOSEN: std::sync::Mutex<Option<(bool, u32)>> = std::sync::Mutex::new(None);
+
+/// Sets the window's small and big icons for its DPI and the taskbar's
+/// theme, and the tray's (Windows; elsewhere the default icon stays).
+/// Does nothing when neither changed since the last call, unless `force`.
+pub(crate) fn refresh(window: &tauri::Window, force: bool) {
     #[cfg(windows)]
     {
+        use tauri::Manager;
         let Ok(hwnd) = window.hwnd() else {
             return;
         };
-        match win::apply(hwnd) {
-            Some((dpi, small, big)) => {
-                log::info!("window icons {small} and {big} px for {dpi} dpi")
+        let light = taskbar_is_light();
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+        {
+            let mut chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !force && *chosen == Some((light, dpi)) {
+                return;
             }
-            None => log::warn!("window icons not loaded from the app icon resource"),
+            *chosen = Some((light, dpi));
         }
+        let theme = if light { "light" } else { "dark" };
+        match win::apply(hwnd, light) {
+            Some((dpi, small, big)) => {
+                log::info!("window icons {small} and {big} px ({theme} taskbar, {dpi} dpi)")
+            }
+            None => log::warn!("window icons not set from the {theme} frames"),
+        }
+        crate::tray::rescale(window.app_handle());
     }
     #[cfg(not(windows))]
-    let _ = window;
+    let _ = (window, force, &CHOSEN);
 }
 
-/// The tray's image: the app icon at the notification area's size for the
-/// taskbar's DPI (Windows), else the default window icon.
-pub(crate) fn tray_image<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Option<tauri::image::Image<'static>> {
+/// The tray's image: the frame for the notification area's size at the
+/// taskbar's DPI, from the set for the taskbar's theme.
+pub(crate) fn tray_image() -> Option<tauri::image::Image<'static>> {
     #[cfg(windows)]
-    {
-        let (small, _) = icon_edges(win::taskbar_dpi());
-        match tauri::image::Image::from_icon_resource(
-            tauri::utils::platform::WINDOWS_APP_ICON_RESOURCE_ID,
-            small,
-            small,
-        ) {
-            Ok(i) => return Some(i),
-            Err(e) => log::warn!("tray icon at {small} px not loaded: {e}"),
+    let dpi = win::taskbar_dpi();
+    #[cfg(not(windows))]
+    let dpi = 96;
+    let (small, _) = icon_edges(dpi);
+    let (size, png) = frame(taskbar_is_light(), small);
+    match decode_rgba(png) {
+        Ok((rgba, w, h)) => Some(tauri::image::Image::new_owned(rgba, w, h)),
+        Err(e) => {
+            log::warn!("tray icon frame {size} px not decoded: {e}");
+            None
         }
     }
-    app.default_window_icon()
-        .cloned()
-        .map(tauri::image::Image::to_owned)
 }
 
 #[cfg(test)]
@@ -169,5 +236,39 @@ mod tests {
         assert_eq!(icon_edges(168), (28, 42));
         assert_eq!(icon_edges(192), (32, 48));
         assert_eq!(icon_edges(0), (16, 24));
+    }
+
+    #[test]
+    fn frames_are_picked_by_size_and_theme() {
+        // Small icon and tray at 100, 125, 150, 175 and 200 percent.
+        let small: Vec<u32> = [96, 120, 144, 168, 192]
+            .iter()
+            .map(|&d| frame(false, icon_edges(d).0).0)
+            .collect();
+        assert_eq!(small, [16, 20, 24, 32, 32]);
+        // The taskbar button: 24 px at 100 percent, 48 at 200.
+        let big: Vec<u32> = [96, 120, 144, 192]
+            .iter()
+            .map(|&d| frame(false, icon_edges(d).1).0)
+            .collect();
+        assert_eq!(big, [24, 32, 48, 48]);
+        assert_eq!(frame(false, 300).0, 48);
+        assert_ne!(frame(true, 16).1, frame(false, 16).1);
+        assert!(std::ptr::eq(frame(true, 20).1, LIGHT[1]));
+        assert!(std::ptr::eq(frame(false, 20).1, DARK[1]));
+    }
+
+    #[test]
+    fn every_frame_decodes_at_its_size() {
+        for (set, frames) in [("light", &LIGHT), ("dark", &DARK)] {
+            for (png, size) in frames.iter().zip(FRAMES) {
+                let (rgba, w, h) = decode_rgba(png).unwrap_or_else(|e| panic!("{set} {size}: {e}"));
+                assert_eq!((w, h), (size, size), "{set}");
+                assert_eq!(rgba.len(), (size * size * 4) as usize, "{set} {size}");
+                // An opaque tile in the middle.
+                let mid = ((size / 2 * size + size / 2) * 4 + 3) as usize;
+                assert_eq!(rgba[mid], 255, "{set} {size}");
+            }
+        }
     }
 }

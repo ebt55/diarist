@@ -2,7 +2,8 @@
 //! and Quit. Left click opens the window. Stop asks for a confirmation
 //! (`live::toggle`): the in-app dialog when the window is on screen, else
 //! a second Stop within 3 s. The icon is the app icon's frame for the
-//! notification area's size (`icons.rs`), redone when the scale changes.
+//! notification area's size and the taskbar's theme (`icons.rs`), chosen
+//! again when either changes.
 
 use std::sync::Mutex;
 
@@ -60,7 +61,7 @@ pub(crate) fn show_main(app: &AppHandle) {
 
 /// Builds the tray (once, in setup). Failure leaves the app without a tray.
 pub(crate) fn build(app: &App) -> tauri::Result<()> {
-    let Some(idle) = crate::icons::tray_image(app.handle()) else {
+    let Some(idle) = crate::icons::tray_image() else {
         log::warn!("no app icon; the tray is not shown");
         return Ok(());
     };
@@ -102,16 +103,16 @@ pub(crate) fn build(app: &App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Reloads the icon for the current scale (the window's scale changed).
+/// Reloads the icon for the current scale and taskbar theme.
 pub(crate) fn rescale(app: &AppHandle) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
     };
-    let Some(idle) = crate::icons::tray_image(app) else {
+    let Some(idle) = crate::icons::tray_image() else {
         return;
     };
     let mut images = tray.images.lock().unwrap_or_else(|e| e.into_inner());
-    if images.0.width() == idle.width() {
+    if images.0.width() == idle.width() && images.0.rgba() == idle.rgba() {
         return;
     }
     log::info!("tray icon {} px", idle.width());

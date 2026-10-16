@@ -32,7 +32,8 @@ All notable changes to Diarist. Versions follow semantic versioning.
 - Fixed: the taskbar button showed the icon blurred (a 32 px image
   enlarged). The window, its taskbar button and the tray now take the
   icon's frame for the display's scale, including the 16, 20 and 24 px
-  frames drawn on the pixel grid.
+  frames drawn on the pixel grid, and follow the taskbar: the paper page on
+  a dark taskbar, the ink page on a light one.
 - Added: Diagnostics' checklist has a "Microphone privacy" row. When
   Windows' "Microphone access" or "Let desktop apps access your microphone"
   is off, Windows hands Diarist silence instead of the microphone; the row

@@ -393,7 +393,7 @@ pub fn run() {
                     "window.__DIARIST_STARTUP__ = {{ autostart: {autostart}, windowStateSaved: {window_state_saved} }};"
                 ))
                 .build()?;
-            icons::apply_window_icons(&window.as_ref().window());
+            icons::refresh(&window.as_ref().window(), true);
 
             if let Err(e) = tray::build(app) {
                 log::warn!("tray icon not available: {e}");
@@ -434,10 +434,12 @@ pub fn run() {
                     log::info!("window hidden to the tray while recording");
                 }
             }
-            // Icons for the new scale (another monitor, a changed setting).
-            WindowEvent::ScaleFactorChanged { .. } => {
-                icons::apply_window_icons(window);
-                tray::rescale(window.app_handle());
+            // Icons for a new scale (another monitor, a changed setting) or
+            // a taskbar switched between light and dark (checked again on
+            // focus: a taskbar-only change sends the window no event).
+            WindowEvent::ScaleFactorChanged { .. } => icons::refresh(window, true),
+            WindowEvent::ThemeChanged(_) | WindowEvent::Focused(true) => {
+                icons::refresh(window, false)
             }
             _ => {}
         })
