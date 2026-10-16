@@ -293,6 +293,7 @@ pub fn run() {
             commands::check_ready,
             commands::health_check,
             commands::open_sound_settings,
+            commands::open_microphone_privacy,
             crash::crash_notice,
             crash::crash_reports,
             crash::crash_report_text,

@@ -1944,6 +1944,8 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         )
         .fix("sound_settings", "Sound settings"),
     });
+    // 8b. Windows' microphone privacy switches for desktop apps.
+    out.push(diagnostics::mic_privacy_check(&diagnostics::mic_consent()));
 
     // 9. Live server reachable when it should be.
     let live = crate::live::status(app);
@@ -2032,12 +2034,27 @@ pub async fn health_check(
     blocking(move || Ok(health_checks(&app, &*store, &data_paths))).await
 }
 
+/// Opens a page of the Windows Settings app (`ms-settings:<page>`);
+/// `fallback` says where it is when that fails.
+fn open_ms_settings(page: &str, fallback: &str) -> CmdResult<()> {
+    std::process::Command::new("explorer")
+        .arg(format!("ms-settings:{page}"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Cannot open the Windows settings ({e}); open {fallback}"))
+}
+
 /// Opens the Windows sound settings (a fix in the checklist).
 #[tauri::command]
 pub async fn open_sound_settings() -> CmdResult<()> {
-    std::process::Command::new("explorer")
-        .arg("ms-settings:sound")
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Cannot open the sound settings ({e}); open Settings, System, Sound"))
+    open_ms_settings("sound", "Settings, System, Sound")
+}
+
+/// Opens Windows' microphone privacy page (the `mic_privacy` fix).
+#[tauri::command]
+pub async fn open_microphone_privacy() -> CmdResult<()> {
+    open_ms_settings(
+        "privacy-microphone",
+        "Settings, Privacy & security, Microphone",
+    )
 }

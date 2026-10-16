@@ -14,6 +14,7 @@ status: string,
 detail: string, 
 /**
  * A UI action that fixes it: `setup`, `download:<name>`, `open_models`,
- * `open_engine`, `settings`, `sound_settings`, `start_engine`, `rescan`.
+ * `open_engine`, `settings`, `sound_settings`, `mic_privacy`, `start_engine`,
+ * `rescan`.
  */
 fix: string | null, fix_label: string | null, };

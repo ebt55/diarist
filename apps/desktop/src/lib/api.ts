@@ -118,6 +118,7 @@ export const api = {
   addModelFile: (path: string, link: boolean) => invoke<string>("add_model_file", { path, link }),
   healthCheck: () => invoke<HealthCheck[]>("health_check"),
   openSoundSettings: () => invoke<void>("open_sound_settings"),
+  openMicrophonePrivacy: () => invoke<void>("open_microphone_privacy"),
 
   dataRootInfo: () => invoke<DataRootInfo>("data_root_info"),
   moveDataRoot: (to: string) => invoke<MoveResult>("move_data_root", { to }),

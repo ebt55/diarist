@@ -70,6 +70,7 @@
       else if (action === "open_models") await api.openModelsFolder();
       else if (action === "open_engine") await api.openEngineFolder();
       else if (action === "sound_settings") await api.openSoundSettings();
+      else if (action === "mic_privacy") await api.openMicrophonePrivacy();
       else if (action === "start_engine") await api.prepareRecording();
       else if (action === "rescan") await api.rescanModels();
       else if (action.startsWith("download:")) {

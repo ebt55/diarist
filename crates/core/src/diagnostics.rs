@@ -21,7 +21,8 @@ pub struct HealthCheck {
     /// What was found, and the next step when it is not a pass.
     pub detail: String,
     /// A UI action that fixes it: `setup`, `download:<name>`, `open_models`,
-    /// `open_engine`, `settings`, `sound_settings`, `start_engine`, `rescan`.
+    /// `open_engine`, `settings`, `sound_settings`, `mic_privacy`, `start_engine`,
+    /// `rescan`.
     pub fix: Option<String>,
     pub fix_label: Option<String>,
 }
@@ -90,14 +91,27 @@ pub fn os_version() -> String {
 
 #[cfg(windows)]
 fn hklm_string(key: &str, value: &str) -> Option<String> {
+    reg_string(
+        windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+        key,
+        value,
+    )
+}
+
+#[cfg(windows)]
+fn reg_string(
+    root: windows::Win32::System::Registry::HKEY,
+    key: &str,
+    value: &str,
+) -> Option<String> {
     use windows::core::HSTRING;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    use windows::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
     let (k, v) = (HSTRING::from(key), HSTRING::from(value));
     let mut buf = [0u16; 128];
     let mut size = (buf.len() * 2) as u32;
     let rc = unsafe {
         RegGetValueW(
-            HKEY_LOCAL_MACHINE,
+            root,
             &k,
             &v,
             RRF_RT_REG_SZ,
@@ -111,6 +125,76 @@ fn hklm_string(key: &str, value: &str) -> Option<String> {
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// Where Windows keeps this user's microphone consent (Settings, Privacy &
+/// security, Microphone). Its `Value` is "Microphone access"; the
+/// `NonPackaged` subkey's `Value` is "Let desktop apps access your
+/// microphone", the switch that covers Diarist.
+pub const MIC_CONSENT_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+
+/// The two consent values as read (`Allow`, `Deny`), `None` where the key
+/// or the value is missing, which Windows treats as allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MicConsent {
+    /// "Microphone access", for all apps.
+    pub all_apps: Option<String>,
+    /// "Let desktop apps access your microphone".
+    pub desktop_apps: Option<String>,
+}
+
+/// Reads [`MIC_CONSENT_KEY`] from HKCU; all `None` off Windows.
+pub fn mic_consent() -> MicConsent {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        MicConsent {
+            all_apps: reg_string(HKEY_CURRENT_USER, MIC_CONSENT_KEY, "Value"),
+            desktop_apps: reg_string(
+                HKEY_CURRENT_USER,
+                &format!(r"{MIC_CONSENT_KEY}\NonPackaged"),
+                "Value",
+            ),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        MicConsent::default()
+    }
+}
+
+/// The checklist row for the consent: a fail with a button for
+/// `ms-settings:privacy-microphone` (`mic_privacy`) when either switch is
+/// off, because Windows then hands desktop apps silence from every
+/// microphone instead of an error.
+pub fn mic_privacy_check(c: &MicConsent) -> HealthCheck {
+    let denied = |v: &Option<String>| {
+        v.as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("deny"))
+    };
+    let (id, label) = ("mic_privacy", "Microphone privacy");
+    let detail = match (denied(&c.all_apps), denied(&c.desktop_apps)) {
+        (false, false) => {
+            let detail = if c.all_apps.is_none() && c.desktop_apps.is_none() {
+                "No Windows privacy setting blocks desktop apps from the microphone"
+            } else {
+                "Windows lets desktop apps use the microphone"
+            };
+            return HealthCheck::new(id, label, "pass", detail);
+        }
+        (true, _) => {
+            "Windows does not allow desktop apps to use the microphone: Microphone access is off, \
+             so Diarist records silence from it. Turn on Microphone access and Let desktop apps \
+             access your microphone, then check again."
+        }
+        (false, true) => {
+            "Windows does not allow desktop apps to use the microphone: Let desktop apps access \
+             your microphone is off, so Diarist records silence from it. Turn it on, then check \
+             again."
+        }
+    };
+    HealthCheck::new(id, label, "fail", detail).fix("mic_privacy", "Privacy settings")
 }
 
 /// The user's profile folder (`%USERPROFILE%`, `$HOME` elsewhere).
@@ -418,6 +502,63 @@ mod tests {
         if cfg!(windows) {
             assert!(os_version().starts_with("Windows"), "{}", os_version());
         }
+    }
+
+    #[test]
+    fn mic_privacy_fails_when_either_switch_is_deny() {
+        let consent = |a: Option<&str>, d: Option<&str>| MicConsent {
+            all_apps: a.map(Into::into),
+            desktop_apps: d.map(Into::into),
+        };
+        let allowed = mic_privacy_check(&consent(Some("Allow"), Some("Allow")));
+        assert_eq!(
+            (allowed.id.as_str(), allowed.status.as_str()),
+            ("mic_privacy", "pass")
+        );
+        assert_eq!(allowed.fix, None);
+        let missing = mic_privacy_check(&consent(None, None));
+        assert_eq!(missing.status, "pass", "{missing:?}");
+        assert!(
+            missing.detail.contains("No Windows privacy setting"),
+            "{missing:?}"
+        );
+        // One of the two missing: the other decides.
+        assert_eq!(
+            mic_privacy_check(&consent(None, Some("Allow"))).status,
+            "pass"
+        );
+        assert_eq!(
+            mic_privacy_check(&consent(None, Some("Deny"))).status,
+            "fail"
+        );
+        for (a, d, names) in [
+            (Some("Deny"), Some("Allow"), "Microphone access is off"),
+            (
+                Some("Allow"),
+                Some("Deny"),
+                "Let desktop apps access your microphone is off",
+            ),
+            (Some("Deny"), Some("Deny"), "Microphone access is off"),
+            (Some(" deny "), None, "Microphone access is off"),
+        ] {
+            let c = mic_privacy_check(&consent(a, d));
+            assert_eq!(c.status, "fail", "{a:?}/{d:?}");
+            assert!(
+                c.detail
+                    .contains("does not allow desktop apps to use the microphone"),
+                "{c:?}"
+            );
+            assert!(c.detail.contains(names), "{a:?}/{d:?}: {c:?}");
+            assert_eq!(c.fix.as_deref(), Some("mic_privacy"));
+            assert_eq!(c.fix_label.as_deref(), Some("Privacy settings"));
+        }
+        // An unexpected value is not a block.
+        assert_eq!(
+            mic_privacy_check(&consent(Some("Prompt"), Some(""))).status,
+            "pass"
+        );
+        // This PC's own values read without failing, whatever they are.
+        let _ = mic_privacy_check(&mic_consent());
     }
 
     #[test]
