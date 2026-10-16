@@ -187,19 +187,22 @@ def cmd_tags(a) -> None:
 def cmd_diff(a) -> None:
     from rapidfuzz.distance import Levenshtein
 
-    print(f"| Session | Words {a.a} | Words {a.b} | Raw words differing (edit ops) | Identical |")
-    print("|---|---|---|---|---|")
+    print(f"| Session | Words {a.a} | Words {a.b} | Raw words differing (edit ops) | Identical | Speaker tags identical |")
+    print("|---|---|---|---|---|---|")
     for sid in [x.strip() for x in a.sessions.split(",") if x.strip()]:
         pa, pb = RUNS / a.a / sid / "engine.words.json", RUNS / a.b / sid / "engine.words.json"
         if not (pa.is_file() and pb.is_file()):
-            print(f"| {sid} | missing | | | |")
+            print(f"| {sid} | missing | | | | |")
             continue
         wa = [w["word"] for w in raw_words(pa)]
         wb = [w["word"] for w in raw_words(pb)]
         n = Levenshtein.distance(wa, wb)
         ta = [(w["word"], w["start"]) for w in raw_words(pa)]
         tb = [(w["word"], w["start"]) for w in raw_words(pb)]
-        print(f"| {sid} | {len(wa)} | {len(wb)} | {n} | {'yes, words and times' if ta == tb else 'no'} |")
+        ka = [(w["word"], w["start"], w.get("speaker")) for w in raw_words(pa)]
+        kb = [(w["word"], w["start"], w.get("speaker")) for w in raw_words(pb)]
+        tags = "yes" if ka == kb else f"no ({sum(x != y for x, y in zip(ka, kb))} of {min(len(ka), len(kb))} differ)"
+        print(f"| {sid} | {len(wa)} | {len(wb)} | {n} | {'yes, words and times' if ta == tb else 'no'} | {tags} |")
 
 
 def cmd_ami_misses(a) -> None:

@@ -220,7 +220,14 @@ def transcribe(
     ):
         if (audio_dir / name).is_file():
             shutil.copyfile(audio_dir / name, d / dest)
-    eng = re.search(r"^engine (\S+) \| asr (.+?) \| diarizer (.+?)(?: \| engine args .*)?\s*$", p.stderr, re.M)
+    # diarist-cli's stderr line: `engine <v> | asr <file> | diarizer <file>`, since
+    # beta.2 also `| lookahead <n> | diar preset <name>`, then `| engine args ...`.
+    eng = re.search(
+        r"^engine (\S+) \| asr (.+?) \| diarizer (.+?)(?: \| lookahead (.+?))?(?: \| diar preset (.+?))?"
+        r"(?: \| engine args .*)?\s*$",
+        p.stderr,
+        re.M,
+    )
     ph = phase_times(audio_dir)
     t_asr0, t_asr1, t_dia1 = ph["engine_start"] or t_start, ph["transcribe_end"], ph["diarize_end"]
     meta = {
@@ -248,6 +255,9 @@ def transcribe(
         "engine_version": eng.group(1) if eng else None,
         "asr_file": eng.group(2) if eng else None,
         "diarizer_file": eng.group(3) if eng else None,
+        # What the CLI says it passed (its run's EngineInfo); None from older builds.
+        "right_context": eng.group(4) if eng else None,
+        "diar_preset": eng.group(5) if eng else None,
         "cli_sha256": sha256_file(CLI),
         "finished": dt.datetime.now().isoformat(timespec="seconds"),
         "cli_stdout": [ln for ln in p.stdout.splitlines() if not ln.strip().startswith("title")],
@@ -470,6 +480,34 @@ def aggregate_rows(name: str, rows: list[dict]) -> list[str]:
     return out
 
 
+def _engine_arg(cfg: dict, flag: str) -> str | None:
+    args = list(cfg.get("engine_args") or [])
+    return args[args.index(flag) + 1] if flag in args[:-1] else None
+
+
+def diar_preset_of(cfg: dict, meta: dict) -> str:
+    """The fused pass's diarizer preset: engine_args, else what the CLI reported, else the runtime default."""
+    arg = _engine_arg(cfg, "--asr.diar.preset")
+    if arg:
+        return f"{arg} (engine_args)"
+    rep = meta.get("diar_preset")
+    if rep and rep != "runtime default":
+        return f"{rep} (diarist-cli's own choice)"
+    return "v3-streaming (runtime default)"
+
+
+def lookahead_of(cfg: dict, meta: dict) -> str:
+    arg = _engine_arg(cfg, "--asr.streaming.rnnt_right_context")
+    if arg:
+        return f"{arg} (engine_args)"
+    rep = meta.get("right_context")
+    if rep and rep != "runtime default":
+        return f"{rep} (diarist-cli's own choice)"
+    if rep == "runtime default":
+        return "runtime default (1)"
+    return "not recorded (a diarist-cli build from before 0.1.0-beta.2 passes the runtime default, 1)"
+
+
 def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, dict], path: Path) -> None:
     today = dt.date.today().isoformat()
     any_meta = next(iter(metas.values()), {})
@@ -487,12 +525,13 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         "## Setup",
         "",
         f"- Date: {today}",
-        f"- diarist-cli: `{CLI.name}` sha256 `{(any_meta.get('cli_sha256') or sha256_file(CLI))[:16]}` (built once from this repo at the start of Phase 4; see tools/eval/.bin)",
+        f"- diarist-cli: `{CLI.name}` sha256 `{(any_meta.get('cli_sha256') or sha256_file(CLI))[:16]}` (built from this repo; see tools/eval/.bin)",
         f"- Engine: nemo-speech {any_meta.get('engine_version') or '?'} (`{ENGINE_DIR.name}`)",
         f"- ASR: {asr.get('name')} `{asr.get('repo')}` rev `{asr.get('revision', '')[:12]}` sha256 `{asr.get('sha256', '')[:16]}`"
         f" (local .verified matches: {asr.get('verified')})",
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
-        f" (local .verified matches: {diar.get('verified')}); preset v3-streaming (runtime default)",
+        f" (local .verified matches: {diar.get('verified')}); preset {diar_preset_of(cfg, any_meta)}",
+        f"- Decoder lookahead (`rnnt_right_context`): {lookahead_of(cfg, any_meta)}",
         f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
         + "".join(f" {a}" for a in engine_arg_flags(cfg))
         + "`, then `export --format rttm`",
