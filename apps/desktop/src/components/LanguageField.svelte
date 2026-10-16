@@ -91,8 +91,10 @@
     <select
       {id}
       bind:value={language}
-      onchange={() => {
-        if (language !== OTHER) onchange?.(language);
+      onchange={(e) => {
+        // The element's value: the binding may update after this handler.
+        const v = e.currentTarget.value;
+        if (v !== OTHER) onchange?.(v);
       }}
     >
       {#each options as o (o.code)}<option value={o.code} disabled={o.disabled}>{o.label}</option>{/each}
