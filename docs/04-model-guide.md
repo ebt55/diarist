@@ -1,6 +1,6 @@
 # Model and hardware guide
 
-Status: v0.2, 15 Oct 2026. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03 and 08 on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
+Status: v0.3, 16 Oct 2026, for 0.1.0-beta.2. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03, 08 and 12 and docs/eval on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
 
 ## 1. What runs inside Diarist
 
@@ -37,7 +37,7 @@ Limits you should know (*published* and **measured**):
 - The stateless `diarize --offline` pass scored worse than streaming on our test clip (DER 43 versus 24) and is not used; it is not the `v3-offline` preset below.
 - Hard cases listed on the model card: heavy overlap, far-field microphones, noisy rooms.
 
-Imports and the post-pass after Stop run the diarizer with its offline geometry, `--asr.diar.preset v3-offline`: the same cache-based streaming algorithm, in 21-second chunks instead of 1.04-second ones; live recording and the optional standalone diarization pass keep the streaming preset (**measured**, 16 Oct 2026, fast subset plus the 77-minute file, with the file lookahead of section 3; the full-set table follows in the release; docs/research/12 section 2). The words are identical; only who said them changes. Words within a second of a speaker change that land on the wrong speaker go from 8.2 to 5.5 percent on a dense Q&A meeting, from 41.2 to 18.0 on the 77-minute in-room recording and from 6.6 to 6.2 on AMI; one Zoom meeting goes from 7.1 to 7.8, where a speaker with only 7 words is merged into another (the speaker count stays within one). The pass runs 20 to 37 percent faster with the same or lower VRAM. The preset is set per diarizer in the manifest (`file_preset`).
+Imports and the post-pass after Stop run the diarizer with its offline geometry, `--asr.diar.preset v3-offline`: the same cache-based streaming algorithm, in 21-second chunks instead of 1.04-second ones; live recording and the optional standalone diarization pass keep the streaming preset. Measured on the full evaluation set of seven sessions with the file lookahead of section 3 (**measured**, 16 Oct 2026, docs/eval/2026-10-16-shipped_n35.md and -shipped_en.md against -n35_rc_13.md and -en_rc_13.md; docs/research/12 section 2): the words are identical and only who said them changes. Words within a second of a speaker change that land on the wrong speaker go, with Nemotron 3.5, from 8.2 to 5.5 percent on a dense Q&A meeting (Aug 2), 6.6 to 5.7 (Aug 9), 6.6 to 6.2 on AMI and 41.2 to 18.0 on the 77-minute in-room recording; Sep 7 stays at 5.7, and Sep 5 goes from 7.1 to 7.8 (one word). The EN model follows the same pattern (8.2 to 5.6, 7.6 to 6.8, 7.3 to 6.3, 42.2 to 19.1; Sep 5 7.3 both times; Sep 7 11.8 to 12.7, one word). The cost: on Sep 5 a participant with only 7 words is merged into another label with both models (5 speakers found as 4, within docs/00's bar of one); the single-speaker control stays at one. `engine.file_diar_preset = streaming` (section 5) goes back to the streaming geometry. The speech pass runs about 30 percent faster (Nemotron 3.5 over the whole set: 363 to 249 s for 324 minutes of audio) with the same or lower VRAM. The preset is set per diarizer in the manifest (`file_preset`).
 
 ## 3. Speech to text: why the Nemotron streaming models, which one, and why not Parakeet
 
@@ -56,22 +56,35 @@ Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 
 Why not the top two: they give no word timestamps, and speaker assignment needs the start and end of every word. They also run only inside a Python stack.
 
-Both Nemotron streaming models are safe on long files (**measured**, docs/research/08 section 7): on the 77-minute recording each found all 8 labels, dropped nothing, and tagged speakers at 99.9 percent agreement with the standalone diarizer; live, both reach first text in about 0.2 s and keep two channels in real time. The choice between them comes from the eval harness (docs/eval, 15 Oct 2026, **measured**):
+Both Nemotron streaming models are safe on long files (**measured**, docs/research/08 section 7): on the 77-minute recording each found all 8 labels, dropped nothing, and tagged speakers at 99.9 percent agreement with the standalone diarizer; live, both reach first text in about 0.2 s and keep two channels in real time. The choice between them comes from the eval harness with the shipped file setting: lookahead 13 (below) and the diarizer's offline geometry (section 2) (**measured**, 16 Oct 2026, docs/eval/2026-10-16-shipped_en.md and -shipped_n35.md: the app's own defaults with nothing passed, word for word and tag for tag the same as the configurations measured in docs/research/12). cpWER on the Zoom meetings is against Zoom's own machine transcript, so it mixes Zoom's errors in; AMI ES2002a has a word-level manual reference. WDER is the share of words given to the wrong speaker, near = within a second of a speaker change.
+
+| Session (minutes, speakers) | EN cpWER | EN WDER (near) | 3.5 cpWER | 3.5 WDER (near) |
+|---|---|---|---|---|
+| Aug 2 (44, 6) | 9.5 | 0.3 (5.6) | 10.3 | 0.2 (5.5) |
+| Aug 9 (44, 3) | 8.1 | 0.3 (6.8) | 8.4 | 0.3 (5.7) |
+| Sep 5 (45, 5) | 4.7 | 0.2 (7.3) | 5.1 | 0.2 (7.8) |
+| Sep 7 (48, 5) | 7.2 | 0.3 (12.7) | 7.5 | 0.2 (5.7) |
+| Sep Logistics (46, 1; single-speaker control) | 7.0 | 0.0 | 6.6 | 0.0 |
+| AMI ES2002a (21, 4; far-field, word-level reference) | 18.0 | 2.3 (6.3) | 20.7 | 2.2 (6.2) |
 
 | | EN 0.6B | 3.5 0.6B |
 |---|---|---|
-| cpWER on the four English Zoom meetings | 5.1, 7.8, 8.5, 10.3 | 5.4, 7.9, 9.2, 12.0 |
-| cpWER on AMI ES2002a (word-level reference) | 19.8 | 23.0 |
-| Words to wrong speaker | identical | identical |
-| Peak VRAM, 77-minute file | 2.6 GB | 1.8 GB |
+| Speech pass, all seven sessions (324 min) | 255 s, 76 times real time | 249 s, 78 times real time |
+| Whole import incl. an extra diarization pass the app skips | 30 times real time | 31 times real time |
+| Peak VRAM, 77-minute file (docs/research/08; an upper bound at the shipped setting) | 2.6 GB | 1.8 GB |
 | Languages | English | 40+ locales, automatic detection |
 | Filler words ("um", "uh") | kept | about 40 percent dropped |
+| Quiet speech | dropped (below) | kept |
+
+Two soft spots of the shipped setting: on Sep 5 a participant with only 7 words is merged into another speaker by the diarizer's offline geometry, with both models (section 2); and with the EN model, Sep 7's words near a speaker change go from 8.2 percent at the old setting to 12.7 (11.8 from the lookahead, one word more from the geometry; about five of the session's 110 such words), within the noise of one session, while every other session improves.
+
+The EN model drops quiet speech (**measured**, docs/eval/2026-10-16-fleurs.md): on about 10 minutes of FLEURS English, where 36 of the 55 recordings peak below -30 dBFS, it scores 21.5 percent WER at the file setting (23.3 at the live one), nearly all of it words left out, against 8.8 for Nemotron 3.5, and returns nothing or a fraction for eight quiet recordings that 3.5 transcribes in full. For quiet recordings (a soft-spoken participant, a far microphone, a file recorded at a low level) use Nemotron 3.5 or a louder source.
 
 - **Default for English: the EN model.** It keeps more of what was said, and the difference is real after fillers are discounted on both sides.
 - **Recommended for other or mixed languages: Nemotron 3.5.** It is also the better choice on a 4 GB card.
 - Neither model punctuates much (0.2 and 2.5 percent of words); the app's segmenting at pauses supplies the structure, and punctuation restoration is planned as a CPU post-step.
 
-Imports and the post-pass after Stop run both models at their full decoder lookahead, 13 frames (1.12 s, `--asr.streaming.rnnt_right_context 13`); the table above is at the runtime's low-latency default of 1, which live recording keeps (**measured**, 16 Oct 2026, fast subset: AMI and two of the Zoom meetings; the full-set table follows in the release). cpWER on AMI goes from 19.8 to 18.3 with the EN model and from 23.0 to 20.8 with Nemotron 3.5; on the two Zoom meetings from 10.3 to 10.2 and 5.1 to 4.7 (EN), and from 12.0 to 10.9 and 5.4 to 5.1 (3.5). Words within a second of a speaker change get better or stay the same, peak VRAM on these files is unchanged (about 1.6 GB), and the speech pass runs about twice as fast (89 s to 49 s on one meeting). The value is set per model in the manifest (`file_right_context`), because the runtime's `-1` (the value in the model file) means 13 for the EN model but only 3 for the pinned Nemotron 3.5. With `post_pass_mode = on_issues` a clean recording keeps its live transcript and so the low-latency setting.
+Imports and the post-pass after Stop run both models at their full decoder lookahead, 13 frames (1.12 s, `--asr.streaming.rnnt_right_context 13`); live recording keeps the runtime's low-latency default of 1 (**measured**, 16 Oct 2026, full set; docs/research/12 section 1). Against the 0.1.0-beta.1 setting (lookahead 1, streaming diarizer; docs/eval/2026-10-16-nemotron_en.md and -nemotron35.md) cpWER on AMI goes from 19.8 to 18.0 with the EN model and from 23.0 to 20.7 with Nemotron 3.5, and every Zoom meeting improves: EN 10.3, 8.5, 5.1 and 7.8 to 9.5, 8.1, 4.7 and 7.2; 3.5 12.0, 9.2, 5.4 and 7.9 to 10.3, 8.4, 5.1 and 7.5. The speech pass runs 2.6 times faster (Nemotron 3.5 over the whole set: 663 to 249 s) with peak VRAM unchanged within the run-to-run noise. The value is set per model in the manifest (`file_right_context`), because the runtime's `-1` (the value in the model file) means 13 for the EN model but only 3 for the pinned Nemotron 3.5. With `post_pass_mode = on_issues` a clean recording keeps its live transcript and so the low-latency setting.
 
 Why Parakeet TDT v3 is experimental only (**measured**, docs/research/08 section 8):
 - It is about 0.6 WER points better than the EN model and writes real punctuation and casing (12 percent of words punctuated).
@@ -141,6 +154,21 @@ Other requirements:
 | Transcription-ready | Spanish (es-ES, es-US), Italian, Portuguese (pt-PT, pt-BR), Hindi, Korean, English, German, French, Russian, Turkish, Vietnamese (vi-VN), Dutch, Japanese (ja-JP), Arabic, Ukrainian | 4 to 13 | Listed |
 | Broad coverage | Polish, Norwegian Bokmål, Finnish, Chinese (zh-CN), Czech, Bulgarian, Slovak, Swedish, Croatian, Romanian, Estonian, Danish, Hungarian | 15 to 29 | Listed as "reduced accuracy" |
 | Adaptation-ready | Greek, Lithuanian, Latvian, Maltese, Slovenian, Hebrew, Thai, Norwegian Nynorsk | needs fine-tuning | Not listed ("Other tag…", or a `languages.user.json` entry) |
+
+Measured in Diarist's own runtime (**measured**, 16 Oct 2026, docs/eval/2026-10-16-fleurs.md): about 10 minutes of the FLEURS test split per language (37 to 55 sentences joined with 1.5 s of silence), transcribed by Nemotron 3.5 at the file setting (lookahead 13, 1.12 s) without diarization. WER in percent, CER for Japanese. These are smoke tests on small slices, one or two points either way is noise, and they sit 1.5 to 7 points above the model card's numbers (full test split, NVIDIA's normaliser; FLEURS writes numbers as digits and the runtime writes them as words), so read them for direction, not as Diarist's published accuracy:
+
+| Language (tag passed) | Words | Language given | Automatic detection | Model card, given / automatic |
+|---|---|---|---|---|
+| English (`en`) | 1,186 | 8.8 | 8.8 | 7.91 / 8.84 |
+| German (`de`) | 878 | 10.6 | 10.3 | 8.31 / 8.22 |
+| Spanish (`es-US`) | 1,178 | 6.8 | 9.5 (detects es-ES) | 4.11 / 4.13 |
+| French (`fr`) | 1,360 | 11.8 | 11.8 | 9.03 / 9.02 |
+| Italian (`it`) | 989 | 6.4 | 6.1 | 4.25 / 4.32 |
+| Portuguese (`pt-BR`) | 1,046 | 9.1 | 8.7 (detects pt-PT) | 5.48 / 5.47 |
+| Hindi (`hi`) | 1,168 | 14.2 | 14.9 | 6.81 / 8.23 |
+| Japanese (`ja-JP`, CER) | 2,072 characters | 20.9 | 21.1 | 11.48 / 11.66 |
+
+At the live setting (160 ms) the same slices score 0.1 to 9.7 points worse with the language given, Spanish most (16.5). The EN model on the English slice: 21.5 at the file setting, nearly all of it dropped quiet speech (section 3).
 
 - Language tags: the runtime's prompt dictionary has bare `de`, `fr`, `ko` and so on, but no bare `ja`, `zh`, `vi`, `th` or `he`, which it silently runs as automatic detection; bare `es` is `es-US` and bare `pt` is `pt-PT`. The app therefore offers `ja-JP`, `zh-CN` and `vi-VN`, lists Spanish and Portuguese per locale, and gives every job a tag the model's dictionary has, also for meetings stored with a bare tag by 0.1.0-beta.1 (whose Japanese and Chinese ran as automatic detection).
 - A model that lists no languages (Parakeet, most GGUFs you add) is not checked: the table's ready and broad-coverage languages are offered for it with a "not checked for this model" note, and nothing switches.

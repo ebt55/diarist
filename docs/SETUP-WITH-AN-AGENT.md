@@ -200,7 +200,7 @@ The runtime package, from step 2:
 
 | What step 2 showed | Package | Why |
 |---|---|---|
-| NVIDIA GPU, compute capability 7.5 or higher, driver 580 or newer (CUDA 13.0 or higher) | `cuda` | The tested package; measured on an RTX 3080, about 27 times faster than real time. |
+| NVIDIA GPU, compute capability 7.5 or higher, driver 580 or newer (CUDA 13.0 or higher) | `cuda` | The tested package; measured on an RTX 3080, about 30 times faster than real time. |
 | AMD or Intel GPU, an NVIDIA GPU with an older driver, or compute capability below 7.5 | `vulkan` | Runs on any current GPU driver, but Diarist 0.1.0-beta.2 cannot use it yet: it starts the runtime with `--device cuda:0`, which the Vulkan build refuses (docs/KNOWN-ISSUES.md). Tell the user before installing. With an older NVIDIA driver, the user may prefer to update it from nvidia.com (they do that, not you) and use `cuda`. |
 | No usable GPU | `cpu` | Diarist 0.1.0-beta.2 cannot use it yet, for the same `--device` reason. Tell the user before installing. |
 

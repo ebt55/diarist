@@ -25,8 +25,8 @@ toolkit is needed; the GPU driver is the only prerequisite.
 ## What it does
 
 - **Imports** recordings (m4a, mp3, wav, flac, ogg, mp4, mkv and more): about
-  27 times faster than real time on an RTX 3080, so an hour takes two to three
-  minutes.
+  30 times faster than real time on an RTX 3080 (*measured* over the whole
+  import), so an hour takes about two minutes.
 - **Records live**: your microphone is "me", the system audio is split into
   the other speakers (up to 8). Text appears within about a second; when you
   stop, the recording is processed again for the final transcript.
@@ -114,9 +114,10 @@ engine unloads after 10 idle minutes):
 ### Which speech model
 
 - **English meetings: the EN model** (default). It keeps more of what was
-  said: cpWER 5.1 to 10.3 on four English Zoom meetings against 5.4 to 12.0
-  for Nemotron 3.5, and 19.8 against 23.0 on the AMI meeting (*measured*).
-  Speaker attribution is identical.
+  said: cpWER 4.7 to 9.5 on four English Zoom meetings against 5.1 to 10.3
+  for Nemotron 3.5, and 18.0 against 20.7 on the AMI meeting (*measured*).
+  Speaker attribution is about the same. It drops quiet speech, though: for a
+  soft-spoken participant or a file recorded at a low level, use Nemotron 3.5.
 - **Other or mixed languages, or a 4 GB card: Nemotron 3.5.** 40+ languages
   with automatic detection, 30 percent less VRAM. It drops about 40 percent of
   filler words ("um", "uh").
@@ -133,9 +134,9 @@ be wrong or missing; on far-field room recordings about one in 9.
 
 - Speaker diarization is Nemotron 3 Diarization, the best system on the only
   independent cross-system benchmark (DER 14.7 against 19 to 31 for the
-  alternatives). On our own Zoom meetings 0.2 to 0.6 percent of words went to
-  the wrong speaker, 7 to 9 percent within a second of a speaker change
-  (*measured*).
+  alternatives). On our own Zoom meetings 0.2 to 0.3 percent of words went to
+  the wrong speaker, 5.5 to 7.8 percent within a second of a speaker change
+  with Nemotron 3.5 and 5.6 to 12.7 with the EN model (*measured*).
 - **At most 8 speakers per recording.** A ninth person is merged into an
   existing label; split very long multi-meeting recordings.
 - Speaker labels in the live view are provisional; the processing after Stop
