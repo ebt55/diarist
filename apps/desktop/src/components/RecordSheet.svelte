@@ -111,10 +111,12 @@
       error = failure;
       return;
     }
+    const switched = notice;
     close();
+    const cpu = await app.cpuNotice();
     app.toast(
       "info",
-      `Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.${notice ? ` ${notice}` : ""}`,
+      `Recording. Ctrl+. or Stop ends it; Ctrl+Alt+R works from any app.${switched ? ` ${switched}` : ""}${cpu ? ` ${cpu}` : ""}`,
     );
   }
 </script>

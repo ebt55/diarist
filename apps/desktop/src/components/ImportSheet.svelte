@@ -39,7 +39,9 @@
     importSheet.close();
     await app.importPaths(paths, language);
     starting = false;
-    if (switched && !app.readiness) app.toast("info", switched);
+    if (app.readiness) return;
+    const note = [switched, await app.cpuNotice()].filter(Boolean).join(" ");
+    if (note) app.toast("info", note);
   }
 </script>
 

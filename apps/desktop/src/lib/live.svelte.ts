@@ -373,7 +373,10 @@ class LiveStore {
   #onToggled(t: Toggled): void {
     const via = t.via === "shortcut" ? "Ctrl+Alt+R" : "the tray";
     if (t.action === "started") {
-      app.toast("info", `Recording started from ${via}. ${via === "Ctrl+Alt+R" ? "Press it" : "Choose Stop"} again to stop (it asks first).`);
+      const again = via === "Ctrl+Alt+R" ? "Press it" : "Choose Stop";
+      void app
+        .cpuNotice()
+        .then((cpu) => app.toast("info", `Recording started from ${via}. ${again} again to stop (it asks first).${cpu ? ` ${cpu}` : ""}`));
     } else if (t.action === "confirm_stop") {
       // The window is on screen: the usual "Stop recording?" dialog, or,
       // when it is already open, the second press answers it.

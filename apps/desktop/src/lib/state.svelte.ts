@@ -2,6 +2,7 @@
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
+import { CPU_NOTICE, isCpuPackage, selectedEngine } from "./cpuNotice";
 import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
 import { UNKNOWN_TOKENS_NOTICE, languageName } from "./languages";
@@ -276,6 +277,24 @@ class AppState {
 
   dismiss(id: number): void {
     this.toasts = this.toasts.filter((t) => t.id !== id);
+  }
+
+  #cpuNoticeShown = false;
+
+  /**
+   * `CPU_NOTICE` the first time per session an import or a recording
+   * starts on the CPU runtime package; null afterwards and on a GPU package.
+   */
+  async cpuNotice(): Promise<string | null> {
+    if (this.#cpuNoticeShown) return null;
+    try {
+      const [files, settings] = await Promise.all([api.listModelFiles(), api.getSettings()]);
+      if (!isCpuPackage(selectedEngine(files, settings))) return null;
+    } catch {
+      return null;
+    }
+    this.#cpuNoticeShown = true;
+    return CPU_NOTICE;
   }
 
   /** Error toast with a "Show log" action that opens Diagnostics. */
