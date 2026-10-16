@@ -14,8 +14,9 @@ use diarist_core::live::{
 };
 use diarist_core::models;
 use diarist_core::pipeline::JobQueue;
+use diarist_core::settings;
 use diarist_core::store::{RunStore, Store};
-use diarist_core::types::Channel;
+use diarist_core::types::{Channel, ModelRole};
 use diarist_core::views::{JobEvent, JobStage};
 
 use super::{hms, CliError, CliResult, Ctx};
@@ -163,8 +164,38 @@ fn resolve(flow: DeviceFlow, q: &Option<String>) -> CliResult<Option<String>> {
 pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
     let mic = resolve(DeviceFlow::Capture, &args.mic)?;
     let loopback = resolve(DeviceFlow::Render, &args.loopback)?;
-    let built = models::select_engine(&ctx.paths, &*ctx.store, &args.device)?;
+    // The recording's language as the tier table spells it (`ja` -> `ja-JP`),
+    // the `default_language` setting when none is given; a model that does
+    // not cover it is switched for one that does, as in the app and
+    // `transcribe`.
+    let language = models::languages::canonical(
+        &args
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                settings::default_language(&settings::effective(&*ctx.store).unwrap_or_default())
+            }),
+    );
+    let (built, switched) = models::select_engine_for(
+        &ctx.paths,
+        &*ctx.store,
+        &args.device,
+        &language,
+        false,
+        &models::EngineOverrides::default(),
+    )?;
     let sel = built.selection.clone();
+    if let Some(reason) = switched {
+        if let Some(selected) = models::selected_file(&*ctx.store, ModelRole::Asr)? {
+            eprintln!(
+                "{}",
+                models::switch_notice(reason, &selected, &sel.asr_file, &language)
+            );
+        }
+    }
     if built.experimental {
         return Err(CliError::Failed(format!(
             "{} is not a streaming model; select one for live recording (`diarist-cli models select asr ...`)",
@@ -202,7 +233,11 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
         store: Arc::clone(&store),
         queue: Arc::clone(&queue),
         data_root: ctx.paths.root.clone(),
-        live_engine: Arc::new(NemoWsLiveEngine::new(supervisor.clone(), multilingual)),
+        // Sessions get a tag the model's prompt dictionary has.
+        live_engine: Arc::new(models::languages::TaggedLiveEngine::new(
+            Arc::new(NemoWsLiveEngine::new(supervisor.clone(), multilingual)),
+            sel.asr_file.capabilities.languages.clone(),
+        )),
         file_engine: built.engine,
         sources: capture::wasapi_source_factory(),
         // Measured above, before the live server loaded.
@@ -240,7 +275,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
         lctx,
         StartOptions {
             title: args.title.clone(),
-            language: args.language.clone(),
+            language: Some(language.clone()),
             diarize_mic: args.diarize_mic,
             devices: DeviceSelection { mic, loopback },
         },
