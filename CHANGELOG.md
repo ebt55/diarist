@@ -23,6 +23,11 @@ All notable changes to Diarist. Versions follow semantic versioning.
 - Fixed: Japanese and Chinese were transcribed with automatic language
   detection; the language is now passed to the model.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
+- Fixed: a deleted meeting's id (or a transcript run's) could be given to the
+  next one, so anything that remembered the old one by id saw the new one.
+  Ids now come from a counter and are never reused. Before a database
+  upgrade the app copies `diarist.db` to `diarist.db.bak-<old version>` next
+  to it, keeping only the newest copy.
 - Fixed: the live view did not open for the second and later recordings of
   a session until Stop. A recording made after deleting the previous one
   gets that meeting id again, and the app took it for the recording it had

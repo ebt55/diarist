@@ -238,6 +238,29 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
         paths.root.display(),
         source_name(paths.source)
     );
+    // The copy SqliteStore makes before a schema upgrade (`diarist.db.bak-<v>`).
+    let db = paths.db();
+    let prefix = format!(
+        "{}.bak-",
+        db.file_name()
+            .map_or("diarist.db".into(), |n| n.to_string_lossy())
+    );
+    let backups: Vec<String> = db
+        .parent()
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix) && !n.ends_with(".tmp"))
+        .collect();
+    if !backups.is_empty() {
+        let _ = writeln!(
+            out,
+            "database backup: {} (copy made before the last schema upgrade)",
+            backups.join(", ")
+        );
+    }
     for (role, label) in [
         (ModelRole::Engine, "engine"),
         (ModelRole::Asr, "asr"),

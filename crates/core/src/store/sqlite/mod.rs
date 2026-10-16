@@ -4,7 +4,11 @@
 //! - rusqlite with the bundled SQLite (FTS5 compiled in), WAL, foreign keys on,
 //!   `busy_timeout` 5 s.
 //! - Schema changes are numbered SQL files under `migrations/`, embedded with
-//!   `include_str!` and applied in order by `PRAGMA user_version`.
+//!   `include_str!` and applied in order by `PRAGMA user_version`. Before
+//!   pending migrations run on an existing database, the backup API copies it
+//!   to `<db>.bak-<old version>` next to it (only the newest such copy is kept).
+//! - Meeting and run ids come from the `counters` table (migration 0002), so
+//!   an id is never handed out twice, even after the newest row is deleted.
 //! - Full-text search uses the external-content FTS5 table `segments_fts`
 //!   (kept in sync by triggers) and only returns segments of each meeting's
 //!   current run. Snippets are split into [`SnippetPart`]s, never HTML.
@@ -46,7 +50,13 @@ use crate::views::{
 };
 
 /// Numbered migrations; entry `i` moves `user_version` from `i` to `i + 1`.
-const MIGRATIONS: &[(&str, &str)] = &[("0001_init", include_str!("migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("migrations/0001_init.sql")),
+    (
+        "0002_counters",
+        include_str!("migrations/0002_counters.sql"),
+    ),
+];
 
 /// Characters of transcript text in [`MeetingSummary::preview`].
 const PREVIEW_CHARS: usize = 200;
@@ -77,6 +87,8 @@ pub struct SqliteStore {
     /// `<data root>/audio`: meeting folders `audio/<uid>` removed by
     /// `delete_meeting` (`None` for an in-memory store).
     audio_root: Option<PathBuf>,
+    /// The copy made before this open migrated the database, if it did.
+    migration_backup: Option<PathBuf>,
 }
 
 impl SqliteStore {
@@ -115,12 +127,23 @@ impl SqliteStore {
         // In-memory databases answer "memory"; that is fine.
         let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        let migration_backup = match &path {
+            Some(db) => backup_before_migration(&conn, db)?,
+            None => None,
+        };
         migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             path,
             audio_root,
+            migration_backup,
         })
+    }
+
+    /// The copy of the database made before this open applied pending
+    /// migrations (`<db>.bak-<old version>`), for the caller to log.
+    pub fn migration_backup(&self) -> Option<&Path> {
+        self.migration_backup.as_deref()
     }
 
     fn lock(&self) -> StoreResult<MutexGuard<'_, Connection>> {
@@ -337,6 +360,67 @@ impl RunStore for SqliteStore {
         std::fs::rename(&tmp, dest)
             .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))
     }
+}
+
+/// File name prefix of the pre-migration copies of `db` (`diarist.db.bak-`).
+pub fn migration_backup_prefix(db: &Path) -> String {
+    let name = db
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "diarist.db".into());
+    format!("{name}.bak-")
+}
+
+/// Before pending migrations run on an existing database (schema version
+/// 1 or later), copies it with the backup API to `<db>.bak-<version>` next to
+/// it and deletes older copies. A copy that cannot be made stops the open:
+/// the migration does not run without one.
+fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<PathBuf>> {
+    let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current == 0 || current as usize >= MIGRATIONS.len() {
+        return Ok(None);
+    }
+    let prefix = migration_backup_prefix(db);
+    let dest = db.with_file_name(format!("{prefix}{current}"));
+    let tmp = db.with_file_name(format!("{prefix}{current}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    conn.backup(rusqlite::MAIN_DB, &tmp, None).map_err(|e| {
+        StoreError::Backend(format!(
+            "cannot back up {} before upgrading it: {e}",
+            db.display()
+        ))
+    })?;
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))?;
+    if let Some(dir) = db.parent().and_then(|d| std::fs::read_dir(d).ok()) {
+        for entry in dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&prefix) && entry.path() != dest {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(Some(dest))
+}
+
+/// The next id for `table` from `counters` (never below `max(id) + 1`), and
+/// advances the counter. Runs inside the caller's transaction, before the
+/// INSERT that uses the id.
+fn take_id(conn: &Connection, key: &str, table: &str) -> StoreResult<i64> {
+    let id: i64 = conn.query_row(
+        &format!(
+            "SELECT MAX(COALESCE((SELECT value FROM counters WHERE key = ?1), 1),
+                        (SELECT COALESCE(MAX(id), 0) + 1 FROM {table}))"
+        ),
+        [key],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO counters (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, id + 1],
+    )?;
+    Ok(id)
 }
 
 fn migrate(conn: &mut Connection) -> StoreResult<u32> {
@@ -1474,12 +1558,14 @@ impl Store for SqliteStore {
     }
 
     fn create_meeting(&self, new: NewMeeting) -> StoreResult<Meeting> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
         let now = now_ms();
-        conn.execute(
-            "INSERT INTO meetings (uid, title, source, source_path, language, diarize_mic,
+        let tx = conn.transaction()?;
+        let id = take_id(&tx, "next_meeting_id", "meetings")?;
+        tx.execute(
+            "INSERT INTO meetings (id, uid, title, source, source_path, language, diarize_mic,
                 started_at, status, audio_keep, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
+             VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
             params![
                 new_id(),
                 new.title,
@@ -1489,10 +1575,13 @@ impl Store for SqliteStore {
                 new.diarize_mic,
                 new.started_at,
                 new.status.as_str(),
-                now
+                now,
+                id
             ],
         )?;
-        get_meeting_row(&conn, MeetingId(conn.last_insert_rowid()))
+        let meeting = get_meeting_row(&tx, MeetingId(id))?;
+        tx.commit()?;
+        Ok(meeting)
     }
 
     fn set_meeting_status(&self, id: MeetingId, status: MeetingStatus) -> StoreResult<()> {
@@ -1545,14 +1634,24 @@ impl Store for SqliteStore {
         kind: RunKind,
         engine_info: serde_json::Value,
     ) -> StoreResult<TranscriptRun> {
-        let conn = self.lock()?;
-        meeting_exists(&conn, meeting)?;
-        conn.execute(
-            "INSERT INTO transcript_runs (meeting_id, kind, engine_info, started_at, status)
-             VALUES (?1, ?2, ?3, ?4, 'running')",
-            params![meeting.0, kind.as_str(), to_json(&engine_info)?, now_ms()],
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        meeting_exists(&tx, meeting)?;
+        let id = take_id(&tx, "next_run_id", "transcript_runs")?;
+        tx.execute(
+            "INSERT INTO transcript_runs (id, meeting_id, kind, engine_info, started_at, status)
+             VALUES (?5, ?1, ?2, ?3, ?4, 'running')",
+            params![
+                meeting.0,
+                kind.as_str(),
+                to_json(&engine_info)?,
+                now_ms(),
+                id
+            ],
         )?;
-        get_run(&conn, RunId(conn.last_insert_rowid()))
+        let run = get_run(&tx, RunId(id))?;
+        tx.commit()?;
+        Ok(run)
     }
 
     fn insert_transcript(&self, run: RunId, transcript: &NewTranscript) -> StoreResult<()> {
@@ -1826,6 +1925,86 @@ mod tests {
         let copy = SqliteStore::open(&dest).unwrap();
         assert_eq!(copy.list_meetings().unwrap()[0].title, "Backed up");
         assert_eq!(copy.search("hello", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ids_of_a_deleted_newest_meeting_or_run_are_not_reused() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let a = meeting(&store, "A");
+        let b = meeting(&store, "B");
+        store.delete_meeting(b.id).unwrap();
+        let c = meeting(&store, "C");
+        assert!(c.id.0 > b.id.0, "{:?} reused {:?}", c.id, b.id);
+        let info = serde_json::json!({});
+        let r1 = store.create_run(a.id, RunKind::File, info.clone()).unwrap();
+        let r2 = store
+            .create_run(a.id, RunKind::PostPass, info.clone())
+            .unwrap();
+        store.delete_run(r2.id).unwrap();
+        let r3 = store.create_run(a.id, RunKind::PostPass, info).unwrap();
+        assert!(
+            r1.id.0 < r2.id.0 && r2.id.0 < r3.id.0,
+            "{r1:?} {r2:?} {r3:?}"
+        );
+    }
+
+    #[test]
+    fn migration_from_0001_keeps_rows_continues_ids_and_backs_up_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("diarist.db");
+        let (a, b) = {
+            let store = SqliteStore::open(&db).unwrap();
+            // A new database has nothing to back up.
+            assert_eq!(store.migration_backup(), None);
+            let a = meeting(&store, "First");
+            current(&store, a.id, &["kept words"]);
+            let b = meeting(&store, "Second");
+            (a.id, b.id)
+        };
+        // Back to schema 0001 as 0.1.0-beta.1 left it (no counters table).
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE counters; PRAGMA user_version = 1;")
+                .unwrap();
+        }
+        let older = dir.path().join("diarist.db.bak-0");
+        std::fs::write(&older, b"an older copy").unwrap();
+
+        let store = SqliteStore::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        let mut ids: Vec<i64> = store
+            .list_meetings()
+            .unwrap()
+            .iter()
+            .map(|m| m.id.0)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![a.0, b.0]);
+        assert_eq!(store.search("kept", 5).unwrap().len(), 1);
+        // Ids continue after the newest row, and a deleted newest one is
+        // not handed out again.
+        let c = meeting(&store, "Third");
+        assert_eq!(c.id.0, b.0 + 1);
+        store.delete_meeting(c.id).unwrap();
+        assert_eq!(meeting(&store, "Fourth").id.0, c.id.0 + 1);
+
+        // The copy made before migrating: schema 1 with both meetings; the
+        // older copy is gone.
+        let bak = dir.path().join("diarist.db.bak-1");
+        assert_eq!(store.migration_backup(), Some(bak.as_path()));
+        assert!(!older.exists());
+        assert!(!dir.path().join("diarist.db.bak-1.tmp").exists());
+        let copy = Connection::open(&bak).unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let rows: i64 = copy
+            .query_row("SELECT COUNT(*) FROM meetings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((version, rows), (1, 2));
+        drop(store);
+        // Up to date: the next open makes no copy.
+        assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
     }
 
     #[test]

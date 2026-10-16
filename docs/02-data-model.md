@@ -11,6 +11,8 @@ Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjud
 - User edits survive new runs: display names and colours are carried over by time-overlap matching; segment reassignments are stored as time-ranged edits and re-applied.
 - Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; one stereo FLAC (left mic, right loopback) after the post-pass, WAVs deleted; retention default 30 days unless a meeting is pinned (`audio_keep`). Eval-set meetings are pinned by the harness. A later re-diarization or fusion re-run only reaches meetings whose audio still exists, and Settings says so. Imports keep the original file as the playback source.
 - Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
+- **Ids are never reused.** A rowid table hands out `max(id) + 1`, so deleting the newest meeting gave its id to the next one and anything that remembered the old meeting by id saw the new one. Since migration 0002, meeting and transcript run ids come from the `counters` table (`next_meeting_id`, `next_run_id`, started at `max(id) + 1` of a 0.1.0-beta.1 database) and advance in the same transaction as the insert. Speakers, segments and words still take `max(id) + 1`; they belong to one run and the UI reloads them with it.
+- **A copy before every upgrade.** Before pending migrations run on an existing database, the backup API copies it to `diarist.db.bak-<old schema version>` next to it; only the newest copy is kept, and the open stops if the copy cannot be made. Copy diagnostics names it.
 
 ## Tables
 
@@ -194,6 +196,8 @@ CREATE INDEX model_files_role ON model_files(role);
 -- Selection per role lives in settings: selected_model.asr, selected_model.diarizer, selected_engine.
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL);  -- 0002: next_meeting_id, next_run_id
 ```
 
 ## Run lifecycle
