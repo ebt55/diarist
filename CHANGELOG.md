@@ -2,6 +2,18 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## [Unreleased]
+
+- Fixed: names given to speakers while recording are kept after Stop. The
+  final transcript matched live and final speakers by the overlap of their
+  word times, and the two passes place each word up to a few hundred
+  milliseconds apart, so on real meetings nobody matched and a name given
+  from the speaker legend fell back to "Speaker N". Speakers are now
+  matched by their stretches of speech; a name that still finds no match
+  goes to the final speaker who covers most of that speech, marked "new
+  label" to check, and renaming from the legend no longer forgets where an
+  earlier rename from a line placed the name.
+
 ## [0.1.0-beta.2] - 2026-10-16
 
 The second beta pre-release, and the first one that installed copies of

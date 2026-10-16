@@ -294,8 +294,11 @@ fn records_streams_and_runs_the_post_pass() {
     .unwrap();
     let m = rec.meeting_id();
     assert!(ctx.queue.queued().is_empty());
-    // While recording: the live run is current and has speaker rows.
-    std::thread::sleep(Duration::from_millis(7_300));
+    // While recording: the live run is current and has speaker rows. Long
+    // enough for the 10 s of speech-region time a name needs to carry over
+    // without an anchor (`store::carry_over`, steps 1-2; it was 7.3 s while
+    // the minimum was 5 s of word time).
+    std::thread::sleep(Duration::from_millis(11_300));
     let d = store.get_meeting(m).unwrap();
     assert_eq!(d.meeting.status, MeetingStatus::Recording);
     assert_eq!(d.current_run.as_ref().unwrap().kind, RunKind::Live);
@@ -369,7 +372,7 @@ fn records_streams_and_runs_the_post_pass() {
     assert!(sink.finals.lock().unwrap().len() >= 12);
     let levels = sink.levels.lock().unwrap();
     let mic_levels = levels.iter().filter(|l| l.channel == Channel::Mic).count();
-    assert!((65..=80).contains(&mic_levels), "{mic_levels} mic levels");
+    assert!((105..=120).contains(&mic_levels), "{mic_levels} mic levels");
     assert!(levels.iter().any(|l| l.peak_dbfs > -20.0));
     // A loud loopback is not amplified (AGC on by default); the mic has none.
     assert!(

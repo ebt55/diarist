@@ -10,20 +10,41 @@
 //!    new ones most (ties: the smallest) is applied to the old run's word
 //!    times, name anchors and edit ranges before everything below. Runs whose
 //!    words line up keep shift 0, so nothing changes for them.
-//! 1. Overlap matrix per channel: seconds where a word of old speaker A and a
-//!    word of new speaker X overlap. Old speakers with under 5 s of speech are
-//!    ignored.
+//! 1. Overlap matrix per channel: milliseconds where a speech region of old
+//!    speaker A and one of new speaker X overlap. Regions are built in
+//!    channel order ([`regions`]): consecutive words of one speaker at most
+//!    [`JOIN_GAP_MS`] apart, ended by any word of another speaker (so a
+//!    region never swallows a backchannel), then widened by
+//!    [`REGION_PAD_MS`] on both sides, never past half the gap to the next
+//!    word of another speaker, and not below 0. Word times alone do not work:
+//!    both engines emit words as short spikes (median 80 ms, one encoder
+//!    frame) and the post-pass places each word a little differently from
+//!    the live run (median 160 ms earlier, 400 ms earlier to 0 at p10 / p90,
+//!    docs/research/12, "Word times"), so after step 0 only about half of the
+//!    spike time overlaps even when both runs agree on every speaker.
+//!    `spk_unknown` rows take no part on either side. Speakers with under
+//!    [`MIN_SPEECH_MS`] of region time, old or new, are not matched (a tiny
+//!    new label inside a long live speaker would otherwise cover nearly all
+//!    of its own time and take the name).
 //! 2. Greedy one-to-one matching, highest overlap first, accepted at 60
-//!    percent of the smaller speaker's speech time; colour and global id are
+//!    percent of the smaller speaker's region time; colour and global id are
 //!    copied to the match.
 //! 3. Names follow the anchor: an old speaker with a name anchor (the
 //!    segment renamed from, or the utterance range of a rename made while
 //!    recording, `Store::rename_speaker_at`) gives its name to the new
 //!    speaker owning most words inside the anchor range, however little the
-//!    old speaker said (the 5 s minimum applies only to step 1); when that
-//!    differs from the overlap winner both get `needs_review`. Names without
-//!    an anchor (including names inherited through a merge) go to the
-//!    overlap winner.
+//!    old speaker said (the region-time minimum applies only to step 1);
+//!    when that differs from the overlap winner both get `needs_review`.
+//!    Names without an anchor (including names inherited through a merge) go
+//!    to the overlap winner.
+//!
+//!    Fallback for names that neither an anchor nor a match placed (a
+//!    legend rename of a short talker, or of a speaker the post-pass split):
+//!    larger old speakers first, the name goes to the new speaker with the
+//!    most region overlap with the old speaker, when that overlap is at least
+//!    [`FALLBACK_SHARE`] of the old speaker's own region time; never onto a
+//!    speaker that already received a name, never a name already given, and
+//!    the receiver gets `needs_review`.
 //! 4. Unmatched new speakers get `needs_review`.
 //! 5. Merges are not carried structurally.
 //! 6. `reassign` edits are replayed in order at word level by word midpoint,
@@ -35,14 +56,32 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use super::{StoreError, StoreResult};
+use crate::transcript::UNKNOWN_LABEL;
 use crate::types::{
     Channel, Edit, MeetingId, ReassignTarget, RunId, Speaker, SpeakerId, TranscriptRun,
 };
 
-/// Old speakers with less speech than this cannot pass names on.
-const MIN_SPEECH_MS: i64 = 5_000;
-/// A match must cover this share of the smaller speaker's speech.
+/// Speakers (old or new) with less region time than this are not matched
+/// (steps 1-2). Region time is about 2.1 times word time on recorded speech
+/// (two replayed meetings, 12 and 34 minutes, at the constants below), so
+/// this keeps roughly the earlier minimum of 5 s of word time: about 20 s of
+/// talk.
+const MIN_SPEECH_MS: i64 = 10_000;
+/// A match must cover this share of the smaller speaker's region time.
 const MATCH_SHARE: f64 = 0.6;
+/// Consecutive words of one speaker at most this far apart are one speech
+/// region. Chosen with [`REGION_PAD_MS`] from join gaps 150 / 300 / 500 and
+/// pads 0 / 100 / 200 ms: the smallest pair that matched every speaker of
+/// the two replayed meetings at 75 percent or more (78 to 84) and kept every
+/// wrong pair under 40 percent (7 at most) on 200 seeded adversarial
+/// meetings, whose halfway label swap stays at 58 percent at most.
+const JOIN_GAP_MS: i64 = 150;
+/// Each speech region is widened by this on both sides (at most half the
+/// gap to the next word of another speaker).
+const REGION_PAD_MS: i64 = 100;
+/// The fallback of step 3 needs this share of the old speaker's own region
+/// time.
+const FALLBACK_SHARE: f64 = 0.5;
 /// The largest shift between the runs' word times that alignment looks for.
 const MAX_SHIFT_MS: i64 = 500;
 /// The alignment's step.
@@ -122,9 +161,76 @@ pub(crate) trait CarryBackend {
     ) -> StoreResult<SpeakerId>;
 }
 
-/// Overlap in ms between every (old, new) speaker pair of one channel.
-/// Both lists are sorted by start; words of one run do not overlap much, so a
-/// sweep with a moving lower bound is enough.
+/// Speech regions of one channel's words (sorted by start, every speaker of
+/// the channel, `spk_unknown` included). In channel order, consecutive words
+/// of one speaker at most [`JOIN_GAP_MS`] apart form a region; the next word
+/// of another speaker ends it. Each region is widened by [`REGION_PAD_MS`]
+/// on both sides, but never by more than half the gap to the nearest word of
+/// another speaker (none when they overlap) and never below 0; regions of
+/// one speaker that then touch are merged. Sorted by start.
+fn regions(words: &[OwnedWord]) -> Vec<OwnedWord> {
+    let n = words.len();
+    // The nearest word of another speaker before / after each word.
+    let mut prev_other: Vec<Option<usize>> = vec![None; n];
+    for i in 1..n {
+        prev_other[i] = if words[i - 1].speaker != words[i].speaker {
+            Some(i - 1)
+        } else {
+            prev_other[i - 1]
+        };
+    }
+    let mut next_other: Vec<Option<usize>> = vec![None; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        next_other[i] = if words[i + 1].speaker != words[i].speaker {
+            Some(i + 1)
+        } else {
+            next_other[i + 1]
+        };
+    }
+    let mut by: BTreeMap<SpeakerId, Vec<(i64, i64)>> = BTreeMap::new();
+    let mut i = 0;
+    while i < n {
+        let speaker = words[i].speaker;
+        let (start, mut end, mut j) = (words[i].start, words[i].end, i);
+        while j + 1 < n
+            && words[j + 1].speaker == speaker
+            && words[j + 1].start - end <= JOIN_GAP_MS
+        {
+            j += 1;
+            end = end.max(words[j].end);
+        }
+        let left = prev_other[i].map_or(REGION_PAD_MS, |k| {
+            ((start - words[k].end).max(0) / 2).min(REGION_PAD_MS)
+        });
+        let right = next_other[j].map_or(REGION_PAD_MS, |k| {
+            ((words[k].start - end).max(0) / 2).min(REGION_PAD_MS)
+        });
+        let (start, end) = ((start - left).max(0), end + right);
+        let own = by.entry(speaker).or_default();
+        match own.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => own.push((start, end)),
+        }
+        i = j + 1;
+    }
+    let mut out: Vec<OwnedWord> = by
+        .into_iter()
+        .flat_map(|(speaker, rs)| {
+            rs.into_iter().map(move |(start, end)| OwnedWord {
+                start,
+                end,
+                speaker,
+            })
+        })
+        .collect();
+    // `overlap_matrix` sweeps in start order.
+    out.sort_by_key(|r| (r.start, r.end, r.speaker));
+    out
+}
+
+/// Overlap in ms between every (old, new) speaker pair of one channel. Both
+/// lists are sorted by start; an item is skipped only once it ends before
+/// the current old item starts, so overlapping items in one list are fine.
 fn overlap_matrix(old: &[OwnedWord], new: &[OwnedWord]) -> HashMap<(SpeakerId, SpeakerId), i64> {
     let mut m: HashMap<(SpeakerId, SpeakerId), i64> = HashMap::new();
     let mut lo = 0usize;
@@ -223,28 +329,53 @@ pub(crate) fn carry_over(
     report.shift_ms = shifts.clone();
     let shift_of = |c: Channel| shifts.get(&c).copied().unwrap_or(0);
 
+    // 1-2. Speech regions (`spk_unknown` breaks and bounds them but takes no
+    // part), overlap matrix per channel and greedy one-to-one matching, all
+    // on region time.
+    let unknown: HashSet<SpeakerId> = old_speakers
+        .iter()
+        .chain(&new_speakers)
+        .filter(|s| s.engine_label == UNKNOWN_LABEL)
+        .map(|s| s.id)
+        .collect();
+    let regions_of =
+        |words: &BTreeMap<Channel, Vec<OwnedWord>>| -> BTreeMap<Channel, Vec<OwnedWord>> {
+            words
+                .iter()
+                .map(|(c, w)| {
+                    let mut r = regions(w);
+                    r.retain(|r| !unknown.contains(&r.speaker));
+                    (*c, r)
+                })
+                .collect()
+        };
+    let (old_regions, new_regions) = (regions_of(&old_words), regions_of(&new_words));
     let mut speech: HashMap<SpeakerId, i64> = HashMap::new();
-    for w in old_words.values().chain(new_words.values()).flatten() {
-        *speech.entry(w.speaker).or_default() += w.end - w.start;
+    for r in old_regions.values().chain(new_regions.values()).flatten() {
+        *speech.entry(r.speaker).or_default() += r.end - r.start;
     }
     let speech_of = |id: SpeakerId| speech.get(&id).copied().unwrap_or(0);
 
-    // 1-2. Overlap matrix per channel and greedy one-to-one matching.
-    let mut pairs: Vec<(i64, SpeakerId, SpeakerId)> = Vec::new();
-    for (channel, old) in &old_words {
-        let Some(new) = new_words.get(channel) else {
+    // Every overlapping (old, new) pair; the matching takes those where both
+    // speakers have the minimum, the name fallback (step 3) any of them.
+    let mut overlaps: Vec<(i64, SpeakerId, SpeakerId)> = Vec::new();
+    for (channel, old) in &old_regions {
+        let Some(new) = new_regions.get(channel) else {
             continue;
         };
-        for ((a, x), ov) in overlap_matrix(old, new) {
-            if speech_of(a) >= MIN_SPEECH_MS {
-                pairs.push((ov, a, x));
-            }
-        }
+        overlaps.extend(
+            overlap_matrix(old, new)
+                .into_iter()
+                .map(|((a, x), ov)| (ov, a, x)),
+        );
     }
-    pairs.sort_by(|p, q| q.0.cmp(&p.0).then(p.1.cmp(&q.1)).then(p.2.cmp(&q.2)));
+    overlaps.sort_by(|p, q| q.0.cmp(&p.0).then(p.1.cmp(&q.1)).then(p.2.cmp(&q.2)));
     let mut old_match: HashMap<SpeakerId, SpeakerId> = HashMap::new();
     let mut new_matched: HashSet<SpeakerId> = HashSet::new();
-    for (ov, a, x) in pairs {
+    for &(ov, a, x) in &overlaps {
+        if speech_of(a) < MIN_SPEECH_MS || speech_of(x) < MIN_SPEECH_MS {
+            continue;
+        }
         if old_match.contains_key(&a) || new_matched.contains(&x) {
             continue;
         }
@@ -335,6 +466,36 @@ pub(crate) fn carry_over(
             if u.name.is_none() {
                 u.name = Some(name);
             }
+        }
+    }
+    // Fallback: names neither an anchor nor a match placed, larger old
+    // speakers first, to the new speaker with the most region overlap when
+    // it covers FALLBACK_SHARE of the old speaker's own region time.
+    let mut given: HashSet<String> = updates.values().filter_map(|u| u.name.clone()).collect();
+    let mut unplaced: Vec<(&Speaker, String)> = old_speakers
+        .iter()
+        .filter(|s| !handled.contains(&s.id) && !old_match.contains_key(&s.id))
+        .filter_map(|s| root_of(s).display_name.map(|n| (s, n)))
+        .collect();
+    unplaced.sort_by(|p, q| {
+        speech_of(q.0.id)
+            .cmp(&speech_of(p.0.id))
+            .then(p.0.id.cmp(&q.0.id))
+    });
+    for (s, name) in unplaced {
+        if given.contains(&name) {
+            continue;
+        }
+        // `overlaps` is sorted by overlap, largest first.
+        let Some(&(ov, _, x)) = overlaps.iter().find(|p| p.1 == s.id) else {
+            continue;
+        };
+        let own = speech_of(s.id);
+        let u = updates.entry(x).or_default();
+        if own > 0 && ov as f64 >= FALLBACK_SHARE * own as f64 && u.name.is_none() {
+            u.name = Some(name.clone());
+            u.review = true;
+            given.insert(name);
         }
     }
 
@@ -481,4 +642,55 @@ pub(crate) fn group_bounds(
         words.iter().map(|w| w.1).max().unwrap_or(start)
     };
     (start, end.max(start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(start: i64, end: i64, speaker: i64) -> OwnedWord {
+        OwnedWord {
+            start,
+            end,
+            speaker: SpeakerId(speaker),
+        }
+    }
+
+    fn spans(words: &[OwnedWord]) -> Vec<(i64, i64, i64)> {
+        regions(words)
+            .into_iter()
+            .map(|r| (r.start, r.end, r.speaker.0))
+            .collect()
+    }
+
+    #[test]
+    fn another_speaker_ends_a_region_and_caps_the_padding() {
+        let words = [
+            w(0, 80, 1),
+            w(150, 230, 1), // 70 ms on: same region
+            w(300, 380, 2), // a backchannel 70 ms after
+            w(400, 480, 1), // 20 ms after it: a new region of 1
+        ];
+        // Padding: 100 ms where nobody else is near, half the gap otherwise
+        // (35 ms either side of the 70 ms gaps, 10 ms of the 20 ms one).
+        assert_eq!(spans(&words), [(0, 265, 1), (265, 390, 2), (390, 580, 1)]);
+    }
+
+    #[test]
+    fn padded_regions_of_one_speaker_merge() {
+        // 160 ms apart: two regions (over 150 ms), touching once padded.
+        assert_eq!(
+            spans(&[w(1_000, 1_080, 7), w(1_240, 1_320, 7)]),
+            [(900, 1_420, 7)]
+        );
+    }
+
+    #[test]
+    fn overlapping_speakers_get_no_padding_between_them() {
+        assert_eq!(
+            spans(&[w(0, 500, 1), w(400, 600, 2)]),
+            [(0, 500, 1), (400, 700, 2)]
+        );
+        assert!(regions(&[]).is_empty());
+    }
 }
