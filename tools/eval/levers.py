@@ -24,6 +24,8 @@ ami-misses: reference words of the AMI clip that the hypothesis gets wrong,
   most frequent first (candidates for --speech-context).
 clip-score: WER and cpWER of runtime words JSONs on an AMI clip.
 punct: share of words carrying punctuation or a capital, per words JSON.
+fleurs-utts: per-utterance errors of FLEURS runs, with empty and silent
+  recordings counted.
 boost: phrase hits, changes against the unboosted run, clip WER and the
   runtime's boosting messages, per nemo_direct run.
 table: the lookahead summary, one row per config (quality on the short
@@ -339,6 +341,46 @@ def cmd_boost(a) -> None:
         print("| " + " | ".join(cells) + " |")
 
 
+def cmd_fleurs_utts(a) -> None:
+    """Per FLEURS utterance of cached runs: hypothesis words inside the
+    utterance's slot (start - 0.4 s to the next start - 0.4 s), error rate,
+    and the recording's peak level, listing the utterances above --bad."""
+    import wave
+
+    import numpy as np
+    from rapidfuzz.distance import Levenshtein
+
+    import run as R
+
+    for lang in [x.strip() for x in a.langs.split(",") if x.strip()]:
+        root = WORK / "fleurs" / lang
+        refs = [json.loads(ln) for ln in (root / "refs.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
+        with wave.open(str(root / "audio.wav")) as wv:
+            audio = np.frombuffer(wv.readframes(wv.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+        for c in [x.strip() for x in a.configs.split(",") if x.strip()]:
+            d = RUNS / c / f"fleurs-{lang}-{a.mode}"
+            if not (d / "engine.words.json").is_file():
+                print(f"{lang} {c} {a.mode}: missing")
+                continue
+            ws = raw_words(d / "engine.words.json")
+            bad, empty, silent = [], 0, 0
+            for i, r in enumerate(refs):
+                lo = r["start"] - 0.4
+                hi = refs[i + 1]["start"] - 0.4 if i + 1 < len(refs) else 1e9
+                hyp = " ".join(w["word"] for w in ws if lo <= float(w["start"]) < hi)
+                rt, ht = R.fleurs_units(lang, r["raw_transcription"]), R.fleurs_units(lang, hyp)
+                er = Levenshtein.distance(rt, ht) / max(len(rt), 1)
+                seg = audio[int(r["start"] * 16000):int(r["end"] * 16000)]
+                peak = 20 * np.log10(float(np.abs(seg).max()) + 1e-9) if seg.size else -120.0
+                silent += peak < -30
+                empty += not ht
+                if er >= a.bad:
+                    bad.append(f"#{i} at {r['start']:.0f} s: {len(ht)}/{len(rt)} units, error {100 * er:.0f} %, peak {peak:.0f} dBFS")
+            print(f"{lang} {c} {a.mode}: {len(refs)} utterances, {empty} with no words, {silent} with peak below -30 dBFS")
+            for b in bad:
+                print("    " + b)
+
+
 def cmd_punct(a) -> None:
     for p in a.words:
         ws = raw_words(Path(p))
@@ -379,6 +421,11 @@ def main() -> None:
     p.add_argument("--phrases", nargs="+", required=True)
     p.add_argument("--offset", type=float, default=50.0)
     p.add_argument("--dur", type=float, default=300.0)
+    p = sub.add_parser("fleurs-utts")
+    p.add_argument("--langs", default="de,es,fr,it,pt,hi,ja,en")
+    p.add_argument("--configs", default="nemotron35,n35_rc_13")
+    p.add_argument("--mode", default="given")
+    p.add_argument("--bad", type=float, default=0.5, help="list utterances with at least this error rate")
     p = sub.add_parser("table")
     p.add_argument("--configs", required=True)
     p.add_argument("--sessions", default="ami,aug2,sep5")
@@ -388,7 +435,7 @@ def main() -> None:
     p = sub.add_parser("punct")
     p.add_argument("--words", nargs="+", required=True)
     a = ap.parse_args()
-    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost,
+    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts,
      "punct": cmd_punct}[a.cmd](a)
 
 
