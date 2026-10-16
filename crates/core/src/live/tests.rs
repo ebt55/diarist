@@ -402,6 +402,9 @@ fn records_streams_and_runs_the_post_pass() {
         "the preset passed"
     );
     assert_eq!(run.id, report.current_run);
+    // Every live name was placed: the live run goes.
+    assert_eq!(report.unplaced_names, 0);
+    assert_eq!(run.engine_info["unplaced_names"], 0);
     assert!(report.live_run_deleted);
     assert!(store.get_run(out.live_run).is_err());
     assert!(report
@@ -604,6 +607,49 @@ fn a_failed_post_pass_runs_again() {
     // The WAVs are gone now: nothing to run again.
     let gone = rerun_post_pass(&ctx, m).err().unwrap();
     assert!(gone.to_string().contains("no live transcript"), "{gone}");
+}
+
+#[test]
+fn a_live_run_with_an_unplaced_name_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, _) = context(dir.path(), None);
+    let rec = Recorder::start(
+        ctx.clone(),
+        StartOptions::default(),
+        Arc::new(Sink::default()),
+    )
+    .unwrap();
+    let m = rec.meeting_id();
+    std::thread::sleep(Duration::from_millis(1_500));
+    // A label that never says anything in the post-pass's time (here: no
+    // words at all) is named: nobody can receive the name.
+    let ghost = store
+        .live_speaker(rec.run_id(), Channel::Loopback, "spk_7")
+        .unwrap();
+    store.rename_speaker(ghost.id, "Ghost", None).unwrap();
+    let out = rec.stop().unwrap();
+    let report = out
+        .post_pass
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.unplaced_names, 1);
+    assert!(
+        !report.live_run_deleted,
+        "keep_live_runs is off, the name keeps it"
+    );
+    let live = store.get_run(out.live_run).unwrap();
+    assert_eq!(live.kind, RunKind::Live);
+    let d = store.get_meeting(m).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    let current = d.current_run.unwrap();
+    assert_eq!(current.id, report.current_run);
+    assert_eq!(current.engine_info["unplaced_names"], 1);
+    assert!(store
+        .run_speakers(out.live_run)
+        .unwrap()
+        .iter()
+        .any(|s| s.display_name.as_deref() == Some("Ghost")));
 }
 
 #[test]
@@ -827,9 +873,21 @@ fn recovers_interrupted_post_passes() {
         .id;
     store.finish_run(c_post, RunStatus::Done).unwrap();
     store.set_current_run(c.id, c_post).unwrap();
+    // D: as C, but the post-pass recorded a live name it could not place.
+    let (d_meeting, d_live) = interrupted_meeting(&store, dir.path(), "D", false);
+    let d_post = store
+        .create_run(
+            d_meeting.id,
+            RunKind::PostPass,
+            serde_json::json!({"unplaced_names": 1}),
+        )
+        .unwrap()
+        .id;
+    store.finish_run(d_post, RunStatus::Done).unwrap();
+    store.set_current_run(d_meeting.id, d_post).unwrap();
 
     let recovered = recover(&ctx).unwrap();
-    assert_eq!(recovered.len(), 3);
+    assert_eq!(recovered.len(), 4);
     let of = |id: MeetingId| recovered.iter().find(|r| r.meeting_id == id).unwrap();
     assert!(recovered.iter().all(|r| r.was == MeetingStatus::Processing));
 
@@ -874,6 +932,13 @@ fn recovers_interrupted_post_passes() {
     assert_eq!(d.meeting.status, MeetingStatus::Done);
     assert_eq!(d.current_run.unwrap().id, c_post);
     assert!(store.get_run(c_live).is_err());
+
+    // D: finished, and the live run with the unplaced name stays.
+    assert_eq!(of(d_meeting.id).action, RecoveryAction::Finished);
+    let d = store.get_meeting(d_meeting.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert_eq!(d.current_run.unwrap().id, d_post);
+    assert!(store.get_run(d_live).is_ok());
 
     // Nothing left to recover.
     assert!(recover(&ctx).unwrap().is_empty());

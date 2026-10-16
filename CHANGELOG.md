@@ -18,6 +18,11 @@ All notable changes to Diarist. Versions follow semantic versioning.
   which was usually the provisional "Unknown speaker" whose name was lost
   at Stop. With no such line it says to select a line (j/k) or rename from
   the speaker legend.
+- Changed: when a name given during a recording still reaches nobody in
+  the final transcript, the live transcript is kept for that meeting
+  instead of deleted (also after a crash during the processing), so the
+  name is not gone for good; the app log records the matching counts
+  after every Stop (no names or text).
 
 ## [0.1.0-beta.2] - 2026-10-16
 

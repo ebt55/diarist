@@ -17,6 +17,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
 ts-rs.workspace = true
+# Logging facade; the desktop app's logger writes the records to diarist.log.
+log = "0.4"
 # SQLite with FTS5 compiled in (bundled build); backup API for `SqliteStore::backup`.
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 # File decode (docs/01 "Audio decode"): AAC-LC in MP4/M4A, MP3, FLAC, WAV, Ogg/Vorbis.

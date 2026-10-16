@@ -435,7 +435,8 @@ meetings a crash left behind:
 - `processing` (the post-pass was queued or running) with both WAVs: the
   runs the interrupted post-pass wrote are deleted and it is queued again.
 - `processing` without WAVs: a finished `post_pass` run that is current is
-  kept (the live run is deleted unless `keep_live_runs`); otherwise the live
+  kept (the live run is deleted unless `keep_live_runs` or the post-pass
+  recorded `engine_info.unplaced_names`); otherwise the live
   run becomes current with `engine_info.recovery` explaining why, and the
   meeting is done.
 

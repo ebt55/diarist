@@ -203,7 +203,7 @@ CREATE TABLE counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL);  -- 0002: 
 ## Run lifecycle
 
 - **File import.** One `file` run. On success it becomes `current_run_id`.
-- **Live.** A `live` run receives `live_utterances` while recording. On stop, the latest `rev` of each `utt` is materialised into segments and words of the live run (so a crash of the post-pass still leaves a readable transcript), then a `post_pass` run is created and, on success, becomes current. The live run is kept until the post-pass is done, then deleted unless `settings.keep_live_runs = 1`.
+- **Live.** A `live` run receives `live_utterances` while recording. On stop, the latest `rev` of each `utt` is materialised into segments and words of the live run (so a crash of the post-pass still leaves a readable transcript), then a `post_pass` run is created and, on success, becomes current. The live run is kept until the post-pass is done, then deleted unless `settings.keep_live_runs = 1` or a display name of the live run reached no speaker of the new run (the post-pass run's `engine_info.unplaced_names` counts them; crash recovery honours it too).
 - **Re-runs** (`rediarize`, `refuse`): new run, carry-over, becomes current only when the user accepts it in the UI (or always, from the CLI with a flag). Old runs stay for comparison and for the eval harness.
 
 ## Carry-over from the previous current run
