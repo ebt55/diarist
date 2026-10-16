@@ -11,9 +11,12 @@ attaches both to a draft pre-release and opens a pull request that rewrites
 this file. Merge that pull request only after the draft is published.
 
 A release built by hand goes the other way round: create the draft
-pre-release with the installer and its `.sig` attached, commit this file on
-`main` with that `.sig`'s contents, then publish the draft. The workflow sees
-the installer already on the release and builds nothing. If its guard job
+pre-release with the installer and its `.sig` attached, publish the draft,
+then commit this file on `main` with that `.sig`'s contents and the asset
+URL. Draft assets are not public, so the file must never name a release
+before it is published: every installed copy's check would fail. Publishing
+pushes the tag; the workflow sees the installer already on the release and
+builds nothing. If its guard job
 fails with "Could not list releases", nothing was built; re-run the workflow.
 
 The file must match the published asset: `version` is the release version,
