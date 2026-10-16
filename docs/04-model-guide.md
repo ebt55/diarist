@@ -124,9 +124,21 @@ Other requirements:
 
 ## 6. Languages
 
-- Diarization is language-independent.
-- Live and file mode: the default EN model is English only. Select Nemotron 3.5 in Settings for 40+ locales; set the meeting's language when you know it, since automatic detection loses about a second of the first utterance.
-- Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language.
+- Diarization is language-independent (Nemotron 3 Diarization).
+- The default EN model transcribes English only. Nemotron 3.5 covers the other languages. You do not need to select it: a recording or import in a language the selected model does not cover runs on an installed model that lists that language (by the language list in its GGUF header, so a model you added yourself counts too), the stored selection stays, and the app says so ("Transcribing with Nemotron 3.5: the selected model is English-only"). When no installed model covers the language, the start sheet and the import sheet offer the Nemotron 3.5 download and wait for it; the job never starts on the wrong model. `diarist-cli transcribe --language de` switches the same way, or stops naming the model to install; `--asr-model` turns the switch off.
+- The lists offer what the installed models cover, from this table (Nemotron 3.5 model card, FLEURS word error rate at the 1.12 s setting with the language given; character error rate for Japanese, Korean and Chinese; *published*). The source is `diarist_core::models::languages`, which the app's lists are generated from.
+
+| Tier | Languages | FLEURS WER | In the app |
+|---|---|---|---|
+| Transcription-ready | Spanish (es-ES, es-US), Italian, Portuguese (pt-PT, pt-BR), Hindi, Korean, English, German, French, Russian, Turkish, Vietnamese (vi-VN), Dutch, Japanese (ja-JP), Arabic, Ukrainian | 4 to 13 | Listed |
+| Broad coverage | Polish, Norwegian Bokmål, Finnish, Chinese (zh-CN), Czech, Bulgarian, Slovak, Swedish, Croatian, Romanian, Estonian, Danish, Hungarian | 15 to 29 | Listed as "reduced accuracy" |
+| Adaptation-ready | Greek, Lithuanian, Latvian, Maltese, Slovenian, Hebrew, Thai, Norwegian Nynorsk | needs fine-tuning | Not offered |
+
+- Language tags: the runtime's prompt dictionary has bare `de`, `fr`, `ko` and so on, but no bare `ja`, `zh`, `vi`, `th` or `he`, which it silently runs as automatic detection; bare `es` is `es-US` and bare `pt` is `pt-PT`. The app therefore offers `ja-JP`, `zh-CN` and `vi-VN`, lists Spanish and Portuguese per locale, and gives every job a tag the model's dictionary has, also for meetings stored with a bare tag by 0.1.0-beta.1 (whose Japanese and Chinese ran as automatic detection).
+- A model that lists no languages (Parakeet, most GGUFs you add) is not checked: every language is offered for it, marked "not checked for this model", and nothing switches.
+- Set the meeting's language when you know it: automatic detection loses about a second of the first utterance and costs 0.1 to 3 WER points against a given language, most for Hindi, Russian, Ukrainian, Polish, Bulgarian, Croatian and Romanian. It is never the default. The first-run screen sets the default language once from the Windows display language.
+- Live: the start sheet's language decides which model the live server runs; changing it while the sheet is open restarts an idle server with the right model (3 to 6 s), and a recording in progress keeps its language.
+- Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language that separates words with spaces. Chinese and Japanese are not segmented yet (docs/KNOWN-ISSUES.md).
 
 ## 7. Honest caveats
 

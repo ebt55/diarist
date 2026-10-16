@@ -12,6 +12,16 @@ All notable changes to Diarist. Versions follow semantic versioning.
   `~`) and Dismiss; Diagnostics lists the reports. The newest five of each
   kind are kept. Nothing is sent anywhere. Errors in the window's scripts
   now reach the app log.
+- Added: languages follow the model. The language lists show what the
+  installed speech-to-text models cover (broad-coverage languages marked
+  "reduced accuracy"); a recording or import in a language the selected
+  model does not cover runs on an installed model that does (Nemotron 3.5),
+  with a notice, or offers the Nemotron 3.5 download first. Imports ask for
+  the language; the first-run screen asks for the meetings' language and
+  picks the model for it. `diarist-cli transcribe --language` switches the
+  same way.
+- Fixed: Japanese and Chinese were transcribed with automatic language
+  detection; the language is now passed to the model.
 - Changed: a new app icon with a paper tile and an outline, visible on dark taskbars.
 - Fixed: the live view did not open for the second and later recordings of
   a session until Stop. A recording made after deleting the previous one
