@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
+mod crash_test;
 mod record;
 use diarist_core::audio::capture::{self, DeviceFlow};
 use diarist_core::audio::{find_on_path, ChainDecoder};
@@ -189,6 +190,20 @@ enum Command {
         #[arg(long, default_value = "cuda:0")]
         device: String,
     },
+    /// Reproduce a crash to test the local reports in <data root>\logs
+    /// (docs/plans/11-hardening.md 8a).
+    #[command(hide = true, group = clap::ArgGroup::new("what").required(true))]
+    Crash {
+        /// A Rust panic: crash-<utc>.txt.
+        #[arg(long, group = "what")]
+        panic: bool,
+        /// An access violation: crash-<utc>.txt and .dmp.
+        #[arg(long, group = "what")]
+        segv: bool,
+        /// The engine crashing during a job: engine-crash-<utc>.txt.
+        #[arg(long, group = "what")]
+        engine: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -278,8 +293,13 @@ impl Ctx {
 }
 
 fn main() -> ExitCode {
+    if crash_test::is_stand_in_engine() {
+        return crash_test::stand_in_engine();
+    }
     let cli = Cli::parse();
-    match run(&cli) {
+    // Panics, native crashes and engine exits leave reports in <root>\logs.
+    crash_test::install(cli.data_dir.as_deref());
+    let code = match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Usage(m)) => {
             eprintln!("usage error: {m}");
@@ -289,7 +309,9 @@ fn main() -> ExitCode {
             eprintln!("error: {m}");
             ExitCode::from(1)
         }
-    }
+    };
+    diarist_core::crash::clean_exit();
+    code
 }
 
 fn run(cli: &Cli) -> CliResult {
@@ -299,6 +321,14 @@ fn run(cli: &Cli) -> CliResult {
             return Ok(());
         }
         Command::Devices => return devices(),
+        Command::Crash {
+            panic,
+            segv,
+            engine,
+        } => {
+            return crash_test::run(cli.data_dir.as_deref(), *panic, *segv, *engine)
+                .map_err(CliError::Failed)
+        }
         Command::Play { device, wav } => {
             let stop = std::sync::atomic::AtomicBool::new(false);
             let r = capture::play_wav(device.as_deref(), wav, &stop)?;
@@ -319,7 +349,9 @@ fn run(cli: &Cli) -> CliResult {
     }
     let ctx = Ctx::open(cli)?;
     match &cli.command {
-        Command::Version | Command::Devices | Command::Play { .. } => unreachable!(),
+        Command::Version | Command::Devices | Command::Play { .. } | Command::Crash { .. } => {
+            unreachable!()
+        }
         Command::Transcribe {
             file,
             language,
