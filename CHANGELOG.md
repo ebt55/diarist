@@ -34,8 +34,10 @@ bug report.
 - Fixed: Install and restart ended an import or a post-pass in progress.
   It now waits, and says which job is running.
 - Changed: imports and the post-pass after Stop use the speech model's full
-  lookahead (about 1 to 2 WER points better on the hand-labelled meeting,
-  and faster); live recording keeps the low-latency setting.
+  lookahead; live recording keeps the low-latency setting. On the full
+  evaluation set, word error on the hand-labelled meeting falls from 19.8 to
+  18.3 percent (EN model) and from 23.0 to 20.8 (Nemotron 3.5), every other
+  meeting improves too, and the speech pass runs about twice as fast.
 - Fixed: names given during a recording and edits made on the live
   transcript carry over to the final transcript even though the final pass
   now places words up to 0.2 s earlier.
@@ -64,8 +66,11 @@ bug report.
   already opened.
 - Changed: imports and the post-pass after Stop run the speaker model with
   its offline geometry: fewer words land on the wrong speaker around a
-  change (measured 8 to 6 percent on a dense Q&A meeting, 41 to 18 on an
-  in-room recording); live recording keeps the streaming setting.
+  change (full set with Nemotron 3.5: 5.5 to 7.8 percent of the words near
+  a change, from 5.7 to 8.2 with the lookahead alone; 41 to 18 on an in-room
+  recording) and the speech pass runs another 30 percent faster; live
+  recording keeps the streaming setting. On one meeting a participant with
+  only 7 words is merged into another speaker.
 - Fixed: playback was much quieter than the meeting itself (a video played
   on the PC and recorded came back faint, and the mix halved it again when
   the microphone channel was silent). The player now raises a quiet meeting
