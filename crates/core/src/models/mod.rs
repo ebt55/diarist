@@ -21,12 +21,17 @@
 //!   [`resolve_selection`] gives the engine and model paths to run with and
 //!   [`select_engine`] builds the file engine from them (scanning first when
 //!   nothing usable is selected); [`select_by_id`] validates a pick.
+//! - [`languages`]: the tier table of offered languages;
+//!   [`select_for_language`] runs a job whose language the selected model
+//!   does not cover on Nemotron 3.5, and [`select_engine_for`] builds the
+//!   engine for a job in a language.
 
 pub mod add;
 pub mod classify;
 pub mod doctor;
 pub mod download;
 pub mod gguf;
+pub mod languages;
 pub mod legacy;
 pub mod manifest;
 pub mod paths;
@@ -181,7 +186,7 @@ pub fn select_engine_with(
     // runtime's own error is shown if it is not one.
     let experimental =
         sel.asr_file.role != ModelRole::Unknown && !sel.asr_file.capabilities.streaming;
-    let engine: Arc<dyn Engine> = if experimental {
+    let inner: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
         e.version = sel.engine_version.clone();
@@ -197,6 +202,11 @@ pub fn select_engine_with(
         e.extra_args = overrides.extra_args.clone();
         Arc::new(e)
     };
+    // Every job gets a tag the model's prompt dictionary has (`ja` -> `ja-JP`).
+    let engine: Arc<dyn Engine> = Arc::new(languages::TaggedEngine::new(
+        inner,
+        sel.asr_file.capabilities.languages.clone(),
+    ));
     let mut diarize_runner = DiarizeRunner::new(&sel.engine_dir, &models_dir, &sel.diarizer);
     diarize_runner.device = device.to_owned();
     Ok(SelectedEngine {
@@ -212,39 +222,266 @@ pub fn select_engine_with(
 /// section 4).
 pub const LOW_VRAM_MODEL: &str = "nemotron-3.5";
 
+/// The manifest model that covers every offered language
+/// ([`languages::LANGUAGES`]): the same Nemotron 3.5.
+pub const MULTILINGUAL_MODEL: &str = LOW_VRAM_MODEL;
+
 /// The installed [`LOW_VRAM_MODEL`] file, if any.
 pub fn low_vram_asr(store: &dyn Store) -> Result<Option<ModelFile>> {
-    Ok(store.list_model_files()?.into_iter().find(|f| {
-        f.role == ModelRole::Asr && !f.missing && f.manifest_name.as_deref() == Some(LOW_VRAM_MODEL)
-    }))
+    Ok(installed_asr(&store.list_model_files()?, LOW_VRAM_MODEL).cloned())
 }
 
-/// The engine for a file import: the selection, except that with
-/// `low_vram` set and Nemotron 3.5 installed, the import runs on Nemotron
-/// 3.5 (the stored selection is unchanged). Returns whether it switched.
+/// The present ASR file of manifest model `name` among `files`.
+fn installed_asr<'a>(files: &'a [ModelFile], name: &str) -> Option<&'a ModelFile> {
+    files.iter().find(|f| {
+        f.role == ModelRole::Asr && !f.missing && f.manifest_name.as_deref() == Some(name)
+    })
+}
+
+/// Why a job runs on another ASR model than the stored selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchReason {
+    /// Low-VRAM mode (`engine.low_vram`, imports only).
+    LowVram,
+    /// The selected model does not cover the job's language.
+    Language,
+}
+
+/// The ASR model a job runs on ([`select_for_language`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsrChoice {
+    /// The stored selection.
+    Selected,
+    /// An installed model that covers the language (Nemotron 3.5 for
+    /// low-VRAM mode); the stored selection is unchanged.
+    Switch {
+        file: Box<ModelFile>,
+        reason: SwitchReason,
+    },
+}
+
+impl AsrChoice {
+    /// Why it switched, if it did.
+    pub fn reason(&self) -> Option<SwitchReason> {
+        match self {
+            Self::Selected => None,
+            Self::Switch { reason, .. } => Some(*reason),
+        }
+    }
+
+    /// The overrides that run a job on this choice.
+    pub fn overrides(&self) -> EngineOverrides {
+        EngineOverrides {
+            // The stored relative path: `find_file` matches it exactly.
+            asr: match self {
+                Self::Selected => None,
+                Self::Switch { file, .. } => Some(file.path.clone()),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Why `selected` does not cover `language`, as the end of a sentence:
+/// "the selected model is English-only".
+fn not_covered(selected: &ModelFile, language: &str) -> String {
+    match languages::only_language(selected) {
+        Some(only) => format!(
+            "the selected model is {}-only",
+            languages::find(&only).map_or(only.as_str(), |l| l.name)
+        ),
+        None if languages::is_auto(language) => {
+            "the selected model cannot detect the language".into()
+        }
+        None => format!(
+            "the selected model does not cover {}",
+            languages::label(language)
+        ),
+    }
+}
+
+/// The notice for a job that switched: "Transcribing with Nemotron 3.5:
+/// the selected model is English-only".
+pub fn switch_notice(reason: SwitchReason, selected: &ModelFile, language: &str) -> String {
+    match reason {
+        SwitchReason::LowVram => "Transcribing with Nemotron 3.5: low-VRAM mode".into(),
+        SwitchReason::Language => format!(
+            "Transcribing with Nemotron 3.5: {}",
+            not_covered(selected, language)
+        ),
+    }
+}
+
+/// A job's language that neither the selected ASR model nor any installed
+/// one can transcribe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageModelMissing {
+    /// The job's language as given (`de`, `auto`).
+    pub language: String,
+    /// Display name of the selected model.
+    pub selected: String,
+    /// Why the selected model does not do: "the selected model is English-only".
+    pub reason: String,
+    /// The manifest model to install ([`MULTILINGUAL_MODEL`]).
+    pub install: &'static str,
+}
+
+impl LanguageModelMissing {
+    /// "German (de)", or "Automatic language detection".
+    pub fn what(&self) -> String {
+        if languages::is_auto(&self.language) {
+            "Automatic language detection".into()
+        } else {
+            languages::label(&self.language)
+        }
+    }
+}
+
+impl std::fmt::Display for LanguageModelMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} needs Nemotron 3.5, which is not installed ({}). Install it from Settings, \
+             Models (CLI: `diarist-cli models pull {}`), or choose another language",
+            self.what(),
+            self.reason,
+            self.install
+        )
+    }
+}
+
+impl std::error::Error for LanguageModelMissing {}
+
+impl From<LanguageModelMissing> for CoreError {
+    fn from(e: LanguageModelMissing) -> Self {
+        CoreError::Models(e.to_string())
+    }
+}
+
+/// The installed streaming ASR model, other than `selected`, that lists
+/// `language` (by capability, so a hand-dropped or re-converted model
+/// counts); the manifest's Nemotron 3.5 first, then the lowest id.
+pub fn asr_for_language<'a>(
+    selected: &ModelFile,
+    files: &'a [ModelFile],
+    language: &str,
+) -> Option<&'a ModelFile> {
+    let mut found: Vec<&ModelFile> = files
+        .iter()
+        .filter(|f| {
+            f.role == ModelRole::Asr
+                && !f.missing
+                && f.id != selected.id
+                && f.capabilities.streaming
+                && languages::lists(f, language)
+        })
+        .collect();
+    found.sort_by_key(|f| {
+        (
+            f.manifest_name.as_deref() != Some(MULTILINGUAL_MODEL),
+            f.id.0,
+        )
+    });
+    found.first().copied()
+}
+
+/// The ASR model a job in `language` runs on, given the stored selection
+/// `selected` and the scanned `files`:
+///
+/// - the selection when it covers the language ([`languages::covers`]: the
+///   same primary subtag, `auto` on a multilingual model, or a model that
+///   lists no languages, which never switches), unless `low_vram` asks for
+///   Nemotron 3.5;
+/// - an installed streaming model that lists the language
+///   ([`asr_for_language`]) when the selection does not cover it; or the
+///   installed Nemotron 3.5 for low-VRAM mode. One switch whichever asks
+///   (the language wins as the reason);
+/// - [`LanguageModelMissing`], naming the model to install (Nemotron 3.5),
+///   when no installed model covers the language.
+///
+/// The stored selection never changes.
+pub fn select_for_language(
+    selected: &ModelFile,
+    files: &[ModelFile],
+    language: &str,
+    low_vram: bool,
+) -> std::result::Result<AsrChoice, LanguageModelMissing> {
+    if !languages::covers(selected, language) {
+        return match asr_for_language(selected, files, language) {
+            Some(f) => Ok(AsrChoice::Switch {
+                file: Box::new(f.clone()),
+                reason: SwitchReason::Language,
+            }),
+            None => Err(LanguageModelMissing {
+                language: language.trim().to_owned(),
+                selected: selected.display_name.clone(),
+                reason: not_covered(selected, language),
+                install: MULTILINGUAL_MODEL,
+            }),
+        };
+    }
+    // Low-VRAM mode: Nemotron 3.5 if it is installed (and covers the
+    // language), else the selection runs.
+    let low = low_vram
+        .then(|| installed_asr(files, LOW_VRAM_MODEL))
+        .flatten()
+        .filter(|f| f.id != selected.id && languages::covers(f, language));
+    Ok(match low {
+        Some(f) => AsrChoice::Switch {
+            file: Box::new(f.clone()),
+            reason: SwitchReason::LowVram,
+        },
+        None => AsrChoice::Selected,
+    })
+}
+
+/// The engine for a job in `language` (imports, recordings, `diarist-cli
+/// transcribe`): the selection, or the installed Nemotron 3.5 as
+/// [`select_for_language`] decides (`low_vram`: also for low-VRAM mode).
+/// An ASR model given in `overrides` wins: nothing switches. Returns the
+/// engine and why it switched; a language nothing installed covers is an
+/// error naming the model to install.
+pub fn select_engine_for(
+    paths: &DataPaths,
+    store: &dyn Store,
+    device: &str,
+    language: &str,
+    low_vram: bool,
+    overrides: &EngineOverrides,
+) -> Result<(SelectedEngine, Option<SwitchReason>)> {
+    // Built first: it scans when nothing usable is selected.
+    let built = select_engine_with(paths, store, device, overrides)?;
+    if overrides.asr.is_some() {
+        return Ok((built, None));
+    }
+    let files = store.list_model_files()?;
+    let choice = select_for_language(&built.selection.asr_file, &files, language, low_vram)?;
+    let Some(reason) = choice.reason() else {
+        return Ok((built, None));
+    };
+    let mut ov = choice.overrides();
+    ov.diarizer = overrides.diarizer.clone();
+    ov.extra_args = overrides.extra_args.clone();
+    Ok((select_engine_with(paths, store, device, &ov)?, Some(reason)))
+}
+
+/// The engine for a file import in `language`: [`select_engine_for`] with
+/// low-VRAM mode. Returns why it switched to Nemotron 3.5, if it did.
 pub fn select_import_engine(
     paths: &DataPaths,
     store: &dyn Store,
     device: &str,
     low_vram: bool,
-) -> Result<(SelectedEngine, bool)> {
-    let switch = if low_vram {
-        low_vram_asr(store)?.filter(|f| {
-            selected_file(store, ModelRole::Asr)
-                .ok()
-                .flatten()
-                .is_none_or(|sel| sel.id != f.id)
-        })
-    } else {
-        None
-    };
-    let overrides = EngineOverrides {
-        // The stored relative path: `find_file` matches it exactly.
-        asr: switch.as_ref().map(|f| f.path.clone()),
-        ..Default::default()
-    };
-    let built = select_engine_with(paths, store, device, &overrides)?;
-    Ok((built, switch.is_some()))
+    language: &str,
+) -> Result<(SelectedEngine, Option<SwitchReason>)> {
+    select_engine_for(
+        paths,
+        store,
+        device,
+        language,
+        low_vram,
+        &EngineOverrides::default(),
+    )
 }
 
 /// A model given as a path (scanned or not) or a [`find_file`] query, as an
@@ -455,44 +692,185 @@ mod tests {
         }
     }
 
-    #[test]
-    fn low_vram_mode_switches_imports_to_nemotron_35() {
+    fn speaks(mut f: ScannedModelFile, langs: &[&str]) -> ScannedModelFile {
+        f.capabilities.languages = langs.iter().map(|s| (*s).to_owned()).collect();
+        f
+    }
+
+    /// The EN model and, with `n35`, Nemotron 3.5 (the locales its header
+    /// lists, in part), the EN model selected.
+    fn language_store(n35: bool) -> MemoryStore {
         let store = MemoryStore::new();
-        let paths = DataPaths::at("D:/data");
-        let mut n35 = scanned("models/n35.gguf", ModelRole::Asr, "n35");
-        n35.manifest_name = Some(LOW_VRAM_MODEL.into());
-        store
-            .sync_model_files(
-                &[
-                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
-                    scanned("models/en.gguf", ModelRole::Asr, "en"),
-                    scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
-                ],
-                1,
-            )
-            .unwrap();
+        let mut files = vec![
+            scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
+            speaks(scanned("models/en.gguf", ModelRole::Asr, "en"), &["en"]),
+            scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
+        ];
+        if n35 {
+            let mut f = speaks(
+                scanned("models/n35.gguf", ModelRole::Asr, "n35"),
+                &["en-US", "en", "de-DE", "de", "ja-JP", "auto"],
+            );
+            f.manifest_name = Some(MULTILINGUAL_MODEL.into());
+            files.push(f);
+        }
+        store.sync_model_files(&files, 1).unwrap();
         select(&store, ModelRole::Engine, "e").unwrap();
         select(&store, ModelRole::Asr, "en").unwrap();
         select(&store, ModelRole::Diarizer, "diar").unwrap();
-        // Not installed: the selection runs.
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", true).unwrap();
-        assert!(!switched && b.selection.asr_file.display_name == "en");
         store
-            .sync_model_files(
-                &[
-                    scanned("engine/nemo-speech-0.2.0", ModelRole::Engine, "e"),
-                    scanned("models/en.gguf", ModelRole::Asr, "en"),
-                    scanned("models/d.gguf", ModelRole::Diarizer, "diar"),
-                    n35,
-                ],
-                2,
-            )
+    }
+
+    fn asr_files(store: &MemoryStore) -> (ModelFile, Vec<ModelFile>) {
+        let files = store.list_model_files().unwrap();
+        let sel = selected_file(store, ModelRole::Asr).unwrap().unwrap();
+        (sel, files)
+    }
+
+    #[test]
+    fn english_on_the_en_model_keeps_the_selection() {
+        let (en, files) = asr_files(&language_store(true));
+        assert_eq!(
+            select_for_language(&en, &files, "en", false),
+            Ok(AsrChoice::Selected)
+        );
+        assert_eq!(
+            select_for_language(&en, &files, "en-GB", false),
+            Ok(AsrChoice::Selected)
+        );
+        // Without Nemotron 3.5 too: nothing is missing for English.
+        let (en, files) = asr_files(&language_store(false));
+        assert_eq!(
+            select_for_language(&en, &files, "en", false),
+            Ok(AsrChoice::Selected)
+        );
+    }
+
+    #[test]
+    fn german_on_the_en_model_switches_to_installed_nemotron_35() {
+        let (en, files) = asr_files(&language_store(true));
+        for lang in ["de", "de-DE", "auto"] {
+            let choice = select_for_language(&en, &files, lang, false).unwrap();
+            let AsrChoice::Switch { file, reason } = &choice else {
+                panic!("{lang}: {choice:?}");
+            };
+            assert_eq!(file.manifest_name.as_deref(), Some(MULTILINGUAL_MODEL));
+            assert_eq!(*reason, SwitchReason::Language);
+            assert_eq!(choice.overrides().asr.as_deref(), Some("models/n35.gguf"));
+        }
+        assert_eq!(
+            switch_notice(SwitchReason::Language, &en, "de"),
+            "Transcribing with Nemotron 3.5: the selected model is English-only"
+        );
+        // Nemotron 3.5 selected: it covers German and detection itself.
+        let n35 = files.iter().find(|f| f.display_name == "n35").unwrap();
+        for lang in ["de", "auto", "en"] {
+            assert_eq!(
+                select_for_language(n35, &files, lang, false),
+                Ok(AsrChoice::Selected)
+            );
+        }
+    }
+
+    #[test]
+    fn german_without_nemotron_35_names_the_model_to_install() {
+        let (en, files) = asr_files(&language_store(false));
+        let err = select_for_language(&en, &files, "de", false).unwrap_err();
+        assert_eq!(err.install, "nemotron-3.5");
+        assert_eq!(err.language, "de");
+        assert_eq!(err.reason, "the selected model is English-only");
+        let text = err.to_string();
+        assert!(text.starts_with("German (de) needs Nemotron 3.5"), "{text}");
+        assert!(text.contains("models pull nemotron-3.5"), "{text}");
+        let err = select_for_language(&en, &files, "auto", true).unwrap_err();
+        assert!(err
+            .to_string()
+            .starts_with("Automatic language detection needs"));
+        // A model whose languages are unknown is trusted with any language.
+        let mut odd = en.clone();
+        odd.capabilities.languages.clear();
+        assert_eq!(
+            select_for_language(&odd, &files, "de", false),
+            Ok(AsrChoice::Selected)
+        );
+    }
+
+    #[test]
+    fn low_vram_and_language_switch_once() {
+        let (en, files) = asr_files(&language_store(true));
+        // Low-VRAM mode alone switches, as before.
+        let choice = select_for_language(&en, &files, "en", true).unwrap();
+        assert_eq!(choice.reason(), Some(SwitchReason::LowVram));
+        // Both ask for Nemotron 3.5: one switch, the language as the reason.
+        let choice = select_for_language(&en, &files, "de", true).unwrap();
+        assert_eq!(choice.reason(), Some(SwitchReason::Language));
+        assert_eq!(choice.overrides().asr.as_deref(), Some("models/n35.gguf"));
+        // Without Nemotron 3.5 low-VRAM mode falls back to the selection,
+        // and the language still says what to install.
+        let (en, files) = asr_files(&language_store(false));
+        assert_eq!(
+            select_for_language(&en, &files, "en", true),
+            Ok(AsrChoice::Selected)
+        );
+        assert!(select_for_language(&en, &files, "de", true).is_err());
+    }
+
+    #[test]
+    fn the_switch_goes_by_capability_not_by_manifest_name() {
+        let (en, mut files) = asr_files(&language_store(false));
+        let mut dropped = en.clone();
+        dropped.id = ModelFileId(77);
+        dropped.path = "models/user/n35-reconverted.gguf".into();
+        dropped.manifest_name = None;
+        dropped.capabilities.languages = vec!["en".into(), "de-DE".into(), "auto".into()];
+        let mut offline = dropped.clone();
+        offline.id = ModelFileId(5);
+        offline.capabilities.streaming = false;
+        files.push(offline);
+        files.push(dropped);
+        let choice = select_for_language(&en, &files, "de", false).unwrap();
+        assert_eq!(
+            choice.overrides().asr.as_deref(),
+            Some("models/user/n35-reconverted.gguf")
+        );
+        assert_eq!(choice.reason(), Some(SwitchReason::Language));
+        // Nothing lists French: the download offer names Nemotron 3.5.
+        assert_eq!(
+            select_for_language(&en, &files, "fr", false)
+                .unwrap_err()
+                .install,
+            MULTILINGUAL_MODEL
+        );
+    }
+
+    #[test]
+    fn imports_switch_to_nemotron_35_and_keep_the_selection() {
+        let paths = DataPaths::at("D:/data");
+        let store = language_store(false);
+        // Not installed: low-VRAM mode runs the selection; German cannot run.
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "en").unwrap();
+        assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
+        let err = select_import_engine(&paths, &store, "cpu", false, "de")
+            .err()
             .unwrap();
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", true).unwrap();
-        assert!(switched);
+        assert!(err.to_string().contains("nemotron-3.5"), "{err}");
+
+        let store = language_store(true);
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "en").unwrap();
+        assert_eq!(switched, Some(SwitchReason::LowVram));
         assert_eq!(b.selection.asr_file.display_name, "n35");
-        let (b, switched) = select_import_engine(&paths, &store, "cpu", false).unwrap();
-        assert!(!switched && b.selection.asr_file.display_name == "en");
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", false, "en").unwrap();
+        assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
+        let (b, switched) = select_import_engine(&paths, &store, "cpu", true, "de").unwrap();
+        assert_eq!(switched, Some(SwitchReason::Language));
+        assert_eq!(b.selection.asr_file.display_name, "n35");
+        // An explicit model (the CLI's --asr-model) is never switched.
+        let ov = EngineOverrides {
+            asr: Some("en".into()),
+            ..Default::default()
+        };
+        let (b, switched) = select_engine_for(&paths, &store, "cpu", "de", true, &ov).unwrap();
+        assert!(switched.is_none() && b.selection.asr_file.display_name == "en");
         assert_eq!(
             selected_file(&store, ModelRole::Asr)
                 .unwrap()

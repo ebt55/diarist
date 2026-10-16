@@ -45,7 +45,7 @@ use diarist_core::models::{self, DataPaths, ResolvedSelection, SelectedEngine};
 use diarist_core::pipeline::JobQueue;
 use diarist_core::settings;
 use diarist_core::store::{RunStore, StoreError};
-use diarist_core::types::{Channel, JobId, MeetingId, MeetingStatus, RunId, Source};
+use diarist_core::types::{Channel, JobId, MeetingId, MeetingStatus, ModelRole, RunId, Source};
 use diarist_core::views::{JobEvent, RecoveredItem};
 use diarist_core::CoreError;
 use serde::Serialize;
@@ -391,8 +391,30 @@ fn app_parts(app: &AppHandle) -> (Arc<dyn RunStore>, DataPaths, Arc<JobQueue>, b
     (store, paths.paths.clone(), queue, paths.demo)
 }
 
-fn select(paths: &DataPaths, store: &dyn RunStore) -> CmdResult<SelectedEngine> {
-    let built = models::select_engine(paths, store, DEVICE).map_err(|e| e.to_string())?;
+/// The engine for a recording in `language`: the selection, or Nemotron 3.5
+/// when the selected model does not cover the language
+/// (`models::select_engine_for`); an error names the model to install.
+fn select(paths: &DataPaths, store: &dyn RunStore, language: &str) -> CmdResult<SelectedEngine> {
+    let (built, switched) = models::select_engine_for(
+        paths,
+        store,
+        DEVICE,
+        language,
+        false,
+        &models::EngineOverrides::default(),
+    )
+    .map_err(|e| match e {
+        CoreError::Models(m) => m,
+        other => other.to_string(),
+    })?;
+    if let Some(reason) = switched {
+        if let Ok(Some(selected)) = models::selected_file(store, ModelRole::Asr) {
+            log::info!(
+                "live, language {language}: {}",
+                models::switch_notice(reason, &selected, language)
+            );
+        }
+    }
     if built.experimental {
         return Err(format!(
             "{} is not a streaming model, so it cannot transcribe live. Select a streaming \
@@ -401,6 +423,19 @@ fn select(paths: &DataPaths, store: &dyn RunStore) -> CmdResult<SelectedEngine> 
         ));
     }
     Ok(built)
+}
+
+/// The language a recording runs in: `requested`, else `default_language`,
+/// as the tier table spells it (`ja` -> `ja-JP`).
+fn recording_language(store: &dyn RunStore, requested: Option<&str>) -> String {
+    let language = requested
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            settings::default_language(&settings::effective(store).unwrap_or_default())
+        });
+    models::languages::canonical(&language)
 }
 
 /// Free VRAM from `nemo-speech doctor`, reusing a reading younger than
@@ -437,9 +472,21 @@ fn free_vram(app: &AppHandle, max_age: Duration) -> Option<VramReading> {
 }
 
 /// The supervisor for `sel`, started (a no-op when it runs). A server for
-/// another selection is stopped first. The first launch measures how much
-/// VRAM the idle server holds, in the background.
+/// another selection (another ASR model for another language) is stopped
+/// first. The first launch measures how much VRAM the idle server holds, in
+/// the background.
 fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, bool) {
+    ensure_server_if(app, sel, false).expect("ensure_server swaps unconditionally")
+}
+
+/// [`ensure_server`]; with `idle_only`, a server for another selection is
+/// left alone (`None`) while a recording starts or runs, so warming up for
+/// the start sheet never replaces the server under a recording.
+fn ensure_server_if(
+    app: &AppHandle,
+    sel: &ResolvedSelection,
+    idle_only: bool,
+) -> Option<(ServeSupervisor, bool)> {
     let key = ServeKey {
         engine_dir: sel.engine_dir.clone(),
         asr: sel.asr.clone(),
@@ -447,6 +494,10 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
     };
     let live = handle(app);
     let mut serve = lock(&live.serve);
+    // Checked under the serve lock: `start` sets Starting before taking it.
+    if idle_only && live.is_recording() && serve.as_ref().is_some_and(|s| s.key != key) {
+        return None;
+    }
     if let Some(s) = serve.as_mut() {
         if s.key == key {
             if matches!(
@@ -458,11 +509,14 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
                 s.supervisor.start();
                 watch_ready(app, key, s.supervisor.clone(), None);
             }
-            return (s.supervisor.clone(), s.multilingual);
+            return Some((s.supervisor.clone(), s.multilingual));
         }
     }
     if let Some(old) = serve.take() {
-        log::info!("live server: selection changed, stopping the old server");
+        log::info!(
+            "live server: the model changed (now {}), stopping the old server",
+            file_name(&key.asr)
+        );
         old.supervisor.stop();
     }
     let (_, paths, _, _) = app_parts(app);
@@ -503,7 +557,7 @@ fn ensure_server(app: &AppHandle, sel: &ResolvedSelection) -> (ServeSupervisor, 
             ))
     );
     watch_ready(app, key, supervisor.clone(), Some(before));
-    (supervisor, multilingual)
+    Some((supervisor, multilingual))
 }
 
 /// Waits (on its own thread) for the server to become ready and notes when;
@@ -672,7 +726,8 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
         if demo {
             return Err("Recording is not available in the demo.".into());
         }
-        let built = select(&paths, &*store)?;
+        let language = recording_language(&*store, req.language.as_deref());
+        let built = select(&paths, &*store, &language)?;
         let devices = capture::list_devices().map_err(|e| e.to_string())?;
         let mic = resolve_device(&devices, DeviceFlow::Capture, req.mic.clone(), strict)?;
         let loopback = resolve_device(&devices, DeviceFlow::Render, req.loopback.clone(), strict)?;
@@ -683,7 +738,11 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             store: Arc::clone(&store),
             queue,
             data_root: paths.root.clone(),
-            live_engine: Arc::new(NemoWsLiveEngine::new(supervisor, multilingual)),
+            // Sessions get a tag the model's prompt dictionary has.
+            live_engine: Arc::new(models::languages::TaggedLiveEngine::new(
+                Arc::new(NemoWsLiveEngine::new(supervisor, multilingual)),
+                built.selection.asr_file.capabilities.languages.clone(),
+            )),
             file_engine: built.engine,
             sources: capture::wasapi_source_factory(),
             vram_free_mb: Arc::new(move || free),
@@ -704,8 +763,8 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             levels: Mutex::new(LevelThrottle::default()),
         });
         log::info!(
-            "recording start: title {title:?}, language {:?}, diarize_mic {}, mic {:?}, loopback {:?}, free VRAM {}",
-            req.language,
+            "recording start: title {title:?}, language {language} on {}, diarize_mic {}, mic {:?}, loopback {:?}, free VRAM {}",
+            built.selection.asr_file.display_name,
             req.diarize_mic,
             mic,
             loopback,
@@ -719,7 +778,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             ctx,
             StartOptions {
                 title: Some(title),
-                language: req.language.clone().filter(|l| !l.trim().is_empty()),
+                language: Some(language),
                 diarize_mic: req.diarize_mic,
                 devices: DeviceSelection { mic, loopback },
             },
@@ -1019,7 +1078,7 @@ pub(crate) fn startup(app: &AppHandle) {
                 log::info!("live server starts on the first Record (engine.preload is off)");
                 return;
             }
-            match select(&paths, &*store) {
+            match select(&paths, &*store, &recording_language(&*store, None)) {
                 Ok(built) => {
                     ensure_server(&app, &built.selection);
                 }
@@ -1061,7 +1120,7 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<Vec<RecoveredItem>> {
             .map(|m| format!("{} ({})", m.id, m.status))
             .collect::<Vec<_>>()
     );
-    let ctx = offline_context(app, Arc::new(Mutex::new(None))).map_err(|e| {
+    let ctx = offline_context(app, Arc::new(Mutex::new(None)), None).map_err(|e| {
         format!(
             "cannot recover {} interrupted recording(s) without an engine: {e}",
             pending.len()
@@ -1120,13 +1179,18 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<Vec<RecoveredItem>> {
 // ---- retry -------------------------------------------------------------------------------------
 
 /// A context for post-passes outside a recording (crash recovery, retry):
-/// no live session or capture is opened through it.
+/// no live session or capture is opened through it. With `language` (the
+/// retry of one meeting) the ASR model follows it as for a recording.
 fn offline_context(
     app: &AppHandle,
     meeting: Arc<Mutex<Option<(MeetingId, String)>>>,
+    language: Option<&str>,
 ) -> CmdResult<LiveContext> {
     let (store, paths, queue, _) = app_parts(app);
-    let built = models::select_engine(&paths, &*store, DEVICE).map_err(|e| e.to_string())?;
+    let built = match language {
+        Some(l) => select(&paths, &*store, l)?,
+        None => models::select_engine(&paths, &*store, DEVICE).map_err(|e| e.to_string())?,
+    };
     Ok(LiveContext {
         store,
         queue,
@@ -1161,12 +1225,16 @@ pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResul
         return Err("A post-pass for this meeting is already queued.".into());
     }
     let (store, _, _, _) = app_parts(app);
-    let title = store
+    let m = store
         .get_meeting(meeting)
         .map_err(|e| e.to_string())?
-        .meeting
-        .title;
-    let ctx = offline_context(app, Arc::new(Mutex::new(Some((meeting, title.clone())))))?;
+        .meeting;
+    let title = m.title;
+    let ctx = offline_context(
+        app,
+        Arc::new(Mutex::new(Some((meeting, title.clone())))),
+        Some(&m.language),
+    )?;
     let handle = live::rerun_post_pass(&ctx, meeting).map_err(|e| match e {
         CoreError::Store(StoreError::Invalid(m) | StoreError::Conflict(m)) => m,
         other => other.to_string(),
@@ -1254,17 +1322,22 @@ pub async fn list_audio_devices() -> CmdResult<Vec<AudioDevice>> {
     blocking(|| capture::list_devices().map_err(|e| e.to_string())).await
 }
 
-/// The start sheet opened: start the live server if it is not running and
-/// refresh the free-VRAM reading, so Start is quick.
-#[tauri::command]
-pub async fn prepare_recording(app: AppHandle) -> CmdResult<()> {
+/// The start sheet opened, or its language changed: start the live server
+/// with the model for `language` (default `default_language`) if it is not
+/// running, replacing an idle server that has another model, and refresh
+/// the free-VRAM reading, so Start is quick.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn prepare_recording(app: AppHandle, language: Option<String>) -> CmdResult<()> {
     blocking(move || {
         let (store, paths, _, demo) = app_parts(&app);
         if demo || handle(&app).is_recording() {
             return Ok(());
         }
-        let built = select(&paths, &*store)?;
-        ensure_server(&app, &built.selection);
+        let language = recording_language(&*store, language.as_deref());
+        let built = select(&paths, &*store, &language)?;
+        if ensure_server_if(&app, &built.selection, true).is_none() {
+            return Ok(());
+        }
         if gpu::nvml_vram(gpu::device_index(DEVICE)).is_none() {
             // Without NVML the gate reads doctor (seconds): refresh it now.
             vram_reading(&app, VRAM_READING_TTL);

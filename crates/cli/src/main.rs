@@ -50,7 +50,10 @@ enum Command {
     Transcribe {
         /// Input file (m4a, mp3, wav, flac, ogg, mp4, ...).
         file: PathBuf,
-        /// Meeting language (BCP-47) or `auto`.
+        /// Meeting language (BCP-47) or `auto`. One the selected ASR model
+        /// does not cover (German on the EN model) runs on Nemotron 3.5 when
+        /// it is installed, else stops with what to install; --asr-model
+        /// turns the switch off.
         #[arg(long, default_value = "en")]
         language: String,
         /// Meeting title (default: the file name).
@@ -583,8 +586,24 @@ fn transcribe(
             file.display()
         )));
     }
-    let built = models::select_engine_with(&ctx.paths, &*ctx.store, device, overrides)?;
+    // As the tier table spells it (`ja` -> `ja-JP`); the engine then gives
+    // the runtime a tag the model's prompt dictionary has.
+    let language = models::languages::canonical(language);
+    let language = language.as_str();
+    let (built, switched) =
+        models::select_engine_for(&ctx.paths, &*ctx.store, device, language, false, overrides)?;
     let sel = built.selection;
+    if let Some(reason) = switched {
+        if let Some(selected) = models::selected_file(&*ctx.store, ModelRole::Asr)? {
+            eprintln!("{}", models::switch_notice(reason, &selected, language));
+        }
+    } else if overrides.asr.is_some() && !models::languages::covers(&sel.asr_file, language) {
+        eprintln!(
+            "warning: {} does not list {}; transcribing with it as asked (--asr-model)",
+            sel.asr_file.display_name,
+            models::languages::label(language)
+        );
+    }
     if built.experimental {
         eprintln!(
             "warning: {} is not a streaming model; using the experimental cascade (may drop speech)",

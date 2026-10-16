@@ -111,7 +111,8 @@ pub async fn search(
 
 // ---- Import jobs -------------------------------------------------------------
 
-/// Queues an import on the process-wide [`Jobs`] queue. Progress, `job:done`,
+/// Queues an import on the process-wide [`Jobs`] queue in `language`
+/// (default: the `default_language` setting). Progress, `job:done`,
 /// `job:error` and `job:cancelled` arrive as events.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn import_file(
@@ -121,6 +122,7 @@ pub async fn import_file(
     jobs: State<'_, Jobs>,
     path: String,
     title: Option<String>,
+    language: Option<String>,
 ) -> CmdResult<JobId> {
     let job_id = JobId::new();
     let req = ImportRequest {
@@ -129,22 +131,30 @@ pub async fn import_file(
         title: title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()),
         diarize: true,
     };
-    log::info!("import queued: {path} (job {job_id})");
+    let language = language
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty());
+    log::info!(
+        "import queued: {path} (job {job_id}, language {})",
+        language.as_deref().unwrap_or("default")
+    );
     let store = Arc::clone(&store.0);
     let data_paths = paths.paths.clone();
     jobs.0.submit(job_id.clone(), move |token| {
-        run_import(&app, store.as_ref(), &data_paths, req, token)
+        run_import(&app, store.as_ref(), &data_paths, req, language, token)
     });
     Ok(job_id)
 }
 
-/// The job body: the selected engine and models, the current settings, the
-/// decoder chain, then `pipeline::import_file`.
+/// The job body: the engine and models for `language` (default
+/// `default_language`), the current settings, the decoder chain, then
+/// `pipeline::import_file`.
 fn run_import(
     app: &AppHandle,
     store: &dyn RunStore,
     paths: &DataPaths,
     req: ImportRequest,
+    language: Option<String>,
     token: &CancelToken,
 ) {
     let job_id = req.job_id.clone();
@@ -165,15 +175,27 @@ fn run_import(
         Err(e) => return fail(e.to_string()),
     };
     let low_vram = settings::get_bool(&settings, settings::ENGINE_LOW_VRAM);
-    let (built, switched) = match models::select_import_engine(paths, store, DEVICE, low_vram) {
-        Ok(b) => b,
-        Err(e) => return fail(e.to_string()),
-    };
+    let language = models::languages::canonical(
+        &language.unwrap_or_else(|| settings::default_language(&settings)),
+    );
+    // A language the selected model does not cover runs on Nemotron 3.5, or
+    // fails here naming it (the readiness check offers the download first).
+    let (built, switched) =
+        match models::select_import_engine(paths, store, DEVICE, low_vram, &language) {
+            Ok(b) => b,
+            Err(e) => return fail(e.to_string()),
+        };
+    let notice = switched.and_then(|reason| {
+        let selected = models::selected_file(store, ModelRole::Asr)
+            .ok()
+            .flatten()?;
+        Some(models::switch_notice(reason, &selected, &language))
+    });
     log::info!(
-        "import {job_id}: engine {} | asr {}{} | diarizer {}{}",
+        "import {job_id}: engine {} | asr {}{} | diarizer {}{} | language {language}",
         built.selection.engine_version.as_deref().unwrap_or("?"),
         built.selection.asr_file.display_name,
-        if switched { " (low-VRAM mode)" } else { "" },
+        notice.map(|n| format!(" ({n})")).unwrap_or_default(),
         built.selection.diarizer_file.display_name,
         if built.experimental {
             " (experimental cascade)"
@@ -182,6 +204,7 @@ fn run_import(
         }
     );
     let mut opts = ImportOptions::new(&paths.root, &settings);
+    opts.language = language;
     opts.diarize_runner = Some(built.diarize_runner);
     let started = Instant::now();
     let result = pipeline::import_file(
@@ -956,12 +979,16 @@ pub async fn add_model_file(
 }
 
 /// Whether Import or Record (`action`) can run now; each missing part comes
-/// with its fix (`diarist_core::models::readiness`).
+/// with its fix (`diarist_core::models::readiness`). `language` (imports:
+/// default `default_language`) adds a `language` part with the Nemotron 3.5
+/// download when neither the selected model nor an installed Nemotron 3.5
+/// covers it (`models::select_for_language`).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn check_ready(
     store: State<'_, AppStore>,
     paths: State<'_, AppPaths>,
     action: String,
+    language: Option<String>,
 ) -> CmdResult<models::Readiness> {
     let data_paths = paths.paths.clone();
     let demo = paths.demo;
@@ -981,14 +1008,43 @@ pub async fn check_ready(
                 install_dropped(&data_paths, &manifest);
                 models::scan(&data_paths, s, &manifest)?;
             }
-            models::readiness(
-                &data_paths,
-                s,
-                &manifest,
-                gpu::gpu_info(0).as_ref(),
-                &gpu::adapters(),
-                &action,
-            )
+            let (gpu, adapters) = (gpu::gpu_info(0), gpu::adapters());
+            let mut ready =
+                models::readiness(&data_paths, s, &manifest, gpu.as_ref(), &adapters, &action)?;
+            let language = language
+                .map(|l| l.trim().to_owned())
+                .filter(|l| !l.is_empty())
+                .or_else(|| {
+                    (action == "import").then(|| {
+                        settings::default_language(&settings::effective(s).unwrap_or_default())
+                    })
+                });
+            let asr = models::selected_file(s, ModelRole::Asr)?;
+            if let (Some(language), Some(asr)) = (language, asr) {
+                let files = s.list_model_files()?;
+                if let Err(need) = models::select_for_language(&asr, &files, &language, false) {
+                    let backend = gpu::recommended_backend(gpu.as_ref(), &adapters);
+                    let item = models::download_items(&data_paths, &manifest, &files, backend)
+                        .into_iter()
+                        .find(|i| i.name == need.install && !i.installed);
+                    let fix = if action == "import" {
+                        "Download it here, or choose another default language in Settings."
+                    } else {
+                        "Download it here, or choose another language."
+                    };
+                    ready.ok = false;
+                    ready.missing.push(models::MissingPart {
+                        what: "language".into(),
+                        message: format!(
+                            "{} needs Nemotron 3.5: {}. {fix}",
+                            need.what(),
+                            need.reason
+                        ),
+                        item,
+                    });
+                }
+            }
+            Ok(ready)
         },
     )
     .await
