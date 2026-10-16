@@ -8,7 +8,6 @@
   import { plural } from "./lib/format";
   import { live } from "./lib/live.svelte";
   import { AUDIO_EXTENSIONS, app, isTyping, startupFlags } from "./lib/state.svelte";
-  import CrashNotice from "./components/CrashNotice.svelte";
   import LegacyMove from "./components/LegacyMove.svelte";
   import Library from "./components/Library.svelte";
   import MeetingView from "./components/MeetingView.svelte";
@@ -252,7 +251,6 @@
 <RecordSheet />
 <ImportSheet />
 <LegacyMove />
-<CrashNotice />
 
 <style>
   .shell {

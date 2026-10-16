@@ -1,6 +1,9 @@
 <script lang="ts">
-  // Toasts, the confirm dialog, the shortcut sheet and the drop overlay.
+  // Toasts (with the crash notice at the bottom of their stack, clear of
+  // the page header), the confirm dialog, the shortcut sheet and the drop
+  // overlay.
   import { app } from "../lib/state.svelte";
+  import CrashNotice from "./CrashNotice.svelte";
   import Icon from "./Icon.svelte";
 
   let dialog: HTMLDialogElement | undefined = $state();
@@ -100,6 +103,7 @@
       </button>
     </div>
   {/each}
+  <CrashNotice />
 </div>
 
 <dialog

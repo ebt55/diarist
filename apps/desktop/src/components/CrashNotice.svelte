@@ -1,6 +1,7 @@
 <script lang="ts">
   // The quiet notice after a crash (docs/plans/11-hardening.md 8a): once per
-  // report, until the user acts on it or dismisses it.
+  // report, until the user acts on it or dismisses it. It sits at the bottom
+  // of the toast stack (Overlays.svelte), so it never covers a page header.
   import { onMount } from "svelte";
   import { api, errorText } from "../lib/api";
   import { crashApi, DUMP_NOTE, type CrashReport } from "../lib/crash";
@@ -63,10 +64,6 @@
 
 <style>
   .crash-notice {
-    position: fixed;
-    top: 12px;
-    right: 16px;
-    z-index: 59;
     max-width: 440px;
     padding: 10px 12px;
     border: 1px solid var(--border-strong);
@@ -74,6 +71,7 @@
     border-radius: var(--radius);
     background: var(--bg-raised);
     box-shadow: var(--shadow);
+    pointer-events: auto;
   }
   .msg {
     margin: 0 0 8px;
