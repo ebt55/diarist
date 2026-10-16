@@ -62,6 +62,14 @@ bug report.
   a session until Stop. A recording made after deleting the previous one
   gets that meeting id again, and the app took it for the recording it had
   already opened.
+- Fixed: playback was much quieter than the meeting itself (a video played
+  on the PC and recorded came back faint, and the mix halved it again when
+  the microphone channel was silent). The player now raises a quiet meeting
+  so its loud speech peaks near full scale (worked out from the waveform,
+  at most +24 dB, with a limiter on the loudest moments), has a volume
+  slider kept across meetings, and an Auto level button that plays the
+  audio as stored (settings `playback.normalize` and `playback.volume`).
+  The stored audio and the waveform do not change.
 
 ## [0.1.0-beta.1] - 2026-10-15
 
