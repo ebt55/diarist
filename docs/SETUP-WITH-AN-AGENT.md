@@ -201,8 +201,8 @@ The runtime package, from step 2:
 | What step 2 showed | Package | Why |
 |---|---|---|
 | NVIDIA GPU, compute capability 7.5 or higher, driver 580 or newer (CUDA 13.0 or higher) | `cuda` | The tested package; measured on an RTX 3080, about 30 times faster than real time. |
-| AMD or Intel GPU, an NVIDIA GPU with an older driver, or compute capability below 7.5 | `vulkan` | Runs on any current GPU driver, but Diarist 0.1.0-beta.2 cannot use it yet: it starts the runtime with `--device cuda:0`, which the Vulkan build refuses (docs/KNOWN-ISSUES.md). Tell the user before installing. With an older NVIDIA driver, the user may prefer to update it from nvidia.com (they do that, not you) and use `cuda`. |
-| No usable GPU | `cpu` | Diarist 0.1.0-beta.2 cannot use it yet, for the same `--device` reason. Tell the user before installing. |
+| AMD or Intel GPU, an NVIDIA GPU with an older driver, or compute capability below 7.5 | `vulkan` | Runs on any current GPU driver; tested by Diarist on an NVIDIA card only (about 25 times faster than real time there), not on AMD or Intel. With an older NVIDIA driver, the user may prefer to update it from nvidia.com (they do that, not you) and use `cuda`. |
+| No usable GPU | `cpu` | Works, about 5 times faster than real time on a 12-core desktop CPU; live recording is not recommended. |
 
 The models. Always `nemotron-3-diarization` (who spoke when, up to 8
 speakers). The speech model, from question 1 and the VRAM:
@@ -213,7 +213,7 @@ speakers). The speech model, from question 1 and the VRAM:
 | English only, less than 6 GB VRAM | `nemotron-3-diarization`, `nemotron-en`, `nemotron-3.5` | Turn on Low-VRAM mode: imports then use Nemotron 3.5, live recording keeps the English model. |
 | Other or mixed languages | `nemotron-3-diarization`, `nemotron-3.5` | Nothing: Nemotron 3.5 is selected when it is the only speech model. |
 | Both English-only and other meetings | all three | The English model is selected by default; the user switches in Settings, Models, Speech to text. |
-| CPU package | as by language above | Expect a long wait for each transcript. |
+| CPU package | as by language above | Expect about 12 minutes per hour of audio on a fast desktop CPU, more on a laptop. |
 
 Never install `parakeet-tdt`. It is experimental: it punctuates, but it
 silently skipped a 46-second span of a 77-minute recording.

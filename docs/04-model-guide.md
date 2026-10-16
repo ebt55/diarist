@@ -100,8 +100,8 @@ The runtime ships three Windows zips. The setup screen checks the GPU (NVML for 
 | Your GPU | Package | Status |
 |---|---|---|
 | NVIDIA, driver new enough for CUDA 13 (R580 or newer is the estimate; 610.88 **measured** working) | `windows-x86_64-cuda` | **Measured** on RTX 3080 10 GB; kernels built for Turing (sm_75), Ampere (sm_86), Ada (sm_89) and Blackwell (sm_120) |
-| AMD or Intel GPU, or older NVIDIA driver | `windows-x86_64-vulkan` | **Not usable yet**: Diarist passes `--device cuda:0`, which this build refuses (docs/KNOWN-ISSUES.md). With `--device vulkan:0`, **measured** on the RTX 3080 only (nothing about AMD or Intel): 5-minute AMI clip in 11.0 to 12.1 s, 25 to 27 times real time (CUDA 44 to 46 times), the same word count as CUDA with 3.2 percent of words different; live ready in 3.6 s with finals and speakers, first text 0.8 s, no abort in 60 s |
-| No usable GPU | `windows-x86_64-cpu` | **Not usable yet**, for the same `--device` reason. With `--device cpu`, **measured** on a Ryzen 9 5900X (12 cores): the 5-minute AMI clip in 95 s, 3.1 times real time, 0.6 percent of words different from CUDA. Live not tested |
+| AMD or Intel GPU, or older NVIDIA driver | `windows-x86_64-vulkan` | **Measured** on the RTX 3080 only, nothing about AMD or Intel (16 Oct 2026, through the app's own path, file setting): the 5-minute AMI clip in 10.7 to 12.0 s, 25 to 28 times real time (CUDA 67 to 69 times), the same word count as CUDA with 3.2 percent of words different and the same speakers; live through the app's adapter ready in 3.1 s with finals and speakers, first word 0.14 s after it was spoken, no abort in 60 s |
+| No usable GPU | `windows-x86_64-cpu` | **Measured** on a Ryzen 9 5900X, 12 cores (16 Oct 2026, through the app's own path, file setting): the 5-minute AMI clip in 58 s, 5.2 times real time (an hour in about 12 minutes), 0.6 percent of words different from CUDA. The app says once that it is slow. Live not tested and not recommended |
 
 VRAM needed (**measured** on the 3080, excluding the desktop's own 1.5 GB):
 

@@ -28,8 +28,9 @@ The setup screen checks:
 - **GPU**: name, memory, driver and the CUDA version the driver supports. The
   CUDA runtime needs an NVIDIA driver with CUDA 13 (R580 or newer). With an
   AMD or Intel GPU the Vulkan runtime is preselected; without a GPU, the CPU
-  runtime. You can change the choice. The Vulkan and CPU runtimes do not
-  work with this version yet: see [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
+  runtime. You can change the choice. Vulkan and CPU were tested on an
+  NVIDIA card and a desktop CPU only; the CPU runtime transcribes at about 5
+  times real time ([KNOWN-ISSUES.md](KNOWN-ISSUES.md)).
 - **Disk**: free space where the data folder is. The defaults need about
   1.1 GB while downloading and 1 GB after.
 

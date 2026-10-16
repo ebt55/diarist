@@ -87,8 +87,8 @@ The setup screen detects your GPU and preselects the package; you can change it.
 | Your GPU | Package | Status |
 |---|---|---|
 | NVIDIA with a driver new enough for CUDA 13 (R580 or newer is the estimate; 610.88 *measured* working) | CUDA | *Measured* on an RTX 3080 10 GB; kernels for Turing, Ampere, Ada and Blackwell |
-| AMD or Intel, or an older NVIDIA driver | Vulkan (19 MB) | Not usable with this version yet ([known issue](docs/KNOWN-ISSUES.md)). With the device fixed, *measured* on the RTX 3080 only: 25 to 27 times real time for files, live works |
-| No usable GPU | CPU (6 MB) | Not usable with this version yet (same issue). With the device fixed, *measured* 3.1 times real time on a 12-core Ryzen 9 5900X |
+| AMD or Intel, or an older NVIDIA driver | Vulkan (19 MB) | *Measured* on an RTX 3080 only (AMD and Intel untested): 25 to 28 times real time for files; live works |
+| No usable GPU | CPU (6 MB) | *Measured* 5 times real time on a 12-core Ryzen 9 5900X (an hour in about 12 minutes); live not recommended |
 
 ### How much GPU memory
 
@@ -181,9 +181,9 @@ deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 Version 0.1.0-beta.2, the second beta pre-release: file
 import and live recording work
-end to end on the development machine (Windows 11, RTX 3080) with the CUDA
-runtime. The Vulkan and CPU runtime packages do not work with this version yet
-(a known issue), and machines other than the author's are untested. Next
+end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
+CPU runtime packages were tested on that machine's NVIDIA card and CPU only,
+and machines other than the author's are untested. Next
 on the roadmap: punctuation restoration, better speaker-change handling, and
 recognising the same person across meetings
 ([docs/plans/00-roadmap.md](docs/plans/00-roadmap.md)). Changes:

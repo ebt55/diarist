@@ -90,8 +90,8 @@ bug report.
   keeps the meeting.
 - Fixed: the Vulkan and CPU runtime packages did not run because the app
   always asked for the CUDA device; the device now follows the installed
-  package (Vulkan measured at 25 times real time on an RTX 3080, CPU at 3
-  times).
+  package (measured on an RTX 3080 and a Ryzen 9 5900X only: Vulkan 25 to 28
+  times real time, CPU 5 times).
 - Changed: Nemotron 3.5 drops far fewer phrases on public language clips at
   the file setting (measured on FLEURS slices).
 

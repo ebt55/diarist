@@ -17,7 +17,7 @@
     "sha256": "edf15a04ba98740aa0ab75ae4681ac7ad0a488b22b35ce2cbebd10590bb1c1e1",
     "size_bytes": 19302464,
     "licence": "Apache-2.0",
-    "tested": false
+    "tested": true
   },
   {
     "name": "nemo-speech-0.2.0-windows-x86_64-cpu",
@@ -27,6 +27,6 @@
     "sha256": "82c80451086e86194aba9af19f800da77cd66d1c28d993d0efceffd6cdb49bb8",
     "size_bytes": 5528418,
     "licence": "Apache-2.0",
-    "tested": false
+    "tested": true
   }
 ]
