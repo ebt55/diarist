@@ -470,6 +470,15 @@ fn monitor(weak: Weak<Inner>) {
             } else {
                 st.status = ServeStatus::Stopped;
             }
+            // A crash after it was ready, or the launch it gave up on, leaves
+            // `logs\engine-crash-*.txt` (docs/plans/11 8a), off this lock.
+            if st.want_running && (was_ready || st.failures >= MAX_FAILURES) {
+                crate::crash::record_engine_exit_later(
+                    "nemo-speech serve",
+                    code.clone(),
+                    cfg.log_path.clone(),
+                );
+            }
             notify = true;
         }
         // Launch when wanted.

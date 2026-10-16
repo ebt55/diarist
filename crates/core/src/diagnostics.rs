@@ -113,6 +113,80 @@ fn hklm_string(key: &str, value: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
+/// The user's profile folder (`%USERPROFILE%`, `$HOME` elsewhere).
+pub fn profile_dir() -> Option<String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(var).ok().filter(|p| !p.trim().is_empty())
+}
+
+/// `text` with the user's profile folder replaced by `~`, so a pasted
+/// report does not carry the Windows user name ("Copy report", "Copy
+/// diagnostics"). See [`scrub_path`].
+pub fn scrub_profile(text: &str) -> String {
+    match profile_dir() {
+        Some(p) => scrub_path(text, &p),
+        None => text.to_owned(),
+    }
+}
+
+/// `text` with every occurrence of the folder `dir` replaced by `~`. A match
+/// ignores ASCII case (Windows paths do), takes any run of `\` and `/` as
+/// one separator (so `C:/Users/x` and the doubled `C:\\Users\\x` of a
+/// Debug-printed path match too) and must end at a name boundary
+/// (`C:\Users\ann` does not match inside `C:\Users\anna`). A `dir` of fewer
+/// than two parts (a bare drive) is left alone.
+pub fn scrub_path(text: &str, dir: &str) -> String {
+    let parts: Vec<&[u8]> = dir
+        .split(['\\', '/'])
+        .filter(|p| !p.is_empty())
+        .map(str::as_bytes)
+        .collect();
+    if parts.len() < 2 {
+        return text.to_owned();
+    }
+    let sep = |b: u8| b == b'\\' || b == b'/';
+    let name_byte =
+        |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.') || b >= 0x80;
+    let t = text.as_bytes();
+    // The end of a match starting at `i`, if one does.
+    let match_at = |i: usize| -> Option<usize> {
+        let mut j = i;
+        for (n, part) in parts.iter().enumerate() {
+            if n > 0 {
+                let from = j;
+                while j < t.len() && sep(t[j]) {
+                    j += 1;
+                }
+                if j == from {
+                    return None;
+                }
+            }
+            let end = j.checked_add(part.len()).filter(|&e| e <= t.len())?;
+            if !t[j..end].eq_ignore_ascii_case(part) {
+                return None;
+            }
+            j = end;
+        }
+        (j == t.len() || !name_byte(t[j])).then_some(j)
+    };
+    let mut out = Vec::with_capacity(t.len());
+    let mut i = 0;
+    while i < t.len() {
+        let starts = i == 0 || !name_byte(t[i - 1]);
+        match match_at(i).filter(|_| starts) {
+            Some(end) => {
+                out.push(b'~');
+                i = end;
+            }
+            None => {
+                out.push(t[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 fn source_name(s: DataRootSource) -> &'static str {
     match s {
         DataRootSource::Explicit => "explicit (DIARIST_DATA_DIR or --data-dir)",
@@ -122,8 +196,12 @@ fn source_name(s: DataRootSource) -> &'static str {
     }
 }
 
-/// The report text.
+/// The report text, with the profile folder as `~` ([`scrub_profile`]).
 pub fn report(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -> String {
+    scrub_profile(&report_text(paths, store, input))
+}
+
+fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}", input.app);
     if !input.os.is_empty() {
@@ -193,6 +271,27 @@ pub fn report(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) ->
     }
     for (k, v) in &input.extra {
         let _ = writeln!(out, "{k}: {v}");
+    }
+    let crashes = crate::crash::list_reports(&paths.logs());
+    if crashes.is_empty() {
+        let _ = writeln!(out, "crash reports: none");
+    } else {
+        let names: Vec<String> = crashes
+            .iter()
+            .map(|r| {
+                let kind = match r.kind {
+                    crate::crash::CrashKind::Panic => "panic",
+                    crate::crash::CrashKind::Native => "native crash",
+                    crate::crash::CrashKind::Engine => "engine exit",
+                };
+                format!("{} ({kind})", r.name)
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "crash reports (in the log folder): {}",
+            names.join(", ")
+        );
     }
     if !input.checks.is_empty() {
         let _ = writeln!(out, "checks:");
@@ -292,8 +391,38 @@ mod tests {
             assert!(text.contains(want), "{want:?} missing from:\n{text}");
         }
         assert!(!text.contains("line 1"));
+        assert!(text.contains("crash reports: none"), "{text}");
         if cfg!(windows) {
             assert!(os_version().starts_with("Windows"), "{}", os_version());
         }
+    }
+
+    #[test]
+    fn scrub_replaces_the_profile_folder_in_every_spelling() {
+        let p = r"C:\Users\Ann Lee";
+        let cases = [
+            (
+                r"log C:\Users\Ann Lee\AppData\x.log",
+                r"log ~\AppData\x.log",
+            ),
+            ("json \"c:/users/ann lee/a\"", "json \"~/a\""),
+            (
+                r#"$ "C:\\Users\\Ann Lee\\engine\\bin""#,
+                r#"$ "~\\engine\\bin""#,
+            ),
+            (r"\\?\C:\Users\Ann Lee\models", r"\\?\~\models"),
+            ("end C:/Users/Ann Lee", "end ~"),
+            // Not the profile: another user, or a longer name.
+            (r"C:\Users\Ann Leez\x", r"C:\Users\Ann Leez\x"),
+            (r"C:\Users\Bob\x", r"C:\Users\Bob\x"),
+            (r"XC:\Users\Ann Lee", r"XC:\Users\Ann Lee"),
+            ("Jürgen C:\\Users\\Ann Lee", "Jürgen ~"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_path(input, p), want, "{input}");
+        }
+        assert_eq!(scrub_path(r"C:\Users\Jürgen\x", r"C:\Users\Jürgen"), r"~\x");
+        assert_eq!(scrub_path(r"C:\x", "C:"), r"C:\x");
+        assert_eq!(scrub_path("", p), "");
     }
 }

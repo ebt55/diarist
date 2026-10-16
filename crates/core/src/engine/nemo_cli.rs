@@ -412,6 +412,16 @@ fn run_child(
             status.code().filter(|c| (0..=255).contains(c)),
             &stderr_text,
         );
+        // A crash or an unexplained failure leaves `logs\engine-crash-*.txt`
+        // (docs/plans/11 8a); bad input and a missing model say so already.
+        if !matches!(code, ErrorCode::BadInput | ErrorCode::ModelMissing) {
+            let verb = cmd
+                .get_args()
+                .next()
+                .map(|a| a.to_string_lossy().into_owned());
+            let engine = format!("nemo-speech {}", verb.unwrap_or_default());
+            crate::crash::record_engine_exit(engine.trim(), &status.to_string(), &stderr_text);
+        }
         Err(RunFailure::Failed(code, msg))
     }
 }

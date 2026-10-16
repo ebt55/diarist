@@ -42,15 +42,22 @@ flac-codec = { version = "1", default-features = false }
 nvml-wrapper = "0.13"
 
 [target.'cfg(windows)'.dependencies]
+# Diagnostics_Debug, Kernel, Memory, ProcessStatus, Threading: the native
+# crash filter and its minidump (crash.rs).
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # WASAPI mic and render-endpoint loopback capture (docs/01 "Audio capture").

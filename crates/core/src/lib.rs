@@ -13,6 +13,7 @@
 //! [`models`] finds, selects and downloads engines and models.
 
 pub mod audio;
+pub mod crash;
 pub mod db;
 pub mod diagnostics;
 pub mod engine;
