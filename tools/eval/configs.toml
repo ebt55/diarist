@@ -4,7 +4,18 @@
 #
 # asr / diarizer: manifest names from manifests/models.json.
 # language: passed as `transcribe --language` (`auto` lets Nemotron 3.5 detect).
+# engine_args: flags appended verbatim to `nemo-speech transcribe`, one list
+#   item per argument (run.py passes each as `--engine-arg=<item>`). They reach
+#   the transcribe step only, not the standalone `diarize` pass of `--rttm`.
 # skip: the config is listed but not runnable; run.py prints the reason.
+#
+# Decoder lookahead (`--asr.streaming.rnnt_right_context R`): the encoder sees
+# R 80 ms frames ahead, so a chunk is (R + 1) x 80 ms: 0 = 80 ms, 1 = 160 ms
+# (runtime default), 3 = 320 ms, 6 = 560 ms, 13 = 1.12 s. `-1` is the GGUF's
+# trained maximum: 13 for Nemotron EN, but 3 for the pinned Nemotron 3.5 GGUF
+# (its header says train_right_ctx 3), so 1.12 s on 3.5 needs an explicit 13.
+# Diarizer context (`--diar-rc`, `--diar-lc`, `--diar-chunk`, 80 ms frames):
+# Nemotron 3 Diarization defaults to chunk 13, right context 1.
 
 [nemotron35]
 description = "Default: Nemotron 3.5 streaming ASR + Nemotron 3 Diarization (v3-streaming preset), language en"
@@ -19,8 +30,75 @@ diarizer = "nemotron-3-diarization"
 language = "en"
 
 [nemotron35_verbatim]
-description = "Nemotron 3.5 with the runtime's --verbatim flag (fillers kept)"
+description = "Nemotron 3.5 with the runtime's --verbatim flag, which in nemo-speech 0.2.0 disables inverse text normalisation (ITN), not filler removal; with no ITN grammars configured it should change nothing"
 asr = "nemotron-3.5"
 diarizer = "nemotron-3-diarization"
 language = "en"
-skip = "diarist-cli transcribe has no way to pass --verbatim to nemo-speech (NemoCliEngine::args builds a fixed argument list)"
+engine_args = ["--verbatim"]
+
+# --- Decoder lookahead for file jobs (plan 12, measurement 1) ---
+# Explicit values per model. The two `_max` configs pass -1 and exist to show
+# what -1 resolves to (identical output to en_rc_13 and n35_rc_3).
+
+[en_rc_13]
+description = "Nemotron EN, rnnt_right_context 13 (1.12 s, the model's trained maximum)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "13"]
+
+[n35_rc_3]
+description = "Nemotron 3.5, rnnt_right_context 3 (320 ms, the pinned GGUF's train_right_ctx)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "3"]
+
+[en_rc_max]
+description = "Nemotron EN, rnnt_right_context -1 (resolves to the trained maximum, 13 = 1.12 s; identity check for en_rc_13)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "-1"]
+
+[n35_rc_max]
+description = "Nemotron 3.5, rnnt_right_context -1 (resolves to the pinned GGUF's train_right_ctx, 3 = 320 ms; identity check for n35_rc_3)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "-1"]
+
+[n35_rc_6]
+description = "Nemotron 3.5, rnnt_right_context 6 (560 ms)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "6"]
+
+[n35_rc_13]
+description = "Nemotron 3.5, rnnt_right_context 13 (1.12 s, the model card's largest setting)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "13"]
+
+# --- Diarizer geometry in the fused pass (plan 12, measurement 2) ---
+# `--asr.diar.preset v3-offline` is still AOSC streaming, with the runtime's
+# offline geometry (src/asr/diar/aosc_state.h, 0.2.0): speaker cache 264,
+# FIFO 0, chunk 264 frames (21.1 s), cache update period 188, left and right
+# context 1, against v3-streaming's 264 / 80 / 13 (1.04 s) / 40 / 0 / 1. Not
+# the stateless `diarize --offline` pass that scored worse in research/03.
+
+[n35_rc_13_diar_off]
+description = "Nemotron 3.5, lookahead 13 (1.12 s), diarizer preset v3-offline in the fused pass"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "13", "--asr.diar.preset", "v3-offline"]
+
+[en_rc_13_diar_off]
+description = "Nemotron EN, lookahead 13 (1.12 s), diarizer preset v3-offline in the fused pass"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "13", "--asr.diar.preset", "v3-offline"]

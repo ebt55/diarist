@@ -8,6 +8,7 @@ over runs that run.py or nemo_direct.py already cached. Never touches the GPU.
   uv run python -I levers.py clip-score --words a/words.json b/words.json --offset 50 --dur 300
   uv run python -I levers.py punct --words <words.json> [...]
   uv run python -I levers.py table --configs nemotron35,n35_rc_3,nemotron_en,en_rc_13
+  uv run python -I levers.py boost --base .work/spikes/boost/n35_base --runs .work/spikes/boost/n35_b3 --phrases Craig beagle
 
 offsets: word-start offset of each config against the base config on the
   same session: normalised words aligned by Levenshtein, starts compared on
@@ -23,6 +24,8 @@ ami-misses: reference words of the AMI clip that the hypothesis gets wrong,
   most frequent first (candidates for --speech-context).
 clip-score: WER and cpWER of runtime words JSONs on an AMI clip.
 punct: share of words carrying punctuation or a capital, per words JSON.
+boost: phrase hits, changes against the unboosted run, clip WER and the
+  runtime's boosting messages, per nemo_direct run.
 table: the lookahead summary, one row per config (quality on the short
   sessions, speed, and on the 77-minute session VRAM, tag agreement and the
   word-start offset against the same model's R = 1 config).
@@ -302,6 +305,40 @@ def cmd_table(a) -> None:
         print("| " + " | ".join(cells) + " |")
 
 
+def cmd_boost(a) -> None:
+    """Per nemo_direct run directory: phrase hits (normalised), words changed
+    against the base run, clip WER, and what the runtime said about boosting
+    on stderr."""
+    from rapidfuzz.distance import Levenshtein
+
+    phrases = [tuple(normalize_token(t)[0] for t in ph.split() if normalize_token(t)) for ph in a.phrases]
+
+    def hits(tokens: list[str], ph: tuple) -> int:
+        n = len(ph)
+        return sum(1 for i in range(len(tokens) - n + 1) if tuple(tokens[i:i + n]) == ph)
+
+    s = load_sessions(a.sessions_file)["ami"]
+    ref_rows = [r for r in read_seglst(s.ref_seglst) if a.offset <= float(r["start_time"]) <= a.offset + a.dur]
+    ref_tok = [t for r in sorted(ref_rows, key=lambda r: float(r["start_time"])) for t in normalize_token(r["words"])]
+    base = [t for w in raw_words(Path(a.base) / "words.json") for t in normalize_token(w["word"])]
+    head = ["Run", "Normalised words"] + [f"'{' '.join(ph)}' hits (ref {hits(ref_tok, ph)})" for ph in phrases]
+    head += ["Edit ops vs base", "Clip WER %", "Runtime message"]
+    print("| " + " | ".join(head) + " |")
+    print("|" + "---|" * len(head))
+    for d in [Path(a.base), *map(Path, a.runs)]:
+        if not (d / "words.json").is_file():
+            print(f"| {d.name} | missing |")
+            continue
+        toks = [t for w in raw_words(d / "words.json") for t in normalize_token(w["word"])]
+        err = (d / "stderr.txt").read_text(encoding="utf-8", errors="replace") if (d / "stderr.txt").is_file() else ""
+        msgs = [ln.strip() for ln in err.splitlines()
+                if (" -> " not in ln) and ("boost" in ln.lower() or "sentencepiece" in ln.lower())]
+        cells = [d.name, str(len(toks))] + [str(hits(toks, ph)) for ph in phrases]
+        cells += [str(Levenshtein.distance(base, toks)), f"{100 * Levenshtein.distance(ref_tok, toks) / len(ref_tok):.1f}",
+                  ("; ".join(dict.fromkeys(msgs)) or "none").replace("|", "/")]
+        print("| " + " | ".join(cells) + " |")
+
+
 def cmd_punct(a) -> None:
     for p in a.words:
         ws = raw_words(Path(p))
@@ -336,6 +373,12 @@ def main() -> None:
     p.add_argument("--words", nargs="+", required=True)
     p.add_argument("--offset", type=float, default=50.0)
     p.add_argument("--dur", type=float, default=300.0)
+    p = sub.add_parser("boost")
+    p.add_argument("--base", required=True, help="nemo_direct run directory without boosting")
+    p.add_argument("--runs", nargs="+", required=True)
+    p.add_argument("--phrases", nargs="+", required=True)
+    p.add_argument("--offset", type=float, default=50.0)
+    p.add_argument("--dur", type=float, default=300.0)
     p = sub.add_parser("table")
     p.add_argument("--configs", required=True)
     p.add_argument("--sessions", default="ami,aug2,sep5")
@@ -345,7 +388,7 @@ def main() -> None:
     p = sub.add_parser("punct")
     p.add_argument("--words", nargs="+", required=True)
     a = ap.parse_args()
-    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table,
+    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost,
      "punct": cmd_punct}[a.cmd](a)
 
 

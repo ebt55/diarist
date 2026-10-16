@@ -52,6 +52,7 @@ from common import (  # noqa: E402
     sha256_file,
     write_jsonl,
 )
+import gpu  # noqa: E402
 import metrics as M  # noqa: E402
 import zoom_vtt_to_ref  # noqa: E402
 
@@ -63,6 +64,7 @@ ENGINE_DIR = Path(
 )
 MODELS_DIR = Path(os.environ.get("DIARIST_EVAL_MODELS_DIR", REPO / "models"))
 RUN_SCHEMA = 1
+GPU_IDLE_MIB = int(os.environ.get("DIARIST_EVAL_GPU_IDLE_MIB", gpu.DEFAULT_IDLE_MIB))
 
 
 def log(msg: str) -> None:
@@ -141,7 +143,9 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
         return None
     if meta.get("status") != "ok" or meta.get("schema") != RUN_SCHEMA or not (d / "transcript.json").is_file():
         return None
-    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")):
+    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")) or list(
+        meta.get("engine_args") or []
+    ) != list(cfg.get("engine_args") or []):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
     if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
@@ -149,31 +153,76 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
     return meta
 
 
-def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
-    d = run_dir(config, s.id)
+def engine_arg_flags(cfg: dict) -> list[str]:
+    """configs.toml `engine_args` -> `--engine-arg=<flag>` per item (diarist-cli
+    appends them verbatim to `nemo-speech transcribe`; the standalone
+    `diarize` pass of `--rttm` does not get them)."""
+    return [f"--engine-arg={a}" for a in cfg.get("engine_args") or []]
+
+
+def birth_time(path: Path) -> float | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return getattr(st, "st_birthtime", None) or st.st_ctime
+
+
+def phase_times(audio_dir: Path) -> dict:
+    """Unix times of the engine steps, from the files diarist-core leaves in
+    the meeting's audio folder: engine.log is created when the first engine
+    command starts, source.words.json is written when `transcribe` ends and
+    diarization.rttm when the standalone `diarize` pass ends."""
+    out = {"engine_start": birth_time(audio_dir / "engine.log")}
+    for key, name in (("transcribe_end", "source.words.json"), ("diarize_end", "diarization.rttm")):
+        try:
+            out[key] = (audio_dir / name).stat().st_mtime
+        except OSError:
+            out[key] = None
+    return out
+
+
+def transcribe(
+    s: Session, config: str, cfg: dict, data: Path, *, language: str | None = None, run_id: str | None = None,
+    diarize: bool = True, wav: Path | None = None, duration: float | None = None,
+) -> dict:
+    """One diarist-cli transcribe of session s (or of `wav`, for FLEURS) into
+    runs/<config>/<run_id or session id>, with wall time per engine step and
+    peak VRAM (nvidia-smi delta) per step."""
+    rid = run_id or s.id
+    d = run_dir(config, rid)
     d.mkdir(parents=True, exist_ok=True)
-    wav, duration = wav_for(s)
-    log(f"[{s.id}] diarist-cli transcribe ({duration / 60:.1f} min, config {config})")
+    if wav is None:
+        wav, duration = wav_for(s)
+    lang = language or cfg["language"]
+    log(f"[{rid}] diarist-cli transcribe ({duration / 60:.1f} min, config {config}, language {lang})")
+    gpu.wait_idle(GPU_IDLE_MIB)
+    args = ["transcribe", str(wav), "--language", lang, "--title", rid]
+    args += ["--rttm"] if diarize else ["--no-diarize"]
+    args += ["--out", str(d / "transcript.json"), "--format", "json", *engine_arg_flags(cfg)]
+    t_start = time.time()
     t0 = time.perf_counter()
-    p = cli(
-        data, "transcribe", str(wav), "--language", cfg["language"], "--title", s.id, "--rttm",
-        "--out", str(d / "transcript.json"), "--format", "json",
-    )
+    with gpu.Sampler() as mon:
+        p = cli(data, *args)
     wall = time.perf_counter() - t0
     m = re.search(r"^meeting (\d+) \((\w+)\)", p.stdout, re.M)
     if not m:
         raise RuntimeError(f"cannot find the meeting id in diarist-cli output:\n{p.stdout}")
     mid, uid = m.group(1), m.group(2)
-    cli(data, "export", mid, "--format", "rttm", "--out", str(d / "hyp.rttm"))
+    if diarize:
+        cli(data, "export", mid, "--format", "rttm", "--out", str(d / "hyp.rttm"))
     audio_dir = data / "audio" / uid
     for name, dest in (
         ("diarization.rttm", "diarizer.rttm"),
         ("diarization.json", "diarizer.json"),
         ("engine.log", "engine.log"),
+        ("source.words.json", "engine.words.json"),
     ):
         if (audio_dir / name).is_file():
             shutil.copyfile(audio_dir / name, d / dest)
-    eng = re.search(r"^engine (\S+) \| asr (.+?) \| diarizer (.+?)\s*$", p.stderr, re.M)
+    eng = re.search(r"^engine (\S+) \| asr (.+?) \| diarizer (.+?)(?: \| engine args .*)?\s*$", p.stderr, re.M)
+    ph = phase_times(audio_dir)
+    t_asr0, t_asr1, t_dia1 = ph["engine_start"] or t_start, ph["transcribe_end"], ph["diarize_end"]
     meta = {
         "schema": RUN_SCHEMA,
         "status": "ok",
@@ -182,10 +231,20 @@ def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
         "meeting_id": int(mid),
         "meeting_uid": uid,
         "wall_s": round(wall, 1),
+        # nemo-speech transcribe alone (model load, warmup and decoding), from
+        # engine.log creation to source.words.json; the rest of wall_s is the
+        # audio decode, the standalone diarize pass and the database import.
+        "asr_wall_s": round(t_asr1 - t_asr0, 1) if t_asr1 else None,
+        "diarize_wall_s": round(t_dia1 - t_asr1, 1) if (t_dia1 and t_asr1) else None,
+        "vram_base_mib": mon.base,
+        "vram_peak_delta_mib": mon.peak_delta(),
+        "vram_asr_peak_delta_mib": mon.peak_delta(t_asr0, t_asr1) if t_asr1 else None,
+        "vram_diarize_peak_delta_mib": mon.peak_delta(t_asr1, t_dia1) if (t_asr1 and t_dia1) else None,
         "audio_s": round(duration, 3),
-        "language": cfg["language"],
+        "language": lang,
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
+        "engine_args": list(cfg.get("engine_args") or []),
         "engine_version": eng.group(1) if eng else None,
         "asr_file": eng.group(2) if eng else None,
         "diarizer_file": eng.group(3) if eng else None,
@@ -194,7 +253,11 @@ def transcribe(s: Session, config: str, cfg: dict, data: Path) -> dict:
         "cli_stdout": [ln for ln in p.stdout.splitlines() if not ln.strip().startswith("title")],
     }
     (d / "run.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    log(f"[{s.id}] done in {wall:.0f} s ({duration / max(wall, 1e-9):.1f}x real time)")
+    asr_rt = f", transcribe step {meta['asr_wall_s']} s" if meta["asr_wall_s"] else ""
+    log(
+        f"[{rid}] done in {wall:.0f} s ({duration / max(wall, 1e-9):.1f}x real time{asr_rt}; "
+        f"peak VRAM delta {meta['vram_peak_delta_mib']} MiB)"
+    )
     return meta
 
 
@@ -258,6 +321,9 @@ def score(s: Session, config: str, meta: dict) -> dict:
         region=region,
         audio_s=duration,
         wall_s=meta.get("wall_s"),
+        asr_wall_s=meta.get("asr_wall_s"),
+        vram_peak_delta_mib=meta.get("vram_peak_delta_mib"),
+        vram_asr_peak_delta_mib=meta.get("vram_asr_peak_delta_mib"),
         score_s=round(time.perf_counter() - t0, 1),
     )
     (d / "metrics.json").write_text(json.dumps(res, indent=2, default=str) + "\n", encoding="utf-8")
@@ -427,7 +493,9 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f" (local .verified matches: {asr.get('verified')})",
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
         f" (local .verified matches: {diar.get('verified')}); preset v3-streaming (runtime default)",
-        f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ...`, then `export --format rttm`",
+        f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
+        + "".join(f" {a}" for a in engine_arg_flags(cfg))
+        + "`, then `export --format rttm`",
         "- Engine command lines (from diarist-core's engine.log): "
         + "; ".join(f"`{c}`" for c in engine_commands(config, metas)),
         "- Word-to-speaker fusion: the runtime's own tags (start-anchored argmax); no app-side smoothing yet",
@@ -480,15 +548,19 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         "",
         "## Words and speed",
         "",
-        "| Session | Ref source | Ref words | Hyp words | Aligned | Near-change words | Ref changes | ORC-WER | Wall s | × real time |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "Wall s covers the whole diarist-cli run (audio decode, transcribe, the standalone diarize pass of `--rttm`, import). "
+        "Transcribe s is the `nemo-speech transcribe` step alone (engine.log creation to its words JSON). "
+        "VRAM is the peak nvidia-smi delta during the transcribe step over the reading before the run (research/08 pitfall 10); – when not sampled.",
+        "",
+        "| Session | Ref source | Ref words | Hyp words | Aligned | Near-change words | Ref changes | ORC-WER | Wall s | × real time | Transcribe s | VRAM Δ MiB |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         rt = r["audio_s"] / r["wall_s"] if r.get("wall_s") else None
         lines.append(
             f"| {r['label']} | {r['ref_source']} | {r['ref_words']} | {r['hyp_words']} | {r['wder_pairs']} | "
             f"{r['wder_near_pairs']} | {r['ref_changes']} | {pct(r.get('orcwer'))} | {r.get('wall_s') or '–'} | "
-            f"{f'{rt:.1f}' if rt else '–'} |"
+            f"{f'{rt:.1f}' if rt else '–'} | {r.get('asr_wall_s') or '–'} | {r.get('vram_asr_peak_delta_mib') or '–'} |"
         )
     lines += [
         "",
@@ -536,9 +608,186 @@ def export_for_correction(s: Session, config: str) -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# WER-only mode: FLEURS slices from fleurs_fetch.py (no diarization reference)
+
+FLEURS = WORK / "fleurs"
+# The language tag the runtime honours per app code. The Nemotron 3.5 prompt
+# dictionary (GGUF asr.rnnt.prompt_dictionary) has bare de, fr, it, hi, en, es
+# (es-US) and pt (pt-PT), but no bare ja or zh: those run as auto. FLEURS es_419
+# is Latin American and pt_br Brazilian, hence es-US and pt-BR.
+FLEURS_TAGS = {"de": "de", "fr": "fr", "it": "it", "hi": "hi", "en": "en", "ja": "ja-JP", "es": "es-US", "pt": "pt-BR"}
+# Model card FLEURS WER (CER for ja), Nemotron 3.5, by lookahead in ms:
+# (language given, auto-detect). Right context R gives (R + 1) x 80 ms.
+CARD = {
+    "es": ({80: 4.87, 160: 4.64, 320: 4.39, 560: 4.26, 1120: 4.11}, {80: 5.04, 160: 4.82, 320: 4.48, 560: 4.34, 1120: 4.13}),
+    "it": ({80: 5.23, 160: 4.85, 320: 4.83, 560: 4.41, 1120: 4.25}, {80: 5.28, 160: 4.89, 320: 4.84, 560: 4.47, 1120: 4.32}),
+    "pt": ({80: 6.29, 160: 6.10, 320: 5.81, 560: 5.65, 1120: 5.48}, {80: 6.41, 160: 6.19, 320: 5.82, 560: 5.57, 1120: 5.47}),
+    "hi": ({80: 8.13, 160: 7.97, 320: 7.41, 560: 7.05, 1120: 6.81}, {80: 11.47, 160: 10.83, 320: 9.88, 560: 9.26, 1120: 8.23}),
+    "en": ({80: 9.43, 160: 8.88, 320: 8.27, 560: 7.99, 1120: 7.91}, {80: 9.72, 160: 9.34, 320: 8.84, 560: 8.80, 1120: 8.84}),
+    "de": ({80: 9.81, 160: 9.21, 320: 8.83, 560: 8.42, 1120: 8.31}, {80: 9.90, 160: 9.37, 320: 8.87, 560: 8.58, 1120: 8.22}),
+    "fr": ({80: 10.97, 160: 10.60, 320: 9.79, 560: 9.45, 1120: 9.03}, {80: 11.03, 160: 10.60, 320: 9.84, 560: 9.46, 1120: 9.02}),
+    "ja": ({80: 13.87, 160: 12.90, 320: 12.22, 560: 11.91, 1120: 11.48}, {80: 14.97, 160: 13.85, 320: 13.00, 560: 12.38, 1120: 11.66}),
+}
+CER_LANGS = {"ja", "zh", "ko"}
+
+
+def lookahead_ms(cfg: dict) -> int:
+    args = list(cfg.get("engine_args") or [])
+    r = 1
+    if "--asr.streaming.rnnt_right_context" in args:
+        r = int(args[args.index("--asr.streaming.rnnt_right_context") + 1])
+    if r < 0:  # the GGUF's trained maximum
+        r = 13 if cfg["asr"] == "nemotron-en" else 3
+    return (r + 1) * 80
+
+
+def multilingual_tokens(text: str) -> list[str]:
+    """Non-English normaliser: NFKC, casefold, every punctuation or symbol
+    character (Unicode P*, S*) becomes a space. Combining marks (Devanagari
+    vowel signs, Japanese voicing marks) are kept, unlike whisper's
+    BasicTextNormalizer, which splits Hindi words at every vowel sign."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKC", text).casefold()
+    s = "".join(" " if unicodedata.category(c)[0] in "PS" else c for c in s)
+    return s.split()
+
+
+def fleurs_units(lang: str, text: str) -> list[str]:
+    from common import normalize_text
+
+    if lang == "en":
+        return normalize_text(text)  # the harness normaliser, as for AMI and Zoom
+    toks = multilingual_tokens(text)
+    if lang in CER_LANGS:
+        return [c for t in toks for c in t]
+    return toks
+
+
+def edit_counts(ref: list[str], hyp: list[str]) -> dict:
+    from rapidfuzz.distance import Levenshtein
+
+    sub = dele = ins = 0
+    for op in Levenshtein.opcodes(ref, hyp):
+        n_ref, n_hyp = op.src_end - op.src_start, op.dest_end - op.dest_start
+        if op.tag == "replace":
+            sub += min(n_ref, n_hyp)
+            dele += max(0, n_ref - n_hyp)
+            ins += max(0, n_hyp - n_ref)
+        elif op.tag == "delete":
+            dele += n_ref
+        elif op.tag == "insert":
+            ins += n_hyp
+    n = len(ref)
+    return {"ref_units": n, "hyp_units": len(hyp), "sub": sub, "del": dele, "ins": ins,
+            "er": (sub + dele + ins) / n if n else float("nan")}
+
+
+def fleurs_language(lang: str, mode: str) -> str:
+    return {"given": FLEURS_TAGS[lang], "short": lang, "auto": "auto"}[mode]
+
+
+def run_fleurs(config: str, cfg: dict, langs: list[str], mode: str, force: bool, metrics_only: bool) -> list[dict]:
+    data = None
+    out = []
+    for lang in langs:
+        root = FLEURS / lang
+        if not (root / "meta.json").is_file():
+            raise SystemExit(f"{root} missing: run `uv run python -I fleurs_fetch.py --langs {lang}`")
+        fmeta = json.loads((root / "meta.json").read_text(encoding="utf-8"))
+        tag = fleurs_language(lang, mode)
+        rid = f"fleurs-{lang}-{mode}"
+        d = run_dir(config, rid)
+        meta = None
+        try:
+            meta = json.loads((d / "run.json").read_text(encoding="utf-8"))
+            if (
+                meta.get("status") != "ok" or meta.get("language") != tag or meta.get("asr") != cfg["asr"]
+                or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+            ):
+                meta = None
+        except (OSError, ValueError):
+            meta = None
+        if (meta is None or force) and not metrics_only:
+            data = data or prepare_data_root(config, cfg)
+            s = Session(id=rid, label=rid, kind="fleurs", group="fleurs", audio=root / "audio.wav")
+            meta = transcribe(
+                s, config, cfg, data, language=tag, run_id=rid, diarize=False,
+                wav=root / "audio.wav", duration=fmeta["duration_s"],
+            )
+        if meta is None:
+            log(f"[{rid}] no cached run for {config}; skipped")
+            continue
+        refs = [json.loads(ln) for ln in (root / "refs.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
+        doc = json.loads((d / "transcript.json").read_text(encoding="utf-8"))
+        hyp_text = " ".join(s["text"] for s in sorted(doc.get("segments", []), key=lambda s: s["start_ms"]))
+        ref_text = " ".join(r["raw_transcription"] for r in refs)
+        res = edit_counts(fleurs_units(lang, ref_text), fleurs_units(lang, hyp_text))
+        detected = None
+        try:
+            detected = json.loads((d / "engine.words.json").read_text(encoding="utf-8")).get("languages")
+        except (OSError, ValueError):
+            pass
+        ms = lookahead_ms(cfg)
+        card = CARD.get(lang)
+        res.update(
+            config=config, lang=lang, mode=mode, tag=tag, metric="CER" if lang in CER_LANGS else "WER",
+            utterances=len(refs), audio_s=fmeta["duration_s"], wall_s=meta.get("wall_s"),
+            asr_wall_s=meta.get("asr_wall_s"), detected=detected, lookahead_ms=ms,
+            card=(card[1 if mode == "auto" else 0].get(ms) if card and cfg["asr"] == "nemotron-3.5" else None),
+        )
+        (d / "metrics.json").write_text(json.dumps(res, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        log(f"[{rid}] {res['metric']} {100 * res['er']:.1f} % ({res['ref_units']} ref units), detected {detected}")
+        out.append(res)
+    return out
+
+
+def fleurs_report(path: Path, configs: dict) -> None:
+    """One table over every cached FLEURS run (all configs and modes)."""
+    rows = []
+    for mj in sorted((WORK / "runs").glob("*/fleurs-*/metrics.json")):
+        r = json.loads(mj.read_text(encoding="utf-8"))
+        if r.get("config") in configs:
+            rows.append(r)
+    order = list(FLEURS_TAGS)
+    rows.sort(key=lambda r: (order.index(r["lang"]) if r["lang"] in order else 99, r["config"], r["mode"]))
+    today = dt.date.today().isoformat()
+    lines = [
+        f"# Eval: FLEURS slices, WER only ({today})",
+        "",
+        "Generated by `tools/eval/run.py --fleurs-report`. About 10 minutes of the FLEURS test split per language "
+        "(`fleurs_fetch.py`: utterances in archive order, one recording per sentence, joined with 1.5 s of silence) "
+        "through `diarist-cli transcribe --no-diarize --language <tag>`. WER in percent; CER for ja. "
+        "Normaliser: the harness's for en (" + NORMALIZER_NAME + "); for the others NFKC, casefold, "
+        "punctuation and symbols removed (combining marks kept). Card = the model card's FLEURS number at the same "
+        "lookahead and mode (full test split, NVIDIA's normaliser), for Nemotron 3.5 only.",
+        "",
+        "| Lang | Config | ASR | Lookahead | Mode | Tag passed | Detected | Utt | Ref units | WER/CER | Sub | Del | Ins | Card | Transcribe s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        cfg = configs.get(r["config"], {})
+        lines.append(
+            f"| {r['lang']} | {r['config']} | {cfg.get('asr', '?')} | {r['lookahead_ms']} ms | {r['mode']} | `{r['tag']}` | "
+            f"{', '.join(r.get('detected') or []) or '–'} | {r['utterances']} | {r['ref_units']} | {pct(r['er'])} ({r['metric']}) | "
+            f"{r['sub']} | {r['del']} | {r['ins']} | {r['card'] if r.get('card') is not None else '–'} | {r.get('asr_wall_s') or '–'} |"
+        )
+    lines += [
+        "",
+        "Notes: a 10-minute slice is 37 to 55 utterances, so one or two points either way is noise. FLEURS references "
+        "write numbers as digits and the runtime has no ITN grammars configured, so spoken numbers count as errors on "
+        "both sides of the comparison. The EN model ignores `--language` (diarist passes it only to multilingual models).",
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    log(f"wrote {path}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", help="required except with --fleurs-report")
     ap.add_argument("--sessions", default="all", help="comma-separated session ids, or all")
     ap.add_argument("--sessions-file", type=Path, default=EVAL_DIR / "sessions.toml")
     ap.add_argument("--configs-file", type=Path, default=EVAL_DIR / "configs.toml")
@@ -548,14 +797,38 @@ def main() -> None:
     ap.add_argument("--export-for-correction", metavar="SESSION")
     ap.add_argument("--out", type=Path, help="report path (default docs/eval/<date>-<config>.md)")
     ap.add_argument("--no-report", action="store_true")
+    ap.add_argument(
+        "--fleurs", metavar="LANGS",
+        help="WER-only mode on the FLEURS slices of fleurs_fetch.py: comma-separated app codes, or all",
+    )
+    ap.add_argument(
+        "--fleurs-language", choices=("given", "auto", "short"), default="given",
+        help="given: the tag the runtime honours (ja-JP, es-US, pt-BR, bare de fr it hi en); "
+        "short: the app's bare code; auto: detection",
+    )
+    ap.add_argument("--fleurs-report", action="store_true", help="write docs/eval/<date>-fleurs.md from cached FLEURS runs")
     a = ap.parse_args()
 
     configs = tomllib.loads(a.configs_file.read_text(encoding="utf-8"))
+    if a.fleurs_report:
+        fleurs_report(a.out or DOCS_EVAL / f"{dt.date.today().isoformat()}-fleurs.md", configs)
+        return
+    if not a.config:
+        raise SystemExit("--config is required")
     if a.config not in configs:
         raise SystemExit(f"unknown config {a.config!r}; known: {', '.join(configs)}")
     cfg = configs[a.config]
     if cfg.get("skip"):
         raise SystemExit(f"config {a.config} is not runnable: {cfg['skip']}")
+    if a.fleurs:
+        langs = list(FLEURS_TAGS) if a.fleurs == "all" else [x.strip() for x in a.fleurs.split(",") if x.strip()]
+        for lang in langs:
+            if lang not in FLEURS_TAGS:
+                raise SystemExit(f"unknown language {lang!r}; known: {', '.join(FLEURS_TAGS)}")
+        res = run_fleurs(a.config, cfg, langs, a.fleurs_language, a.force, a.metrics_only)
+        for r in res:
+            print(f"{r['lang']:<4}{r['mode']:<7}{r['tag']:<8}{r['metric']} {100 * r['er']:5.1f}  card {r['card']}")
+        return
     sessions = load_sessions(a.sessions_file)
     if a.export_for_correction:
         export_for_correction(sessions[a.export_for_correction], a.config)
