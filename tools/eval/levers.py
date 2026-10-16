@@ -24,6 +24,7 @@ ami-misses: reference words of the AMI clip that the hypothesis gets wrong,
   most frequent first (candidates for --speech-context).
 clip-score: WER and cpWER of runtime words JSONs on an AMI clip.
 punct: share of words carrying punctuation or a capital, per words JSON.
+compare: session by config table of speaker count, DER, WDER, near and cpWER.
 fleurs-utts: per-utterance errors of FLEURS runs, with empty and silent
   recordings counted.
 boost: phrase hits, changes against the unboosted run, clip WER and the
@@ -381,6 +382,30 @@ def cmd_fleurs_utts(a) -> None:
                 print("    " + b)
 
 
+def cmd_compare(a) -> None:
+    """Session by config table from cached metrics.json: speaker count
+    error, DER c0.25, WDER, WDER near and cpWER (percent)."""
+    sessions = load_sessions(a.sessions_file)
+    configs = [x.strip() for x in a.configs.split(",") if x.strip()]
+    sids = list(sessions) if a.sessions == "all" else [x.strip() for x in a.sessions.split(",") if x.strip()]
+
+    def pc(x):
+        return "–" if x is None or x != x else f"{100 * x:.1f}"
+
+    print("| Session | Config | Ref / hyp speakers | DER c0.25 | WDER | WDER near | cpWER |")
+    print("|---|---|---|---|---|---|---|")
+    for sid in sids:
+        for c in configs:
+            m = _load(RUNS / c / sid / "metrics.json")
+            if not m:
+                print(f"| {sessions[sid].label} | {c} | missing | | | | |")
+                continue
+            print(
+                f"| {sessions[sid].label} | {c} | {m['ref_speakers']} / {m['hyp_speakers']} | {pc(m.get('der_c025'))} | "
+                f"{pc(m.get('wder'))} | {pc(m.get('wder_near'))} | {pc(m.get('cpwer'))} |"
+            )
+
+
 def cmd_punct(a) -> None:
     for p in a.words:
         ws = raw_words(Path(p))
@@ -426,6 +451,9 @@ def main() -> None:
     p.add_argument("--configs", default="nemotron35,n35_rc_13")
     p.add_argument("--mode", default="given")
     p.add_argument("--bad", type=float, default=0.5, help="list utterances with at least this error rate")
+    p = sub.add_parser("compare")
+    p.add_argument("--configs", required=True)
+    p.add_argument("--sessions", default="all")
     p = sub.add_parser("table")
     p.add_argument("--configs", required=True)
     p.add_argument("--sessions", default="ami,aug2,sep5")
@@ -435,7 +463,7 @@ def main() -> None:
     p = sub.add_parser("punct")
     p.add_argument("--words", nargs="+", required=True)
     a = ap.parse_args()
-    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts,
+    {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts, "compare": cmd_compare,
      "punct": cmd_punct}[a.cmd](a)
 
 

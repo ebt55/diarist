@@ -2,6 +2,8 @@
 
 Chunk A of `docs/plans/12-release-beta2.md`: the four runtime levers Diarist does not use yet (decoder lookahead, diarizer geometry, punctuation model, word boosting) and a per-language smoke test, measured on the fixed eval set (`docs/05-eval-data.md`). No product code changed. Opus 5.5 implementation agent.
 
+**Summary** (section 7 has the table): adopt lookahead 13 and the `v3-offline` diarizer preset for file jobs and the post-pass. Together they take AMI cpWER from 23.0 to 20.7 % (Nemotron 3.5) and from 19.8 to 18.0 % (EN), make the transcribe step 2.6 times faster at the same VRAM, and lower near-change WDER on five of six multi-speaker sessions; the one cost is a 7-word speaker merged on Sep 5. Drop the runtime punctuation hook (nemo-speech ignores it for both of Diarist's models) and word boosting (impossible on the pinned GGUFs, destructive on the re-converted one). Pass locale tags: bare `ja` runs as `auto`, bare `pt` as pt-PT. Eval reports: `docs/eval/2026-10-16-{nemotron35,n35_rc_13,n35_rc_13_diar_off,nemotron_en,en_rc_13,en_rc_13_diar_off,fleurs}.md`.
+
 ## 0. Setup
 
 | Item | Value |
@@ -110,7 +112,61 @@ Config `n35_rc_13_diar_off` (`--asr.streaming.rnnt_right_context 13 --asr.diar.p
 - The transcribe step is 20 to 37 % faster again and peak VRAM is the same or lower.
 - Tag agreement with the (streaming) standalone diarizer on Aug 14 drops from 99.9 to 99.1 %, as expected when the two passes no longer use the same geometry.
 
-FULLSET_DIAR
+### Full set (seven sessions)
+
+`uv run python -I run.py --config <config> --sessions all` for `nemotron35`, `n35_rc_13`, `n35_rc_13_diar_off`, `nemotron_en`, `en_rc_13`, `en_rc_13_diar_off`; table from `uv run python -I levers.py compare --configs <...>`; reports in `docs/eval/2026-10-16-<config>.md`. Percentages; speakers are reference / transcript. In every session the preset leaves the words identical and retags 0 to 40 words (Aug 14: about 2,500, mostly a different numbering of the same 8 labels).
+
+| Session | Config | Ref / hyp speakers | DER c0.25 | WDER | WDER near | cpWER |
+|---|---|---|---|---|---|---|
+| Aug 2 | nemotron35 | 6 / 6 | 8.5 | 0.6 | 9.1 | 12.0 |
+| Aug 2 | n35_rc_13 | 6 / 6 | 7.6 | 0.5 | 8.2 | 10.9 |
+| Aug 2 | n35_rc_13_diar_off | 6 / 6 | 7.5 | 0.2 | 5.5 | 10.3 |
+| Aug 2 | nemotron_en | 6 / 6 | 6.4 | 0.6 | 8.8 | 10.3 |
+| Aug 2 | en_rc_13 | 6 / 6 | 7.7 | 0.7 | 8.2 | 10.2 |
+| Aug 2 | en_rc_13_diar_off | 6 / 6 | 7.4 | 0.3 | 5.6 | 9.5 |
+| Aug 9 | nemotron35 | 3 / 3 | 9.0 | 0.3 | 7.4 | 9.2 |
+| Aug 9 | n35_rc_13 | 3 / 3 | 9.0 | 0.3 | 6.6 | 8.5 |
+| Aug 9 | n35_rc_13_diar_off | 3 / 3 | 8.9 | 0.3 | 5.7 | 8.4 |
+| Aug 9 | nemotron_en | 3 / 3 | 8.4 | 0.3 | 6.9 | 8.5 |
+| Aug 9 | en_rc_13 | 3 / 3 | 9.0 | 0.4 | 7.6 | 8.1 |
+| Aug 9 | en_rc_13_diar_off | 3 / 3 | 9.0 | 0.3 | 6.8 | 8.1 |
+| Sep 7 | nemotron35 | 5 / 4 | 12.6 | 0.3 | 8.2 | 7.9 |
+| Sep 7 | n35_rc_13 | 5 / 4 | 11.9 | 0.2 | 5.7 | 7.5 |
+| Sep 7 | n35_rc_13_diar_off | 5 / 4 | 11.9 | 0.2 | 5.7 | 7.5 |
+| Sep 7 | nemotron_en | 5 / 4 | 10.6 | 0.3 | 8.2 | 7.8 |
+| Sep 7 | en_rc_13 | 5 / 4 | 11.4 | 0.4 | 11.8 | 7.3 |
+| Sep 7 | en_rc_13_diar_off | 5 / 4 | 11.4 | 0.3 | 12.7 | 7.2 |
+| Sep 5 | nemotron35 | 5 / 5 | 3.6 | 0.2 | 7.8 | 5.4 |
+| Sep 5 | n35_rc_13 | 5 / 5 | 3.6 | 0.1 | 7.1 | 5.1 |
+| Sep 5 | n35_rc_13_diar_off | 5 / 4 | 3.6 | 0.2 | 7.8 | 5.1 |
+| Sep 5 | nemotron_en | 5 / 5 | 3.0 | 0.1 | 6.9 | 5.1 |
+| Sep 5 | en_rc_13 | 5 / 5 | 3.9 | 0.2 | 7.3 | 4.7 |
+| Sep 5 | en_rc_13_diar_off | 5 / 4 | 3.9 | 0.2 | 7.3 | 4.7 |
+| Sep Logistics | nemotron35 | 1 / 1 | 6.7 | 0.0 | – | 7.3 |
+| Sep Logistics | n35_rc_13 | 1 / 1 | 5.2 | 0.0 | – | 6.6 |
+| Sep Logistics | n35_rc_13_diar_off | 1 / 1 | 5.2 | 0.0 | – | 6.6 |
+| Sep Logistics | nemotron_en | 1 / 1 | 5.9 | 0.0 | – | 7.1 |
+| Sep Logistics | en_rc_13 | 1 / 1 | 6.5 | 0.0 | – | 7.0 |
+| Sep Logistics | en_rc_13_diar_off | 1 / 1 | 6.5 | 0.0 | – | 7.0 |
+| Aug 14 | nemotron35 | 6 / 8 | 26.8 | 20.7 | 40.4 | 44.3 |
+| Aug 14 | n35_rc_13 | 6 / 8 | 26.1 | 20.7 | 41.2 | 43.5 |
+| Aug 14 | n35_rc_13_diar_off | 6 / 8 | 25.0 | 19.3 | 18.0 | 42.9 |
+| Aug 14 | nemotron_en | 6 / 8 | 26.3 | 20.9 | 43.8 | 44.7 |
+| Aug 14 | en_rc_13 | 6 / 8 | 27.1 | 20.9 | 42.2 | 44.3 |
+| Aug 14 | en_rc_13_diar_off | 6 / 8 | 25.7 | 19.4 | 19.1 | 43.9 |
+| AMI ES2002a | nemotron35 | 4 / 4 | 26.1 | 3.2 | 8.9 | 23.0 |
+| AMI ES2002a | n35_rc_13 | 4 / 4 | 24.8 | 2.3 | 6.6 | 20.8 |
+| AMI ES2002a | n35_rc_13_diar_off | 4 / 4 | 24.7 | 2.2 | 6.2 | 20.7 |
+| AMI ES2002a | nemotron_en | 4 / 4 | 20.4 | 3.4 | 9.3 | 19.8 |
+| AMI ES2002a | en_rc_13 | 4 / 4 | 19.8 | 2.7 | 7.3 | 18.3 |
+| AMI ES2002a | en_rc_13_diar_off | 4 / 4 | 19.9 | 2.3 | 6.3 | 18.0 |
+
+Noise band: WDER near counts the 110 to 240 reference words within 1 s of a speaker change in a Zoom session, so one word moves it by 0.4 to 0.9 points; AMI has 716 such words (0.14 points per word).
+
+- **Nemotron 3.5 + preset against 3.5 at lookahead 13**: near-change WDER improves on Aug 2 (8.2 to 5.5), Aug 9 (6.6 to 5.7), AMI (6.6 to 6.2) and the stress session Aug 14 (41.2 to 18.0); Sep 7 and Sep Logistics are unchanged; Sep 5 goes from 7.1 to 7.8, one word, inside the band. Overall WDER never rises by more than 0.1. cpWER is equal or better everywhere (Aug 2 10.9 to 10.3).
+- **Speaker count**: the preset regresses one session, Sep 5, from 5 to 4 speakers: the reference's smallest speaker (7 words) is merged into another label, on both models. Sep 7 is one short with and without it (as it was at the default lookahead in the 15 Oct report). The single-speaker control stays at 1. This is within docs/00's bar ("within one"), but it is a real loss of a speaker who said one sentence.
+- **Nemotron EN + preset against EN at lookahead 13**: the same pattern (Aug 2 8.2 to 5.6, Aug 9 7.6 to 6.8, AMI 7.3 to 6.3, Aug 14 42.2 to 19.1, Sep 5 7.3 to 7.3, Sep 7 11.8 to 12.7, one word), and the same Sep 5 speaker merge.
+- **Lookahead and near-change WDER on EN**: lookahead 13 alone does not help the EN model's near-change attribution on every Zoom session the way it does on 3.5: Aug 2 8.8 to 8.2, Sep 5 6.9 to 7.3, Aug 9 6.9 to 7.6 and **Sep 7 8.2 to 11.8** (about four words), while AMI improves 9.3 to 7.3; its transcript DER also rises by 0.6 to 1.3 points on the Zoom sessions (the segments move with the 160 ms earlier word starts). On 3.5 lookahead 13 improves near-change WDER on every session but the stress session (Sep 7 8.2 to 5.7, Aug 9 7.4 to 6.6, Sep 5 7.8 to 7.1; Aug 14 40.4 to 41.2). EN's Sep 7 is the one session in the whole table that regresses beyond the band, and the preset does not repair it (12.7).
 
 ## 3. Punctuation and casing (`--pnc-model`)
 
@@ -228,6 +284,26 @@ WER in percent (CER for ja). Card: the Nemotron 3.5 model card's FLEURS numbers 
 - **`--verbatim` changes nothing here.** In nemo-speech 0.2.0 it sets `verbatim_transcripts`, which only skips inverse text normalisation (`src/asr/postproc/pipeline.cpp`, the ITN stage); fillers are dropped by the model itself, not by a post-processor. With no ITN grammars configured, `nemotron35_verbatim` (now runnable: `engine_args = ["--verbatim"]`) gives word-for-word and time-for-time identical output to `nemotron35` on AMI, Aug 2 and Sep 5 (`levers.py diff --a nemotron35 --b nemotron35_verbatim`: 0 edit operations). docs/05's hope that it brings fillers back does not hold.
 - **The 3.5 prompt dictionary** (`asr.rnnt.prompt_dictionary` in the GGUF, 121 entries) maps bare `en`, `es` (to es-US), `fr`, `de`, `hi`, `pt` (to **pt-PT**), `it`, `nl`, `pl`, `ru`, `ko`, `tr`, `uk`, `ro` and others, but has no bare `ja`, `zh`, `vi`, `th` or `he`; those need the locale form (`ja-JP`, `zh-CN`, ...). Checked on the FLEURS slices with Nemotron 3.5 at the default lookahead (`run.py --config nemotron35 --fleurs ja,pt --fleurs-language short`): bare `ja`, which the app's language list offers today, gives output identical to `auto` (0 edit operations; CER 24.7 % against 23.5 % with `ja-JP`), so a user who picks Japanese silently gets detection. Bare `pt` runs the pt-PT prompt on Brazilian audio (the runtime reports `pt-PT`): 150 words differ from the `pt-BR` run, at the same WER (9.2 %) on this slice. The app needs the locale mapping that chunk C adds (ja to ja-JP, zh to zh-CN, separate pt-BR and pt-PT, es-ES and es-US).
 - **GPU sharing during evals.** Another agent's debug build of the desktop app with a live `nemo-speech serve` held 2 GB and 20 to 40 % utilisation for part of the afternoon. run.py's idle check (`tools/eval/gpu.py`) now waits only while another job keeps the GPU busy (median utilisation of 25 % or more over 5 s) or holds more than 1.2 GB above the idle level; before, it waited on memory alone and a desktop at 1.7 to 1.9 GB of browser and app windows blocked it.
+
+## 7. Recommendations
+
+| Lever | Numbers (sections above) | Verdict |
+|---|---|---|
+| **Decoder lookahead** for file jobs and the post-pass: `--asr.streaming.rnnt_right_context 13` on both models (the explicit value; `-1` means 3 on the pinned 3.5) | AMI cpWER 23.0 → 20.8 (3.5) and 19.8 → 18.3 (EN). Zoom cpWER −0.3 to −1.1 (3.5) and −0.1 to −0.5 (EN) on all five user meetings. Near-change WDER on 3.5 better on every session but the stress one; on EN mixed (AMI 9.3 → 7.3, Sep 7 8.2 → 11.8). FLEURS: better in all eight languages, −0.1 to −9.7 points with the language given. Transcribe step 663 → 363 s for the 324-minute full set (×29 → ×54 real time). Peak VRAM unchanged (1.66 to 1.89 GB on the 77-minute file). Tag agreement with `diarize` 99.9 % (3.5), 99.7 % (EN). Word starts 80 ms (3.5) and 160 ms (EN) earlier, toward the true times | **Adopt** as the default for file jobs and the post-pass, both models (chunk E). Live stays at R = 1. Live-to-post-pass carry-over must match within at least 250 ms (or on text). A hidden `engine.file_lookahead` key is harmless, but no VRAM or speed cost needs an escape hatch. Watch EN's Sep 7 near-change number when EN is the selected model |
+| **Diarizer geometry** `--asr.diar.preset v3-offline` in the fused pass, with lookahead 13 | Near-change WDER, 3.5: Aug 2 8.2 → 5.5, Aug 9 6.6 → 5.7, AMI 6.6 → 6.2, Aug 14 (stress) 41.2 → 18.0; Sep 7 and Sep Logistics unchanged; Sep 5 7.1 → 7.8 (one word). EN the same pattern. Words identical; cpWER equal or better everywhere. Transcribe step another 31 % faster (363 → 251 s, ×77 real time), VRAM the same or lower. One regression: Sep 5 loses its 7-word speaker (5 → 4) on both models; the single-speaker control stays at 1 | **Adopt** for file jobs and the post-pass, together with the lookahead. The speaker merge is within docs/00's "within one" and costs one sentence's label; keep a stored key to fall back to `v3-streaming` if users report merged one-sentence speakers. Live keeps the streaming geometry. The standalone `diarize` pass (if the app keeps one) should get the same preset so the two passes agree |
+| **Punctuation through the runtime** (`--pnc-model`) | nemo-speech 0.2.0 ignores `--pnc-model` for any ASR model whose vocabulary has a sentence terminator, and both of ours do: the probe gives the warning, identical words, no time or VRAM cost. The Apache-2.0 47-language checkpoint does not convert ("cannot determine checkpoint architecture", then "missing expected PnC artifacts in .nemo"). The NGC checkpoints are under the NGC Terms of Use | **Drop** for beta.2, including F's "plumbing" (dead code for every model in the manifest). Punctuation goes to the app-side route (the 47-language ONNX model applied to the existing `words[]`, case upgrades only), beta.3 |
+| **Word boosting** (`--speech-context`) | Pinned GGUFs: "no embedded SentencePiece tokenizer … boosting disabled", output unchanged. Re-converted 3.5 (`ea30d66`, 742,090,464 B, SHA-256 `3fc991d3…70b1`): no target word fixed at any boost from 0.5 to 5; clip WER 23.0 → 23.5 (boost 1), 24.5 (2), 36.5 (3), 83.4 (5); 20 names absent from the audio: 23.5 at boost 1, 45.7 at 3 | **Drop** for beta.2 and do not build G on runtime 0.2.0. No manifest bump for it (the re-converted GGUF also decodes slightly differently without boosting). Revisit with a runtime release that changes RNNT boosting; repeat the 20-absent-names control first |
+| **Language tags** | Bare `ja` runs as `auto` (identical output); bare `pt` runs pt-PT on Brazilian audio; `es` means es-US | **Adopt** chunk C's locale mapping (ja-JP, zh-CN, pt-BR and pt-PT, es-ES and es-US) |
+| **Auto-detect** | At 1.12 s within 0.7 points of a given tag except Spanish (9.5 against 6.8); at 160 ms up to 8.9 points worse (es) | Keep `auto` as a choice, not the default. With lookahead 13 its cost is small for most languages |
+| **`--verbatim`** | Identical output (it only skips ITN; no grammars are configured) | **Drop**; docs/05 corrected |
+
+What the website can say from this: on AMI ES2002a (far-field mix, word-level manual reference), Diarist's file pass goes from 23.0 to 20.7 % cpWER with Nemotron 3.5 and from 19.8 to 18.0 % with Nemotron EN with both levers, and on Diarist's own meetings it puts 5.5 to 7.8 % of the words near speaker changes on the wrong speaker (the in-room stress session aside), at about 77 times real time for the transcribe step on an RTX 3080. The FLEURS slices are smoke tests, not publishable WER; per-language claims should quote the model card.
+
+### Not done, and why
+
+- The NGC `punctuation_en_bert` functional check: not downloaded, because downloading it accepts the NGC Terms of Use, which is the owner's call. The gate in section 3 makes it moot for Diarist's models. The command is in section 8.
+- zh was not fetched for FLEURS (not in the plan's language list); the tag finding for it (`zh-CN`) comes from the prompt dictionary and the plan review's test.
+- The EN model's Sep 7 regression at lookahead 13 (near-change WDER 8.2 → 11.8) was not investigated further.
 
 ## 8. Reproducing (all from `tools/eval`, after the README setup)
 
