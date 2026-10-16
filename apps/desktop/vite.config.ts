@@ -1,6 +1,7 @@
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { defineConfig } from "vite";
+import { defineConfig, searchForWorkspaceRoot } from "vite";
 
 // Set by the Tauri CLI for mobile/remote dev; unset on desktop.
 const host = process.env.TAURI_DEV_HOST;
@@ -17,6 +18,8 @@ export default defineConfig({
     host: host || "127.0.0.1",
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+    // The sidebar's app icon comes from the repository's branding folder.
+    fs: { allow: [searchForWorkspaceRoot(process.cwd()), fileURLToPath(new URL("../../branding", import.meta.url))] },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {

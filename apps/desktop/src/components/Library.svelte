@@ -8,6 +8,7 @@
   import type { JobStage } from "../lib/generated/JobStage";
   import { live } from "../lib/live.svelte";
   import { app } from "../lib/state.svelte";
+  import Brand from "./Brand.svelte";
   import Icon from "./Icon.svelte";
 
   interface Props {
@@ -188,7 +189,7 @@
 
 <aside class="sidebar" aria-label="Library">
   <header class="side-head">
-    <span class="brand">Diarist</span>
+    <Brand />
     <div class="head-actions">
       {#if live.active}
         <button
@@ -419,13 +420,6 @@
     justify-content: space-between;
     gap: 8px;
     padding: 10px 10px 6px 14px;
-  }
-  .brand {
-    overflow: hidden;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-    white-space: nowrap;
-    text-overflow: ellipsis;
   }
   .head-actions {
     display: flex;
