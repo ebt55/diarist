@@ -231,6 +231,32 @@ the workspace `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`
 (Cargo.lock follows through cargo). NSIS accepts pre-release versions; MSI
 would not, and is not built.
 
+**Release PDB.** The release profile (workspace `Cargo.toml`) builds with
+`debug = "line-tables-only"` and `strip = "none"`, so `bun run tauri build`
+leaves `target\release\diarist.pdb` next to the exe (and `cargo build
+--release -p diarist-cli` leaves `diarist_cli.pdb`). On windows-msvc the debug
+information lives only in the PDB; the exe names it by file name and GUID, so
+its size does not change and the installer does not grow. Measured on
+`diarist-cli` (16 Oct 2026): exe 10,636,288 bytes with the old `strip = true`
+and 10,633,216 with line tables; PDB 3.3 MB, which resolved only the standard
+library's frames (ours showed as `__ImageBase`), against 29.8 MB that resolves
+every frame to a function, file and line. A PDB matches only the build that
+produced it, so archive `diarist.exe` and `diarist.pdb` of every release
+together, either as a private artifact the owner keeps (for example
+`diarist-<version>-symbols.zip` next to the signing key's backup) or as an
+asset on the GitHub release; the owner decides per release. A published PDB
+holds no code, but it does hold function names and the build machine's
+absolute source paths, user folder name included. To symbolicate a crash
+report: its header gives `exe base`, a native report gives `address: ... in
+diarist.exe + 0x<offset>`, and for a frame of a panic backtrace the offset is
+the frame address minus the exe base. With the archived exe and PDB in one
+folder, `cdb -z <folder>\diarist.exe -y <folder> -c ".lines -e; ln
+diarist+0x<offset>; q"` (cdb from the Windows SDK's Debugging Tools; the CLI's
+module is `diarist_cli`) prints the function and the source line, and `cdb -z
+crash-<time>.dmp -y <folder> -i <folder> -c ".lines -e; .ecxr; kn; q"` prints
+the whole stack of a minidump the user chose to send. Keep the symbol path to
+that folder: `srv*` would fetch Windows' own symbols from Microsoft.
+
 The Tauri CLI downloads NSIS into its cache on the first bundle. If that
 download is blocked, add `--no-bundle` to get just the exe.
 

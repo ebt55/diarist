@@ -28,7 +28,12 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 # a panicking command should not take the whole app (and a live recording) down.
 codegen-units = 1
 lto = true
-strip = true
+# Line tables, kept in the PDB next to the exe (windows-msvc keeps debug info
+# out of the exe; `strip` would drop it): each release's PDB is archived so the
+# addresses in a crash report resolve to functions and lines (docs/DEV.md,
+# "Release PDB").
+debug = "line-tables-only"
+strip = "none"
 
 # Debug builds optimise dependencies (symphonia, rubato, rusqlite, ...) so a
 # debug desktop build decodes an hour of AAC in seconds, not minutes; our own
