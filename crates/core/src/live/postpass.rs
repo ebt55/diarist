@@ -11,6 +11,9 @@
 //! WAVs deleted, and the live run deleted unless `keep_live_runs`. With
 //! `transcribe = false` (`post_pass_mode = on_issues` and a clean
 //! recording) the live run is promoted instead and only the audio work runs.
+//! Words that come back mostly unknown-token markers fail the post-pass
+//! before anything is stored ([`CoreError::UnknownTokens`]): the live run
+//! and the WAVs stay, so it can run again.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,7 @@ use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
 use crate::audio::flac::encode_stereo;
 use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, FileJob};
 use crate::error::{CoreError, Result};
+use crate::models::languages;
 use crate::pipeline::CancelToken;
 use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
 use crate::transcript::{
@@ -234,6 +238,15 @@ pub fn run_post_pass(
             channels.push((ch, tw));
         }
         transcribe_wall = t0.elapsed();
+        // A language the model cannot transcribe: nothing is stored, and the
+        // live transcript and the WAVs stay for a run with another model.
+        if languages::unknown_token_output(
+            channels
+                .iter()
+                .flat_map(|(_, ws)| ws.iter().map(|w| w.text.as_str())),
+        ) {
+            return Err(CoreError::UnknownTokens);
+        }
         progress(JobStage::Saving, audio_ms, total_ms);
         // Mic first on equal start times.
         channels.reverse();

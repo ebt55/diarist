@@ -37,6 +37,12 @@ pub enum CoreError {
     #[error("cancelled")]
     Cancelled,
 
+    /// A file job or post-pass came back mostly unknown-token markers: the
+    /// model cannot transcribe the language
+    /// ([`crate::models::languages::unknown_token_output`]).
+    #[error("{}", crate::models::languages::UNKNOWN_TOKENS_NOTICE)]
+    UnknownTokens,
+
     /// Not enough free disk space for the operation.
     #[error("not enough free disk space in {path}: {free_mb} MB free, {needed_mb} MB needed; free up old audio in Settings or move the data folder to a larger drive")]
     InsufficientSpace {

@@ -165,6 +165,8 @@ struct FakeFile {
     jobs: Mutex<Vec<(PathBuf, bool)>>,
     /// The next job fails (an engine crash).
     fail_next: AtomicBool,
+    /// Jobs return runs of `<unk>` (a language the model cannot transcribe).
+    unknown: AtomicBool,
 }
 impl Engine for FakeFile {
     fn transcribe_file(&self, job: FileJob) -> crate::error::Result<Receiver<EngineEvent>> {
@@ -187,7 +189,11 @@ impl Engine for FakeFile {
             .map(|s| EngineWord {
                 t0_us: s * 1_000_000 + 50_000,
                 t1_us: s * 1_000_000 + 900_000,
-                text: format!("p{s}"),
+                text: if self.unknown.load(Ordering::SeqCst) {
+                    "<unk><unk><unk>e<unk>".to_owned()
+                } else {
+                    format!("p{s}")
+                },
                 conf: None,
                 spk: job.diarize.then(|| "spk_0".to_owned()),
             })
@@ -246,6 +252,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
     let file = Arc::new(FakeFile {
         jobs: Mutex::new(Vec::new()),
         fail_next: AtomicBool::new(false),
+        unknown: AtomicBool::new(false),
     });
     let sources: Arc<SourceFactory> = Arc::new(|cfg: CaptureConfig, ring| {
         let hz = if cfg.channel == Channel::Mic {
@@ -594,6 +601,47 @@ fn a_failed_post_pass_runs_again() {
     // The WAVs are gone now: nothing to run again.
     let gone = rerun_post_pass(&ctx, m).err().unwrap();
     assert!(gone.to_string().contains("no live transcript"), "{gone}");
+}
+
+#[test]
+fn unknown_tokens_fail_the_post_pass_and_keep_the_wavs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    let rec = Recorder::start(
+        ctx.clone(),
+        StartOptions::default(),
+        Arc::new(Sink::default()),
+    )
+    .unwrap();
+    let m = rec.meeting_id();
+    std::thread::sleep(Duration::from_millis(1_500));
+    file.unknown.store(true, Ordering::SeqCst);
+    let out = rec.stop().unwrap();
+    let err = out.post_pass.wait(Duration::from_secs(30)).unwrap();
+    assert_eq!(
+        err.unwrap_err(),
+        crate::models::languages::UNKNOWN_TOKENS_NOTICE
+    );
+    // Nothing stored: the live run stays current, the WAVs stay.
+    let d = store.get_meeting(m).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Failed);
+    assert_eq!(d.current_run.unwrap().kind, RunKind::Live);
+    assert!(store
+        .list_runs(m)
+        .unwrap()
+        .iter()
+        .all(|r| r.kind == RunKind::Live));
+    // Another model (here: the fake again, now transcribing) can run it.
+    file.unknown.store(false, Ordering::SeqCst);
+    let report = rerun_post_pass(&ctx, m)
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.get_meeting(m).unwrap().current_run.unwrap().id,
+        report.current_run
+    );
 }
 
 #[test]

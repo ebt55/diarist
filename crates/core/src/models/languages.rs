@@ -20,8 +20,16 @@
 //! effective table from the `language_table` command; the TypeScript module
 //! `generated/languageTiers.ts` ([`typescript_module`]) is its fallback, and
 //! `apps/desktop/src/lib/languages.ts` builds the language lists from it.
-//! A language a model lists that the table does not know is still offered,
-//! named by its tag.
+//!
+//! What the lists offer: the table's transcription-ready and broad-coverage
+//! entries (and entries `languages.user.json` adds or promotes) that the
+//! selected model, or a model a switch can use, declares. The declaration
+//! is the GGUF header's prompt dictionary, which has every tag the
+//! tokenizer knows (121 for Nemotron 3.5), not the languages the model was
+//! trained on: a declared language the table does not know, or puts in the
+//! adaptation tier, is reachable only as a typed tag, with a note. A file
+//! job or post-pass whose words come back mostly unknown-token markers
+//! fails with [`UNKNOWN_TOKENS_NOTICE`] ([`unknown_token_output`]).
 
 use std::path::Path;
 use std::sync::mpsc::Receiver;
@@ -44,8 +52,9 @@ pub enum LanguageTier {
     Ready,
     /// FLEURS WER 15 to 29: listed with "(reduced accuracy)".
     Broad,
-    /// The model knows the language but needs fine-tuning for it: offered
-    /// only for a model that lists it, marked.
+    /// The model knows the language but needs fine-tuning for it: not
+    /// offered, unless `languages.user.json` gives the entry another tier
+    /// (or none).
     Adaptation,
 }
 
@@ -369,6 +378,59 @@ impl LanguageTable {
     }
 }
 
+/// What a file job or post-pass fails with when the model emitted mostly
+/// unknown tokens ([`unknown_token_output`]); also in the generated
+/// TypeScript module, so the app can tell it from other failures.
+pub const UNKNOWN_TOKENS_NOTICE: &str = "The model could not transcribe this language \
+     (unknown tokens). Choose a supported language or another model.";
+
+/// How a token outside the vocabulary comes back: NeMo-Speech.cpp writes
+/// `<unk>` (glued into runs with stray letters between, one "word" per
+/// run), SentencePiece decodes it as U+2047; a bare word `unk` counts too.
+const UNKNOWN_MARKERS: [&str; 3] = ["<unk>", "[unk]", "\u{2047}"];
+
+/// One word's `(unknown, other)` tokens: each marker in it counts once, and
+/// each run of other characters between the markers (split on whitespace
+/// and ASCII punctuation, so `-l--` is one) counts once.
+fn token_counts(word: &str) -> (usize, usize) {
+    let word = word.trim();
+    if word
+        .trim_matches(|c: char| c.is_ascii_punctuation())
+        .eq_ignore_ascii_case("unk")
+    {
+        return (1, 0);
+    }
+    let mut rest = word.to_lowercase();
+    let mut unknown = 0;
+    for m in UNKNOWN_MARKERS {
+        let n = rest.matches(m).count();
+        if n > 0 {
+            unknown += n;
+            rest = rest.replace(m, " ");
+        }
+    }
+    let other = rest
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .count();
+    (unknown, other)
+}
+
+/// Whether a finished run's words are more than half unknown-token markers
+/// ([`UNKNOWN_MARKERS`]): the model cannot transcribe the language, as
+/// Nemotron 3.5 given `ml`, which its prompt dictionary has but the model
+/// was not trained on. A marker glued into a word counts as a word of its
+/// own, and so does each run of letters between markers. No words: false.
+pub fn unknown_token_output<'a>(words: impl IntoIterator<Item = &'a str>) -> bool {
+    let (mut unknown, mut other) = (0usize, 0usize);
+    for w in words {
+        let (u, o) = token_counts(w);
+        unknown += u;
+        other += o;
+    }
+    unknown > other
+}
+
 /// The job language that asks the model to detect the language (costs
 /// about a second of the first utterance, docs/04 section 6). Never the
 /// default.
@@ -574,8 +636,11 @@ pub fn typescript_module() -> String {
          /** The one-line expectation per tier. */\n\
          export const TIER_EXPECTATIONS: Record<LanguageTier, string> = {{\n{notes}\n}};\n\n\
          /** Manifest name of the model that covers every offered language. */\n\
-         export const MULTILINGUAL_MODEL = {:?};\n",
-        super::MULTILINGUAL_MODEL
+         export const MULTILINGUAL_MODEL = {:?};\n\n\
+         /** The message a file job or post-pass fails with when the model emitted mostly unknown tokens. */\n\
+         export const UNKNOWN_TOKENS_NOTICE = {:?};\n",
+        super::MULTILINGUAL_MODEL,
+        UNKNOWN_TOKENS_NOTICE
     )
 }
 
@@ -775,6 +840,29 @@ mod tests {
         assert_eq!(runtime_tag(&[], "ja"), "ja");
     }
 
+    #[test]
+    fn unknown_tokens_are_detected_on_a_word_list() {
+        // What NeMo-Speech.cpp returns for a language the model cannot
+        // transcribe: runs of `<unk>` glued into one word, stray letters
+        // between (12 markers, 4 other tokens).
+        let glued = "<unk><unk><unk><unk>-l--<unk><unk><unk>e<unk><unk><unk><unk>al-<unk>a";
+        assert_eq!(token_counts(glued), (12, 4));
+        assert!(unknown_token_output([glued]));
+        assert!(unknown_token_output([glued, "ok", "fine"]));
+        // Markers as words of their own, in each spelling.
+        assert!(unknown_token_output(["<unk>", "<UNK>", "hello"]));
+        assert!(unknown_token_output(["unk", "unk,", "fine"]));
+        assert!(unknown_token_output(["\u{2047}", "\u{2047}", "x"]));
+        assert!(unknown_token_output(["[unk]"]));
+        // Half or less is a transcript with a few gaps, not a failure.
+        assert!(!unknown_token_output(["<unk>", "hello"]));
+        assert!(!unknown_token_output(["<unk>", "Guten", "Morgen,"]));
+        assert!(!unknown_token_output(["unknown", "unkempt", "chunk"]));
+        assert!(!unknown_token_output(["नमस्ते", "दोस्तों", "<unk>"]));
+        assert!(!unknown_token_output(Vec::<&str>::new()));
+        assert!(UNKNOWN_TOKENS_NOTICE.starts_with("The model could not transcribe this language"));
+    }
+
     /// Writes `generated/languageTiers.ts` (name matches the `export_bindings`
     /// filter in docs/DEV.md).
     #[test]
@@ -784,6 +872,9 @@ mod tests {
             module.contains("  { code: \"de\", name: \"German\", tier: \"ready\", bare: true },")
         );
         assert!(module.contains("export const MULTILINGUAL_MODEL = \"nemotron-3.5\";"));
+        assert!(module.contains(&format!(
+            "export const UNKNOWN_TOKENS_NOTICE = {UNKNOWN_TOKENS_NOTICE:?};"
+        )));
         assert!(module.contains("import type { LanguageEntry } from \"./LanguageEntry\";"));
         if let Some(dir) = std::env::var_os("TS_RS_EXPORT_DIR") {
             let path = std::path::PathBuf::from(dir).join("languageTiers.ts");

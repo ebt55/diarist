@@ -9,7 +9,7 @@ use super::{CancelToken, ImportRequest};
 use crate::audio::Decoder;
 use crate::engine::{DiarPreset, DiarizeRunner, Engine, EngineEvent, EngineWord, FileJob};
 use crate::error::{CoreError, Result};
-use crate::models::free_disk_bytes;
+use crate::models::{free_disk_bytes, languages};
 use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, Store};
 use crate::transcript::{build_transcript, words_from_engine, SegmentOptions, UNKNOWN_LABEL};
@@ -93,7 +93,11 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 /// 4. Build speakers, segments (`transcript` module) and words;
 ///    `store.insert_transcript`, `finish_run(done)`, `set_current_run`,
 ///    status `done`; delete the 16 kHz intermediate unless kept.
-/// 5. On failure: `finish_run(failed)`, status `failed`, `JobEvent::Error`.
+///    Words that are mostly unknown-token markers are not stored: the job
+///    fails with [`CoreError::UnknownTokens`] (the model cannot transcribe
+///    the language, [`languages::unknown_token_output`]).
+/// 5. On failure: `finish_run(failed)`, status `failed` (the meeting and
+///    its playback track stay), `JobEvent::Error`.
 ///    On cancellation: the meeting is deleted (folder included) and
 ///    `JobEvent::Cancelled` is sent (with the meeting id only if the delete
 ///    failed and a `failed` row is left).
@@ -382,6 +386,11 @@ fn run_import(
         w.end_ms = w.end_ms.clamp(w.start_ms, end.max(w.start_ms));
     }
     words.sort_by_key(|w| w.start_ms);
+    // A language the model cannot transcribe (declared in its prompt
+    // dictionary, never trained): the run fails, the meeting stays.
+    if languages::unknown_token_output(words.iter().map(|w| w.text.as_str())) {
+        return Err(CoreError::UnknownTokens);
+    }
     let transcript = build_transcript(&words, &opts.segment);
     store.insert_transcript(run.id, &transcript)?;
     store.finish_run(run.id, RunStatus::Done)?;
@@ -431,6 +440,8 @@ mod tests {
         Fixture,
         Fail,
         WaitForCancel,
+        /// Runs of `<unk>`, as for a language the model was not trained on.
+        UnknownTokens,
     }
 
     struct FakeEngine {
@@ -474,6 +485,32 @@ mod tests {
                         engine_words(&out),
                         300_032_000,
                         Duration::from_secs(11),
+                    ) {
+                        tx.send(ev).unwrap();
+                    }
+                }
+                Mode::UnknownTokens => {
+                    let words = [
+                        "<unk><unk><unk>-l--<unk><unk>e<unk><unk><unk>",
+                        "<unk>",
+                        "a",
+                    ]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| EngineWord {
+                        t0_us: i as u64 * 1_000_000,
+                        t1_us: i as u64 * 1_000_000 + 500_000,
+                        text: (*t).to_owned(),
+                        conf: None,
+                        spk: Some("spk_0".into()),
+                    })
+                    .collect();
+                    for ev in file_events(
+                        &job.job_id,
+                        Channel::Source,
+                        words,
+                        300_032_000,
+                        Duration::from_secs(1),
                     ) {
                         tx.send(ev).unwrap();
                     }
@@ -636,6 +673,53 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unknown_tokens_fail_the_run_and_keep_the_meeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let src = input(dir.path());
+        let engine = FakeEngine::new(Mode::UnknownTokens);
+        let events = Mutex::new(Vec::new());
+        let opts = ImportOptions {
+            min_free_bytes: 0,
+            language: "ml".into(),
+            ..ImportOptions::new(dir.path(), &Settings::default())
+        };
+        let err = import_file(
+            &store,
+            &engine,
+            &FakeDecoder,
+            request(&src),
+            &opts,
+            &CancelToken::default(),
+            &|e| events.lock().unwrap().push(e),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::UnknownTokens), "{err}");
+        // The meeting stays (failed, no transcript) with its playback track.
+        let m = store.list_meetings().unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].status, MeetingStatus::Failed);
+        assert!(store.get_meeting(m[0].id).unwrap().current_run.is_none());
+        assert!(store.get_words(m[0].id, 0, i64::MAX).unwrap().is_empty());
+        assert_eq!(
+            store.list_runs(m[0].id).unwrap()[0].status,
+            RunStatus::Failed
+        );
+        assert_eq!(store.list_audio_tracks(m[0].id).unwrap().len(), 1);
+        match events.into_inner().unwrap().last() {
+            Some(JobEvent::Error {
+                meeting_id: Some(id),
+                message,
+                ..
+            }) => {
+                assert_eq!(*id, m[0].id);
+                assert_eq!(message, languages::UNKNOWN_TOKENS_NOTICE);
+            }
+            other => panic!("ends with {other:?}"),
+        }
     }
 
     #[test]

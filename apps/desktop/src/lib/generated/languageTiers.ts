@@ -65,3 +65,6 @@ export const TIER_EXPECTATIONS: Record<LanguageTier, string> = {
 
 /** Manifest name of the model that covers every offered language. */
 export const MULTILINGUAL_MODEL = "nemotron-3.5";
+
+/** The message a file job or post-pass fails with when the model emitted mostly unknown tokens. */
+export const UNKNOWN_TOKENS_NOTICE = "The model could not transcribe this language (unknown tokens). Choose a supported language or another model.";
