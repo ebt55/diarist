@@ -3,6 +3,13 @@
 //! written once over [`CarryBackend`] so `SqliteStore` (inside a
 //! transaction) and `MemoryStore` (under its lock) share the rules.
 //!
+//! 0. Alignment per channel: the new run's word times may sit a constant
+//!    amount off the old run's (the post-pass's file lookahead puts word
+//!    starts 80 to 190 ms earlier than live, docs/research/12, "Word
+//!    times"). The shift within 500 ms at which the old words overlap the
+//!    new ones most (ties: the smallest) is applied to the old run's word
+//!    times, name anchors and edit ranges before everything below. Runs whose
+//!    words line up keep shift 0, so nothing changes for them.
 //! 1. Overlap matrix per channel: seconds where a word of old speaker A and a
 //!    word of new speaker X overlap. Old speakers with under 5 s of speech are
 //!    ignored.
@@ -36,6 +43,10 @@ use crate::types::{
 const MIN_SPEECH_MS: i64 = 5_000;
 /// A match must cover this share of the smaller speaker's speech.
 const MATCH_SHARE: f64 = 0.6;
+/// The largest shift between the runs' word times that alignment looks for.
+const MAX_SHIFT_MS: i64 = 500;
+/// The alignment's step.
+const SHIFT_STEP_MS: i64 = 10;
 
 /// What [`super::RunStore::carry_over`] changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +63,9 @@ pub struct CarryOverReport {
     pub segments_split: usize,
     /// `user_N` speakers created for edit targets nobody in the new run is named.
     pub created_speakers: Vec<SpeakerId>,
+    /// Per channel, the shift (ms) applied to the old run's times to line
+    /// them up with the new run's (negative: the new words come earlier).
+    pub shift_ms: BTreeMap<Channel, i64>,
 }
 
 /// One word with the speaker owning its segment.
@@ -131,6 +145,41 @@ fn overlap_matrix(old: &[OwnedWord], new: &[OwnedWord]) -> HashMap<(SpeakerId, S
     m
 }
 
+/// Milliseconds where the words of `old`, moved by `shift`, overlap words of
+/// `new` (speakers ignored). Both sorted by start, as in [`overlap_matrix`].
+fn total_overlap(old: &[OwnedWord], new: &[OwnedWord], shift: i64) -> i64 {
+    let mut sum = 0;
+    let mut lo = 0usize;
+    for a in old {
+        let (start, end) = (a.start + shift, a.end + shift);
+        while lo < new.len() && new[lo].end <= start {
+            lo += 1;
+        }
+        let mut k = lo;
+        while k < new.len() && new[k].start < end {
+            sum += (end.min(new[k].end) - start.max(new[k].start)).max(0);
+            k += 1;
+        }
+    }
+    sum
+}
+
+/// The shift (multiple of [`SHIFT_STEP_MS`], at most [`MAX_SHIFT_MS`]) that
+/// lines `old` up with `new` best: most overlap, the smallest shift on a
+/// tie (0 when the words already line up), the earlier one between equals.
+fn alignment_shift(old: &[OwnedWord], new: &[OwnedWord]) -> i64 {
+    let mut best = (total_overlap(old, new, 0), 0);
+    for step in 1..=MAX_SHIFT_MS / SHIFT_STEP_MS {
+        for shift in [-step * SHIFT_STEP_MS, step * SHIFT_STEP_MS] {
+            let ov = total_overlap(old, new, shift);
+            if ov > best.0 {
+                best = (ov, shift);
+            }
+        }
+    }
+    best.1
+}
+
 /// The carry-over rules (module docs) over any backend. The caller provides
 /// atomicity (a transaction, a held lock).
 pub(crate) fn carry_over(
@@ -155,8 +204,24 @@ pub(crate) fn carry_over(
     let old_speakers = b.speakers(from_run)?;
     let new_speakers = b.speakers(to_run)?;
     let old_by_id: HashMap<SpeakerId, &Speaker> = old_speakers.iter().map(|s| (s.id, s)).collect();
-    let old_words = b.words(from_run)?;
+    let mut old_words = b.words(from_run)?;
     let new_words = b.words(to_run)?;
+
+    // 0. Line the old run's times up with the new run's, per channel.
+    let mut shifts: BTreeMap<Channel, i64> = BTreeMap::new();
+    for (channel, old) in old_words.iter_mut() {
+        let Some(new) = new_words.get(channel) else {
+            continue;
+        };
+        let shift = alignment_shift(old, new);
+        for w in old.iter_mut() {
+            w.start += shift;
+            w.end += shift;
+        }
+        shifts.insert(*channel, shift);
+    }
+    report.shift_ms = shifts.clone();
+    let shift_of = |c: Channel| shifts.get(&c).copied().unwrap_or(0);
 
     let mut speech: HashMap<SpeakerId, i64> = HashMap::new();
     for w in old_words.values().chain(new_words.values()).flatten() {
@@ -231,6 +296,8 @@ pub(crate) fn carry_over(
         ) else {
             continue;
         };
+        // In the new run's time, which the new speaker keeps.
+        let (a0, a1) = (a0 + shift_of(s.channel), a1 + shift_of(s.channel));
         let words = new_words.get(&s.channel).map(Vec::as_slice).unwrap_or(&[]);
         let mut counts: BTreeMap<SpeakerId, usize> = BTreeMap::new();
         for w in words {
@@ -299,7 +366,13 @@ pub(crate) fn carry_over(
             &old_match,
             &mut report,
         )?;
-        let covered = b.covered_words(to_run, edit.channel, edit.start_ms, edit.end_ms)?;
+        let shift = shift_of(edit.channel);
+        let covered = b.covered_words(
+            to_run,
+            edit.channel,
+            edit.start_ms + shift,
+            edit.end_ms + shift,
+        )?;
         if covered.is_empty() {
             continue;
         }

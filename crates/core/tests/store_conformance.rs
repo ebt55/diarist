@@ -67,6 +67,10 @@ const RUN_CASES: &[(&str, RunCase)] = &[
     ),
     ("carry_over_rejects_bad_runs", carry_over_rejects_bad_runs),
     (
+        "carry_over_survives_earlier_post_pass_words",
+        carry_over_survives_earlier_post_pass_words,
+    ),
+    (
         "live_speakers_survive_materialise",
         live_speakers_survive_materialise,
     ),
@@ -1345,6 +1349,176 @@ fn carry_over_user_speaker(store: &dyn RunStore) {
             (20_000, "Final".to_owned())
         ]
     );
+}
+
+/// One block of a meeting with turn-taking as it comes out of the engine:
+/// `(speaker, word durations in ms, gap between its words, pause after)`.
+/// Short words (150 to 300 ms) and quick turns (240 ms) included.
+const TURNS: &[(usize, &[i64], i64, i64)] = &[
+    (0, &[240, 300, 400, 200, 560, 320], 80, 400),
+    (1, &[200, 160, 480, 300], 0, 240),
+    (2, &[300, 240, 200, 400, 360, 240, 280], 80, 600),
+    (0, &[160, 200], 0, 240),
+    (1, &[400, 320, 240, 560, 200, 300], 80, 320),
+    (2, &[150, 300], 0, 240),
+    (0, &[300, 400, 240, 200, 480], 160, 800),
+    (1, &[200], 0, 240),
+];
+const BLOCKS: usize = 8;
+
+/// Per-utterance variation of the shift, in units of the jitter.
+const JITTER: &[i64] = &[0, 1, -1, 1, 0, -1, -1, 1, 0];
+
+/// The block-repeated meeting as one segment per utterance, words named
+/// `b<block>t<turn>w<word>`, every time moved by `shift_ms` (plus or minus
+/// `jitter_ms` per utterance), speaker `i` labelled `labels[i]`.
+fn turns_transcript(labels: [&str; 3], shift_ms: i64, jitter_ms: i64) -> NewTranscript {
+    let mut t = NewTranscript::default();
+    for l in labels {
+        t.speakers.push(speaker(Channel::Loopback, l));
+    }
+    let mut at = 1_000;
+    for b in 0..BLOCKS {
+        for (u, (spk, durs, gap, pause)) in TURNS.iter().enumerate() {
+            let seg = t.segments.len();
+            let start = at;
+            let shift_ms = shift_ms + JITTER[seg % JITTER.len()] * jitter_ms;
+            let mut texts = Vec::new();
+            for (k, d) in durs.iter().enumerate() {
+                if k > 0 {
+                    at += gap;
+                }
+                let text = format!("b{b}t{u}w{k}");
+                t.words.push(NewWord {
+                    segment: seg,
+                    start_ms: at + shift_ms,
+                    end_ms: at + d + shift_ms,
+                    text: text.clone(),
+                    confidence: None,
+                    raw_label: Some(labels[*spk].to_owned()),
+                    margin: None,
+                    overlap: false,
+                });
+                texts.push(text);
+                at += d;
+            }
+            t.segments.push(NewSegment {
+                speaker: *spk,
+                start_ms: start + shift_ms,
+                end_ms: at + shift_ms,
+                text: texts.join(" "),
+            });
+            at += pause;
+        }
+    }
+    t
+}
+
+/// The post-pass after Stop runs the file lookahead, whose word starts come
+/// 80 to 190 ms earlier than the live run's (docs/research/12, "Word times").
+/// Names given during the meeting (from a one-word segment, from a live
+/// utterance range, from the legend) and reassigned utterances (one and two
+/// short words) must land on the same words.
+fn carry_over_survives_earlier_post_pass_words(store: &dyn RunStore) {
+    for (shift, jitter) in [(0, 0), (-160, 0), (-200, 0), (-160, 40), (-200, 40)] {
+        let m = live_meeting(store);
+        let live = run_with(
+            store,
+            m,
+            RunKind::Live,
+            &turns_transcript(["spk_0", "spk_1", "spk_2"], 0, 0),
+        );
+        store.set_current_run(m, live).unwrap();
+        let seg_of = |b: usize, u: usize| -> SegmentId {
+            let first = format!("b{b}t{u}w0");
+            let w = store
+                .get_words(m, 0, i64::MAX)
+                .unwrap()
+                .into_iter()
+                .find(|w| w.text == first)
+                .unwrap();
+            w.segment_id
+        };
+        let (a, b, c) = (
+            by_label(store, live, "spk_0").id,
+            by_label(store, live, "spk_1").id,
+            by_label(store, live, "spk_2").id,
+        );
+        store.rename_speaker(a, "Priya", None).unwrap();
+        // Marcus from his one-word (200 ms) segment.
+        store
+            .rename_speaker(b, "Marcus", Some(seg_of(3, 7)))
+            .unwrap();
+        // Lee from a live utterance range: 150 + 300 ms.
+        let lee = segments(store, m)
+            .into_iter()
+            .find(|s| s.id == seg_of(5, 5))
+            .unwrap();
+        store
+            .rename_speaker_at(c, "Lee", lee.start_ms, lee.end_ms)
+            .unwrap();
+        // Short utterances given to someone else.
+        store.reassign_segment(seg_of(6, 3), b).unwrap(); // A's 160 + 200 ms -> Marcus
+        store.reassign_segment(seg_of(1, 7), c).unwrap(); // B's 200 ms -> Lee
+        store.reassign_segment(seg_of(2, 5), a).unwrap(); // C's 150 + 300 ms -> Priya
+
+        let new = run_with(
+            store,
+            m,
+            RunKind::PostPass,
+            &turns_transcript(["spk_2", "spk_0", "spk_1"], shift, jitter),
+        );
+        let report = store.carry_over(live, new).unwrap();
+        store.set_current_run(m, new).unwrap();
+        let names: std::collections::HashMap<SegmentId, String> = segments(store, m)
+            .into_iter()
+            .map(|s| (s.id, s.speaker_name))
+            .collect();
+        let mut wrong = Vec::new();
+        let words = store.get_words(m, i64::MIN, i64::MAX).unwrap();
+        for w in &words {
+            let (bl, rest) = w.text[1..].split_once('t').unwrap();
+            let turn: usize = rest.split_once('w').unwrap().0.parse().unwrap();
+            let bl: usize = bl.parse().unwrap();
+            let want = match (bl, turn) {
+                (6, 3) => "Marcus",
+                (1, 7) => "Lee",
+                (2, 5) => "Priya",
+                _ => ["Priya", "Marcus", "Lee"][TURNS[turn].0],
+            };
+            if names[&w.segment_id] != want {
+                wrong.push(format!("{} {} (want {want})", w.text, names[&w.segment_id]));
+            }
+        }
+        assert_eq!(words.len(), BLOCKS * 33, "shift {shift} jitter {jitter}");
+        assert!(
+            wrong.is_empty(),
+            "shift {shift} jitter {jitter} ms: {} of {} words on the wrong speaker: {wrong:?}; {report:?}",
+            wrong.len(),
+            words.len()
+        );
+        assert_eq!(
+            report.matched.len(),
+            3,
+            "shift {shift} jitter {jitter}: {report:?}"
+        );
+        assert_eq!(
+            report.edits_replayed, 3,
+            "shift {shift} jitter {jitter}: {report:?}"
+        );
+        assert_eq!(
+            report.segments_split, 0,
+            "shift {shift} jitter {jitter}: {report:?}"
+        );
+        assert!(
+            report.needs_review.is_empty(),
+            "shift {shift} jitter {jitter}: {report:?}"
+        );
+        assert!(
+            report.created_speakers.is_empty(),
+            "shift {shift} jitter {jitter}"
+        );
+    }
 }
 
 fn carry_over_rejects_bad_runs(store: &dyn RunStore) {
