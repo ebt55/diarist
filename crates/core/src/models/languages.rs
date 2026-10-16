@@ -59,7 +59,7 @@ impl LanguageTier {
     pub fn expectation(self) -> &'static str {
         match self {
             Self::Ready => "4 to 13 percent word error rate (FLEURS)",
-            Self::Broad => "15 to 29 percent word error rate (FLEURS): reduced accuracy",
+            Self::Broad => "15 to 29 percent word error rate (FLEURS), reduced accuracy",
             Self::Adaptation => "needs fine-tuning; not offered",
         }
     }

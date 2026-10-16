@@ -71,11 +71,17 @@
   const defaultLanguage = $derived(canonical(app.setting("default_language")));
   const languageChoices = $derived(languageOptions(asrFiles, status?.selected.asr ?? null, defaultLanguage, false));
   const languagePlan = $derived(planFor(asrFiles, status?.selected.asr ?? null, defaultLanguage));
-  const tierNames = (tier: "ready" | "broad") =>
-    offeredLanguages()
-      .filter((l) => l.tier === tier)
-      .map((l) => l.name)
-      .join(", ");
+  /** "Portuguese (Brazil, Portugal)": locale entries grouped under their language. */
+  const tierNames = (tier: "ready" | "broad") => {
+    const groups = new Map<string, string[]>();
+    for (const l of offeredLanguages().filter((x) => x.tier === tier)) {
+      const [base = l.name, region] = l.name.split(", ");
+      const g = groups.get(base) ?? [];
+      if (region) g.push(region);
+      groups.set(base, g);
+    }
+    return [...groups].map(([base, regions]) => (regions.length ? `${base} (${regions.join(", ")})` : base)).join(", ");
+  };
   const unknown = $derived(status?.models_by_role.unknown ?? []);
 
   let devices = $state.raw<AudioDevice[]>([]);

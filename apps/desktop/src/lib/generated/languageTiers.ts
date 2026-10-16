@@ -58,7 +58,7 @@ export const TIER_TITLES: Record<LanguageTier, string> = {
 /** The one-line expectation per tier. */
 export const TIER_EXPECTATIONS: Record<LanguageTier, string> = {
   ready: "4 to 13 percent word error rate (FLEURS)",
-  broad: "15 to 29 percent word error rate (FLEURS): reduced accuracy",
+  broad: "15 to 29 percent word error rate (FLEURS), reduced accuracy",
   adaptation: "needs fine-tuning; not offered",
 };
 
