@@ -37,8 +37,10 @@ nemo-speech.exe transcribe <in.wav> --model <...\parakeet-tdt-0.6b-v3.q8_0.gguf>
 
 **File, Nemotron, diarized (use this for long files):**
 ```
-nemo-speech.exe transcribe <in.wav> --model <...\nemotron-speech-streaming-en-0.6b.q8_0.gguf> --stream --endpointing --diarize --diar-model <...\Nemotron-3-Diarization.q8_0.gguf> --device cuda:0 --json --output <out.json> --force
+nemo-speech.exe transcribe <in.wav> --model <...\nemotron-speech-streaming-en-0.6b.q8_0.gguf> --stream --endpointing --asr.streaming.rnnt_right_context 13 --diarize --diar-model <...\Nemotron-3-Diarization.q8_0.gguf> --device cuda:0 --json --output <out.json> --force
 ```
+
+(`--asr.streaming.rnnt_right_context 13` since 16 Oct 2026: the cache-aware decoder's lookahead in frames. The runtime default is 1; `-1` means the GGUF header's value, which is 13 for the EN model but only 3 for the pinned 3.5. File jobs and the post-pass pass 13 for both known models; live keeps the default. Numbers in docs/research/12.)
 
 | Flag | Meaning |
 |---|---|
