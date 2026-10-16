@@ -198,15 +198,19 @@ impl Manifest {
         self.models.iter().filter(|m| m.required)
     }
 
-    /// The newest tested engine, else the newest.
+    /// The newest tested engine, else the newest; among packages of the same
+    /// version the first listed (CUDA in the shipped manifest). `max_by`
+    /// keeps the last of equal elements, hence the `rev()`.
     pub fn default_engine(&self) -> Option<&EngineEntry> {
         self.engines
             .iter()
+            .rev()
             .filter(|e| e.tested)
             .max_by(|a, b| version_cmp(&a.version, &b.version))
             .or_else(|| {
                 self.engines
                     .iter()
+                    .rev()
                     .max_by(|a, b| version_cmp(&a.version, &b.version))
             })
     }
