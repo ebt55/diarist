@@ -439,6 +439,15 @@ impl State {
             w.push(stem.to_owned());
         }
     }
+
+    /// Gives the start-up thread up to `max` to finish the system lines (a
+    /// crash in the first second). Polls without locking.
+    fn wait_for_system(&self, max: std::time::Duration) {
+        let start = std::time::Instant::now();
+        while self.system.get().is_none() && start.elapsed() < max {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -692,6 +701,7 @@ fn on_panic(info: &std::panic::PanicHookInfo<'_>) {
     }
     let thread = std::thread::current();
     let backtrace = Backtrace::force_capture();
+    st.wait_for_system(std::time::Duration::from_secs(1));
     if let Ok((stem, mut file)) = create_report(&st.logs, APP_PREFIX) {
         with_scratch(st, |s| {
             s.text.clear();
@@ -934,6 +944,7 @@ mod native {
             }
         };
         if let Some(st) = super::STATE.get() {
+            st.wait_for_system(Duration::from_secs(2));
             write_report(st, info, FAULT_TID.load(Ordering::SeqCst));
         }
         DONE.store(true, Ordering::SeqCst);
