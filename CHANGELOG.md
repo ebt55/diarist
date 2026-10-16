@@ -2,7 +2,13 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.1.0-beta.2] - 2026-10-16
+
+The second beta pre-release, and the first one that installed copies of
+0.1.0-beta.1 can reach through Check for updates. Imports and the
+processing after Stop are more accurate, languages follow the installed
+speech models, and a crash now leaves a local report you can paste into a
+bug report.
 
 - Added: local crash reports. A crash of the app or the CLI (a panic or a
   native fault) leaves `logs\crash-<time>.txt` in the data folder, a native
@@ -20,6 +26,9 @@ All notable changes to Diarist. Versions follow semantic versioning.
   the language; the first-run screen asks for the meetings' language and
   picks the model for it. `diarist-cli transcribe --language` switches the
   same way.
+- Changed: `diarist-cli record` switches the model by language like
+  `transcribe` and the app (the given `--language`, else the default
+  language), with the same notice.
 - Fixed: Japanese and Chinese were transcribed with automatic language
   detection; the language is now passed to the model.
 - Fixed: Install and restart ended an import or a post-pass in progress.
@@ -27,6 +36,9 @@ All notable changes to Diarist. Versions follow semantic versioning.
 - Changed: imports and the post-pass after Stop use the speech model's full
   lookahead (about 1 to 2 WER points better on the hand-labelled meeting,
   and faster); live recording keeps the low-latency setting.
+- Fixed: names given during a recording and edits made on the live
+  transcript carry over to the final transcript even though the final pass
+  now places words up to 0.2 s earlier.
 - Changed: a new app icon in a light and a dark variant; the installer icon is
   the dark-background one, and the running app follows the taskbar theme.
 - Fixed: the taskbar button showed the icon blurred (a 32 px image
