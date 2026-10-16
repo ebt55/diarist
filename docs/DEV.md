@@ -468,8 +468,8 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   then GitHub's download CDN on 185.199.108-111.133); model pulls only from
   `C:\Windows\System32\curl.exe` (huggingface.co, us.aws.cdn.hf.co).
 - Move data folder: `move_data_root` copies (database through the backup
-  API, then audio, engine, models, manifests; logs and window state as they
-  are), verifies sizes, writes the registry key (cleared when the target is
+  API, then audio, engine, models, manifests; logs, window state and the
+  pre-upgrade `diarist.db.bak-*` as they are), verifies sizes, writes the registry key (cleared when the target is
   the default root) and leaves `moved-from.json`; the UI restarts the app and
   the next launch deletes the copied items from the old root, retrying for up
   to 10 s while the exiting instance still holds files.

@@ -7,7 +7,8 @@
 //! 2. [`copy_data`] copies the database through a caller-supplied backup
 //!    (the SQLite backup API: the database is open), then `audio\`,
 //!    `engine\`, `models\` and `manifests\` file by file, checking every
-//!    file's size after the copy. `logs\` and the window state are copied as
+//!    file's size after the copy. `logs\`, the window state and the
+//!    database's pre-upgrade copies (`diarist.db.bak-<version>`) are copied as
 //!    they are (the log grows while copying). Links (junctions) are recreated as
 //!    links, never followed. A [`MOVE_MARKER`] in the new root records the
 //!    old root and what was copied.
@@ -15,7 +16,8 @@
 //!    ([`super::paths::set_registry_root`]) and restarts the app.
 //! 4. At the next launch, from the new root, [`finish_pending_move`] deletes
 //!    exactly the copied items from the old root (plus the WebView profile
-//!    and window state, which are recreated), and the old root itself when
+//!    and window state, which are recreated, and a pre-upgrade copy the new
+//!    root holds whole), and the old root itself when
 //!    that leaves it empty. Nothing else in the old folder is touched.
 //!
 //! The old copy is deleted after the restart, not before, because the
@@ -36,7 +38,8 @@ pub const DB_FILE: &str = "diarist.db";
 /// Folders copied to the new root and verified, in order.
 pub const MOVED_DIRS: &[&str] = &["audio", "engine", "models", "manifests"];
 /// Copied as they are (they change while the app runs) and removed from
-/// the old root after the move.
+/// the old root after the move; so are the database's pre-upgrade copies
+/// (`diarist.db.bak-<version>`, [`best_effort_items`]).
 pub const BEST_EFFORT: &[&str] = &["logs", ".window-state.json"];
 /// Removed from the old root after the move but not copied: the WebView
 /// profile is recreated in the new root.
@@ -46,6 +49,33 @@ const SPACE_MARGIN: u64 = 64 << 20;
 
 fn err(msg: impl Into<String>) -> CoreError {
     CoreError::Models(msg.into())
+}
+
+/// Name prefix of the copies `SqliteStore` makes of the database before a
+/// schema upgrade (`diarist.db.bak-<version>`).
+fn backup_prefix() -> String {
+    format!("{DB_FILE}.bak-")
+}
+
+/// The best-effort items of `root`: [`BEST_EFFORT`] and the pre-upgrade
+/// database copies found there (whole files only, not a `.tmp` being
+/// written).
+pub fn best_effort_items(root: &Path) -> Vec<String> {
+    let prefix = backup_prefix();
+    let mut backups: Vec<String> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.starts_with(&prefix) && !n.ends_with(".tmp"))
+        .collect();
+    backups.sort();
+    BEST_EFFORT
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain(backups)
+        .collect()
 }
 
 /// What [`copy_data`] will copy.
@@ -348,9 +378,8 @@ pub fn copy_data(
     let created = !plan.to.exists();
     // A pre-rename root moves into a root this launch already uses (logs,
     // WebView profile): what was there before stays if the copy fails.
-    let existing: Vec<&str> = BEST_EFFORT
-        .iter()
-        .copied()
+    let existing: Vec<String> = best_effort_items(&plan.to)
+        .into_iter()
         .filter(|n| plan.to.join(n).exists())
         .collect();
     let result = (|| -> Result<MoveReport> {
@@ -403,9 +432,9 @@ pub fn copy_data(
             ));
             items.push((*d).to_owned());
         }
-        for name in BEST_EFFORT {
-            let src = plan.from.join(name);
-            let dest = plan.to.join(name);
+        for name in best_effort_items(&plan.from) {
+            let src = plan.from.join(&name);
+            let dest = plan.to.join(&name);
             if src.is_dir() {
                 let mut ignored = MoveReport::default();
                 let _ = copy_tree(&src, &dest, &mut ignored, &mut |_| {});
@@ -434,13 +463,14 @@ pub fn copy_data(
 
 /// Removes what [`copy_data`] wrote into `to` (and `to` when it created it),
 /// except the `keep` items that were there before.
-fn remove_copy(to: &Path, created: bool, keep: &[&str]) {
+fn remove_copy(to: &Path, created: bool, keep: &[String]) {
     for name in [DB_FILE, "diarist.db.tmp", MOVE_MARKER] {
         let _ = fs::remove_file(to.join(name));
     }
-    for d in MOVED_DIRS.iter().chain(BEST_EFFORT) {
-        if !keep.contains(d) {
-            let _ = remove_item(&to.join(d));
+    let items = MOVED_DIRS.iter().map(|d| (*d).to_owned());
+    for d in items.chain(best_effort_items(to)) {
+        if !keep.contains(&d) {
+            let _ = remove_item(&to.join(&d));
         }
     }
     if created {
@@ -566,10 +596,25 @@ pub fn finish_pending_move(root: &Path) -> Option<CleanupReport> {
             Err(e) => report.kept.push(format!("{item}: {e}")),
         }
     }
-    for name in BEST_EFFORT.iter().chain(RECREATED) {
-        let p = old.join(name);
-        if p.exists() && retry_while_held(&deadline, || remove_item(&p)).is_ok() {
-            report.removed.push((*name).to_owned());
+    let prefix = backup_prefix();
+    let recreated = RECREATED.iter().map(|s| (*s).to_owned());
+    for name in best_effort_items(&old).into_iter().chain(recreated) {
+        let p = old.join(&name);
+        if !p.exists() {
+            continue;
+        }
+        // A pre-upgrade copy goes only when the new folder has it whole.
+        if name.starts_with(&prefix) {
+            let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
+            if size(&root.join(&name)) != size(&p) {
+                report
+                    .kept
+                    .push(format!("{name}: missing from the new folder"));
+                continue;
+            }
+        }
+        if retry_while_held(&deadline, || remove_item(&p)).is_ok() {
+            report.removed.push(name);
         }
     }
     report.removed_root = fs::remove_dir(&old).is_ok();
@@ -651,6 +696,50 @@ mod tests {
         assert!(finish_pending_move(&new).is_none());
         // The new copy is intact.
         assert_eq!(fs::read(new.join("logs/diarist.log")).unwrap(), b"line\n");
+    }
+
+    #[test]
+    fn the_pre_upgrade_database_copy_moves_with_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        fake_root(&old);
+        fs::remove_file(old.join("unrelated.txt")).unwrap();
+        write(&old.join(format!("{DB_FILE}.bak-1")), b"old schema copy");
+        write(&old.join(format!("{DB_FILE}.bak-1.tmp")), b"half");
+        assert_eq!(
+            best_effort_items(&old),
+            ["logs", ".window-state.json", "diarist.db.bak-1"]
+        );
+        let plan = plan_move(&old, &new).unwrap();
+        copy_data(&plan, &backup(old.clone()), &mut |_, _| {}).unwrap();
+        assert_eq!(
+            fs::read(new.join("diarist.db.bak-1")).unwrap(),
+            b"old schema copy"
+        );
+        assert!(!new.join("diarist.db.bak-1.tmp").exists());
+        // A stray .tmp is not ours to move; without it the old folder goes.
+        fs::remove_file(old.join(format!("{DB_FILE}.bak-1.tmp"))).unwrap();
+        let r = finish_pending_move(&new).unwrap();
+        assert!(r.removed.iter().any(|x| x == "diarist.db.bak-1"), "{r:?}");
+        assert!(r.removed_root, "{r:?}");
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn a_pre_upgrade_copy_missing_from_the_new_folder_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        fake_root(&old);
+        write(&old.join(format!("{DB_FILE}.bak-1")), b"old schema copy");
+        let plan = plan_move(&old, &new).unwrap();
+        copy_data(&plan, &backup(old.clone()), &mut |_, _| {}).unwrap();
+        fs::remove_file(new.join("diarist.db.bak-1")).unwrap();
+        let r = finish_pending_move(&new).unwrap();
+        assert!(
+            r.kept.iter().any(|k| k.starts_with("diarist.db.bak-1")),
+            "{r:?}"
+        );
+        assert!(old.join("diarist.db.bak-1").is_file());
     }
 
     #[test]
