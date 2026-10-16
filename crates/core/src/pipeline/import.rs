@@ -287,6 +287,7 @@ fn run_import(
             "runtime": engine_info.runtime,
             "models": engine_info.models,
             "device": engine_info.device,
+            "right_context": crate::protocol::lookahead_json(engine_info.right_context),
             "language": opts.language,
             "diarize": req.diarize,
             "decoder": info.decoder.as_str(),
@@ -553,6 +554,7 @@ mod tests {
         assert_eq!(d.current_run.as_ref().unwrap().status, RunStatus::Done);
         let info = d.current_run.unwrap().engine_info;
         assert_eq!(info["runtime"], "fake 1.0");
+        assert_eq!(info["right_context"], "runtime default");
         assert_eq!(info["decoder"], "other");
         assert_eq!(info["language"], "en");
         assert_eq!(d.speakers.len(), 4);

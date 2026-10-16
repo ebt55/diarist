@@ -539,12 +539,10 @@ impl NemoCliEngine {
         a.push("--stream".into());
         a.push("--endpointing".into());
         // An `--engine-arg` lookahead (the eval harness) is the only one.
-        let in_extra = self.extra_args.iter().any(|x| {
-            x == RIGHT_CONTEXT_FLAG
-                || x.strip_prefix(RIGHT_CONTEXT_FLAG)
-                    .is_some_and(|r| r.starts_with('='))
-        });
-        if let Some(r) = self.right_context.filter(|_| !in_extra) {
+        if let Some(r) = self
+            .right_context
+            .filter(|_| self.extra_right_context().is_none())
+        {
             a.push(RIGHT_CONTEXT_FLAG.into());
             a.push(r.to_string().into());
         }
@@ -560,6 +558,29 @@ impl NemoCliEngine {
         a.push("--force".into());
         a.extend(self.extra_args.iter().map(Into::into));
         a
+    }
+
+    /// The lookahead among [`Self::extra_args`] (`FLAG N` or `FLAG=N`):
+    /// `Some` when one is there, holding its value if it has one.
+    fn extra_right_context(&self) -> Option<Option<&str>> {
+        self.extra_args.iter().enumerate().find_map(|(i, x)| {
+            if x == RIGHT_CONTEXT_FLAG {
+                Some(self.extra_args.get(i + 1).map(String::as_str))
+            } else {
+                x.strip_prefix(RIGHT_CONTEXT_FLAG)?
+                    .strip_prefix('=')
+                    .map(Some)
+            }
+        })
+    }
+
+    /// The lookahead a job's command line carries: one among the extra
+    /// flags, else [`Self::right_context`]; `None` when there is no flag.
+    pub fn effective_right_context(&self) -> Option<i64> {
+        match self.extra_right_context() {
+            Some(v) => v.and_then(|v| v.trim().parse().ok()),
+            None => self.right_context.map(i64::from),
+        }
     }
 
     /// Where the words JSON of `wav` goes: `<wav stem>.words.json` next to it.
@@ -675,6 +696,7 @@ impl Engine for NemoCliEngine {
             ),
             models,
             device: self.device.clone(),
+            right_context: self.effective_right_context(),
         }
     }
 }
@@ -987,6 +1009,8 @@ impl Engine for NemoCascadeEngine {
             ),
             models,
             device: self.device.clone(),
+            // Offline TDT: no streaming lookahead.
+            right_context: None,
         }
     }
 }
@@ -1215,9 +1239,11 @@ mod tests {
         };
         // A model without a file lookahead: no flag, the runtime default.
         assert!(!args(&e).iter().any(|a| a.contains("rnnt_right_context")));
+        assert_eq!(e.info().right_context, None);
         // With one: after `--endpointing`, before the diarizer and the extras.
         e.right_context = Some(13);
         e.extra_args = vec!["--verbatim".into()];
+        assert_eq!(e.info().right_context, Some(13));
         assert_eq!(
             args(&e),
             [
@@ -1258,10 +1284,14 @@ mod tests {
                 "{a:?}"
             );
             assert!(a.ends_with(&extra), "{a:?}");
+            assert_eq!(e.info().right_context, Some(1), "the value passed");
         }
+        e.extra_args = vec!["--asr.streaming.rnnt_right_context".into(), "-1".into()];
+        assert_eq!(e.info().right_context, Some(-1));
         // Another `--asr.streaming.*` key does not count.
         e.extra_args = vec!["--asr.streaming.rnnt_right_context_x".into(), "2".into()];
         assert!(args(&e).iter().any(|a| a == "13"));
+        assert_eq!(e.info().right_context, Some(13));
     }
 
     #[test]

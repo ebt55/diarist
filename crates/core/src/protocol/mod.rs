@@ -63,6 +63,25 @@ pub struct EngineInfo {
     pub models: BTreeMap<String, String>,
     /// `cuda:0`, `cpu`, ...
     pub device: String,
+    /// Decoder lookahead a file job passes (`--asr.streaming.rnnt_right_context`,
+    /// 80 ms frames; `-1`, the model file's value, only through an extra
+    /// flag). `None`: no flag, the runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_context: Option<i64>,
+}
+
+/// What runs and Copy diagnostics say for a job that passes no lookahead flag.
+pub const LOOKAHEAD_RUNTIME_DEFAULT: &str = "runtime default";
+
+/// A lookahead as a run's `engine_info` stores it (`right_context`): the
+/// frames passed, or [`LOOKAHEAD_RUNTIME_DEFAULT`].
+pub fn lookahead_json(right_context: Option<i64>) -> serde_json::Value {
+    right_context.map_or_else(|| LOOKAHEAD_RUNTIME_DEFAULT.into(), Into::into)
+}
+
+/// The same as text: `13`, or `runtime default`.
+pub fn lookahead_text(right_context: Option<i64>) -> String {
+    right_context.map_or_else(|| LOOKAHEAD_RUNTIME_DEFAULT.to_owned(), |n| n.to_string())
 }
 
 /// An event from an engine job or live session.
@@ -213,6 +232,24 @@ mod tests {
         r#"{"ev":"done","job_id":"01J0","stats":{"rtf":0.037,"speakers":3,"audio_ms":1273000,"wall_ms":47100}}"#,
         r#"{"ev":"error","job_id":"01J0","code":"model_missing","message":"diarizer model not found"}"#,
     ];
+
+    #[test]
+    fn lookahead_reads_as_frames_or_the_runtime_default() {
+        assert_eq!(lookahead_json(Some(13)), serde_json::json!(13));
+        assert_eq!(lookahead_json(None), serde_json::json!("runtime default"));
+        assert_eq!(lookahead_text(Some(-1)), "-1");
+        assert_eq!(lookahead_text(None), "runtime default");
+        // Absent from `Ready` when no flag is passed (the docs/03 line above).
+        let info = EngineInfo {
+            right_context: Some(13),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(r#""right_context":13"#), "{json}");
+        assert_eq!(serde_json::from_str::<EngineInfo>(&json).unwrap(), info);
+        let none = serde_json::to_string(&EngineInfo::default()).unwrap();
+        assert!(!none.contains("right_context"), "{none}");
+    }
 
     #[test]
     fn events_round_trip() {

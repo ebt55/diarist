@@ -192,15 +192,7 @@ pub fn select_engine_with(
         sel.asr_file.role != ModelRole::Unknown && !sel.asr_file.capabilities.streaming;
     // File jobs and the post-pass run at the model's full lookahead; live
     // keeps the runtime's low-latency default (`engine::live_ws`).
-    let right_context = if experimental {
-        None
-    } else {
-        file_right_context(
-            &sel.asr_file,
-            settings::file_lookahead(&store.get_settings()?),
-            Manifest::load(&paths.root).ok().as_ref(),
-        )
-    };
+    let right_context = asr_right_context(paths, store, &sel.asr_file)?;
     let inner: Arc<dyn Engine> = if experimental {
         let mut e = NemoCascadeEngine::new(&sel.engine_dir, &models_dir, &sel.asr, &sel.diarizer);
         e.device = device.to_owned();
@@ -232,6 +224,25 @@ pub fn select_engine_with(
         experimental,
         right_context,
     })
+}
+
+/// The decoder lookahead file jobs on ASR model `file` pass, with the
+/// stored `engine.file_lookahead` and the data root's manifest
+/// ([`file_right_context`]); `None` for a model the experimental cascade
+/// runs (not streaming). Copy diagnostics shows it for the selection.
+pub fn asr_right_context(
+    paths: &DataPaths,
+    store: &dyn Store,
+    file: &ModelFile,
+) -> Result<Option<u32>> {
+    if file.role != ModelRole::Unknown && !file.capabilities.streaming {
+        return Ok(None);
+    }
+    Ok(file_right_context(
+        file,
+        settings::file_lookahead(&store.get_settings()?),
+        Manifest::load(&paths.root).ok().as_ref(),
+    ))
 }
 
 /// The decoder lookahead file jobs and the post-pass run `file` at: the

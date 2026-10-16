@@ -211,6 +211,7 @@ impl Engine for FakeFile {
     fn info(&self) -> EngineInfo {
         EngineInfo {
             runtime: "fake 1".into(),
+            right_context: Some(13),
             ..Default::default()
         }
     }
@@ -384,6 +385,7 @@ fn records_streams_and_runs_the_post_pass() {
     assert_eq!(d.meeting.status, MeetingStatus::Done);
     let run = d.current_run.unwrap();
     assert_eq!(run.kind, RunKind::PostPass);
+    assert_eq!(run.engine_info["right_context"], 13, "the lookahead passed");
     assert_eq!(run.id, report.current_run);
     assert!(report.live_run_deleted);
     assert!(store.get_run(out.live_run).is_err());

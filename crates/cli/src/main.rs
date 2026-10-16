@@ -627,10 +627,11 @@ fn transcribe(
         diarize,
     };
     eprintln!(
-        "engine {} | asr {} | diarizer {}{}",
+        "engine {} | asr {} | diarizer {} | lookahead {}{}",
         sel.engine_version.as_deref().unwrap_or("?"),
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
+        diarist_core::protocol::lookahead_text(engine.info().right_context),
         if overrides.extra_args.is_empty() {
             String::new()
         } else {
@@ -725,6 +726,10 @@ fn transcribe(
             "wall_s": (wall * 1_000.0).round() / 1_000.0,
             "decoder": decoder.last_decoder(),
             "engine_version": sel.engine_version,
+            "right_context": detail
+                .current_run
+                .as_ref()
+                .and_then(|r| r.engine_info.get("right_context").cloned()),
             "asr_model": sel.asr.display().to_string(),
             "diar_model": sel.diarizer.display().to_string(),
             "language": language,
@@ -799,8 +804,14 @@ fn show(ctx: &Ctx, id: MeetingId, all: bool) -> CliResult {
     println!("  language  {}", m.language);
     println!("  pinned    {}", m.audio_keep);
     if let Some(run) = &d.current_run {
+        // Runs from before beta.2 have no `right_context`.
+        let lookahead = match run.engine_info.get("right_context") {
+            Some(serde_json::Value::String(s)) => format!(", lookahead {s}"),
+            Some(v) => format!(", lookahead {v}"),
+            None => String::new(),
+        };
         println!(
-            "  run       {} {} ({})",
+            "  run       {} {} ({}{lookahead})",
             run.kind.as_str(),
             run.status.as_str(),
             run.engine_info

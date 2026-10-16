@@ -362,8 +362,20 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
                     None if role == ModelRole::Engine => String::new(),
                     None => "sha256 not recorded".to_owned(),
                 };
+                // What imports and post-passes pass, as their runs store it.
+                let lookahead = match role {
+                    ModelRole::Asr => crate::models::asr_right_context(paths, store, &f)
+                        .map(|rc| {
+                            format!(
+                                " | file lookahead {}",
+                                crate::protocol::lookahead_text(rc.map(i64::from))
+                            )
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
                 format!(
-                    "{}{version} | {} | {} bytes{}{}",
+                    "{}{version} | {} | {} bytes{}{}{lookahead}",
                     f.display_name,
                     f.path,
                     f.size_bytes,
@@ -489,7 +501,7 @@ mod tests {
             "driver 610.88 | CUDA 13.1",
             "data root: D:/data [explicit",
             "engine: nemo-speech-0.2.0 0.2.0 | engine/nemo-speech-0.2.0",
-            "asr: en.gguf | models/en.gguf | 42 bytes | sha256 abc123",
+            "asr: en.gguf | models/en.gguf | 42 bytes | sha256 abc123 | file lookahead runtime default",
             "diarizer: none selected",
             "live server: stopped",
             "checks:\n  [pass] Free disk: 80 GB free",
@@ -499,6 +511,17 @@ mod tests {
         }
         assert!(!text.contains("line 1"));
         assert!(text.contains("crash reports: none"), "{text}");
+        // A streaming model with a file lookahead shows the value imports pass.
+        let mut asr = row("models/en.gguf", ModelRole::Asr, "x", Some("abc123"));
+        asr.capabilities.streaming = true;
+        asr.capabilities.file_right_context = Some(13);
+        let engine = row("engine/nemo-speech-0.2.0", ModelRole::Engine, "0.2.0", None);
+        store.sync_model_files(&[engine, asr], 2).unwrap();
+        let text = report(&DataPaths::at("D:/data"), &store, &input);
+        assert!(
+            text.contains("sha256 abc123 | file lookahead 13\n"),
+            "{text}"
+        );
         if cfg!(windows) {
             assert!(os_version().starts_with("Windows"), "{}", os_version());
         }
