@@ -74,6 +74,15 @@ bug report.
   slider kept across meetings, and an Auto level button that plays the
   audio as stored (settings `playback.normalize` and `playback.volume`).
   The stored audio and the waveform do not change.
+- Added: a language a model names but cannot transcribe no longer ends in
+  a transcript of unknown tokens. The language lists offer the 30
+  transcription-ready and broad-coverage languages that an installed model
+  lists, not every tag in its header (121 for Nemotron 3.5, Malayalam among
+  them); any other tag can still be typed under "Other tag…", with a
+  warning, and `languages.user.json` can add a language to the lists. An
+  import or post-pass whose words come back mostly unknown tokens stops
+  with "The model could not transcribe this language (unknown tokens)" and
+  keeps the meeting.
 
 ## [0.1.0-beta.1] - 2026-10-15
 
