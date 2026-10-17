@@ -4,6 +4,14 @@ All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [Unreleased]
 
+- Fixed: clicking a word after scrolling the transcript away from the
+  cursor row did nothing. Pressing the mouse focused the row, and the
+  transcript then scrolled back to the cursor before the button came up,
+  so the click never reached the word. The transcript now scrolls to the
+  cursor only when it gets focus from the keyboard. A click on a row whose
+  words are still loading plays from the start of that row, and moving the
+  pointer over the transcript keeps it from following the playback away
+  from the row you are aiming at.
 - Fixed: names given to speakers while recording are kept after Stop. The
   final transcript matched live and final speakers by the overlap of their
   word times, and the two passes place each word up to a few hundred

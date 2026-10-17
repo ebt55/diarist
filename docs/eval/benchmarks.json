@@ -81,6 +81,6 @@
       { "language": "Japanese", "code": "ja", "tag": "ja-JP", "unit": "CER", "ref_units": 2072, "given": 20.9, "auto": 21.1, "card_given": 11.48, "card_auto": 11.66 }
     ],
     "en_model_english": { "given": 21.5, "note": "the EN model on the same English slice; nearly all errors are dropped quiet recordings (36 of 55 peak below -30 dBFS)" },
-    "note": "Smoke tests on small slices: one or two points either way is noise. The model card's numbers use the full test split and NVIDIA's normaliser; FLEURS writes numbers as digits and the runtime, with no normalisation grammars, writes them as words, so these numbers sit 1.5 to 7 points above the card's. Automatic detection picks es-ES and pt-PT for the Latin American and Brazilian slices."
+    "note": "Smoke tests on small slices: one or two points either way is noise. The model card's numbers use the full test split and NVIDIA's normaliser; FLEURS writes numbers as digits and the runtime, with no normalisation grammars, writes them as words, so these numbers sit 1 to 9.5 points above the card's, least for English and most for Hindi and Japanese. Automatic detection picks es-ES and pt-PT for the Latin American and Brazilian slices."
   }
 }
