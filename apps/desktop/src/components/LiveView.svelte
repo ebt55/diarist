@@ -14,6 +14,8 @@
     type LiveRow,
     type Meter,
   } from "../lib/live.svelte";
+  import { NO_LINE_NOTE, renameTarget } from "../lib/renameTarget";
+  import { app } from "../lib/state.svelte";
 
   interface Props {
     speakers: SpeakerView[];
@@ -72,7 +74,6 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     const at = cursor < 0 ? rows.length : cursor;
-    const row = rows[cursor];
     switch (e.key) {
       case "ArrowDown":
       case "j":
@@ -96,9 +97,11 @@
         break;
       case "r":
       case "R": {
-        // The selected line, else the newest one.
-        const target = row ?? rows[rows.length - 1];
+        // The selected line, else the newest final line of a known speaker
+        // (the newest line is usually a provisional "Unknown speaker").
+        const target = renameTarget(rows, cursor, (r) => live.isFinal(r));
         if (target) renameRow(target);
+        else app.toast("info", NO_LINE_NOTE);
         break;
       }
       default:

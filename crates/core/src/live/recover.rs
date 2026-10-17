@@ -7,8 +7,10 @@
 //!   with both WAVs still there, the output of the interrupted post-pass is
 //!   discarded and the post-pass queued again. Without them (the post-pass
 //!   got as far as deleting the WAVs), a finished `post_pass` run that is
-//!   current is kept and the meeting finished; otherwise the materialised
-//!   live run becomes current with a note in its `engine_info`.
+//!   current is kept and the meeting finished (the live run goes unless
+//!   `keep_live_runs` or the post-pass recorded `unplaced_names`);
+//!   otherwise the materialised live run becomes current with a note in its
+//!   `engine_info`.
 
 use std::path::Path;
 
@@ -204,10 +206,15 @@ fn recover_processing(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeeti
             .is_some_and(|c| c.kind == RunKind::PostPass && c.status == RunStatus::Done) =>
         {
             // The post-pass wrote its run and deleted the WAVs; only the
-            // bookkeeping after that was lost.
+            // bookkeeping after that was lost. A live run with names the
+            // carry-over could not place stays, as after a normal post-pass.
             let stored = settings::effective(store)?;
+            let unplaced = current
+                .as_ref()
+                .and_then(|c| c.engine_info["unplaced_names"].as_u64())
+                .unwrap_or(0);
             if let Some(run) = live {
-                if !settings::get_bool(&stored, settings::KEEP_LIVE_RUNS) {
+                if !settings::get_bool(&stored, settings::KEEP_LIVE_RUNS) && unplaced == 0 {
                     store.delete_run(run)?;
                 }
             }

@@ -194,7 +194,8 @@ pub trait Store: Send + Sync {
     /// Sets the display name (trimmed); a blank name restores the default.
     /// `anchor_segment` is the segment the rename was invoked from: its time
     /// range is stored as the name anchor used by carry-over. `None` (rename
-    /// from the legend) clears the anchor.
+    /// from the legend) keeps the anchor an earlier rename set; a blank name
+    /// clears both.
     fn rename_speaker(
         &self,
         id: SpeakerId,

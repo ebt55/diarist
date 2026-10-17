@@ -8,14 +8,17 @@
 //! ([`build_transcript_channels`]) into a `post_pass` run, names and edits carried
 //! over from the live run, the new run made current, the stereo
 //! `playback.flac` (left mic, right loopback) encoded and registered, the
-//! WAVs deleted, and the live run deleted unless `keep_live_runs`. With
+//! WAVs deleted, and the live run deleted unless `keep_live_runs` or a
+//! display name of the live run reached nobody in the new run (counted in
+//! the new run's `engine_info.unplaced_names`, and logged with the rest of
+//! the carry-over's counts). With
 //! `transcribe = false` (`post_pass_mode = on_issues` and a clean
 //! recording) the live run is promoted instead and only the audio work runs.
 //! Words that come back mostly unknown-token markers fail the post-pass
 //! before anything is stored ([`CoreError::UnknownTokens`]): the live run
 //! and the WAVs stay, so it can run again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -78,6 +81,9 @@ pub struct PostPassReport {
     pub speakers: Vec<(Channel, String, Option<String>)>,
     pub words: usize,
     pub carry_over: Option<CarryOverReport>,
+    /// Display names of the live run that no speaker of the new run
+    /// received (the live run is then kept; also `engine_info.unplaced_names`).
+    pub unplaced_names: usize,
     pub flac_path: PathBuf,
     pub flac_frames: u64,
     pub flac_bytes: u64,
@@ -144,6 +150,32 @@ fn transcribe(
     Ok(utterances.into_values().flat_map(|(_, w)| w).collect())
 }
 
+/// How many distinct display names of `live_run` (as the user sees them: a
+/// merged speaker shows its root's) no speaker received in the carry-over.
+fn unplaced_names(
+    store: &dyn RunStore,
+    live_run: RunId,
+    report: &CarryOverReport,
+) -> Result<usize> {
+    let speakers = store.run_speakers(live_run)?;
+    let name_of = |id| {
+        speakers
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.display_name.clone())
+    };
+    let placed: HashSet<&str> = report.named.iter().map(|(_, n)| n.as_str()).collect();
+    let unplaced: HashSet<String> = speakers
+        .iter()
+        .filter_map(|s| match s.merged_into {
+            Some(root) => name_of(root),
+            None => s.display_name.clone(),
+        })
+        .filter(|n| !placed.contains(n.as_str()))
+        .collect();
+    Ok(unplaced.len())
+}
+
 /// Maps a channel's words from channel time to meeting time and clamps
 /// them to the channel's end (Nemotron's last word can end after the audio).
 pub fn map_words(words: &mut [TranscriptWord], map: &ClockMap, channel_end_ms: i64) {
@@ -195,6 +227,7 @@ pub fn run_post_pass(
 
     let mut transcribe_wall = Duration::ZERO;
     let mut carry = None;
+    let mut unplaced = 0;
     let mut live_deleted = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
@@ -277,7 +310,24 @@ pub fn run_post_pass(
             return Err(e.into());
         }
         store.finish_run(run.id, RunStatus::Done)?;
-        carry = Some(store.carry_over(job.live_run, run.id)?);
+        let report = store.carry_over(job.live_run, run.id)?;
+        // Names given on the live run that reached no speaker of the new
+        // run: the live run is kept for them (recorded before the WAVs go,
+        // so crash recovery keeps it too).
+        unplaced = unplaced_names(store, job.live_run, &report)?;
+        let mut info = run.engine_info.clone();
+        info["unplaced_names"] = serde_json::json!(unplaced);
+        store.set_run_engine_info(run.id, info)?;
+        log::info!(
+            "post-pass meeting {}: carry-over shift_ms {:?}, {} matched, {} named, {} need review, {} unplaced names",
+            job.meeting,
+            report.shift_ms,
+            report.matched.len(),
+            report.named.len(),
+            report.needs_review.len(),
+            unplaced
+        );
+        carry = Some(report);
         store.set_current_run(job.meeting, run.id)?;
         run.id
     } else {
@@ -319,7 +369,9 @@ pub fn run_post_pass(
     let _ = std::fs::remove_file(&mic);
     let _ = std::fs::remove_file(&lb);
 
-    if job.transcribe && !job.keep_live_runs {
+    // A live run with a name nobody in the new run received stays, as if
+    // `keep_live_runs` were on for this meeting.
+    if job.transcribe && !job.keep_live_runs && unplaced == 0 {
         store.delete_run(job.live_run)?;
         live_deleted = true;
     }
@@ -339,6 +391,7 @@ pub fn run_post_pass(
         speakers,
         words,
         carry_over: carry,
+        unplaced_names: unplaced,
         flac_path: flac,
         flac_frames: info.frames,
         flac_bytes: info.bytes,

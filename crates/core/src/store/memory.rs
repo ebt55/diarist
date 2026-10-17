@@ -832,8 +832,12 @@ fn set_speaker_name(
         sp.name_anchor_end_ms = None;
     } else {
         sp.display_name = Some(name.to_owned());
-        sp.name_anchor_start_ms = anchor.map(|a| a.0);
-        sp.name_anchor_end_ms = anchor.map(|a| a.1);
+        // A rename without an anchor (from the legend) keeps the one an
+        // earlier rename set: carry-over still knows where the speaker talks.
+        if let Some((start, end)) = anchor {
+            sp.name_anchor_start_ms = Some(start);
+            sp.name_anchor_end_ms = Some(end);
+        }
     }
     Ok(())
 }

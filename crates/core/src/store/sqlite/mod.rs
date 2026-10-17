@@ -607,7 +607,10 @@ fn get_run(conn: &Connection, run: RunId) -> StoreResult<TranscriptRun> {
     .ok_or_else(|| StoreError::not_found("run", run))
 }
 
-/// Sets (trimmed) or clears (blank) a display name with its name anchor.
+/// Sets (trimmed) or clears (blank) a display name. A given anchor replaces
+/// the name anchor; without one (a rename from the legend) the anchor an
+/// earlier rename set stays, so carry-over still knows where the speaker
+/// talks. Clearing the name clears the anchor.
 fn write_speaker_name(
     conn: &Connection,
     id: SpeakerId,
@@ -621,11 +624,16 @@ fn write_speaker_name(
              name_anchor_end_ms = NULL WHERE id = ?1",
             [id.0],
         )?;
-    } else {
+    } else if let Some((start, end)) = anchor {
         conn.execute(
             "UPDATE speakers SET display_name = ?2, name_anchor_start_ms = ?3,
              name_anchor_end_ms = ?4 WHERE id = ?1",
-            params![id.0, name, anchor.map(|a| a.0), anchor.map(|a| a.1)],
+            params![id.0, name, start, end],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE speakers SET display_name = ?2 WHERE id = ?1",
+            params![id.0, name],
         )?;
     }
     Ok(())

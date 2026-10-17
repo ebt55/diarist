@@ -2,7 +2,7 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## Unreleased
+## [Unreleased]
 
 - Fixed: clicking a word after scrolling the transcript away from the
   cursor row did nothing. Pressing the mouse focused the row, and the
@@ -12,6 +12,25 @@ All notable changes to Diarist. Versions follow semantic versioning.
   words are still loading plays from the start of that row, and moving the
   pointer over the transcript keeps it from following the playback away
   from the row you are aiming at.
+- Fixed: names given to speakers while recording are kept after Stop. The
+  final transcript matched live and final speakers by the overlap of their
+  word times, and the two passes place each word up to a few hundred
+  milliseconds apart, so on real meetings nobody matched and a name given
+  from the speaker legend fell back to "Speaker N". Speakers are now
+  matched by their stretches of speech; a name that still finds no match
+  goes to the final speaker who covers most of that speech, marked "new
+  label" to check, and renaming from the legend no longer forgets where an
+  earlier rename from a line placed the name.
+- Changed: R in the live transcript with no line selected renames the
+  newest finished line of a known speaker instead of the newest line,
+  which was usually the provisional "Unknown speaker" whose name was lost
+  at Stop. With no such line it says to select a line (j/k) or rename from
+  the speaker legend.
+- Changed: when a name given during a recording still reaches nobody in
+  the final transcript, the live transcript is kept for that meeting
+  instead of deleted (also after a crash during the processing), so the
+  name is not gone for good; the app log records the matching counts
+  after every Stop (no names or text).
 
 ## [0.1.0-beta.2] - 2026-10-16
 

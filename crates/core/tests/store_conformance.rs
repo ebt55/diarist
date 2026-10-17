@@ -71,6 +71,22 @@ const RUN_CASES: &[(&str, RunCase)] = &[
         carry_over_survives_earlier_post_pass_words,
     ),
     (
+        "carry_over_survives_engine_word_spikes",
+        carry_over_survives_engine_word_spikes,
+    ),
+    (
+        "carry_over_keeps_alternating_speakers_apart",
+        carry_over_keeps_alternating_speakers_apart,
+    ),
+    (
+        "carry_over_seeded_engine_like_meetings",
+        carry_over_seeded_engine_like_meetings,
+    ),
+    (
+        "rename_without_anchor_keeps_the_anchor",
+        rename_without_anchor_keeps_the_anchor,
+    ),
+    (
         "live_speakers_survive_materialise",
         live_speakers_survive_materialise,
     ),
@@ -1147,10 +1163,13 @@ fn carry_over_names_anchor_edits(store: &dyn RunStore) {
     let z = by_label(store, new, "spk_2");
     let w = by_label(store, new, "spk_3");
 
-    // Overlap: A-X, B-Y (8.8 s beats B-Z 7.2 s), D-W; C is ignored (2.4 s).
+    // Overlap of speech regions: A-X, B-Y (11 s beats B-Z 9 s); C (3 s) and
+    // D (43-50 s once its 50-60 s went to Priya: 7 s) are under the 10 s
+    // region minimum. (With the earlier word-time rule, 5 s of 800 ms words,
+    // D's 5.6 s matched W.)
     assert!(report.matched.contains(&(a.id, x.id)));
     assert!(report.matched.contains(&(b.id, y.id)));
-    assert_eq!(report.matched.len(), 3);
+    assert_eq!(report.matched.len(), 2);
     assert_eq!(x.display_name.as_deref(), Some("Priya"));
     assert_eq!(x.color.as_deref(), Some("#123456"));
     assert!(!x.needs_review);
@@ -1162,14 +1181,15 @@ fn carry_over_names_anchor_edits(store: &dyn RunStore) {
         y.needs_review && z.needs_review,
         "anchor disagreement flags both"
     );
+    // W matched nobody (D is under the minimum): a new label to check.
     assert_eq!(report.needs_review, {
-        let mut v = vec![y.id, z.id];
+        let mut v = vec![y.id, z.id, w.id];
         v.sort();
         v
     });
-    // Ghost (under 5 s) names nobody; W matched D (unnamed).
+    // Ghost (under the minimum) names nobody; W has no name.
     assert_eq!(w.display_name, None);
-    assert!(!w.needs_review);
+    assert!(w.needs_review);
     assert!(store
         .run_speakers(new)
         .unwrap()
@@ -1287,7 +1307,9 @@ fn rename_at_anchors_a_live_speaker(store: &dyn RunStore) {
     // Unmatched by overlap: the new label is flagged for review.
     assert!(dana.needs_review && !eve.needs_review);
 
-    // The same rename from the legend (no anchor) passes no name on.
+    // The same rename from the legend (no anchor): too short to match, the
+    // name reaches spk_1 through the fallback (it covers all of Dana's speech
+    // region), flagged for review. (Before the fallback it was lost.)
     let (m2, live2, _, _) = recorded_live_run(store, false);
     let new2 = run_with(
         store,
@@ -1296,7 +1318,9 @@ fn rename_at_anchors_a_live_speaker(store: &dyn RunStore) {
         &carry_transcript(&[("spk_0", &[(20, 40)]), ("spk_1", &[(10, 13)])]),
     );
     store.carry_over(live2, new2).unwrap();
-    assert_eq!(by_label(store, new2, "spk_1").display_name, None);
+    let dana2 = by_label(store, new2, "spk_1");
+    assert_eq!(dana2.display_name.as_deref(), Some("Dana"));
+    assert!(dana2.needs_review);
     assert_eq!(
         by_label(store, new2, "spk_0").display_name.as_deref(),
         Some("Eve")
@@ -1519,6 +1543,461 @@ fn carry_over_survives_earlier_post_pass_words(store: &dyn RunStore) {
             "shift {shift} jitter {jitter}"
         );
     }
+}
+
+/// Deterministic xorshift for the engine-like fixtures.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[(self.next() % xs.len() as u64) as usize]
+    }
+}
+
+/// Utterances as the engines emit them: `(speaker index, [(start, end)])`,
+/// mostly 80 ms words (one encoder frame) with 80 to 320 ms gaps, 240 ms
+/// between turns.
+fn spike_turns(order: &[usize], seed: u64) -> Vec<(usize, Vec<(i64, i64)>)> {
+    let mut rng = Rng(seed);
+    let mut at = 1_000;
+    let mut out = Vec::new();
+    for &spk in order {
+        let n = 3 + rng.next() % 10;
+        let mut words = Vec::new();
+        for k in 0..n {
+            if k > 0 {
+                at += rng.pick(&[80, 160, 240, 320]);
+            }
+            let d = rng.pick(&[80, 80, 80, 80, 160, 240]);
+            words.push((at, at + d));
+            at += d;
+        }
+        out.push((spk, words));
+        at += 240;
+    }
+    out
+}
+
+/// One segment per utterance on the loopback; speaker `i` is `labels[i]`.
+/// Each word moves by `shift_ms` plus a per-word offset drawn from
+/// `spread` (sorted again within the utterance).
+fn spike_transcript(
+    turns: &[(usize, Vec<(i64, i64)>)],
+    labels: &[&str],
+    shift_ms: i64,
+    spread: &[i64],
+    seed: u64,
+) -> NewTranscript {
+    let mut rng = Rng(seed);
+    let mut t = NewTranscript::default();
+    for l in labels {
+        t.speakers.push(speaker(Channel::Loopback, l));
+    }
+    for (u, (spk, words)) in turns.iter().enumerate() {
+        let mut ws: Vec<(i64, i64)> = words
+            .iter()
+            .map(|&(a, b)| {
+                let off = shift_ms
+                    + if spread.is_empty() {
+                        0
+                    } else {
+                        rng.pick(spread)
+                    };
+                ((a + off).max(0), (b + off).max(0))
+            })
+            .collect();
+        ws.sort();
+        let seg = t.segments.len();
+        t.segments.push(NewSegment {
+            speaker: *spk,
+            start_ms: ws[0].0,
+            end_ms: ws.iter().map(|w| w.1).max().unwrap(),
+            text: format!("u{u}"),
+        });
+        for (k, (a, b)) in ws.into_iter().enumerate() {
+            t.words.push(NewWord {
+                segment: seg,
+                start_ms: a,
+                end_ms: b,
+                text: format!("u{u}w{k}"),
+                confidence: None,
+                raw_label: Some(labels[*spk].to_owned()),
+                margin: None,
+                overlap: false,
+            });
+        }
+    }
+    t
+}
+
+/// Post-pass word offsets against the live run as measured on real
+/// recordings (right context 13 against 1): a median 160 ms earlier, spread
+/// 400 ms earlier to 0 (p10 / p90), about two thirds within one 80 ms frame
+/// of the median. As offsets around the -160 ms shift.
+const SPIKE_SPREAD: &[i64] = &[-240, -160, -80, -80, 0, 0, 0, 0, 80, 80, 160, 240];
+
+/// Live and post-pass words of three speakers are 80 ms spikes and the
+/// post-pass places each one a little differently (`SPIKE_SPREAD`): the
+/// spikes overlap too little for word overlap to match anyone, so names
+/// given from the legend used to be lost. Speech regions match.
+fn carry_over_survives_engine_word_spikes(store: &dyn RunStore) {
+    let order: Vec<usize> = (0..60).map(|i| [0, 1, 2, 0, 2, 1][i % 6]).collect();
+    let turns = spike_turns(&order, 0x5EED);
+    let m = live_meeting(store);
+    let live = run_with(
+        store,
+        m,
+        RunKind::Live,
+        &spike_transcript(&turns, &["spk_0", "spk_1", "spk_2"], 0, &[], 1),
+    );
+    store.set_current_run(m, live).unwrap();
+    let (a, b) = (
+        by_label(store, live, "spk_0").id,
+        by_label(store, live, "spk_1").id,
+    );
+    // Priya from the legend, Marcus from one of his live lines.
+    store.rename_speaker(a, "Priya", None).unwrap();
+    let line = &turns.iter().filter(|t| t.0 == 1).nth(4).unwrap().1;
+    store
+        .rename_speaker_at(b, "Marcus", line[0].0, line[line.len() - 1].1)
+        .unwrap();
+    // The post-pass labels them differently.
+    let new = run_with(
+        store,
+        m,
+        RunKind::PostPass,
+        &spike_transcript(&turns, &["spk_2", "spk_0", "spk_1"], -160, SPIKE_SPREAD, 2),
+    );
+    let report = store.carry_over(live, new).unwrap();
+    let name = |label: &str| by_label(store, new, label).display_name;
+    assert_eq!(
+        report.shift_ms.get(&Channel::Loopback),
+        Some(&-160),
+        "{report:?}"
+    );
+    assert_eq!(name("spk_2").as_deref(), Some("Priya"), "{report:?}");
+    assert_eq!(name("spk_0").as_deref(), Some("Marcus"), "{report:?}");
+    assert_eq!(name("spk_1"), None, "{report:?}");
+    assert_eq!(report.matched.len(), 3, "{report:?}");
+    assert!(report.needs_review.is_empty(), "{report:?}");
+}
+
+/// Two speakers alternating in quick turns (240 ms apart, some one-word
+/// interjections), post-pass labels swapped and word times spread as in
+/// `SPIKE_SPREAD`: each live speaker matches its own post-pass speaker,
+/// never the neighbour whose regions touch its own.
+fn carry_over_keeps_alternating_speakers_apart(store: &dyn RunStore) {
+    let order: Vec<usize> = (0..80).map(|i| i % 2).collect();
+    let mut turns = spike_turns(&order, 0xA17E);
+    // Every fifth turn of B is a one-word interjection.
+    for (i, t) in turns.iter_mut().enumerate() {
+        if t.0 == 1 && i % 10 == 1 {
+            t.1.truncate(1);
+        }
+    }
+    let m = live_meeting(store);
+    let live = run_with(
+        store,
+        m,
+        RunKind::Live,
+        &spike_transcript(&turns, &["spk_0", "spk_1"], 0, &[], 3),
+    );
+    store.set_current_run(m, live).unwrap();
+    let (a, b) = (
+        by_label(store, live, "spk_0").id,
+        by_label(store, live, "spk_1").id,
+    );
+    store.rename_speaker(a, "Ana", None).unwrap();
+    store.rename_speaker(b, "Ben", None).unwrap();
+    let new = run_with(
+        store,
+        m,
+        RunKind::PostPass,
+        &spike_transcript(&turns, &["spk_1", "spk_0"], -160, SPIKE_SPREAD, 4),
+    );
+    let report = store.carry_over(live, new).unwrap();
+    let (na, nb) = (by_label(store, new, "spk_1"), by_label(store, new, "spk_0"));
+    let mut matched = report.matched.clone();
+    matched.sort();
+    let mut want = vec![(a, na.id), (b, nb.id)];
+    want.sort();
+    assert_eq!(matched, want, "{report:?}");
+    assert_eq!(na.display_name.as_deref(), Some("Ana"));
+    assert_eq!(nb.display_name.as_deref(), Some("Ben"));
+    assert!(report.needs_review.is_empty(), "{report:?}");
+}
+
+/// Post-pass word offsets against the live run, absolute, as measured on two
+/// recorded meetings: median -160 ms, p10 -400 ms, p90 0, about 60 percent
+/// within one 80 ms frame of the median.
+const MEASURED_OFFSETS: &[i64] = &[
+    -480, -400, -400, -320, -320, -240, -240, -240, -160, -160, -160, -160, -160, -160, -160, -160,
+    -80, -80, -80, 0, 0, 80,
+];
+
+/// A transcript on the loopback from utterances (`turns`, live times), each
+/// word labelled by `label(turn, word)`; segments are runs of one label
+/// within an utterance. With `offsets`, every word moves by a value drawn
+/// from it (then the utterance is sorted again).
+fn labelled_transcript(
+    turns: &[Vec<(i64, i64)>],
+    label: &dyn Fn(usize, usize) -> String,
+    offsets: Option<(&[i64], u64)>,
+) -> NewTranscript {
+    let mut rng = Rng(offsets.map_or(1, |o| o.1));
+    let mut t = NewTranscript::default();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (u, words) in turns.iter().enumerate() {
+        let mut ws: Vec<(i64, i64, String)> = words
+            .iter()
+            .enumerate()
+            .map(|(k, &(a, b))| {
+                let off = offsets.map_or(0, |o| rng.pick(o.0));
+                ((a + off).max(0), (b + off).max(0), label(u, k))
+            })
+            .collect();
+        ws.sort();
+        for (k, (a, b, l)) in ws.iter().enumerate() {
+            let spk = *index.entry(l.clone()).or_insert_with(|| {
+                t.speakers.push(speaker(Channel::Loopback, l));
+                t.speakers.len() - 1
+            });
+            if k == 0 || ws[k - 1].2 != *l {
+                t.segments.push(NewSegment {
+                    speaker: spk,
+                    start_ms: *a,
+                    end_ms: *b,
+                    text: format!("u{u}"),
+                });
+            }
+            let seg = t.segments.len() - 1;
+            t.segments[seg].end_ms = t.segments[seg].end_ms.max(*b);
+            t.words.push(NewWord {
+                segment: seg,
+                start_ms: *a,
+                end_ms: *b,
+                text: format!("u{u}w{k}"),
+                confidence: None,
+                raw_label: Some(l.clone()),
+                margin: None,
+                overlap: false,
+            });
+        }
+    }
+    t
+}
+
+/// 200 seeded meetings with engine-like words (80 ms spikes, 80 to 320 ms
+/// gaps, 240 ms between turns, post-pass offsets drawn from
+/// `MEASURED_OFFSETS`): live A, B (with one-word backchannels), C, E (two
+/// short turns, under the minimum) and `spk_unknown` words at some turn
+/// ends; the post-pass splits C into C1 (two thirds) and C2, and labels one
+/// word in the middle of A's longest turn as a new speaker T. Ann (A) and
+/// Eve (E) are named from the legend, Bob (B) from a live line. Every seed:
+/// exactly A-A', B-B', C-C1 match; Ann, Bob and Eve (through the fallback)
+/// land on A', B', E' and no name anywhere else. A control meeting of two
+/// balanced speakers whose post-pass labels swap halfway matches nobody.
+fn carry_over_seeded_engine_like_meetings(store: &dyn RunStore) {
+    for seed in 1..=200u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let base = [0usize, 1, 0, 2, 1, 0, 2, 1];
+        let mut order: Vec<usize> = (0..56).map(|i| base[i % base.len()]).collect();
+        order[11] = 3;
+        order[37] = 3;
+        let mut turns: Vec<Vec<(i64, i64)>> = Vec::new();
+        let mut at = 1_000;
+        for &spk in &order {
+            let backchannel = spk == 1 && rng.next().is_multiple_of(4);
+            let n = if backchannel { 1 } else { 3 + rng.next() % 10 };
+            let mut ws = Vec::new();
+            for k in 0..n {
+                if k > 0 {
+                    at += rng.pick(&[80, 160, 240, 320]);
+                }
+                let d = rng.pick(&[80, 80, 80, 80, 160, 240]);
+                ws.push((at, at + d));
+                at += d;
+            }
+            turns.push(ws);
+            at += 240;
+        }
+        // C1: C's turns up to two thirds of C's talk time.
+        let span = |t: usize| turns[t].last().unwrap().1 - turns[t][0].0;
+        let c_turns: Vec<usize> = (0..order.len()).filter(|&t| order[t] == 2).collect();
+        let c_total: i64 = c_turns.iter().map(|&t| span(t)).sum();
+        let mut c1 = std::collections::HashSet::new();
+        let mut c_sum = 0;
+        for &t in &c_turns {
+            if 3 * c_sum >= 2 * c_total {
+                break;
+            }
+            c_sum += span(t);
+            c1.insert(t);
+        }
+        let a_long = (0..order.len())
+            .filter(|&t| order[t] == 0)
+            .max_by_key(|&t| (turns[t].len(), std::cmp::Reverse(t)))
+            .unwrap();
+        let live_labels = ["spk_0", "spk_1", "spk_2", "spk_3"];
+        let live_label = |t: usize, k: usize| -> String {
+            let n = turns[t].len();
+            if order[t] != 3 && t.is_multiple_of(7) && n > 3 && k == n - 1 {
+                "spk_unknown".into()
+            } else {
+                live_labels[order[t]].into()
+            }
+        };
+        // Post-pass labels: A' spk_0, B' spk_1, C1 spk_2, C2 spk_4, E' spk_3, T spk_5.
+        let pp_label = |t: usize, k: usize| -> String {
+            match order[t] {
+                0 if t == a_long && k == turns[t].len() / 2 => "spk_5".into(),
+                2 if !c1.contains(&t) => "spk_4".into(),
+                s => live_labels[s].into(),
+            }
+        };
+        let m = live_meeting(store);
+        let live = run_with(
+            store,
+            m,
+            RunKind::Live,
+            &labelled_transcript(&turns, &live_label, None),
+        );
+        store.set_current_run(m, live).unwrap();
+        let old = |l: &str| by_label(store, live, l).id;
+        store.rename_speaker(old("spk_0"), "Ann", None).unwrap();
+        store.rename_speaker(old("spk_3"), "Eve", None).unwrap();
+        let line = (0..order.len())
+            .filter(|&t| order[t] == 1 && turns[t].len() > 2)
+            .nth(2)
+            .unwrap();
+        let (l0, l1) = (turns[line][0].0, turns[line].last().unwrap().1);
+        store
+            .rename_speaker_at(old("spk_1"), "Bob", l0, l1)
+            .unwrap();
+        let new = run_with(
+            store,
+            m,
+            RunKind::PostPass,
+            &labelled_transcript(&turns, &pp_label, Some((MEASURED_OFFSETS, seed + 1_000))),
+        );
+        let report = store.carry_over(live, new).unwrap();
+        let newl = |l: &str| by_label(store, new, l);
+        let mut matched = report.matched.clone();
+        matched.sort();
+        let mut want = vec![
+            (old("spk_0"), newl("spk_0").id),
+            (old("spk_1"), newl("spk_1").id),
+            (old("spk_2"), newl("spk_2").id),
+        ];
+        want.sort();
+        assert_eq!(matched, want, "seed {seed}: {report:?}");
+        let names: Vec<(String, Option<String>, bool)> = store
+            .run_speakers(new)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.engine_label, s.display_name, s.needs_review))
+            .collect();
+        for (label, name, review) in &names {
+            let want = match label.as_str() {
+                "spk_0" => Some("Ann"),
+                "spk_1" => Some("Bob"),
+                "spk_3" => Some("Eve"),
+                _ => None,
+            };
+            assert_eq!(name.as_deref(), want, "seed {seed} {label}: {names:?}");
+            // Matched speakers are settled; the fallback's receiver and the
+            // unmatched C2 and T are flagged.
+            let flagged = matches!(label.as_str(), "spk_3" | "spk_4" | "spk_5");
+            assert_eq!(*review, flagged, "seed {seed} {label}: {names:?}");
+        }
+
+        // Control: two balanced speakers, post-pass labels swapped halfway.
+        let mut cturns: Vec<Vec<(i64, i64)>> = Vec::new();
+        let mut at = 1_000;
+        for _ in 0..40 {
+            let n = 3 + rng.next() % 10;
+            let mut ws = Vec::new();
+            for k in 0..n {
+                if k > 0 {
+                    at += rng.pick(&[80, 160, 240, 320]);
+                }
+                let d = rng.pick(&[80, 80, 80, 80, 160, 240]);
+                ws.push((at, at + d));
+                at += d;
+            }
+            cturns.push(ws);
+            at += 240;
+        }
+        let half = cturns.len() / 2;
+        let cm = live_meeting(store);
+        let clive = run_with(
+            store,
+            cm,
+            RunKind::Live,
+            &labelled_transcript(&cturns, &|t, _| format!("spk_{}", t % 2), None),
+        );
+        let cnew = run_with(
+            store,
+            cm,
+            RunKind::PostPass,
+            &labelled_transcript(
+                &cturns,
+                &|t, _| format!("spk_{}", (t + usize::from(t >= half)) % 2),
+                Some((MEASURED_OFFSETS, seed + 2_000)),
+            ),
+        );
+        let creport = store.carry_over(clive, cnew).unwrap();
+        assert!(
+            creport.matched.is_empty(),
+            "control seed {seed}: {creport:?}"
+        );
+    }
+}
+
+/// A rename without an anchor keeps the anchor an earlier rename set; a
+/// blank name clears both.
+fn rename_without_anchor_keeps_the_anchor(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let live = store
+        .create_run(m, RunKind::Live, serde_json::json!({}))
+        .unwrap()
+        .id;
+    let s = store
+        .live_speaker(live, Channel::Loopback, "spk_0")
+        .unwrap();
+    let anchor = |id| {
+        let s = store
+            .run_speakers(live)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap();
+        (s.display_name, s.name_anchor_start_ms, s.name_anchor_end_ms)
+    };
+    store.rename_speaker_at(s.id, "Dana", 1_000, 2_500).unwrap();
+    store.rename_speaker(s.id, "Dana K.", None).unwrap();
+    assert_eq!(
+        anchor(s.id),
+        (Some("Dana K.".into()), Some(1_000), Some(2_500))
+    );
+    store
+        .rename_speaker_at(s.id, "Dana K.", 4_000, 4_400)
+        .unwrap();
+    assert_eq!(
+        anchor(s.id),
+        (Some("Dana K.".into()), Some(4_000), Some(4_400))
+    );
+    store.rename_speaker(s.id, "  ", None).unwrap();
+    assert_eq!(anchor(s.id), (None, None, None));
+    store.rename_speaker(s.id, "Dana", None).unwrap();
+    assert_eq!(anchor(s.id), (Some("Dana".into()), None, None));
 }
 
 fn carry_over_rejects_bad_runs(store: &dyn RunStore) {
