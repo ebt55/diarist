@@ -39,7 +39,7 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `Diarist_0.1.0-beta.2_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.3_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
    `%LOCALAPPDATA%\Diarist`.
@@ -179,7 +179,7 @@ deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 ## Status
 
-Version 0.1.0-beta.2, the second beta pre-release: file
+Version 0.1.0-beta.3, the third beta pre-release: file
 import and live recording work
 end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
 CPU runtime packages were tested on that machine's NVIDIA card and CPU only,
