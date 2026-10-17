@@ -2,7 +2,7 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.1.0-beta.3] - 2026-10-17
 
 - Fixed: clicking a word after scrolling the transcript away from the
   cursor row did nothing. Pressing the mouse focused the row, and the
