@@ -2,6 +2,17 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## Unreleased
+
+- Fixed: clicking a word after scrolling the transcript away from the
+  cursor row did nothing. Pressing the mouse focused the row, and the
+  transcript then scrolled back to the cursor before the button came up,
+  so the click never reached the word. The transcript now scrolls to the
+  cursor only when it gets focus from the keyboard. A click on a row whose
+  words are still loading plays from the start of that row, and moving the
+  pointer over the transcript keeps it from following the playback away
+  from the row you are aiming at.
+
 ## [0.1.0-beta.2] - 2026-10-16
 
 The second beta pre-release, and the first one that installed copies of

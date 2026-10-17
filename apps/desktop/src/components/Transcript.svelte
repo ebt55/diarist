@@ -87,7 +87,8 @@
     });
   });
 
-  // Follow the playhead unless the user scrolled in the last 3 s.
+  // Follow the playhead unless the user scrolled or moved the pointer over the
+  // transcript in the last 3 s (so a row being aimed at stays put).
   $effect(() => {
     const i = activeIndex;
     if (i < 0 || !player.playing || !follow || !vlist) return;
@@ -258,6 +259,11 @@
     if (!window.getSelection()?.isCollapsed) return;
     const w = wordFromEvent(e, seg);
     if (w) seekTo(w.start_ms);
+    else if (!words.get(seg.id)?.length) {
+      // Plain text, its words not loaded yet: play from the segment's start.
+      seekTo(seg.start_ms);
+      if (!words.has(seg.id)) scheduleWords(0);
+    }
   }
 
   function onRowContext(e: MouseEvent, seg: SegmentView, i: number) {
@@ -345,11 +351,17 @@
       bind:this={vlist}
       onscroll={() => scheduleWords()}
       onwheel={() => (lastUserScroll = performance.now())}
+      onpointermove={() => (lastUserScroll = performance.now())}
       onfocusin={(e: FocusEvent) => {
         const list = e.currentTarget as HTMLElement;
         // Rows and timestamps are not tab stops; keep focus on the listbox.
         if (e.target !== list) list.focus({ preventScroll: true });
-        else vlist?.scrollToIndex(cursor, { align: "nearest" });
+        // Bring the cursor into view only when focus arrives from outside by
+        // keyboard. A click on a row focuses the row and then the list: scrolling
+        // to the old cursor between mousedown and mouseup would lose that click.
+        else if (!list.contains(e.relatedTarget as Node | null) && list.matches(":focus-visible")) {
+          vlist?.scrollToIndex(cursor, { align: "nearest" });
+        }
       }}
       {onkeydown}
     >
