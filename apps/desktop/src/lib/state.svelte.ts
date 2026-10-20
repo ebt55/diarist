@@ -100,6 +100,8 @@ class AppState {
   jobs = $state<Job[]>([]);
   confirmRequest = $state.raw<ConfirmRequest | null>(null);
   helpOpen = $state(false);
+  /** A Settings field to scroll to when Settings opens (`set-<name>`), from a checklist fix. */
+  settingsAnchor = $state<string | null>(null);
   dragging = $state(false);
   /** Post-passes queued or running (from `live:state`). */
   postPasses = $state.raw<PostPassView[]>([]);

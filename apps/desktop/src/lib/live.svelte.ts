@@ -1,6 +1,7 @@
 // Live recording state: the `live:*` events folded into what the record
 // controls and the live meeting view render. One recording at a time.
 import { api, errorText, onEvent } from "./api";
+import { echoWarningText } from "./echo";
 import type { Channel } from "./generated/Channel";
 import type { DegradedUpdate } from "./generated/DegradedUpdate";
 import type { DeviceChange } from "./generated/DeviceChange";
@@ -31,9 +32,7 @@ export function warningText(w: LiveWarning): string {
     case "capture":
       return `${w.channel === "mic" ? "Microphone" : "System audio"}: ${w.message}`;
     case "echo":
-      return w.aec
-        ? "Sound from the meeting reaches your microphone. Echo cancellation is on."
-        : `Sound from the meeting reaches your microphone. Echoed words are removed from "me"; headphones would help.`;
+      return echoWarningText(w.aec);
     default:
       return JSON.stringify(w);
   }
@@ -141,6 +140,10 @@ class LiveStore {
   error = $state<string | null>(null);
   /** The GPU queue holds new jobs while a recording runs (`JobQueue::is_paused`). */
   queuePaused = $state(false);
+  /** Echo handling was turned off for this recording (the echo banner's action). */
+  echoOff = $state(false);
+  /** The echo banner's action is running. */
+  echoTurningOff = $state(false);
   mic = $state.raw<Meter | null>(null);
   loopback = $state.raw<Meter | null>(null);
   rows = $state.raw<LiveRow[]>([]);
@@ -159,6 +162,11 @@ class LiveStore {
 
   get active(): boolean {
     return this.phase === "recording" || this.phase === "stopping";
+  }
+
+  /** The echo warning is on screen with its "Turn off for this recording" (N). */
+  get echoActionShown(): boolean {
+    return !this.echoOff && this.warnings.slice(this.warningsSeen).some((w) => w.kind === "echo");
   }
 
   get elapsedMs(): number {
@@ -287,6 +295,20 @@ class LiveStore {
     this.warningsSeen = this.warnings.length;
   }
 
+  /** The echo banner's "Turn off for this recording" (N): no echo gating for the rest of it, nor in the post-pass. */
+  async turnOffEcho(): Promise<void> {
+    if (!this.active || this.echoOff || this.echoTurningOff) return;
+    this.echoTurningOff = true;
+    try {
+      await api.turnOffEchoForRecording();
+      this.echoOff = true;
+    } catch (e) {
+      app.error(errorText(e));
+    } finally {
+      this.echoTurningOff = false;
+    }
+  }
+
   // ---- events ----------------------------------------------------------------
 
   #reset(): void {
@@ -298,6 +320,7 @@ class LiveStore {
     this.degraded = {};
     this.warnings = [];
     this.warningsSeen = 0;
+    this.echoOff = false;
     this.mic = null;
     this.loopback = null;
     this.#lag = {};
@@ -326,6 +349,7 @@ class LiveStore {
       this.devices = { ...v.devices, ...this.devices };
       this.degraded = v.degraded;
       if (v.warnings.length > this.warnings.length) this.warnings = v.warnings;
+      if (this.active) this.echoOff = v.echo_off;
     }
     app.setPostPasses(v.post_passes);
     if (this.active) {

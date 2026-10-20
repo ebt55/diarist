@@ -3,6 +3,7 @@
   // transcript (both channels interleaved by time). Labels stay provisional
   // (dotted chip, dimmed text) until the engine marks the text final.
   import { tick } from "svelte";
+  import { ECHO_OFF_ACTION, ECHO_OFF_KEY, ECHO_OFF_NOTE } from "../lib/echo";
   import { formatClock } from "../lib/format";
   import type { SpeakerId } from "../lib/generated/SpeakerId";
   import type { SpeakerView } from "../lib/generated/SpeakerView";
@@ -201,7 +202,26 @@
   {#if warnings.length > 0}
     <div class="banner warn" role="alert">
       <div class="w-list">
-        {#each warnings as w, i (i)}<span>{warningText(w)}</span>{/each}
+        {#each warnings as w, i (i)}
+          {#if w.kind === "echo" && live.echoOff}
+            <span>{ECHO_OFF_NOTE}</span>
+          {:else if w.kind === "echo"}
+            <span>
+              {warningText(w)}
+              <button
+                type="button"
+                class="link"
+                disabled={live.echoTurningOff}
+                onclick={() => live.turnOffEcho()}
+                title={`Keep every word the microphone hears in "me", also in the final transcript (${ECHO_OFF_KEY})`}
+                >{ECHO_OFF_ACTION}</button
+              >
+              <kbd>{ECHO_OFF_KEY}</kbd>
+            </span>
+          {:else}
+            <span>{warningText(w)}</span>
+          {/if}
+        {/each}
       </div>
       <button type="button" class="link" onclick={() => live.dismissWarnings()}>Dismiss</button>
     </div>

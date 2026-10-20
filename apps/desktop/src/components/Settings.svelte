@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { api, errorText, langApi, onEvent } from "../lib/api";
@@ -17,7 +17,8 @@
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
   import type { ModelSource } from "../lib/generated/ModelSource";
-  import { SETTING_DEFAULTS, type SettingKey } from "../lib/generated/settingDefaults";
+  import { ECHO_GATE, SETTING_DEFAULTS, type SettingKey } from "../lib/generated/settingDefaults";
+  import { ECHO_MODE_HELP, ECHO_MODES, ECHO_THRESHOLD_HELP, echoMode, echoThreshold } from "../lib/echo";
   import {
     LANGUAGE_TIERS,
     TIER_EXPECTATIONS,
@@ -320,6 +321,31 @@
       app.error(`Could not change start with Windows (${errorText(err)}); Windows Settings, Apps, Startup has the same switch`);
     }
   }
+
+  async function saveEchoThreshold(e: Event) {
+    const el = e.currentTarget as HTMLInputElement;
+    const v = echoThreshold(el.value);
+    if (v === null) {
+      el.value = app.setting("echo.gate_threshold");
+      return;
+    }
+    el.value = v;
+    if (await app.setSetting("echo.gate_threshold", v)) {
+      app.toast("info", `Echo gate threshold ${v}, from the next recording`);
+    }
+  }
+
+  // A checklist fix asked for one field (Diagnostics, `settings:<name>`).
+  $effect(() => {
+    const anchor = app.settingsAnchor;
+    if (!anchor) return;
+    void tick().then(() => {
+      const el = document.getElementById(`set-${anchor}`);
+      el?.scrollIntoView({ block: "start" });
+      el?.querySelector<HTMLInputElement>("input:checked, input")?.focus({ preventScroll: true });
+      app.settingsAnchor = null;
+    });
+  });
 
   async function saveIdle(e: Event) {
     const el = e.currentTarget as HTMLInputElement;
@@ -727,6 +753,42 @@
         <span><strong>{t.label}</strong>. {t.help}</span>
       </label>
     {/each}
+    <fieldset class="field" id="set-echo">
+      <legend class="label">Recording with speakers (echo)</legend>
+      <div class="row radios">
+        {#each ECHO_MODES as [value, label] (value)}
+          <label class="radio">
+            <input
+              type="radio"
+              name="echo_mode"
+              {value}
+              checked={echoMode(app.setting("echo.mode")) === value}
+              onchange={() => app.setSetting("echo.mode", value)}
+            />
+            {label}{value === "auto" ? " (default)" : ""}
+          </label>
+        {/each}
+      </div>
+      <p class="help">{ECHO_MODE_HELP}</p>
+      <details class="howto">
+        <summary>Advanced: echo gate threshold</summary>
+        <div class="row">
+          <input
+            id="echo-threshold"
+            type="number"
+            min={ECHO_GATE.min}
+            max={ECHO_GATE.max}
+            step="0.05"
+            class="num-input"
+            aria-label="Echo gate threshold"
+            value={app.setting("echo.gate_threshold")}
+            onchange={saveEchoThreshold}
+          />
+          <span>{ECHO_GATE.min} to {ECHO_GATE.max}, default {SETTING_DEFAULTS["echo.gate_threshold"]}</span>
+        </div>
+        <p class="help">{ECHO_THRESHOLD_HELP}</p>
+      </details>
+    </fieldset>
     <p class="help">
       Recordings are kept as lossless FLAC (about 90 MB per hour) for
       {plural(Number(app.settings.audio_retention_days ?? SETTING_DEFAULTS.audio_retention_days), "day")} (Keep audio
