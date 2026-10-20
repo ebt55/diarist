@@ -18,30 +18,47 @@
 //! before anything is stored ([`CoreError::UnknownTokens`]): the live run
 //! and the WAVs stay, so it can run again.
 //!
-//! Echo (plan 15; nothing with `echo.mode = off`): after the mic is
-//! transcribed, [`EchoProfile::scan`] judges the WAVs in 2 s blocks (always
-//! rescanned: crash recovery and re-runs have no live monitor) and, when it
-//! found coupling, a canceller ran (`aec` in the live run's
-//! `engine_info.echo`) or the mode is `always`, [`gate_wavs`] drops the mic
-//! words that are the far end's echo before segmentation. The loopback is
-//! never touched. The counts and parameters go to `engine_info.echo`, the
-//! dropped words to the run's `echo_dropped` (for Restore), one count-only
-//! log line. A recording whose echo handling the user turned off while it
-//! ran (`user_off` in the live run's `engine_info.echo`) is scanned but not
-//! gated: the counts are written with mode
+//! Echo (plan 15; nothing with `echo.mode = off`), on a thread of its own
+//! while the loopback is transcribed ([`prepare_echo`]):
+//! [`EchoProfile::scan`] judges the WAVs in 2 s blocks (always rescanned:
+//! crash recovery and re-runs have no live monitor). When it found coupling
+//! with an echo return loss under [`AEC_ERL_BELOW_DB`] (the AGCs' gain
+//! tracks taken out, when the recording has them), or the mode is `always`,
+//! Diarist's echo canceller ([`crate::audio::aec::offline`], chunk B2a)
+//! runs over `mic.wav` with `loopback.wav` as the reference (its AGC
+//! replayed backwards from `loopback.gain` when there is one) into a
+//! temporary [`MIC_AEC_WAV`], which is transcribed instead of `mic.wav` and
+//! deleted right after. Then, when the profile found coupling, a canceller
+//! ran (here, or `aec` in the live run's `engine_info.echo`) or the mode is
+//! `always`, [`gate_wavs`] drops the mic words that are the far end's echo
+//! before segmentation, scoring each word's span against the raw `mic.wav`
+//! (the cancelled mic no longer correlates with the loopback), over the
+//! cancelled mic's words with a band of its own ([`band_after_canceller`]).
+//! The loopback is never touched. The counts and parameters go to
+//! `engine_info.echo` (with the canceller's `erle_db`, `aec_wall_s`,
+//! `aec_wait_s` and `gain_track`, and the gate's `band`), the dropped words
+//! to the run's `echo_dropped` (for Restore), one count-only log line. A recording whose echo handling the user turned off while it
+//! ran (`user_off` in the live run's `engine_info.echo`) is scanned but
+//! neither cancelled nor gated: the counts are written with mode
 //! [`super::ECHO_OFF_FOR_RECORDING`], and there is no `echo_dropped`. The
 //! echo step never fails the post-pass: on an error (an unreadable WAV) the
 //! mic stays ungated, `engine_info.echo` is `{"error": "<message>"}` and the
-//! error is logged.
+//! error is logged; a canceller that fails leaves the raw mic to be
+//! transcribed and gated, with `aec_error` in `engine_info.echo`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
+use crate::audio::aec::offline::{cancel_wavs, OfflineOptions, OfflineReport};
 use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
-use crate::audio::echo::{gate_wavs, ClockPair, EchoMode, EchoProfile, GateBand};
+use crate::audio::echo::{
+    gate_wavs, ClockPair, EchoMode, EchoProfile, GateBand, PcmSource, WavSamples, ACTIVE_DBFS,
+};
 use crate::audio::flac::encode_stereo;
+use crate::audio::gain_track::{self, GainTrack};
 use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, FileJob};
 use crate::error::{CoreError, Result};
 use crate::models::languages;
@@ -85,6 +102,48 @@ impl PostPassJob {
     }
     pub fn flac(&self) -> PathBuf {
         self.folder.join("playback.flac")
+    }
+    /// The canceller's output (temporary).
+    pub fn mic_aec_wav(&self) -> PathBuf {
+        self.folder.join(MIC_AEC_WAV)
+    }
+}
+
+/// The echo canceller's output beside the WAVs, transcribed instead of
+/// `mic.wav` and deleted right after (and with the WAVs).
+pub const MIC_AEC_WAV: &str = "mic-aec.wav";
+
+/// The canceller engages on a coupled recording whose echo return loss is
+/// under this (dB; plan 15 section 3.3: meeting 12 has 10 to 13 dB, a leaky
+/// headset 30 to 40 dB, which the gate handles alone).
+pub const AEC_ERL_BELOW_DB: f32 = 20.0;
+
+/// The gate's band over the cancelled mic's words (still scored on the raw
+/// mic): keep under 0.40, drop at 0.80, in between the neighbours' median
+/// at `echo.gate_threshold` + 0.10 (0.60 by default). The canceller has
+/// already removed most of the echo (meeting 12: duplicates 12,260 → 681),
+/// so the gate is there for its residue, while the owner's words spoken over
+/// the far end, now recognised, still correlate with it in the raw mic.
+/// With the band of the uncancelled mic (0.20 / 0.50 / 0.60) the gate took
+/// the spliced double-talk set's word error rate from 7.6 to 11.9 percent
+/// and the FLEURS fixture's from 9.4 to 19.5; with this one 7.6 and 12.6,
+/// while meeting 12 keeps 53 duplicates (3.2 percent, under the matcher's
+/// 4.0 percent chance level) instead of 11 and the same owner's words
+/// (docs/eval/2026-10-20-echo.md, "Post-pass canceller (B2a)").
+pub fn band_after_canceller(threshold: f32) -> GateBand {
+    GateBand {
+        keep_under: 0.40,
+        threshold: (threshold + 0.10).clamp(0.40, 0.80),
+        drop_at: 0.80,
+    }
+}
+
+/// Deletes a file when dropped (the canceller's output, whatever happens).
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -218,25 +277,188 @@ pub(super) struct EchoOutcome {
     log: String,
 }
 
-/// The echo step of the post-pass for the mic words (meeting time): scan,
-/// then the gate when it applies (never after the user turned it off for
-/// the recording: `user_off` in `live`, the live run's `engine_info.echo`);
-/// returns the drop flag of every word.
+/// The echo step's work before the mic is transcribed ([`prepare_echo`]).
+pub(super) struct EchoPrep {
+    profile: Result<EchoProfile>,
+    scan_s: f64,
+    /// The canceller, when it engaged.
+    aec: Option<AecRun>,
+    /// How long the mic's transcription waited for this after the
+    /// loopback's (s).
+    wait_s: f64,
+}
+
+/// One run of the canceller.
+struct AecRun {
+    /// Its report, or why it failed.
+    result: Result<OfflineReport>,
+    /// The return loss the engagement rule saw (dB; `None` with
+    /// `echo.mode = always` on a recording without coupling).
+    erl_db: Option<f32>,
+    /// The loopback's AGC was replayed from its gain track (else the
+    /// post-AGC loopback was the reference).
+    gain_track: bool,
+    /// The mic's AGC was undone and re-applied from its gain track.
+    mic_gain_track: bool,
+    wall_s: f64,
+}
+
+impl EchoPrep {
+    /// The canceller ran: its output is the mic to transcribe.
+    pub(super) fn cancelled(&self) -> bool {
+        self.aec.as_ref().is_some_and(|a| a.result.is_ok())
+    }
+}
+
+/// The median AGC gain (dB) over the 2 s blocks of `lb_wav` whose level is
+/// at or above the echo detector's activity threshold: what the stored
+/// levels carry on top of what the speakers played, for the return loss.
+fn median_gain_db(lb_wav: &Path, track: &GainTrack) -> Result<Option<f32>> {
+    let mut src = WavSamples::open(lb_wav)?;
+    let mut buf = Vec::with_capacity(32_000);
+    let mut gains = Vec::new();
+    let mut at = 0u64;
+    loop {
+        buf.clear();
+        let n = src.pull(&mut buf, 32_000);
+        if n < 32_000 {
+            break;
+        }
+        let e: f64 = buf.iter().map(|&v| (f64::from(v) / 32_768.0).powi(2)).sum();
+        if 10.0 * (e / n as f64).max(1e-20).log10() >= f64::from(ACTIVE_DBFS) {
+            let vals = &track.values()[(at / 160) as usize..];
+            let k = vals.len().min(200);
+            if k > 0 {
+                gains.push(vals[..k].iter().sum::<f32>() / k as f32);
+            }
+        }
+        at += n as u64;
+    }
+    gains.sort_by(f32::total_cmp);
+    Ok((!gains.is_empty()).then(|| gains[gains.len() / 2]))
+}
+
+/// The echo step before the mic is transcribed: the scan, then the
+/// canceller into `aec_wav` when it engages (see the module docs).
+/// `cancelled` stops the canceller (the job was cancelled, or the loopback
+/// failed meanwhile).
+pub(super) fn prepare_echo(
+    mic: &Path,
+    lb: &Path,
+    aec_wav: &Path,
+    clocks: Option<ClockPair>,
+    mode: EchoMode,
+    live: &serde_json::Value,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> EchoPrep {
+    let t0 = Instant::now();
+    let profile = EchoProfile::scan(mic, lb, clocks);
+    let scan_s = t0.elapsed().as_secs_f64();
+    let user_off = live["user_off"].as_bool().unwrap_or(false);
+    let Ok(p) = &profile else {
+        return EchoPrep {
+            profile,
+            scan_s,
+            aec: None,
+            wait_s: 0.0,
+        };
+    };
+    if user_off || mode == EchoMode::Off || !(p.coupled || mode == EchoMode::Always) {
+        return EchoPrep {
+            profile,
+            scan_s,
+            aec: None,
+            wait_s: 0.0,
+        };
+    }
+    let t1 = Instant::now();
+    let read_track = |wav: &Path| match GainTrack::read(&gain_track::path_for(wav)) {
+        Ok(t) => t.filter(|t| t.frames() > 0),
+        Err(e) => {
+            log::warn!("echo canceller: {e}; the stored levels are used as they are");
+            None
+        }
+    };
+    let (lb_gain, mic_gain) = (read_track(lb), read_track(mic));
+    // The return loss on the levels the speakers played and the mic heard:
+    // the WAVs are after the AGCs.
+    let mut erl = p.erl_db;
+    if let Some(e) = erl.as_mut() {
+        for (track, sign) in [(&lb_gain, -1.0f32), (&mic_gain, 1.0)] {
+            if let Some(t) = track {
+                match median_gain_db(lb, t) {
+                    Ok(Some(g)) => *e += sign * g,
+                    Ok(None) => {}
+                    Err(err) => log::warn!("echo canceller: gain track levels: {err}"),
+                }
+            }
+        }
+    }
+    let engage = mode == EchoMode::Always || erl.is_some_and(|e| e < AEC_ERL_BELOW_DB);
+    if !engage {
+        log::info!(
+            "echo canceller not engaged: return loss {erl:?} dB (at or over {AEC_ERL_BELOW_DB} dB)"
+        );
+        return EchoPrep {
+            profile,
+            scan_s,
+            aec: None,
+            wait_s: 0.0,
+        };
+    }
+    let hint = |t: i64| p.lag_at(t);
+    let mut opts = OfflineOptions::post_pass(p.clocks.as_ref().map(|c| (&c.mic, &c.loopback)));
+    opts.lag_hint = Some(&hint);
+    opts.loopback_gain = lb_gain.as_ref();
+    opts.mic_gain = mic_gain.as_ref();
+    opts.cancelled = cancelled;
+    let result = cancel_wavs(mic, lb, aec_wav, &opts);
+    let aec = AecRun {
+        result,
+        erl_db: erl,
+        gain_track: lb_gain.is_some(),
+        mic_gain_track: mic_gain.is_some(),
+        wall_s: t1.elapsed().as_secs_f64(),
+    };
+    EchoPrep {
+        profile,
+        scan_s,
+        aec: Some(aec),
+        wait_s: 0.0,
+    }
+}
+
+/// The echo step of the post-pass for the mic words (meeting time) once
+/// they are transcribed: the gate when it applies (never after the user
+/// turned it off for the recording: `user_off` in `live`, the live run's
+/// `engine_info.echo`), on the raw mic; returns the drop flag of every
+/// word.
 fn gate_mic(
     mic: &Path,
     lb: &Path,
-    clocks: Option<ClockPair>,
+    prep: EchoPrep,
     words: &[TranscriptWord],
     mode: EchoMode,
     threshold: f32,
     live: &serde_json::Value,
 ) -> Result<(Vec<bool>, EchoOutcome)> {
     let t0 = Instant::now();
-    let aec = live["aec"].as_bool().unwrap_or(false);
     let user_off = live["user_off"].as_bool().unwrap_or(false);
-    let profile = EchoProfile::scan(mic, lb, clocks)?;
-    let scan_s = t0.elapsed().as_secs_f64();
+    let EchoPrep {
+        profile,
+        scan_s,
+        aec: run,
+        wait_s,
+    } = prep;
+    let profile = profile?;
+    let ran = run.as_ref().is_some_and(|a| a.result.is_ok());
+    let aec = ran || live["aec"].as_bool().unwrap_or(false);
     let gated = !user_off && profile.gates(mode, aec);
+    let band = if ran {
+        band_after_canceller(threshold)
+    } else {
+        GateBand::with_threshold(threshold)
+    };
     let before = words.len();
     let mut dropped = Vec::new();
     let flags = if gated {
@@ -246,13 +468,7 @@ fn gate_mic(
             .iter()
             .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
             .collect();
-        let g = gate_wavs(
-            &spans,
-            mic,
-            lb,
-            &profile,
-            GateBand::with_threshold(threshold),
-        )?;
+        let g = gate_wavs(&spans, mic, lb, &profile, band)?;
         for (w, (d, s)) in words.iter().zip(g.drop.iter().zip(&g.scores)) {
             if *d {
                 dropped.push(EchoDroppedWord {
@@ -272,7 +488,8 @@ fn gate_mic(
     let erl = live["erl_db"]
         .as_f64()
         .or(profile.erl_db.map(super::round3));
-    let summary = serde_json::json!({
+    let report = run.as_ref().and_then(|a| a.result.as_ref().ok());
+    let mut summary = serde_json::json!({
         "coupled": profile.coupled,
         "coupling": super::round3(profile.coupling),
         "lag_ms": profile.lag_ms.map(super::round3),
@@ -280,12 +497,43 @@ fn gate_mic(
         "mic_words_before": before,
         "dropped": dropped.len(),
         "threshold": super::round3(threshold),
+        "band": [super::round3(band.keep_under), super::round3(band.threshold), super::round3(band.drop_at)],
         "aec": aec,
+        "erle_db": report.and_then(|r| r.erle_db).map(super::round3),
+        "aec_wall_s": run.as_ref().map(|a| super::round3(a.wall_s as f32)),
+        "aec_wait_s": run.as_ref().map(|_| super::round3(wait_s as f32)),
+        "gain_track": run.as_ref().is_some_and(|a| a.gain_track),
         "mode": if user_off { super::ECHO_OFF_FOR_RECORDING } else { mode.as_str() },
         "user_off": user_off,
     });
+    if let Some(a) = &run {
+        summary["aec_erl_db"] = serde_json::json!(a.erl_db.map(super::round3));
+        if a.mic_gain_track {
+            summary["mic_gain_track"] = serde_json::json!(true);
+        }
+        if let Err(e) = &a.result {
+            summary["aec_error"] = serde_json::json!(e.to_string());
+        }
+    }
+    let canceller = match (&run, report) {
+        (Some(a), Some(r)) => format!(
+            "; canceller: ERLE {:?} dB over {} far-end blocks, lag {:?} ms, {} jumps, {} resets, {:.1} s ({}gain track), the mic waited {wait_s:.1} s",
+            r.erle_db,
+            r.far_blocks,
+            r.lag_ms,
+            r.jumps,
+            r.stats.resets,
+            a.wall_s,
+            if a.gain_track { "" } else { "no " }
+        ),
+        (Some(a), None) => format!(
+            "; canceller failed after {:.1} s, the raw mic was transcribed",
+            a.wall_s
+        ),
+        (None, _) => String::new(),
+    };
     let log = format!(
-        "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{} at {threshold:.2}; scan {scan_s:.1} s, total {:.1} s",
+        "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{} at {threshold:.2}; scan {scan_s:.1} s, gate {:.1} s{canceller}",
         profile.status,
         profile.coupling,
         profile.lag_ms,
@@ -299,6 +547,9 @@ fn gate_mic(
         },
         t0.elapsed().as_secs_f64()
     );
+    if let Some(Err(e)) = run.as_ref().map(|a| &a.result) {
+        log::warn!("echo canceller failed: {e}");
+    }
     Ok((
         flags,
         EchoOutcome {
@@ -310,22 +561,22 @@ fn gate_mic(
     ))
 }
 
-/// The echo step of the post-pass ([`gate_mic`]), which never fails it: on
-/// an error the mic words stay as they are, `engine_info.echo` records
-/// `{"error": "<message>"}` and there is no `echo_dropped`. Returns the kept
-/// words.
+/// The echo step of the post-pass after the mic is transcribed
+/// ([`gate_mic`]), which never fails it: on an error the mic words stay as
+/// they are, `engine_info.echo` records `{"error": "<message>"}` and there
+/// is no `echo_dropped`. Returns the kept words.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn echo_step(
     meeting: MeetingId,
     mic: &Path,
     lb: &Path,
-    clocks: Option<ClockPair>,
+    prep: EchoPrep,
     words: Vec<TranscriptWord>,
     mode: EchoMode,
     threshold: f32,
     live: &serde_json::Value,
 ) -> (Vec<TranscriptWord>, EchoOutcome) {
-    match gate_mic(mic, lb, clocks, &words, mode, threshold, live) {
+    match gate_mic(mic, lb, prep, &words, mode, threshold, live) {
         Ok((flags, e)) => {
             log::info!("post-pass meeting {meeting}: echo {}", e.log);
             let kept = words
@@ -406,23 +657,22 @@ pub fn run_post_pass(
     let mut live_deleted = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
-        let mut channels: Vec<(Channel, Vec<TranscriptWord>)> = Vec::new();
-        for (i, (ch, wav, diarize, frames)) in [
-            (Channel::Loopback, &lb, true, lb_frames),
-            (Channel::Mic, &mic, job.diarize_mic, mic_frames),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        // One channel through the file engine, on meeting time.
+        let transcribe_channel = |i: u64,
+                                  ch: Channel,
+                                  wav: &Path,
+                                  diarize: bool,
+                                  frames: u64|
+         -> Result<Vec<TranscriptWord>> {
             if cancel.is_cancelled() {
                 return Err(CoreError::Cancelled);
             }
-            let base = i as u64 * audio_ms;
+            let base = i * audio_ms;
             let words = transcribe(
                 engine,
                 FileJob {
                     job_id: JobId::new(),
-                    wav_path: wav.clone(),
+                    wav_path: wav.to_path_buf(),
                     diarize,
                     language: job.language.clone(),
                     diar_preset: DiarPreset::Streaming,
@@ -443,23 +693,66 @@ pub fn run_post_pass(
             }
             map_words(&mut tw, &map_of(ch), (frames * 1_000 / 16_000) as i64);
             tw.sort_by_key(|w| w.start_ms);
-            if ch == Channel::Mic && echo_mode != EchoMode::Off {
-                let clocks = ClockPair::usable(map_of(Channel::Mic), map_of(Channel::Loopback));
-                let (kept, e) = echo_step(
-                    job.meeting,
-                    &mic,
-                    &lb,
-                    clocks,
-                    tw,
-                    echo_mode,
-                    echo_threshold,
-                    &live_echo,
-                );
-                tw = kept;
-                echo = Some(e);
+            Ok(tw)
+        };
+        // The echo scan and the canceller run while the loopback is
+        // transcribed (the engine works on the GPU); the canceller's output
+        // goes whatever happens.
+        let aec_wav = job.mic_aec_wav();
+        let _remove_aec = RemoveOnDrop(aec_wav.clone());
+        let stop = AtomicBool::new(false);
+        let clocks = ClockPair::usable(map_of(Channel::Mic), map_of(Channel::Loopback));
+        let (lb_words, prep) = std::thread::scope(|s| {
+            let prep = (echo_mode != EchoMode::Off).then(|| {
+                let (mic, lb, aec_wav, live_echo, stop) = (&mic, &lb, &aec_wav, &live_echo, &stop);
+                let clocks = clocks.clone();
+                s.spawn(move || {
+                    let halt = || stop.load(Ordering::Relaxed) || cancel.is_cancelled();
+                    prepare_echo(mic, lb, aec_wav, clocks, echo_mode, live_echo, &halt)
+                })
+            });
+            let lb_words = transcribe_channel(0, Channel::Loopback, &lb, true, lb_frames);
+            if lb_words.is_err() {
+                stop.store(true, Ordering::Relaxed);
             }
-            channels.push((ch, tw));
+            let waited = Instant::now();
+            let prep = prep.map(|h| {
+                let mut p = h.join().unwrap_or_else(|_| EchoPrep {
+                    profile: Err(CoreError::Engine("the echo step panicked".into())),
+                    scan_s: 0.0,
+                    aec: None,
+                    wait_s: 0.0,
+                });
+                p.wait_s = waited.elapsed().as_secs_f64();
+                p
+            });
+            (lb_words, prep)
+        });
+        let lb_words = lb_words?;
+        let mic_source = if prep.as_ref().is_some_and(EchoPrep::cancelled) {
+            &aec_wav
+        } else {
+            &mic
+        };
+        let mut mic_words =
+            transcribe_channel(1, Channel::Mic, mic_source, job.diarize_mic, mic_frames)?;
+        let _ = std::fs::remove_file(&aec_wav);
+        if let Some(prep) = prep {
+            let (kept, e) = echo_step(
+                job.meeting,
+                &mic,
+                &lb,
+                prep,
+                mic_words,
+                echo_mode,
+                echo_threshold,
+                &live_echo,
+            );
+            mic_words = kept;
+            echo = Some(e);
         }
+        let mut channels: Vec<(Channel, Vec<TranscriptWord>)> =
+            vec![(Channel::Loopback, lb_words), (Channel::Mic, mic_words)];
         transcribe_wall = t0.elapsed();
         // A language the model cannot transcribe: nothing is stored, and the
         // live transcript and the WAVs stay for a run with another model.
@@ -566,6 +859,7 @@ pub fn run_post_pass(
     }
     let _ = std::fs::remove_file(&mic);
     let _ = std::fs::remove_file(&lb);
+    let _ = std::fs::remove_file(job.mic_aec_wav());
 
     // A live run with a name nobody in the new run received stays, as if
     // `keep_live_runs` were on for this meeting.

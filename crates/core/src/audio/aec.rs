@@ -1,6 +1,7 @@
-//! App-side acoustic echo canceller, a spike
-//! (`docs/research/14-echo-cancellation.md` section 2). Nothing in the live
-//! pipeline or the post-pass calls it yet.
+//! App-side acoustic echo canceller (`docs/research/14-echo-cancellation.md`
+//! section 2, where the spike measured it on meeting 12). The post-pass runs
+//! it over the stored WAVs before transcribing the mic ([`offline`], plan 15
+//! chunk B2a); the live pipeline does not yet (chunk B2b).
 //!
 //! With the meeting on speakers the microphone hears the far end. The
 //! loopback is what the speakers played, so [`Aec`] learns the echo path
@@ -93,6 +94,8 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+pub mod offline;
 
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};

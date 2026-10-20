@@ -445,6 +445,7 @@ fn records_streams_and_runs_the_post_pass() {
     );
     assert!(gains.values().iter().all(|&g| g == 0.0));
     assert!(!folder.join("mic.gain").exists());
+    assert!(!folder.join("mic-aec.wav").exists());
     // Post-pass word times are meeting time too.
     let w = store.get_words(m, 2_000, 2_999).unwrap();
     assert!(w
@@ -1584,11 +1585,22 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
         raw_label: None,
     }];
     let gone = Path::new("does-not-exist");
+    let (mic, lb) = (gone.join("mic.wav"), gone.join("loopback.wav"));
+    let prep = postpass::prepare_echo(
+        &mic,
+        &lb,
+        &gone.join(postpass::MIC_AEC_WAV),
+        None,
+        EchoMode::Always,
+        &serde_json::Value::Null,
+        &|| false,
+    );
+    assert!(!prep.cancelled());
     let (kept, e) = postpass::echo_step(
         MeetingId(1),
-        &gone.join("mic.wav"),
-        &gone.join("loopback.wav"),
-        None,
+        &mic,
+        &lb,
+        prep,
         words.clone(),
         EchoMode::Auto,
         0.5,
@@ -1606,32 +1618,13 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
     assert_eq!(e.summary.as_object().unwrap().len(), 1);
 }
 
-/// A stored meeting whose first 28 s are the far end echoed into the mic
-/// and whose last 28 s are the owner alone, then the real post-pass with
-/// the fake engine's word per second.
-fn echo_post_pass(mode: Option<&str>, echo: bool) -> (Arc<SqliteStore>, PostPassReport) {
-    echo_post_pass_with(mode, echo, false)
-}
-
-/// [`echo_post_pass`]; `user_off`: the live run says echo handling was
-/// turned off for the recording.
-fn echo_post_pass_with(
-    mode: Option<&str>,
-    echo: bool,
-    user_off: bool,
-) -> (Arc<SqliteStore>, PostPassReport) {
+/// The echo fixture's WAVs in `folder`: the far end for the first 28 s of
+/// the loopback, echoed into the mic 3 ms later and 10 dB down (with
+/// `echo`), the owner alone over the last 28 s. With `gain`, the stored
+/// loopback is what an AGC raising it by 0 to 12 dB made of it, and
+/// `loopback.gain` says so.
+fn echo_wavs(folder: &Path, echo: bool, gain: bool) {
     use crate::audio::echo::synth::{add_delayed, add_noise, db, monologue, to_i16};
-    let dir = tempfile::tempdir().unwrap();
-    let (_ctx, store, file) = context(dir.path(), None);
-    if let Some(m) = mode {
-        store.set_setting(settings::ECHO_MODE, m).unwrap();
-    }
-    let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
-    if user_off {
-        let mut info = store.get_run(live).unwrap().engine_info;
-        info["echo"] = serde_json::json!({"user_off": true, "mode": ECHO_OFF_FOR_RECORDING});
-        store.set_run_engine_info(live, info).unwrap();
-    }
     let n = 60 * 16_000;
     let (far, _) = monologue(51, 28 * 16_000, db(-28.0));
     let (own, _) = monologue(52, 28 * 16_000, db(-33.0));
@@ -1644,18 +1637,62 @@ fn echo_post_pass_with(
         add_delayed(&mut mic, &lb, 48, db(-10.0));
     }
     add_noise(&mut mic, 54, db(-60.0));
-    let folder = dir.path().join("audio").join(&meeting.uid);
+    if gain {
+        let path = crate::audio::gain_track::path_for(&folder.join("loopback.wav"));
+        let mut w = crate::audio::gain_track::GainTrackWriter::create(&path).unwrap();
+        let mut values = Vec::new();
+        for f in 0..n / 1_600 {
+            let rec: [f32; 10] = std::array::from_fn(|k| {
+                let t = (f * 10 + k) as f32 / 100.0;
+                6.0 + 6.0 * (t * 0.4).sin()
+            });
+            values.extend_from_slice(&rec);
+            w.push((f * 1_600) as u64, &rec).unwrap();
+        }
+        w.flush().unwrap();
+        crate::audio::gain_track::GainTrack::from_values(values).apply(0, &mut lb);
+    }
     for (ch, x) in [("mic", &mic), ("loopback", &lb)] {
         let mut w = crate::audio::wav::WavSink::create(&folder.join(format!("{ch}.wav"))).unwrap();
         w.write(&to_i16(x)).unwrap();
         w.finalize().unwrap();
     }
+}
+
+/// What [`echo_post_pass_with`] ran.
+struct EchoRun {
+    store: Arc<SqliteStore>,
+    report: PostPassReport,
+    /// The WAV the fake engine transcribed for the mic.
+    mic_job: PathBuf,
+    /// `mic-aec.wav` was left in the meeting folder.
+    aec_left: bool,
+}
+
+/// A stored meeting with [`echo_wavs`], then the real post-pass with the
+/// fake engine's word per second. `user_off`: the live run says echo
+/// handling was turned off for the recording; `gain`: the loopback has a
+/// gain track.
+fn echo_post_pass_with(mode: Option<&str>, echo: bool, user_off: bool, gain: bool) -> EchoRun {
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    if let Some(m) = mode {
+        store.set_setting(settings::ECHO_MODE, m).unwrap();
+    }
+    let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
+    if user_off {
+        let mut info = store.get_run(live).unwrap().engine_info;
+        info["echo"] = serde_json::json!({"user_off": true, "mode": ECHO_OFF_FOR_RECORDING});
+        store.set_run_engine_info(live, info).unwrap();
+    }
+    let folder = dir.path().join("audio").join(&meeting.uid);
+    echo_wavs(&folder, echo, gain);
     let job = PostPassJob {
         job_id: JobId::new(),
         meeting: meeting.id,
         live_run: live,
         data_root: dir.path().to_path_buf(),
-        folder,
+        folder: folder.clone(),
         language: "en".into(),
         diarize_mic: false,
         transcribe: true,
@@ -1670,7 +1707,21 @@ fn echo_post_pass_with(
         &|_| {},
     )
     .unwrap();
-    (store, report)
+    let jobs = file.jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs[0].0.ends_with("loopback.wav"), "{jobs:?}");
+    if gain {
+        assert!(
+            folder.join("loopback.gain").is_file(),
+            "the gain track stays with the FLAC"
+        );
+    }
+    EchoRun {
+        store,
+        report,
+        mic_job: jobs[1].0.clone(),
+        aec_left: folder.join(postpass::MIC_AEC_WAV).exists(),
+    }
 }
 
 #[test]
@@ -1685,11 +1736,30 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
             .map(|w| w.start_ms / 1_000)
             .collect()
     };
-    // auto: the echoed seconds go, the owner's stay.
-    let (store, report) = echo_post_pass(None, true);
+    // auto: the canceller runs (coupled, return loss 10 dB) and its output
+    // is transcribed, then the echoed seconds go, the owner's stay.
+    let r = echo_post_pass_with(None, true, false, false);
+    let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
     assert_eq!(e["coupled"], true, "{e}");
+    assert_eq!(
+        (e["aec"].as_bool(), e["gain_track"].as_bool()),
+        (Some(true), Some(false)),
+        "{e}"
+    );
+    assert!(e["erle_db"].as_f64().unwrap() >= 20.0, "{e}");
+    assert!(e["aec_wall_s"].as_f64().unwrap() > 0.0, "{e}");
+    assert!(e["aec_erl_db"].as_f64().unwrap() < 20.0, "{e}");
+    assert!(e.get("aec_error").is_none(), "{e}");
+    // The cancelled mic's words get the gate's band after the canceller.
+    assert_eq!(e["band"], serde_json::json!([0.4, 0.6, 0.8]), "{e}");
+    assert!(
+        r.mic_job.ends_with(postpass::MIC_AEC_WAV),
+        "{:?}",
+        r.mic_job
+    );
+    assert!(!r.aec_left);
     assert_eq!(
         (e["mic_words_before"].as_u64(), e["threshold"].as_f64()),
         (Some(60), Some(0.5))
@@ -1702,27 +1772,43 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert!(dropped
         .iter()
         .all(|w| w.start_ms < 30_000 && w.text.starts_with('p')));
-    // off: no echo key, no list, every word.
-    let (store, report) = echo_post_pass(Some("off"), true);
+    // off: no canceller, no echo key, no list, every word.
+    let r = echo_post_pass_with(Some("off"), true, false, false);
+    assert!(
+        r.mic_job.ends_with("mic.wav") && !r.aec_left,
+        "{:?}",
+        r.mic_job
+    );
+    let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     assert!(run.engine_info.get("echo").is_none());
     assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
-    // always, without echo: gated, nothing correlates, nothing goes.
-    let (store, report) = echo_post_pass(Some("always"), false);
+    // always, without echo: cancelled and gated, nothing correlates,
+    // nothing goes.
+    let r = echo_post_pass_with(Some("always"), false, false, false);
+    assert!(r.mic_job.ends_with(postpass::MIC_AEC_WAV) && !r.aec_left);
+    let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
     assert_eq!(
-        (e["coupled"].as_bool(), e["dropped"].as_u64()),
-        (Some(false), Some(0))
+        (
+            e["coupled"].as_bool(),
+            e["dropped"].as_u64(),
+            e["aec"].as_bool()
+        ),
+        (Some(false), Some(0), Some(true))
     );
     assert_eq!(
         store.echo_dropped(report.current_run).unwrap(),
         Some(Vec::new())
     );
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
-    // Turned off for the recording (the live run says so): scanned, not gated.
-    let (store, report) = echo_post_pass_with(None, true, true);
+    // Turned off for the recording (the live run says so): scanned, neither
+    // cancelled nor gated.
+    let r = echo_post_pass_with(None, true, true, false);
+    assert!(r.mic_job.ends_with("mic.wav") && !r.aec_left);
+    let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
     assert_eq!(
@@ -1734,6 +1820,72 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         (Some(true), Some(0), Some(ECHO_OFF_FOR_RECORDING)),
         "{e}"
     );
+    assert_eq!(e["aec"], false, "{e}");
+    assert_eq!(e["band"], serde_json::json!([0.2, 0.5, 0.6]), "{e}");
     assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
+    // With the loopback's gain track: replayed backwards for the reference.
+    let r = echo_post_pass_with(None, true, false, true);
+    let run = r.store.get_run(r.report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (e["aec"].as_bool(), e["gain_track"].as_bool()),
+        (Some(true), Some(true)),
+        "{e}"
+    );
+    assert!(e["erle_db"].as_f64().unwrap() >= 20.0, "{e}");
+    let kept = mic_words(&r.store, r.report.current_run);
+    assert!((32..60).all(|s| kept.contains(&s)), "{kept:?}");
+}
+
+#[test]
+fn recovery_and_a_rerun_cancel_the_echo_through_the_same_post_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    // A crash during the post-pass left the WAVs and a half-written
+    // mic-aec.wav; the engine fails once (the loopback), then works.
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
+    let folder = dir.path().join("audio").join(&m.uid);
+    echo_wavs(&folder, true, true);
+    std::fs::write(folder.join(postpass::MIC_AEC_WAV), b"RIFF").unwrap();
+    file.fail_next.store(true, Ordering::SeqCst);
+    let recovered = recover(&ctx).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].action, RecoveryAction::PostPassQueued);
+    let err = recovered[0]
+        .post_pass
+        .as_ref()
+        .unwrap()
+        .wait(Duration::from_secs(60))
+        .unwrap();
+    assert!(err.unwrap_err().contains("fake crash"));
+    // The failure took the canceller's output with it; the WAVs stay.
+    assert!(!folder.join(postpass::MIC_AEC_WAV).exists());
+    assert!(folder.join("mic.wav").is_file() && folder.join("loopback.wav").is_file());
+    assert_eq!(
+        store.get_meeting(m.id).unwrap().meeting.status,
+        MeetingStatus::Failed
+    );
+    // The re-run goes through the same post-pass: cancelled, then gated.
+    let report = rerun_post_pass(&ctx, m.id)
+        .unwrap()
+        .wait(Duration::from_secs(60))
+        .unwrap()
+        .unwrap();
+    let jobs = file.jobs.lock().unwrap().clone();
+    let last: Vec<&PathBuf> = jobs.iter().rev().take(2).map(|j| &j.0).collect();
+    assert!(last[0].ends_with(postpass::MIC_AEC_WAV), "{jobs:?}");
+    assert!(last[1].ends_with("loopback.wav"), "{jobs:?}");
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (e["aec"].as_bool(), e["gain_track"].as_bool()),
+        (Some(true), Some(true)),
+        "{e}"
+    );
+    assert!(e["dropped"].as_u64().unwrap() > 0, "{e}");
+    assert!(!folder.join(postpass::MIC_AEC_WAV).exists());
+    assert!(!folder.join("mic.wav").exists());
+    assert!(folder.join("loopback.gain").is_file());
+    assert!(store.get_run(live).is_err(), "the live run went");
 }
