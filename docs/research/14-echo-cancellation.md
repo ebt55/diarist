@@ -288,16 +288,22 @@ Plan 15 chunk B1: can a linear echo canceller written in Rust clean the mic chan
   - Re-timing the reference from the signals is worth 1.5 dB overall and 2.4 dB at 400 to 1,000 Hz.
   - Whole-sample against fractional placement, and filter length (130 to 260 ms), change nothing.
 - **Cost:** 140 µs per 100 ms frame for the 200 ms filter (0.14 percent of one core), 110 µs for 130 ms, 156 µs with suppression.
+- **Causal configuration** (what a live canceller would have: clock anchors only, no look-ahead trackers, with suppression):
+  - 14.0 dB of echo removed (18.6 dB median per word).
+  - Duplicates 12,264 → 1,710 (−86 percent); echo words in "me" 13,162 → 2,625 (−80 percent).
+  - Owner's labelled words kept 1,413 (96.6 percent; 98.6 percent counting the loop and the variants as kept); double-talk words kept 164 of 172.
+  - Spliced double-talk word error rate 8.3 percent (raw 17.1).
+  - With the AGC undone as well (what the post-pass would have once the gain track exists): 14.0 dB; duplicates 1,757; owner's words kept 1,409; double-talk words kept 164; spliced word error rate 7.5 percent.
 - **Against the go/no-go bars of plan 15 section 3.3** (alignment as built here, which looks ahead; post-AGC reference):
 
-| Bar | Linear | With residual suppression |
-|---|---|---|
-| At least 15 dB of echo removed on far-end-only stretches | 12.2 dB energy-weighted, 15.1 dB median per word: missed as energy | 14.7 dB energy-weighted, 19.9 dB median: missed by 0.3 dB as energy |
-| Owner's own stretches changed by at most 1 dB | −0.12 dB level, 0.88 dB spectral distance: met | −0.12 dB, 1.19 dB: level met |
-| No divergence over 111 minutes | 0 resets, but 34 two-second windows louder than the mic by over 1 dB (0 with the AGC undone) | 0 resets, 3 windows |
-| At most 5 percent of a core | 0.14 percent: met | 0.16 percent: met |
-| Owner's labelled words kept, at least 98 percent | 96.9 percent as counted; 98.8 percent counting the loop and the variants as kept | 96.7 percent; 98.6 percent |
-| Duplicates cut by at least 90 percent before the gate | 70 percent: missed | 94.5 percent: met |
+| Bar | Linear | With residual suppression | Causal: anchors only, with suppression |
+|---|---|---|---|
+| At least 15 dB of echo removed on far-end-only stretches | 12.2 dB energy-weighted, 15.1 dB median per word: missed as energy | 14.7 dB energy-weighted, 19.9 dB median: missed by 0.3 dB as energy | 14.0 dB, 18.6 dB median: missed by 1.0 dB as energy |
+| Owner's own stretches changed by at most 1 dB | −0.12 dB level, 0.88 dB spectral distance: met | −0.12 dB, 1.19 dB: level met | −0.12 dB, 1.10 dB: level met |
+| No divergence over 111 minutes | 0 resets, but 34 two-second windows louder than the mic by over 1 dB (0 with the AGC undone) | 0 resets, 3 windows | 0 resets, 3 windows |
+| At most 5 percent of a core | 0.14 percent: met | 0.16 percent: met | 0.16 percent: met |
+| Owner's labelled words kept, at least 98 percent | 96.9 percent as counted; 98.8 percent counting the loop and the variants as kept | 96.7 percent; 98.6 percent | 96.6 percent; 98.6 percent |
+| Duplicates cut by at least 90 percent before the gate | 70 percent: missed | 94.5 percent: met | 86.1 percent: missed |
 
 ### 2.1 The canceller
 
@@ -376,7 +382,7 @@ All signals are 100 Hz high-passed. The word classes are recomputed in the test 
 | Variant (reference alignment, filter) | ERLE, far end only | per word p10 / p50 / p90 | Owner alone: level | spectral distance | Double talk: level | 2 s windows louder than the mic | Resets |
 |---|---|---|---|---|---|---|---|
 | Anchors, 200 ms | 10.7 dB | 4.0 / 13.7 / 20.5 | −0.12 dB | 0.79 dB | +0.31 dB | 35 | 0 |
-| Anchors, 200 ms + residual | 14.0 dB | 8.4 / 18.6 / 26.7 | −0.12 dB | 1.10 dB | −0.47 dB | 3 | 0 |
+| Anchors, 200 ms + residual (causal; `mic-aec-anchor-res.wav`) | 14.0 dB | 8.4 / 18.6 / 26.7 | −0.12 dB | 1.10 dB | −0.47 dB | 3 | 0 |
 | Anchors, whole-sample reference | 10.6 dB | 3.9 / 13.3 / 19.8 | −0.12 dB | 0.76 dB | +0.30 dB | 34 | 0 |
 | Anchors, AGC undone | 10.9 dB | 4.1 / 13.8 / 20.6 | −0.12 dB | 0.15 dB | −0.20 dB | 0 | 0 |
 | Lag track, 200 ms | 11.1 dB | 4.4 / 14.4 / 21.6 | −0.12 dB | 0.89 dB | +0.25 dB | 32 | 0 |
@@ -387,6 +393,7 @@ All signals are 100 Hz high-passed. The word classes are recomputed in the test 
 | Lag track + fine, 20 ms blocks | 11.8 dB | 5.7 / 15.0 / 21.9 | −0.12 dB | 0.90 dB | +0.70 dB | 41 | 0 |
 | Lag track + fine, AGC undone (`mic-aec-raw.wav`) | 12.5 dB | 6.1 / 15.2 / 22.0 | −0.12 dB | 0.15 dB | −0.22 dB | 0 | 0 |
 | Lag track + fine, AGC undone + residual | 14.7 dB | 9.3 / 19.9 / 28.2 | −0.12 dB | 0.57 dB | −0.37 dB | 0 | 0 |
+| Anchors, AGC undone + residual (causal, post-pass with the gain track; `mic-aec-anchor-raw-res.wav`) | 14.0 dB | 8.4 / 18.6 / 26.7 | −0.12 dB | 0.57 dB | −0.37 dB | 0 | 0 |
 
 - The measurement ceiling (the echo at the mic over the mic noise floor, on the same spans) is 20.4 dB.
 - The owner-alone change of −0.12 dB is the DC notch. The spectral distance there is the echo estimate subtracted from the AGC-raised far-end room tone, which goes away with the AGC undone.
@@ -400,6 +407,8 @@ Per band, far end only:
 | Lag track + fine, 200 ms | 13.2 dB | 13.0 dB | 7.3 dB | 3.3 dB |
 | Lag track + fine, 200 ms + residual | 15.5 dB | 16.5 dB | 9.5 dB | 4.6 dB |
 | Lag track + fine, AGC undone | 13.6 dB | 13.2 dB | 7.4 dB | 3.3 dB |
+| Anchors, 200 ms + residual (causal) | 15.3 dB | 15.3 dB | 8.3 dB | 2.8 dB |
+| Anchors, AGC undone + residual (causal) | 15.5 dB | 15.3 dB | 8.2 dB | 2.8 dB |
 
 - **Where the residual sits** (offline, 34 to 44 min, far end only, on the "lag track, 200 ms" output, against the mic floor measured in 526 quiet 2 s windows):
   - At 100 to 400 Hz the output is within 1 to 2 dB of the floor: the canceller takes all the echo there.
@@ -441,6 +450,8 @@ With the AGC undone, the echo under those words is about 14 dB below the owner. 
 | Lag track + fine, 200 ms | +8.9 dB | +19.5 dB | 10.6 dB | 12.6 dB | +0.04 dB |
 | + residual | +8.9 dB | +18.4 dB | 9.4 dB | 16.4 dB | −0.20 dB |
 | AGC undone | +8.9 dB | +19.5 dB | 10.6 dB | 12.8 dB | +0.04 dB |
+| Anchors, 200 ms + residual (causal) | +8.9 dB | +18.0 dB | 9.1 dB | 15.8 dB | −0.20 dB |
+| Anchors, AGC undone + residual (causal) | +8.9 dB | +18.0 dB | 9.1 dB | 15.8 dB | −0.20 dB |
 
 The window's far end talks almost continuously, so its AGC gain is near 0 dB and the AGC rows match. The spliced test does not show the AGC's double-talk problem; the oracle above does.
 
@@ -458,11 +469,14 @@ The window's far end talks almost continuously, so its AGC gain is near 0 dB and
 | mic-aec-res | 2,537 | 676 (26.6 %) | 441 | 1,421 | 1,414 | 23 | 165 | 175 |
 | mic-aec-raw (AGC undone) | 6,424 | 3,490 (54.3 %) | 1,512 | 1,423 | 1,418 | 19 | 165 | 174 |
 | mic-aec-raw-res | 2,451 | 588 (24.0 %) | 438 | 1,426 | 1,416 | 23 | 165 | 173 |
+| mic-aec-anchor-res (causal) | 4,046 | 1,710 (42.3 %) | 915 | 1,421 | 1,413 | 21 | 164 | 172 |
+| mic-aec-anchor-raw-res (causal, AGC undone) | 4,114 | 1,757 (42.7 %) | 941 | 1,416 | 1,409 | 24 | 164 | 170 |
 
-- **Echo words left in "me"** (duplicates plus garbled): 13,162 raw, 5,274 linear (−60 percent), 1,117 with suppression (−92 percent); 5,002 and 1,026 with the AGC undone. The linear canceller turns part of the echo into quieter, garbled words: 898 → 1,587. Suppression removes those as well.
+- **Echo words left in "me"** (duplicates plus garbled): 13,162 raw, 5,274 linear (−60 percent), 1,117 with suppression (−92 percent); 5,002 and 1,026 with the AGC undone. The causal configurations leave 2,625 (anchors only with suppression, −80 percent) and 2,698 (the same with the AGC undone). The linear canceller turns part of the echo into quieter, garbled words: 898 → 1,587. Suppression removes those as well.
 - **Missing labelled owner's words** (offline):
   - Linear (45 missing): 17 are a single repeated-token loop the raw ASR emitted at one instant, 10 are spelling variants of a word still present (a word merged or split), and 18 are gone (1.2 percent).
   - With suppression (48): 17, 11 and 20.
+  - Causal, anchors only with suppression (49): 17, 12 and 20. With the AGC undone as well (53): 17, 12 and 24.
 - **On the real recording** the labelled double-talk words were by definition already recognised in the raw mic, so they cannot show recovery: 165 of 172 stay. The spliced test can.
 
 | Spliced double talk (reference: `dt-near.wav` transcribed alone, 630 owner's words in the clips) | Owner's word error rate | Owner's words matched | Echo duplicates inside the owner's clips | Duplicates outside the clips | Non-duplicates outside the clips |
@@ -471,6 +485,8 @@ The window's far end talks almost continuously, so its AGC gain is near 0 dB and
 | dt-mix-aec (linear) | **6.7 %** | 604 | 23 | 131 | 50 |
 | dt-mix-aec-res | 7.0 % | 599 | 25 | 8 | 19 |
 | dt-mix-aec-raw (AGC undone) | 6.8 % | 602 | 23 | 132 | 61 |
+| dt-mix-aec-anchor-res (causal) | 8.3 % | 591 | 25 | 52 | 34 |
+| dt-mix-aec-anchor-raw-res (causal, AGC undone) | 7.5 % | 597 | 25 | 48 | 30 |
 
 ### 2.7 Cost
 
@@ -506,7 +522,8 @@ set DIARIST_ECHO_OUT=<scratch>\aec-spike\out
 cargo test --release -p diarist-core --test aec_spike -- --nocapture      (writes the WAVs and report.txt, about 100 s)
 cargo build --release -p diarist-cli
 diarist-cli --data-dir <scratch>\aec-spike\cli-data --models-dir <data>\models --engine-dir <data>\engine transcribe <out>\<name>.wav --no-diarize --json
-    (for mic, mic-aec, mic-aec-res, mic-aec-raw, mic-aec-raw-res, dt-near, dt-mix, dt-mix-aec, dt-mix-aec-res, dt-mix-aec-raw;
+    (for mic, mic-aec, mic-aec-res, mic-aec-raw, mic-aec-raw-res, mic-aec-anchor-res, mic-aec-anchor-raw-res,
+     dt-near, dt-mix, dt-mix-aec, dt-mix-aec-res, dt-mix-aec-raw, dt-mix-aec-anchor-res, dt-mix-aec-anchor-raw-res;
      copy the printed words_json to <out>\<name>.asr.json)
 cargo test --release -p diarist-core --test aec_spike -- --nocapture      (again: scores the transcripts)
 cargo test --release -p diarist-core --lib audio::aec -- --nocapture       (synthetic tests and the benchmark)

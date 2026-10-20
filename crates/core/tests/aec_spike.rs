@@ -12,7 +12,9 @@
 //! output folder: `mic.wav` and `loopback.wav` (the raw channels);
 //! `mic-aec.wav` (the linear canceller), `mic-aec-res.wav` (with residual
 //! suppression), `mic-aec-raw.wav` and `mic-aec-raw-res.wav` (the same with
-//! the loopback AGC undone); `reference.wav` and `reference-raw.wav` (the
+//! the loopback AGC undone); `mic-aec-anchor-res.wav` and
+//! `mic-aec-anchor-raw-res.wav` (the causal configurations: clock anchors
+//! only, with suppression); `reference.wav` and `reference-raw.wav` (the
 //! aligned references); the spliced double-talk set `dt-near.wav`,
 //! `dt-mix.wav`, `dt-mix-aec*.wav`; and `report.txt`. When the
 //! re-transcriptions are there as `<wav stem>.asr.json` (the engine's words
@@ -1463,7 +1465,7 @@ fn aec_spike_meeting() -> Res<()> {
     // (name, config, reference index, keep the output, gate statistic)
     let variants: Vec<(&str, AecConfig, usize, bool, bool)> = vec![
         ("anchors, 200 ms", base, 0, false, true),
-        ("anchors, 200 ms + residual", res, 0, false, false),
+        ("anchors, 200 ms + residual", res, 0, true, false),
         ("anchors, whole-sample reference", base, 1, false, false),
         ("anchors, AGC undone", base, 3, false, false),
         ("lag track, 200 ms", base, 2, false, false),
@@ -1504,6 +1506,9 @@ fn aec_spike_meeting() -> Res<()> {
             true,
             true,
         ),
+        // The causal configurations: clock anchors only, no look-ahead
+        // trackers (live; the post-pass once the gain track exists).
+        ("anchors, AGC undone + residual", res, 3, true, false),
     ];
     let t0 = Instant::now();
     let mut rows: Vec<Row> = Vec::new();
@@ -1541,12 +1546,12 @@ fn aec_spike_meeting() -> Res<()> {
     write_wav(&outdir.join("mic-aec-res.wav"), &kept[&6])?;
     write_wav(&outdir.join("mic-aec-raw.wav"), &kept[&10])?;
     write_wav(&outdir.join("mic-aec-raw-res.wav"), &kept[&11])?;
+    write_wav(&outdir.join("mic-aec-anchor-res.wav"), &kept[&1])?;
+    write_wav(&outdir.join("mic-aec-anchor-raw-res.wav"), &kept[&12])?;
     write_wav(&outdir.join("reference.wav"), &ctx.refr)?;
     write_wav(&outdir.join("reference-raw.wav"), &ref_raw_tracked)?;
     drop(ref_round);
-    drop(ref_anchor);
     drop(ref_tracked);
-    drop(ref_raw);
 
     say!("");
     say!("Signal metrics (100 Hz high-passed; far end only = the duplicates' spans while the loopback is active; owner alone = owner's words with the loopback silent; double talk = owner's words while it is active)");
@@ -1660,8 +1665,17 @@ fn aec_spike_meeting() -> Res<()> {
     }
 
     // Spliced double talk with ground truth.
-    let dt = spliced_double_talk(&ctx, &ref_raw_tracked, &outdir, &mut rep)?;
+    let dt = spliced_double_talk(
+        &ctx,
+        &ref_raw_tracked,
+        &ref_anchor,
+        &ref_raw,
+        &outdir,
+        &mut rep,
+    )?;
     drop(ref_raw_tracked);
+    drop(ref_anchor);
+    drop(ref_raw);
 
     // Re-transcriptions, when present.
     score_transcripts(&ctx, &runs, &sample, &outdir, &dt, &mut rep)?;
@@ -1686,6 +1700,8 @@ struct Spliced {
 fn spliced_double_talk(
     ctx: &Ctx,
     ref_raw: &[f32],
+    ref_anchor: &[f32],
+    ref_anchor_raw: &[f32],
     outdir: &Path,
     rep: &mut String,
 ) -> Res<Spliced> {
@@ -1819,6 +1835,12 @@ fn spliced_double_talk(
             res,
             &ref_raw[pre..m1],
         ),
+        ("anchors, 200 ms + residual", res, &ref_anchor[pre..m1]),
+        (
+            "anchors, AGC undone + residual",
+            res,
+            &ref_anchor_raw[pre..m1],
+        ),
     ] {
         let (out, _, _) = cancel(cfg, &mix_full, reference, None);
         let out_h = highpass(&out);
@@ -1859,6 +1881,14 @@ fn spliced_double_talk(
     write_wav(&outdir.join("dt-mix-aec.wav"), &outs[0][m0 - pre..])?;
     write_wav(&outdir.join("dt-mix-aec-res.wav"), &outs[1][m0 - pre..])?;
     write_wav(&outdir.join("dt-mix-aec-raw.wav"), &outs[2][m0 - pre..])?;
+    write_wav(
+        &outdir.join("dt-mix-aec-anchor-res.wav"),
+        &outs[4][m0 - pre..],
+    )?;
+    write_wav(
+        &outdir.join("dt-mix-aec-anchor-raw-res.wav"),
+        &outs[5][m0 - pre..],
+    )?;
     Ok(Spliced { m0, clips })
 }
 
@@ -1885,6 +1915,8 @@ fn score_transcripts(
         "mic-aec-res",
         "mic-aec-raw",
         "mic-aec-raw-res",
+        "mic-aec-anchor-res",
+        "mic-aec-anchor-raw-res",
     ];
     let present: Vec<&str> = names
         .iter()
@@ -1986,6 +2018,8 @@ fn score_transcripts(
         "dt-mix-aec",
         "dt-mix-aec-res",
         "dt-mix-aec-raw",
+        "dt-mix-aec-anchor-res",
+        "dt-mix-aec-anchor-raw-res",
     ];
     if !outdir.join("dt-near.asr.json").is_file() {
         say!("spliced double talk: dt-near.asr.json not there yet");
