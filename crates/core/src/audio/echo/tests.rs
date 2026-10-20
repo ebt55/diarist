@@ -100,15 +100,17 @@ fn coupled_conversation_drops_every_echo_word_and_keeps_the_owner() {
     let echo = spans(&c.far_words, 48, Some(&mut rng));
     let near = spans(&c.near_words, 0, None);
     let all: Vec<(i64, i64)> = echo.iter().chain(&near).copied().collect();
-    let g = gate_sources(&all, &mic[..], &lb[..], &p, GATE_THRESHOLD);
+    let band = GateBand::DEFAULT;
+    let g = gate_sources(&all, &mic[..], &lb[..], &p, band);
     let (e, o) = g.scores.split_at(echo.len());
     let coef = |s: &WordScore| s.coefficient().unwrap_or(0.0);
     let min_echo = e.iter().map(coef).fold(1.0, f32::min);
     let max_own = o.iter().map(coef).fold(0.0, f32::max);
     // Every echo word over the drop bound, every owner word under the keep
     // bound: the 0.3 margin is the hysteresis band between them.
-    assert!(min_echo >= GATE_DROP_AT, "lowest echo word {min_echo}");
-    assert!(max_own < GATE_KEEP_UNDER, "highest owner word {max_own}");
+    assert!(min_echo >= band.drop_at, "lowest echo word {min_echo}");
+    assert!(max_own < band.keep_under, "highest owner word {max_own}");
+    assert!(min_echo - max_own >= 0.3, "{min_echo} vs {max_own}");
     assert!(g.drop[..echo.len()].iter().all(|d| *d));
     assert!(g.drop[echo.len()..].iter().all(|d| !*d));
     assert_eq!(g.dropped, echo.len());
@@ -133,7 +135,7 @@ fn uncorrelated_channels_are_clear_and_nothing_drops() {
         .collect();
     assert!(p.gates(EchoMode::Always, false) && !p.gates(EchoMode::Auto, false));
     assert!(!p.gates(EchoMode::Off, true) && p.gates(EchoMode::Auto, true));
-    let g = gate_sources(&all, &mic[..], &lb[..], &p, GATE_THRESHOLD);
+    let g = gate_sources(&all, &mic[..], &lb[..], &p, GateBand::DEFAULT);
     assert_eq!(
         g.dropped,
         0,
@@ -147,7 +149,7 @@ fn uncorrelated_channels_are_clear_and_nothing_drops() {
     let zeros = vec![0i16; lb.len()];
     let p = EchoProfile::scan_sources(&mic[..], &zeros[..], None);
     assert_eq!((p.status, p.active_blocks), (EchoStatus::Unknown, 0));
-    let g = gate_sources(&all, &mic[..], &zeros[..], &p, GATE_THRESHOLD);
+    let g = gate_sources(&all, &mic[..], &zeros[..], &p, GateBand::DEFAULT);
     assert!(g.scores.iter().all(|s| *s == WordScore::Undefined) && g.dropped == 0);
 }
 
@@ -157,6 +159,11 @@ fn hysteresis_lets_the_neighbours_decide_the_middle_band() {
         v.iter()
             .map(|c| c.map_or(WordScore::Undefined, WordScore::Scored))
             .collect()
+    };
+    let band = GateBand {
+        keep_under: 0.2,
+        threshold: 0.35,
+        drop_at: 0.5,
     };
     // 0.55 drops, 0.1 keeps, the 0.3 between echo words drops, the 0.3
     // between owner words stays; undefined is kept.
@@ -170,18 +177,25 @@ fn hysteresis_lets_the_neighbours_decide_the_middle_band() {
             None,
             Some(0.1),
         ]),
-        0.35,
+        band,
     );
     assert_eq!(d, vec![true, true, true, true, true, false, false]);
     let d = decide(
         &s(&[Some(0.05), Some(0.1), Some(0.3), Some(0.02), Some(0.6)]),
-        0.35,
+        band,
     );
     assert_eq!(d, vec![false, false, false, false, true]);
     // A lone middle word: its own coefficient against the threshold.
-    assert_eq!(decide(&s(&[Some(0.4)]), 0.35), vec![true]);
-    assert_eq!(decide(&s(&[Some(0.3)]), 0.35), vec![false]);
-    assert_eq!(decide(&[WordScore::Pending], 0.35), vec![false]);
+    assert_eq!(decide(&s(&[Some(0.4)]), band), vec![true]);
+    assert_eq!(decide(&s(&[Some(0.3)]), band), vec![false]);
+    assert_eq!(decide(&[WordScore::Pending], band), vec![false]);
+    // The flags come back in the input order whatever order the words are in.
+    let spans = [(30, 40), (10, 20), (20, 30)];
+    let scores = s(&[Some(0.1), Some(0.9), Some(0.3)]);
+    assert_eq!(
+        decide_in_order(&spans, &scores, band),
+        vec![false, true, true]
+    );
 }
 
 #[test]
@@ -437,7 +451,7 @@ fn raw_indices_without_clock_maps_still_gate_at_minute_one_hundred() {
         periods_of(mic_period, periods),
         periods_of(lb_period, periods),
         &p,
-        GATE_THRESHOLD,
+        GateBand::DEFAULT,
     );
     assert!(
         g.drop[..echo.len()].iter().all(|d| *d),

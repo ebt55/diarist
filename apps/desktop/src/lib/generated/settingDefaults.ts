@@ -19,7 +19,7 @@ export const SETTING_DEFAULTS = {
   "capture.loopback_agc": "true",
   "capture.mic_agc": "false",
   "echo.mode": "auto",
-  "echo.gate_threshold": "0.35",
+  "echo.gate_threshold": "0.5",
   "engine.preload": "false",
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",

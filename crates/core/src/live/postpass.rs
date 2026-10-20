@@ -34,7 +34,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
-use crate::audio::echo::{gate_wavs, ClockPair, EchoMode, EchoProfile};
+use crate::audio::echo::{gate_wavs, ClockPair, EchoMode, EchoProfile, GateBand};
 use crate::audio::flac::encode_stereo;
 use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, FileJob};
 use crate::error::{CoreError, Result};
@@ -237,7 +237,13 @@ fn gate_mic(
             .iter()
             .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
             .collect();
-        let g = gate_wavs(&spans, mic, lb, &profile, threshold)?;
+        let g = gate_wavs(
+            &spans,
+            mic,
+            lb,
+            &profile,
+            GateBand::with_threshold(threshold),
+        )?;
         let mut kept = Vec::with_capacity(g.kept);
         for (w, (d, s)) in words.into_iter().zip(g.drop.iter().zip(&g.scores)) {
             if *d {

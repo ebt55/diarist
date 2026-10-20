@@ -39,9 +39,18 @@
 //!   add 100 to 300 ms).
 //! - The mic ASR stamps echo words late (+75 ms median, +275 ms p90), hence
 //!   the asymmetric gate span. Word NCC: echo words median 0.74, the owner's
-//!   words during far-end speech 0.06 (p90 0.23). Hysteresis: drop at 0.5,
-//!   keep under 0.2, in between the neighbours decide at
-//!   `echo.gate_threshold` (0.35).
+//!   words during far-end speech 0.06 (p90 0.23). Under full double-talk a
+//!   word's NCC is about sqrt(echo share of the mic power): 0.47 for the
+//!   owner 5 dB over the echo, so the band sits above that. Hysteresis
+//!   ([`GateBand`]): keep under 0.20, drop at 0.55, in between the
+//!   neighbours decide at `echo.gate_threshold` (0.50). Chosen from a sweep
+//!   of 125 bands (docs/eval/2026-10-20-echo.md) as the band dropping the
+//!   most duplicates while the FLEURS double-talk fixture's "me" WER rises
+//!   at most 1 point: meeting 12 duplicates dropped 99.04 percent,
+//!   misrecognised echo during far-end speech 95.45, the owner's words kept
+//!   98.84 (97.09 during far-end speech); fixture +0.25 points (0.20 / 0.35
+//!   / 0.50 before: 99.37 percent of duplicates, the owner's words 98.50,
+//!   fixture +15.91 points).
 //! - Echo return loss median 10.3 dB; per coupled block
 //!   `(loopback − loopback gain) − (mic − mic gain) − 20·log10(NCC)`, so the
 //!   AGCs do not move it and the NCC term isolates the echo's share of the
@@ -97,12 +106,12 @@ const LOSE_AFTER: u32 = 30;
 pub const GATE_BEFORE: i64 = 5_600;
 pub const GATE_AFTER: i64 = 2_560;
 pub const GATE_LAG_HALF: i64 = 320;
-/// Hysteresis: drop at or above, keep under; in between the neighbours
-/// decide at `echo.gate_threshold`.
-pub const GATE_DROP_AT: f32 = 0.5;
+/// Hysteresis ([`GateBand::DEFAULT`]): drop at or above, keep under; in
+/// between the neighbours decide at `echo.gate_threshold`.
+pub const GATE_DROP_AT: f32 = 0.55;
 pub const GATE_KEEP_UNDER: f32 = 0.2;
 /// `echo.gate_threshold` default and accepted range.
-pub const GATE_THRESHOLD: f32 = 0.35;
+pub const GATE_THRESHOLD: f32 = 0.5;
 pub const GATE_THRESHOLD_RANGE: (f32, f32) = (0.2, 0.6);
 /// Live PCM ring per channel: 20 s.
 pub const RING_SAMPLES: usize = 320_000;
@@ -1463,25 +1472,71 @@ fn score_word(
     }
 }
 
-/// The hysteresis over a word sequence in time order: drop at or above 0.5,
-/// keep under 0.2, in between drop when the median of the two neighbouring
-/// words on each side (those with a coefficient; the word's own without
-/// any) is at or above `threshold`. Words without a coefficient are kept.
-pub fn decide(scores: &[WordScore], threshold: f32) -> Vec<bool> {
+/// The gate's hysteresis band: a word is kept under `keep_under`, dropped
+/// at or above `drop_at`, and in between dropped when its neighbours' median
+/// reaches `threshold` (`echo.gate_threshold`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GateBand {
+    pub keep_under: f32,
+    pub threshold: f32,
+    pub drop_at: f32,
+}
+
+impl GateBand {
+    pub const DEFAULT: Self = Self {
+        keep_under: GATE_KEEP_UNDER,
+        threshold: GATE_THRESHOLD,
+        drop_at: GATE_DROP_AT,
+    };
+
+    /// The default bounds around `threshold`.
+    pub fn with_threshold(threshold: f32) -> Self {
+        Self {
+            threshold,
+            ..Self::DEFAULT
+        }
+    }
+}
+
+impl Default for GateBand {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The hysteresis over a word sequence in time order: drop at or above
+/// `band.drop_at`, keep under `band.keep_under`, in between drop when the
+/// median of the two neighbouring words on each side (those with a
+/// coefficient; the word's own without any) is at or above `band.threshold`.
+/// Words without a coefficient are kept.
+pub fn decide(scores: &[WordScore], band: GateBand) -> Vec<bool> {
     (0..scores.len())
         .map(|i| match scores[i].coefficient() {
             None => false,
-            Some(c) if c >= GATE_DROP_AT => true,
-            Some(c) if c < GATE_KEEP_UNDER => false,
+            Some(c) if c >= band.drop_at => true,
+            Some(c) if c < band.keep_under => false,
             Some(c) => {
                 let mut nb: Vec<f32> = [i.wrapping_sub(2), i.wrapping_sub(1), i + 1, i + 2]
                     .iter()
                     .filter_map(|&j| scores.get(j).and_then(|s| s.coefficient()))
                     .collect();
-                median(&mut nb).unwrap_or(c) >= threshold
+                median(&mut nb).unwrap_or(c) >= band.threshold
             }
         })
         .collect()
+}
+
+/// [`decide`] over words given in any order (`spans` decide the time order);
+/// the flags in the input order.
+pub fn decide_in_order(spans: &[(i64, i64)], scores: &[WordScore], band: GateBand) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| spans[i]);
+    let sorted: Vec<WordScore> = order.iter().map(|&i| scores[i]).collect();
+    let mut drop = vec![false; spans.len()];
+    for (k, d) in decide(&sorted, band).into_iter().enumerate() {
+        drop[order[k]] = d;
+    }
+    drop
 }
 
 /// What [`gate_words`] decided, in the order of the input spans.
@@ -1500,24 +1555,19 @@ pub fn gate_words(
     spans: &[(i64, i64)],
     audio: &mut dyn EchoAudio,
     lag_at: &dyn Fn(i64) -> Option<f32>,
-    threshold: f32,
+    band: GateBand,
 ) -> GateReport {
+    // Scored in time order: stored channels are read forward.
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by_key(|&i| spans[i]);
     let mut corr = Correlator::default();
     let (mut x, mut y) = (Vec::new(), Vec::new());
-    let mut sorted = Vec::with_capacity(spans.len());
+    let mut scores = vec![WordScore::Undefined; spans.len()];
     for &i in &order {
         let s = spans[i];
-        sorted.push(score_word(audio, &mut corr, s, lag_at(s.0), &mut x, &mut y));
+        scores[i] = score_word(audio, &mut corr, s, lag_at(s.0), &mut x, &mut y);
     }
-    let drops = decide(&sorted, threshold);
-    let mut scores = vec![WordScore::Undefined; spans.len()];
-    let mut drop = vec![false; spans.len()];
-    for (k, &i) in order.iter().enumerate() {
-        scores[i] = sorted[k];
-        drop[i] = drops[k];
-    }
+    let drop = decide_in_order(spans, &scores, band);
     let dropped = drop.iter().filter(|d| **d).count();
     GateReport {
         kept: spans.len() - dropped,
@@ -1534,14 +1584,14 @@ pub fn gate_sources(
     mic: impl PcmSource,
     loopback: impl PcmSource,
     profile: &EchoProfile,
-    threshold: f32,
+    band: GateBand,
 ) -> GateReport {
     let mut audio = StreamAudio {
         mic: Stream::new(mic),
         loopback: Stream::new(loopback),
         clocks: profile.clocks.clone(),
     };
-    gate_words(spans, &mut audio, &|t| profile.lag_at(t), threshold)
+    gate_words(spans, &mut audio, &|t| profile.lag_at(t), band)
 }
 
 /// [`gate_sources`] over the two WAVs.
@@ -1550,14 +1600,14 @@ pub fn gate_wavs(
     mic_wav: &Path,
     loopback_wav: &Path,
     profile: &EchoProfile,
-    threshold: f32,
+    band: GateBand,
 ) -> Result<GateReport> {
     Ok(gate_sources(
         spans,
         WavSamples::open(mic_wav)?,
         WavSamples::open(loopback_wav)?,
         profile,
-        threshold,
+        band,
     ))
 }
 

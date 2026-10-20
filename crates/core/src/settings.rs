@@ -46,7 +46,8 @@ pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
 /// nothing is gated) or `always` (gate regardless of detection) ([`echo_mode`]).
 pub const ECHO_MODE: &str = "echo.mode";
 /// Correlation at or above which a mic word in the gate's hysteresis band
-/// (0.2 to 0.5) is dropped when its neighbours are; 0.2 to 0.6 accepted
+/// (0.2 to 0.55) is dropped when its neighbours' median reaches it; 0.2 to
+/// 0.6 accepted
 /// ([`echo_gate_threshold`]).
 pub const ECHO_GATE_THRESHOLD: &str = "echo.gate_threshold";
 /// Start `nemo-speech serve` at app launch instead of on the first Record
@@ -102,7 +103,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (CAPTURE_LOOPBACK_AGC, "true"),
     (CAPTURE_MIC_AGC, "false"),
     (ECHO_MODE, "auto"),
-    (ECHO_GATE_THRESHOLD, "0.35"),
+    (ECHO_GATE_THRESHOLD, "0.5"),
     (ENGINE_PRELOAD, "false"),
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
@@ -259,7 +260,7 @@ pub fn echo_mode(settings: &Settings) -> EchoMode {
     EchoMode::parse(get(settings, ECHO_MODE))
 }
 
-/// `echo.gate_threshold`, clamped to 0.2 to 0.6; unreadable: 0.35.
+/// `echo.gate_threshold`, clamped to 0.2 to 0.6; unreadable: 0.5.
 pub fn echo_gate_threshold(settings: &Settings) -> f32 {
     get(settings, ECHO_GATE_THRESHOLD)
         .trim()
@@ -316,10 +317,10 @@ mod tests {
         assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
         assert!(get_bool(&s, PLAYBACK_NORMALIZE));
         assert_eq!(get(&s, PLAYBACK_VOLUME), "1.0");
-        // Echo handling: on detection, at 0.35; clamped, unreadable is 0.35.
+        // Echo handling: on detection, at 0.5; clamped, unreadable is 0.5.
         assert_eq!(
             (echo_mode(&s), echo_gate_threshold(&s)),
-            (EchoMode::Auto, 0.35)
+            (EchoMode::Auto, 0.5)
         );
         store.set_setting(ECHO_MODE, "Off").unwrap();
         store.set_setting(ECHO_GATE_THRESHOLD, "0.9").unwrap();
@@ -329,7 +330,7 @@ mod tests {
             (EchoMode::Off, 0.6)
         );
         store.set_setting(ECHO_GATE_THRESHOLD, "high").unwrap();
-        assert_eq!(echo_gate_threshold(&effective(&store).unwrap()), 0.35);
+        assert_eq!(echo_gate_threshold(&effective(&store).unwrap()), 0.5);
         store.remove_setting(ECHO_MODE).unwrap();
         store.remove_setting(ECHO_GATE_THRESHOLD).unwrap();
         // A value that is not a boolean falls back to the default.

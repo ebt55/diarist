@@ -68,7 +68,7 @@ use crate::audio::capture::{
 };
 use crate::audio::clock::ClockMap;
 use crate::audio::echo::{
-    decide, EchoMode, EchoMonitor, EchoState, EchoStatus, WordScore, COUPLED_AT,
+    decide, EchoMode, EchoMonitor, EchoState, EchoStatus, GateBand, WordScore, COUPLED_AT,
 };
 use crate::audio::feed::{
     feed, spawn_feed_worker, FeedNotice, FeedReport, FeedTransition, FeedWorker, FEED_CAPACITY,
@@ -1179,7 +1179,7 @@ impl LiveEcho {
     /// The drop flags the sink should show for `u` now.
     fn drops(&self, u: &MicUtt) -> Vec<bool> {
         if self.gating() {
-            decide(&u.scores, self.threshold)
+            decide(&u.scores, GateBand::with_threshold(self.threshold))
         } else {
             vec![false; u.words.len()]
         }
@@ -1258,7 +1258,10 @@ impl LiveEcho {
             }
         }
         all.sort_by_key(|w| (w.0, w.1, w.3));
-        let flags = decide(&all.iter().map(|w| w.4).collect::<Vec<_>>(), self.threshold);
+        let flags = decide(
+            &all.iter().map(|w| w.4).collect::<Vec<_>>(),
+            GateBand::with_threshold(self.threshold),
+        );
         let mut skip = std::collections::HashSet::new();
         let mut dropped = Vec::new();
         if gated {

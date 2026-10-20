@@ -1221,7 +1221,7 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert_eq!(e["coupled"], true, "{e}");
     assert_eq!(
         (e["mic_words_before"].as_u64(), e["threshold"].as_f64()),
-        (Some(60), Some(0.35))
+        (Some(60), Some(0.5))
     );
     let kept = mic_words(&store, report.current_run);
     assert!(kept.iter().all(|s| *s >= 27), "{kept:?}");

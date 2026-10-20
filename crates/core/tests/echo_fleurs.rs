@@ -14,6 +14,9 @@
 //!   model, Nemotron 3 Diarization), as for `live_carry_repro`.
 //! - `DIARIST_ECHO_MINUTES` (default 10), `DIARIST_ECHO_OUT` (scratch
 //!   folder, default `%TEMP%\diarist-echo-fleurs`).
+//! - `DIARIST_ECHO_BANDS` (optional, `keep/threshold/drop;...`): each band
+//!   applied to the gate-off run's "me" words with the post-pass's own scan
+//!   and gate, one row per band; the auto run uses the shipped band.
 //!
 //! Per utterance, the hypothesis is the "me" words whose middle falls in
 //! the utterance's span (−0.2 s, +0.4 s); WER is summed edits over summed
@@ -25,6 +28,7 @@
 
 use std::path::{Path, PathBuf};
 
+use diarist_core::audio::echo::{decide_in_order, gate_sources, EchoProfile, GateBand};
 use diarist_core::audio::flac::decode_i16;
 use diarist_core::engine::NemoCliEngine;
 use diarist_core::live::{run_post_pass, PostPassJob};
@@ -374,8 +378,59 @@ fn fleurs_owner_over_a_speaker_meeting() {
     engine.pass_language = false;
     engine.right_context = Some(13);
     engine.diar_preset = Some("v3-offline".into());
-    let off = score(&utts, &post_pass(&out, &engine, &mic, &lb, "off"));
+    let off_words = post_pass(&out, &engine, &mic, &lb, "off");
+    let off = score(&utts, &off_words);
     let on = score(&utts, &post_pass(&out, &engine, &mic, &lb, "auto"));
+    let sweep: Vec<GateBand> = std::env::var("DIARIST_ECHO_BANDS")
+        .ok()
+        .map(|v| {
+            v.split(';')
+                .filter_map(|b| {
+                    let f: Vec<f32> = b.split('/').filter_map(|x| x.trim().parse().ok()).collect();
+                    match f[..] {
+                        [keep_under, threshold, drop_at] => Some(GateBand {
+                            keep_under,
+                            threshold,
+                            drop_at,
+                        }),
+                        _ => None,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !sweep.is_empty() {
+        // The post-pass's scan and gate on the gate-off run's words (no
+        // clock maps in the fixture: meeting time is channel time).
+        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
+        let spans: Vec<(i64, i64)> = off_words
+            .iter()
+            .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
+            .collect();
+        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
+        eprintln!("| Band (keep / neighbours / drop) | \"me\" WER change | over the far end | in far-end pauses | Echo words removed |");
+        eprintln!("|---|---|---|---|---|");
+        for b in &sweep {
+            let d = decide_in_order(&spans, &g.scores, *b);
+            let kept: Vec<(i64, i64, String)> = off_words
+                .iter()
+                .zip(&d)
+                .filter(|(_, d)| !**d)
+                .map(|(w, _)| w.clone())
+                .collect();
+            let s = score(&utts, &kept);
+            eprintln!(
+                "| {:.2} / {:.2} / {:.2} | {:+.2} | {:+.2} | {:+.2} | {:.2} % |",
+                b.keep_under,
+                b.threshold,
+                b.drop_at,
+                s.wer - off.wer,
+                s.wer_double_talk - off.wer_double_talk,
+                s.wer_clear - off.wer_clear,
+                100.0 * (1.0 - s.echo_words as f64 / off.echo_words.max(1) as f64)
+            );
+        }
+    }
     eprintln!("| | gate off | gate on |");
     eprintln!("|---|---|---|");
     eprintln!(

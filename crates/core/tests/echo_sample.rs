@@ -13,7 +13,9 @@
 //!   (`i,start_s,end_s,text,norm,single_match,...,trigram_covered`, meeting
 //!   time, the database's word order) labelling every mic word duplicate,
 //!   misrecognised echo ("other") or the owner's; prints the per-class table.
-//! - `DIARIST_ECHO_THRESHOLD` (default 0.35).
+//! - `DIARIST_ECHO_BAND` (default the gate's): `keep/threshold/drop`, e.g.
+//!   `0.45/0.60/0.70`; `DIARIST_ECHO_BANDS`: several, `;`-separated, each a
+//!   row of the per-class sweep from the same scores.
 //! - `DIARIST_ECHO_WAV_DIR` (optional): a scratch folder; the channels are
 //!   written there as `mic.wav` / `loopback.wav` (and removed after) to time
 //!   the post-pass path, which reads WAVs.
@@ -29,8 +31,8 @@ use std::time::Instant;
 
 use diarist_core::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
 use diarist_core::audio::echo::{
-    gate_sources, rms_dbfs, ClockPair, EchoMonitor, EchoProfile, EchoStatus, HighPass, COUPLED_AT,
-    GATE_THRESHOLD,
+    decide_in_order, gate_sources, rms_dbfs, ClockPair, EchoMonitor, EchoProfile, EchoStatus,
+    GateBand, HighPass, COUPLED_AT,
 };
 use diarist_core::audio::flac::decode_i16;
 use diarist_core::audio::pipeline::{Frame, Level};
@@ -240,10 +242,14 @@ fn echo_on_a_stored_meeting() {
         eprintln!("DIARIST_ECHO_SAMPLE is not set: skipped");
         return;
     };
-    let threshold = std::env::var("DIARIST_ECHO_THRESHOLD")
+    let band = std::env::var("DIARIST_ECHO_BAND")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(GATE_THRESHOLD);
+        .and_then(|v| parse_band(&v))
+        .unwrap_or_default();
+    let sweep: Vec<GateBand> = std::env::var("DIARIST_ECHO_BANDS")
+        .ok()
+        .map(|v| v.split(';').filter_map(parse_band).collect())
+        .unwrap_or_default();
     let uid = folder.file_name().unwrap().to_string_lossy().into_owned();
     let t = Instant::now();
     let (pcm, ch) = decode_i16(&folder.join("playback.flac")).unwrap();
@@ -306,10 +312,10 @@ fn echo_on_a_stored_meeting() {
         })
         .collect();
     let t = Instant::now();
-    let g = gate_sources(&spans, &mic[..], &lb[..], &p, threshold);
+    let g = gate_sources(&spans, &mic[..], &lb[..], &p, band);
     let gate_s = t.elapsed().as_secs_f64();
     eprintln!(
-        "gate at {threshold}: {} mic words, {} dropped, {} kept; {gate_s:.2} s ({:.0} us per word); would gate: {}",
+        "gate at {band:?}: {} mic words, {} dropped, {} kept; {gate_s:.2} s ({:.0} us per word); would gate: {}",
         spans.len(),
         g.dropped,
         g.kept,
@@ -362,7 +368,7 @@ fn echo_on_a_stored_meeting() {
         let t = Instant::now();
         let pw = EchoProfile::scan(&mw, &lw, clocks.clone()).unwrap();
         let scan_wav = t.elapsed().as_secs_f64();
-        let gw = diarist_core::audio::echo::gate_wavs(&spans, &mw, &lw, &pw, threshold).unwrap();
+        let gw = diarist_core::audio::echo::gate_wavs(&spans, &mw, &lw, &pw, band).unwrap();
         let total = t.elapsed().as_secs_f64();
         let _ = (std::fs::remove_file(&mw), std::fs::remove_file(&lw));
         assert_eq!((pw.coupled, gw.dropped), (p.coupled, g.dropped));
@@ -452,5 +458,39 @@ fn echo_on_a_stored_meeting() {
             .map(|i| g.scores[i].coefficient().unwrap_or(-1.0))
             .collect();
         eprintln!("dropped own coefficients: {dropped_own:?}");
+        let other_far_n = count(&|i| !c.dup[i] && !c.own[i] && during(i));
+        if !sweep.is_empty() {
+            eprintln!("| Band (keep / neighbours / drop) | Duplicates dropped | Misrecognised echo dropped during far-end speech | Owner kept | Owner kept during far-end speech |");
+            eprintln!("|---|---|---|---|---|");
+        }
+        for b in &sweep {
+            let d = decide_in_order(&spans, &g.scores, *b);
+            eprintln!(
+                "| {:.2} / {:.2} / {:.2} | {:.2} % | {:.2} % | {:.2} % | {:.2} % |",
+                b.keep_under,
+                b.threshold,
+                b.drop_at,
+                pct(count(&|i| c.dup[i] && d[i]), dups),
+                pct(
+                    count(&|i| !c.dup[i] && !c.own[i] && during(i) && d[i]),
+                    other_far_n
+                ),
+                pct(count(&|i| c.own[i] && !d[i]), own),
+                pct(count(&|i| c.own[i] && during(i) && !d[i]), own_far),
+            );
+        }
+    }
+}
+
+/// `keep/threshold/drop`.
+fn parse_band(v: &str) -> Option<GateBand> {
+    let f: Vec<f32> = v.split('/').filter_map(|x| x.trim().parse().ok()).collect();
+    match f[..] {
+        [keep_under, threshold, drop_at] => Some(GateBand {
+            keep_under,
+            threshold,
+            drop_at,
+        }),
+        _ => None,
     }
 }
