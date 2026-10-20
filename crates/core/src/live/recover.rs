@@ -15,15 +15,15 @@
 use std::path::Path;
 
 use super::rerun::discard_unfinished_post_passes;
-use super::{register_wavs, submit_post_pass, LiveContext, PostPassHandle, PostPassJob};
+use super::{
+    live_run_of, register_wavs, submit_post_pass, LiveContext, PostPassHandle, PostPassJob,
+};
 use crate::audio::wav::repair_header;
 use crate::error::Result;
 use crate::settings;
 use crate::store::{RunStore, StoreError};
 use crate::transcript::SegmentOptions;
-use crate::types::{
-    JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source, TranscriptRun,
-};
+use crate::types::{JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source};
 
 /// The note a promoted live run gets in its `engine_info` (key `recovery`).
 pub const PROMOTED_NOTE: &str = "The post-pass was interrupted and the recorded audio is gone, \
@@ -54,10 +54,6 @@ pub struct RecoveredMeeting {
     pub loopback_frames: u64,
     /// The queued post-pass (`None` when there was no audio to process).
     pub post_pass: Option<PostPassHandle>,
-}
-
-fn latest_live_run(runs: &[TranscriptRun]) -> Option<&TranscriptRun> {
-    runs.iter().rev().find(|r| r.kind == RunKind::Live)
 }
 
 /// Makes sure the live run has its transcript, is finished and is current.
@@ -123,7 +119,7 @@ fn recover_recording(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeetin
     let mic_frames = repair(&folder.join("mic.wav"));
     let loopback_frames = repair(&folder.join("loopback.wav"));
     let runs = store.list_runs(id)?;
-    let live = latest_live_run(&runs).map(|r| r.id);
+    let live = live_run_of(&runs).map(|r| r.id);
     if let Some(run) = live {
         settle_live_run(store, id, run)?;
     }
@@ -173,7 +169,7 @@ fn recover_processing(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeeti
     let mic_frames = frames(&folder.join("mic.wav"));
     let loopback_frames = frames(&folder.join("loopback.wav"));
     let runs = store.list_runs(id)?;
-    let live = latest_live_run(&runs).map(|r| r.id);
+    let live = live_run_of(&runs).map(|r| r.id);
     let mut r = RecoveredMeeting {
         meeting_id: id,
         was: MeetingStatus::Processing,

@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use super::{LiveWord, WordsUpdate};
+use super::{live_run_of, LiveWord, WordsUpdate};
 use crate::store::{RunStore, StoreResult};
 use crate::transcript::{ME_LABEL, UNKNOWN_LABEL};
-use crate::types::{Channel, LiveUtterance, MeetingId, RunKind, SpeakerId};
+use crate::types::{Channel, LiveUtterance, MeetingId, SpeakerId};
 
 /// The newest revision of every utterance of the meeting's latest live run,
 /// in `live:words` shape and utterance order per channel (empty without a
@@ -28,7 +28,7 @@ pub fn snapshot_except(
     hide: &dyn Fn(Channel, u32, u32, usize) -> bool,
 ) -> StoreResult<Vec<WordsUpdate>> {
     let runs = store.list_runs(meeting)?;
-    let Some(run) = runs.iter().rev().find(|r| r.kind == RunKind::Live) else {
+    let Some(run) = live_run_of(&runs) else {
         return Ok(Vec::new());
     };
     let diarize_mic = store.get_meeting(meeting)?.meeting.diarize_mic;

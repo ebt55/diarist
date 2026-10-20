@@ -1889,3 +1889,96 @@ fn recovery_and_a_rerun_cancel_the_echo_through_the_same_post_pass() {
     assert!(folder.join("loopback.gain").is_file());
     assert!(store.get_run(live).is_err(), "the live run went");
 }
+
+#[test]
+fn restored_runs_are_not_the_live_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    // A post-pass that failed: the live run is current, with words the live
+    // gate removed, and the WAVs are still there.
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Echo", true);
+    store
+        .set_echo_dropped(
+            live,
+            &[crate::types::EchoDroppedWord {
+                start_ms: 1_000,
+                end_ms: 1_300,
+                text: "echo".into(),
+                coefficient: 0.8,
+            }],
+        )
+        .unwrap();
+    let mut info = store.get_run(live).unwrap().engine_info;
+    info["echo"] = serde_json::json!({"coupled": true, "dropped": 1, "aec": false, "mode": "auto"});
+    store.set_run_engine_info(live, info).unwrap();
+    store
+        .set_meeting_status(m.id, MeetingStatus::Failed)
+        .unwrap();
+    // Restore: a new live-kind run, current, that says where it came from.
+    let restored = super::restore::restore_echo_dropped(&*store, live).unwrap();
+    let r = store.get_run(restored.run).unwrap();
+    assert_eq!(r.kind, RunKind::Live);
+    assert_eq!(
+        r.engine_info["echo"]["restored_from"].as_i64(),
+        Some(live.0)
+    );
+    assert_eq!(
+        store.get_meeting(m.id).unwrap().current_run.unwrap().id,
+        restored.run
+    );
+    // The snapshot is the live run's utterances, not the restored copy's.
+    let snap = snapshot(&*store, m.id).unwrap();
+    assert!(
+        !snap.is_empty() && snap.iter().all(|u| u.run_id == live),
+        "{snap:?}"
+    );
+    // The re-run carries over from the live run, not the restored copy,
+    // and replaces it; the restored copy is kept (not current).
+    let report = rerun_post_pass(&ctx, m.id)
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!(run.kind, RunKind::PostPass);
+    assert_eq!(run.engine_info["live_run"].as_i64(), Some(live.0));
+    assert!(report.live_run_deleted);
+    assert!(store.get_run(live).is_err());
+    assert!(store.get_run(restored.run).is_ok());
+    assert_eq!(file.jobs.lock().unwrap().len(), 2);
+    // Crash recovery picks the live run too.
+    let (m2, live2) = interrupted_meeting(&store, dir.path(), "Echo 2", true);
+    store
+        .set_meeting_status(m2.id, MeetingStatus::Done)
+        .unwrap();
+    store
+        .set_echo_dropped(
+            live2,
+            &[crate::types::EchoDroppedWord {
+                start_ms: 1_000,
+                end_ms: 1_300,
+                text: "echo".into(),
+                coefficient: 0.8,
+            }],
+        )
+        .unwrap();
+    let restored2 = super::restore::restore_echo_dropped(&*store, live2).unwrap();
+    store
+        .set_meeting_status(m2.id, MeetingStatus::Processing)
+        .unwrap();
+    let rec = recover(&ctx).unwrap();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].live_run, Some(live2));
+    let report = rec[0]
+        .post_pass
+        .as_ref()
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.get_run(report.current_run).unwrap().engine_info["live_run"].as_i64(),
+        Some(live2.0)
+    );
+    assert!(store.get_run(restored2.run).is_ok());
+}

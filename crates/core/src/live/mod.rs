@@ -1225,6 +1225,16 @@ struct EventLoop {
     echo: Option<LiveEcho>,
 }
 
+/// The meeting's live run among its runs (in creation order): the latest of
+/// kind `live` that is not a copy Restore made of one (a restored run has
+/// `engine_info.echo.restored_from`, holds no live utterances and must not
+/// stand in for the recording in a re-run, crash recovery or a snapshot).
+pub(crate) fn live_run_of(runs: &[TranscriptRun]) -> Option<&TranscriptRun> {
+    runs.iter()
+        .rev()
+        .find(|r| r.kind == RunKind::Live && r.engine_info["echo"]["restored_from"].is_null())
+}
+
 /// Three decimals for `engine_info`.
 pub(crate) fn round3(v: f32) -> f64 {
     (f64::from(v) * 1_000.0).round() / 1_000.0
