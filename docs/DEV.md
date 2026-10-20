@@ -425,7 +425,7 @@ All are in `settings::DEFAULTS` (and `generated/settingDefaults.ts`):
 | `record.mic_device`, `record.loopback_device` | `""` | Endpoint ids for new recordings (`""`: the default communications mic; the default output, following the app that plays) |
 | `record.diarize_mic` | `false` | Diarize the mic too (a room with several people) |
 | `echo.mode` | `auto` | Recording with speakers (plan 15): `auto` runs the echo monitor (2 s blocks, FFT correlation of the loopback against the mic) and gates the mic words that are the far end's echo once coupling is detected, live (what the view shows, and the live run at Stop) and in the post-pass; `off` runs nothing and gates nothing; `always` gates regardless of detection |
-| `echo.gate_threshold` | `0.35` | Correlation at or above which a mic word in the gate's middle band (0.2 to 0.5) is dropped when its neighbours are; values outside 0.2 to 0.6 are clamped. Removed words are listed in the run's `echo_dropped` column, the counts in `engine_info.echo` |
+| `echo.gate_threshold` | `0.5` | The neighbours' median correlation at or above which a mic word in the gate's middle band (0.20 to 0.55) is dropped; words at 0.55 or more always go, under 0.20 always stay; values outside 0.2 to 0.6 are clamped. Removed words are listed in the run's `echo_dropped` column, the counts in `engine_info.echo` |
 
 The level meters show the gain the AGC applied; their tooltip shows the
 peak before it.
