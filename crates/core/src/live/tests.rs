@@ -1186,8 +1186,16 @@ fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
             .map(|u| u.words.len())
             .sum()
     };
-    let all = snapshot(&*store, m).unwrap();
-    let gated = snapshot_except(&*store, m, &|c, u, r, i| hidden.contains(&(c, u, r, i))).unwrap();
+    // Both snapshots of one moment: the recording goes on, and an utterance
+    // that lands between the two reads would count in one only.
+    let (all, gated) = loop {
+        let all = snapshot(&*store, m).unwrap();
+        let gated =
+            snapshot_except(&*store, m, &|c, u, r, i| hidden.contains(&(c, u, r, i))).unwrap();
+        if snapshot(&*store, m).unwrap().len() == all.len() {
+            break (all, gated);
+        }
+    };
     assert_eq!(gated.len(), all.len(), "hidden utterances stay, empty");
     assert!(
         mic_words(&gated) + hidden.len() <= mic_words(&all) + 2,
