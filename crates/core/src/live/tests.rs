@@ -7,6 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use super::*;
 use crate::audio::capture::{Control, Packet, PacketData, PacketFlags};
+use crate::audio::echo::EchoStatus;
 use crate::engine::{EngineInfo, FileJob, JobStats, LiveSession};
 use crate::store::{SqliteStore, Store};
 use crate::types::{ModelRole, SegmentId};
@@ -1150,10 +1151,454 @@ fn speakers_warn_once_and_echo_words_leave_the_live_run_and_the_post_pass() {
     drop(ctx);
 }
 
+#[test]
+fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store) = echo_context(dir.path());
+    store.set_setting(settings::KEEP_LIVE_RUNS, "true").unwrap();
+    let sink = Arc::new(WarnSink::default());
+    let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
+    let m = rec.meeting_id();
+    std::thread::sleep(Duration::from_millis(7_500));
+    assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
+    assert!(!rec.echo_off());
+    // A view that opens now gets what the sink shows: the hidden words of
+    // the latest revisions are left out of the snapshot.
+    let hidden = rec.echo_hidden();
+    assert!(!hidden.is_empty());
+    assert!(hidden.iter().all(|k| k.0 == Channel::Mic));
+    let mic_words = |snap: &[WordsUpdate]| -> usize {
+        snap.iter()
+            .filter(|u| u.channel == Channel::Mic)
+            .map(|u| u.words.len())
+            .sum()
+    };
+    let all = snapshot(&*store, m).unwrap();
+    let gated = snapshot_except(&*store, m, &|c, u, r, i| hidden.contains(&(c, u, r, i))).unwrap();
+    assert_eq!(gated.len(), all.len(), "hidden utterances stay, empty");
+    assert!(
+        mic_words(&gated) + hidden.len() <= mic_words(&all) + 2,
+        "{} + {} against {}",
+        mic_words(&gated),
+        hidden.len(),
+        mic_words(&all)
+    );
+    assert!(mic_words(&gated) < mic_words(&all));
+    // Turn off for this recording: recorded on the live run at once, the
+    // hidden words go back to the sink, nothing is hidden any more.
+    let shown_before = sink.words.lock().unwrap().len();
+    assert!(rec.turn_off_echo().unwrap());
+    assert!(!rec.turn_off_echo().unwrap(), "already off");
+    assert!(rec.echo_off());
+    let info = store.get_run(rec.run_id()).unwrap().engine_info;
+    assert_eq!(info["echo"]["user_off"], true);
+    assert_eq!(info["echo"]["mode"], ECHO_OFF_FOR_RECORDING);
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert!(rec.echo_hidden().is_empty());
+    let resent: Vec<WordsUpdate> = sink.words.lock().unwrap()[shown_before..]
+        .iter()
+        .filter(|u| u.channel == Channel::Mic && !u.words.is_empty())
+        .cloned()
+        .collect();
+    let first_hidden = hidden.iter().map(|k| k.1).min().unwrap();
+    assert!(
+        resent.iter().any(|u| u.utt == first_hidden),
+        "utterance {first_hidden} was not sent again"
+    );
+    let now_hidden = rec.echo_hidden();
+    let snap =
+        snapshot_except(&*store, m, &|c, u, r, i| now_hidden.contains(&(c, u, r, i))).unwrap();
+    assert_eq!(mic_words(&snap), mic_words(&snapshot(&*store, m).unwrap()));
+    // Stop: the live run is not gated and has no removed words; the monitor
+    // still says there was echo.
+    let out = rec.stop().unwrap();
+    assert_eq!(out.echo_dropped, 0);
+    assert_eq!(out.echo.unwrap().status, EchoStatus::Coupled);
+    let live = store.get_run(out.live_run).unwrap();
+    let e = &live.engine_info["echo"];
+    assert_eq!(
+        (
+            e["coupled"].as_bool(),
+            e["user_off"].as_bool(),
+            e["mode"].as_str(),
+            e["dropped"].as_u64()
+        ),
+        (
+            Some(true),
+            Some(true),
+            Some(ECHO_OFF_FOR_RECORDING),
+            Some(0)
+        ),
+        "{e}"
+    );
+    assert_eq!(store.echo_dropped(out.live_run).unwrap(), None);
+    let rows = store.list_live_utterances(out.live_run).unwrap();
+    let stored_mic = latest_words(&rows, Channel::Mic);
+    let live_mic = store
+        .get_words(m, i64::MIN, i64::MAX)
+        .unwrap()
+        .iter()
+        .filter(|w| w.text.starts_with('w') && w.raw_label.is_none())
+        .count();
+    assert_eq!(live_mic, stored_mic);
+    // The post-pass honours it: scanned, not gated.
+    let report = out
+        .post_pass
+        .wait(Duration::from_secs(60))
+        .unwrap()
+        .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (
+            e["coupled"].as_bool(),
+            e["user_off"].as_bool(),
+            e["mode"].as_str(),
+            e["dropped"].as_u64()
+        ),
+        (
+            Some(true),
+            Some(true),
+            Some(ECHO_OFF_FOR_RECORDING),
+            Some(0)
+        ),
+        "{e}"
+    );
+    assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
+    let mic_left = store
+        .get_words(m, i64::MIN, i64::MAX)
+        .unwrap()
+        .iter()
+        .filter(|w| w.text.starts_with('p') && w.raw_label.is_none())
+        .count() as u64;
+    assert_eq!(Some(mic_left), e["mic_words_before"].as_u64());
+    drop(ctx);
+}
+
+/// A view reloaded now: the snapshot through the recorder's live gate
+/// against the sink's newest update of each utterance, read while the sink
+/// is held (the event thread waits at its next update, so only the one
+/// update in flight can differ). Returns (utterances compared, differing).
+fn reload_against_sink(rec: &Recorder, store: &dyn RunStore, sink: &WarnSink) -> (usize, usize) {
+    let sunk = sink.words.lock().unwrap();
+    let hidden = rec.echo_hidden();
+    let snap = snapshot_except(store, rec.meeting_id(), &|c, u, r, i| {
+        hidden.contains(&(c, u, r, i))
+    })
+    .unwrap();
+    let mut latest: HashMap<(Channel, u32), &WordsUpdate> = HashMap::new();
+    for u in sunk.iter() {
+        latest.insert((u.channel, u.utt), u);
+    }
+    let (mut compared, mut differ) = (0, 0);
+    for s in &snap {
+        if let Some(l) = latest.get(&(s.channel, s.utt)).filter(|l| l.rev == s.rev) {
+            compared += 1;
+            if serde_json::to_string(l).unwrap() != serde_json::to_string(s).unwrap() {
+                differ += 1;
+            }
+        }
+    }
+    (compared, differ)
+}
+
+#[test]
+fn a_reload_mid_recording_shows_what_the_sink_showed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store) = echo_context(dir.path());
+    let sink = Arc::new(WarnSink::default());
+    let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
+    // Before coupling, and after it (the gate hides the echo).
+    std::thread::sleep(Duration::from_millis(3_000));
+    let (n, differ) = reload_against_sink(&rec, &*store, &sink);
+    assert!(
+        n >= 10 && differ <= 1,
+        "{differ} of {n} differ before coupling"
+    );
+    std::thread::sleep(Duration::from_millis(5_000));
+    assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
+    assert!(!rec.echo_hidden().is_empty());
+    let (n, differ) = reload_against_sink(&rec, &*store, &sink);
+    assert!(n >= 30 && differ <= 1, "{differ} of {n} differ while gated");
+    drop(rec);
+    drop(ctx);
+}
+
+/// The mic: one utterance that grows by a word per second of audio and is
+/// revised every `every` seconds with all its words (each revision 4 ms
+/// later than the one before, as an ASR re-stamping them), and once more at
+/// close; the loopback: [`FakeSession`].
+struct FakeLongLive {
+    every: u64,
+}
+
+struct LongMicSession {
+    job: JobId,
+    tx: Sender<EngineEvent>,
+    rx: Receiver<EngineEvent>,
+    samples: u64,
+    secs: Vec<u64>,
+    rev: u32,
+    every: u64,
+    sent: usize,
+}
+
+impl LongMicSession {
+    fn emit(&mut self) {
+        let shift = u64::from(self.rev) * 4_000;
+        let words = self
+            .secs
+            .iter()
+            .map(|&s| EngineWord {
+                t0_us: s * 1_000_000 + 100_000 + shift,
+                t1_us: s * 1_000_000 + 800_000 + shift,
+                text: format!("w{s}"),
+                conf: None,
+                spk: None,
+            })
+            .collect();
+        let _ = self.tx.send(EngineEvent::Utterance {
+            job_id: self.job.clone(),
+            channel: Channel::Mic,
+            utt: 0,
+            rev: self.rev,
+            words,
+        });
+        self.rev += 1;
+        self.sent = self.secs.len();
+    }
+}
+
+impl LiveSession for LongMicSession {
+    fn push(&mut self, pcm: &[i16], _pts_us: u64) -> crate::error::Result<()> {
+        let before = self.samples / 16_000;
+        self.samples += pcm.len() as u64;
+        for s in before..self.samples / 16_000 {
+            self.secs.push(s);
+            if (s + 1) % self.every == 0 {
+                self.emit();
+            }
+        }
+        Ok(())
+    }
+    fn events(&mut self) -> &mut Receiver<EngineEvent> {
+        &mut self.rx
+    }
+    fn close(mut self: Box<Self>) -> crate::error::Result<()> {
+        if self.sent < self.secs.len() {
+            self.emit();
+        }
+        let _ = self.tx.send(EngineEvent::Done {
+            job_id: self.job.clone(),
+            stats: JobStats::default(),
+        });
+        Ok(())
+    }
+}
+
+impl LiveEngine for FakeLongLive {
+    fn open(
+        &self,
+        job: JobId,
+        ch: Channel,
+        opts: LiveOpts,
+    ) -> crate::error::Result<Box<dyn LiveSession>> {
+        if ch != Channel::Mic {
+            return FakeLive.open(job, ch, opts);
+        }
+        let (tx, rx) = channel();
+        Ok(Box::new(LongMicSession {
+            job,
+            tx,
+            rx,
+            samples: 0,
+            secs: Vec::new(),
+            rev: 0,
+            every: self.every,
+            sent: 0,
+        }))
+    }
+}
+
+#[test]
+fn a_long_echoed_mic_utterance_keeps_its_first_words_out_of_the_view_and_the_live_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ctx, store) = echo_context(dir.path());
+    ctx.live_engine = Arc::new(FakeLongLive { every: 10 });
+    store.set_setting(settings::KEEP_LIVE_RUNS, "true").unwrap();
+    let sink = Arc::new(WarnSink::default());
+    let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
+    let m = rec.meeting_id();
+    // Longer than the monitor's ring (40 s with a 20 s ring), revised at
+    // 10, 20, 30 and 40 s; played four times faster than real time.
+    let secs = (crate::audio::echo::RING_SAMPLES / 16_000) as u64 + 20;
+    std::thread::sleep(Duration::from_millis(secs * 250 + 500));
+    assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
+    let early = |words: &[(i64, &str)]| -> Vec<String> {
+        words
+            .iter()
+            .filter(|(t, _)| (5_000..10_000).contains(t))
+            .map(|(_, w)| w.to_string())
+            .collect()
+    };
+    let view = sink
+        .words
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|u| u.channel == Channel::Mic && u.utt == 0)
+        .cloned()
+        .unwrap();
+    assert!(view.rev + 1 >= (secs / 10) as u32, "rev {}", view.rev);
+    let shown: Vec<(i64, &str)> = view
+        .words
+        .iter()
+        .map(|w| (w.start_ms, w.text.as_str()))
+        .collect();
+    assert!(early(&shown).is_empty(), "shown again: {:?}", early(&shown));
+    assert!(shown.len() <= 3, "{shown:?}");
+    let out = rec.stop().unwrap();
+    let _ = out.post_pass.wait(Duration::from_secs(60));
+    // The live run (kept) has them out too.
+    store.set_current_run(m, out.live_run).unwrap();
+    let words = store.get_words(m, i64::MIN, i64::MAX).unwrap();
+    let mic: Vec<(i64, &str)> = words
+        .iter()
+        .filter(|w| w.raw_label.is_none() && w.text.starts_with('w'))
+        .map(|w| (w.start_ms, w.text.as_str()))
+        .collect();
+    assert!(early(&mic).is_empty(), "in the live run: {:?}", early(&mic));
+    assert!(mic.len() <= 3, "{mic:?}");
+    let e = &store.get_run(out.live_run).unwrap().engine_info["echo"];
+    assert!(
+        e["dropped"].as_u64().unwrap() + 3 >= e["mic_words_before"].as_u64().unwrap(),
+        "{e}"
+    );
+    drop(ctx);
+}
+
+#[test]
+fn without_coupling_auto_shows_and_keeps_every_word_and_off_adds_nothing() {
+    for mode in ["auto", "off"] {
+        // Tones at 300 Hz on the mic and 500 Hz on the loopback: never coupled.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, store, _) = context(dir.path(), None);
+        store.set_setting(settings::ECHO_MODE, mode).unwrap();
+        store.set_setting(settings::KEEP_LIVE_RUNS, "true").unwrap();
+        let sink = Arc::new(WarnSink::default());
+        let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
+        let m = rec.meeting_id();
+        std::thread::sleep(Duration::from_millis(5_500));
+        match rec.echo_state() {
+            Some(s) => {
+                assert_eq!(mode, "auto");
+                assert_ne!(s.status, EchoStatus::Coupled, "{s:?}");
+            }
+            None => assert_eq!(mode, "off"),
+        }
+        assert!(rec.echo_hidden().is_empty());
+        // What the sink got is byte for byte what the store holds.
+        let (n, differ) = reload_against_sink(&rec, &*store, &sink);
+        assert!(n >= 6 && differ == 0, "{mode}: {differ} of {n} differ");
+        let rows = store.list_live_utterances(rec.run_id()).unwrap();
+        for u in sink.words.lock().unwrap().iter() {
+            let stored = rows
+                .iter()
+                .find(|r| (r.channel, r.utt, r.rev) == (u.channel, u.utt, u.rev))
+                .unwrap();
+            assert_eq!(u.words.len(), stored.words.len(), "{mode}: {u:?}");
+        }
+        let out = rec.stop().unwrap();
+        let _ = out.post_pass.wait(Duration::from_secs(60));
+        assert_eq!(out.echo_dropped, 0);
+        assert!(!sink
+            .warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|w| matches!(w, LiveWarning::Echo { .. })));
+        let live = store.get_run(out.live_run).unwrap();
+        let rows = store.list_live_utterances(out.live_run).unwrap();
+        let stored = latest_words(&rows, Channel::Mic) + latest_words(&rows, Channel::Loopback);
+        if mode == "off" {
+            assert!(
+                live.engine_info.get("echo").is_none(),
+                "{}",
+                live.engine_info
+            );
+            assert!(out.echo.is_none());
+        } else {
+            let e = &live.engine_info["echo"];
+            assert_eq!(
+                (e["coupled"].as_bool(), e["dropped"].as_u64()),
+                (Some(false), Some(0)),
+                "{e}"
+            );
+            assert_eq!(
+                e["mic_words_before"].as_u64(),
+                Some(latest_words(&rows, Channel::Mic) as u64)
+            );
+        }
+        assert_eq!(store.echo_dropped(out.live_run).unwrap(), None);
+        // The live run holds every stored word.
+        store.set_current_run(m, out.live_run).unwrap();
+        assert_eq!(
+            store.get_words(m, i64::MIN, i64::MAX).unwrap().len(),
+            stored
+        );
+        drop(ctx);
+    }
+}
+
+#[test]
+fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
+    let words = vec![crate::transcript::TranscriptWord {
+        channel: Channel::Mic,
+        start_ms: 1_000,
+        end_ms: 1_400,
+        text: "hello".into(),
+        confidence: None,
+        speaker: ME_LABEL.into(),
+        raw_label: None,
+    }];
+    let gone = Path::new("does-not-exist");
+    let (kept, e) = postpass::echo_step(
+        MeetingId(1),
+        &gone.join("mic.wav"),
+        &gone.join("loopback.wav"),
+        None,
+        words.clone(),
+        EchoMode::Auto,
+        0.5,
+        &serde_json::Value::Null,
+    );
+    assert_eq!(kept, words);
+    assert!(!e.gated && e.dropped.is_empty());
+    assert!(
+        e.summary["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("mic.wav")),
+        "{}",
+        e.summary
+    );
+    assert_eq!(e.summary.as_object().unwrap().len(), 1);
+}
+
 /// A stored meeting whose first 28 s are the far end echoed into the mic
 /// and whose last 28 s are the owner alone, then the real post-pass with
 /// the fake engine's word per second.
 fn echo_post_pass(mode: Option<&str>, echo: bool) -> (Arc<SqliteStore>, PostPassReport) {
+    echo_post_pass_with(mode, echo, false)
+}
+
+/// [`echo_post_pass`]; `user_off`: the live run says echo handling was
+/// turned off for the recording.
+fn echo_post_pass_with(
+    mode: Option<&str>,
+    echo: bool,
+    user_off: bool,
+) -> (Arc<SqliteStore>, PostPassReport) {
     use crate::audio::echo::synth::{add_delayed, add_noise, db, monologue, to_i16};
     let dir = tempfile::tempdir().unwrap();
     let (_ctx, store, file) = context(dir.path(), None);
@@ -1161,6 +1606,11 @@ fn echo_post_pass(mode: Option<&str>, echo: bool) -> (Arc<SqliteStore>, PostPass
         store.set_setting(settings::ECHO_MODE, m).unwrap();
     }
     let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
+    if user_off {
+        let mut info = store.get_run(live).unwrap().engine_info;
+        info["echo"] = serde_json::json!({"user_off": true, "mode": ECHO_OFF_FOR_RECORDING});
+        store.set_run_engine_info(live, info).unwrap();
+    }
     let n = 60 * 16_000;
     let (far, _) = monologue(51, 28 * 16_000, db(-28.0));
     let (own, _) = monologue(52, 28 * 16_000, db(-33.0));
@@ -1249,5 +1699,20 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         store.echo_dropped(report.current_run).unwrap(),
         Some(Vec::new())
     );
+    assert_eq!(mic_words(&store, report.current_run).len(), 60);
+    // Turned off for the recording (the live run says so): scanned, not gated.
+    let (store, report) = echo_post_pass_with(None, true, true);
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (
+            e["coupled"].as_bool(),
+            e["dropped"].as_u64(),
+            e["mode"].as_str()
+        ),
+        (Some(true), Some(0), Some(ECHO_OFF_FOR_RECORDING)),
+        "{e}"
+    );
+    assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
 }

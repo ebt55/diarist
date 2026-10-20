@@ -18,14 +18,27 @@
 //!
 //! Echo (plan 15, unless `echo.mode = off`): each pipeline also copies its
 //! frames to a non-blocking [`FrameTap`]; a monitor thread places both
-//! channels on meeting time in 20 s rings and judges 2 s blocks
+//! channels on meeting time in rings and judges 2 s blocks
 //! ([`EchoMonitor`]); the first detection is one [`LiveWarning::Echo`].
-//! Every mic word is still stored; while coupled (or with `always`) the sink
-//! gets the mic words the gate keeps ([`crate::audio::echo::gate_words`]'s
-//! scoring from the rings, once per revision, words whose span has not
-//! arrived shown and scored again at the next mic frame), and Stop
-//! materialises the live run without the dropped words (their list goes to
-//! the run's `echo_dropped`, the counts to `engine_info.echo`).
+//! Every mic word is still stored. From the first coupling on (with
+//! `always`, from the start) the sink gets the mic words the gate keeps
+//! ([`crate::audio::echo::gate_words`]'s scoring from the rings, each word
+//! scored once and its score kept across revisions; the `echo_gate` module
+//! has the rules), and Stop materialises the live run without the dropped
+//! words (their list goes to the run's `echo_dropped`, the counts to
+//! `engine_info.echo`). A later release (headphones put on) changes nothing
+//! already decided. The sink gets the gate's hysteresis per utterance, Stop
+//! decides it over every live mic word of the run in time order, so a
+//! middle-band word at an utterance's edge can be shown and still be left
+//! out of the live run, or the reverse. A recording that never couples is
+//! never scored. The sink's current decisions are kept per word, so
+//! [`snapshot_except`] gives a view that reopens mid-recording what the sink
+//! showed ([`Recorder::echo_hidden`]). [`Recorder::turn_off_echo`] (the
+//! banner's "Turn off for this recording") stops the gating for the rest of
+//! the recording, re-sends what was hidden and marks the live run
+//! (`engine_info.echo.user_off`), which the post-pass honours.
+//! [`restore_echo_dropped`] puts a finished run's removed words back as a
+//! new run.
 //!
 //! [`Recorder::stop`] stops the captures, ends both WAVs at the same length,
 //! closes the sessions (their last finals still land), materialises the live
@@ -36,10 +49,12 @@
 //! `processing`; [`rerun_post_pass`] queues a failed or cancelled post-pass
 //! again.
 
+mod echo_gate;
 pub mod postpass;
 pub mod power;
 mod recover;
 mod rerun;
+mod restore;
 mod snapshot;
 pub mod views;
 
@@ -47,14 +62,16 @@ pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
 pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
 pub use rerun::rerun_post_pass;
-pub use snapshot::snapshot;
+pub use restore::{remove_restored_echo, restore_echo_dropped, EchoRestore};
+pub use snapshot::{snapshot, snapshot_except};
 pub use views::{
     LiveLevels, LivePhase, LiveStateView, LiveStatusView, PostPassView, ServeView, StartRequest,
     StopSummary, TextFinal, ToggleAction, ToggleVia, Toggled, WarningNote, STOP_CONFIRM_WINDOW_MS,
 };
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -67,9 +84,7 @@ use crate::audio::capture::{
     qpc_now_100ns, CaptureConfig, CaptureStatus, ChangeReason, PacketSource, SourceFactory,
 };
 use crate::audio::clock::ClockMap;
-use crate::audio::echo::{
-    decide, EchoMode, EchoMonitor, EchoState, EchoStatus, GateBand, WordScore, COUPLED_AT,
-};
+use crate::audio::echo::{EchoMode, EchoMonitor, EchoState, COUPLED_AT};
 use crate::audio::feed::{
     feed, spawn_feed_worker, FeedNotice, FeedReport, FeedTransition, FeedWorker, FEED_CAPACITY,
     FEED_RECOVER_BELOW,
@@ -87,10 +102,11 @@ use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, RunStore};
 use crate::transcript::{SegmentOptions, ME_LABEL, UNKNOWN_LABEL};
 use crate::types::{
-    AudioFormat, Channel, ClockAnchor, EchoDroppedWord, JobId, Meeting, MeetingId, MeetingStatus,
-    RunId, RunKind, RunStatus, Source, SpeakerId, TrackChannel, TranscriptRun,
+    AudioFormat, Channel, ClockAnchor, JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind,
+    RunStatus, Source, SpeakerId, TrackChannel, TranscriptRun,
 };
 use crate::views::JobEvent;
+use echo_gate::{HiddenWords, LiveEcho, Update};
 
 pub use crate::settings::{CAPTURE_AUTOCONVERT, CAPTURE_LOOPBACK_AGC, CAPTURE_MIC_AGC};
 /// Loopback peaks (before the AGC) under this for [`LOOPBACK_QUIET_WINDOW`]
@@ -107,6 +123,9 @@ pub const LOOPBACK_SILENT_WARNING: Duration = Duration::from_secs(60);
 const RING_PACKETS: usize = 2_048;
 /// Frames the echo tap holds for the monitor thread (both channels, 5 s).
 const ECHO_TAP_FRAMES: usize = 100;
+/// `engine_info.echo.mode` of a recording whose echo handling the user
+/// turned off ([`Recorder::turn_off_echo`]; also `user_off: true`).
+pub const ECHO_OFF_FOR_RECORDING: &str = "off_for_recording";
 
 /// Free VRAM in MB (`None` when unknown), as it is at Start
 /// ([`crate::gpu::free_vram`]).
@@ -380,6 +399,8 @@ enum Ev {
     Power(PowerEvent),
     /// The echo status changed.
     Echo(EchoState),
+    /// The user turned echo handling off for this recording.
+    EchoOff,
     Stop,
 }
 
@@ -390,6 +411,10 @@ struct EchoRig {
     dropped: Arc<std::sync::atomic::AtomicU64>,
     mode: EchoMode,
     threshold: f32,
+    /// "Turn off for this recording" was chosen.
+    user_off: Arc<AtomicBool>,
+    /// What the sink does not show now (the event thread keeps it).
+    hidden: HiddenWords,
 }
 
 struct Rig {
@@ -587,6 +612,8 @@ impl Recorder {
             dropped: tap.drop_counter(),
             mode: echo_mode,
             threshold: echo_threshold,
+            user_off: Arc::new(AtomicBool::new(false)),
+            hidden: Arc::default(),
         });
         let mut me = Self {
             ctx: ctx.clone(),
@@ -625,14 +652,14 @@ impl Recorder {
             warned: false,
             quiet: QuietDetector::default(),
             loopback_device: String::new(),
-            echo: echo.as_ref().map(|e| LiveEcho {
-                monitor: Arc::clone(&e.monitor),
-                mode: e.mode,
-                threshold: e.threshold,
-                state: EchoState::default(),
-                warned: false,
-                utts: BTreeMap::new(),
-                pending: Vec::new(),
+            echo: echo.as_ref().map(|e| {
+                LiveEcho::new(
+                    Arc::clone(&e.monitor),
+                    e.mode,
+                    e.threshold,
+                    Arc::clone(&e.user_off),
+                    Arc::clone(&e.hidden),
+                )
             }),
         };
         let mut cmds = Vec::new();
@@ -835,6 +862,71 @@ impl Recorder {
             .map(|e| e.monitor.lock().unwrap_or_else(|p| p.into_inner()).state())
     }
 
+    /// "Turn off for this recording", the live echo banner's action: from
+    /// now on the sink gets every mic word (utterances it got gated are sent
+    /// again whole), Stop materialises the live run ungated and writes no
+    /// `echo_dropped`, and the live run's `engine_info.echo` says
+    /// `user_off: true` (mode [`ECHO_OFF_FOR_RECORDING`]) at once, so the
+    /// post-pass, also one after a crash, does not gate this meeting. The
+    /// monitor keeps measuring, so the meeting still records whether there
+    /// was echo. `false` when there is nothing to turn off (`echo.mode =
+    /// off`) or it already was.
+    pub fn turn_off_echo(&self) -> Result<bool> {
+        let Some(rig) = &self.echo else {
+            return Ok(false);
+        };
+        if rig.user_off.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let store = &self.ctx.store;
+        let mut info = store.get_run(self.run.id)?.engine_info;
+        if !info.is_object() {
+            info = serde_json::json!({});
+        }
+        if !info["echo"].is_object() {
+            info["echo"] = serde_json::json!({});
+        }
+        info["echo"]["user_off"] = serde_json::json!(true);
+        info["echo"]["mode"] = serde_json::json!(ECHO_OFF_FOR_RECORDING);
+        store.set_run_engine_info(self.run.id, info)?;
+        rig.user_off.store(true, Ordering::SeqCst);
+        let _ = self.events_tx.send(Ev::EchoOff);
+        log::info!(
+            "live echo meeting {}: turned off for this recording",
+            self.meeting.id
+        );
+        Ok(true)
+    }
+
+    /// Whether echo handling was turned off for this recording.
+    pub fn echo_off(&self) -> bool {
+        self.echo
+            .as_ref()
+            .is_some_and(|e| e.user_off.load(Ordering::SeqCst))
+    }
+
+    /// The stored live words the sink does not show now (the live echo
+    /// gate's current decisions), as `(channel, utt, rev, word index)`, for
+    /// [`snapshot_except`]. Words of a revision the gate has not decided yet
+    /// are not in it.
+    pub fn echo_hidden(&self) -> HashSet<(Channel, u32, u32, usize)> {
+        let Some(rig) = &self.echo else {
+            return HashSet::new();
+        };
+        rig.hidden
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|(&utt, (rev, drops))| {
+                drops
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| **d)
+                    .map(move |(i, _)| (Channel::Mic, utt, *rev, i))
+            })
+            .collect()
+    }
+
     /// Stops the recording, finishes the live run and submits the post-pass.
     pub fn stop(mut self) -> Result<StopOutcome> {
         let store = Arc::clone(&self.ctx.store);
@@ -932,7 +1024,7 @@ impl Recorder {
         store.set_meeting_status(self.meeting.id, MeetingStatus::Processing)?;
         let (echo, echo_dropped) = match (&self.echo, live_echo) {
             (Some(rig), Some(mut le)) => {
-                let gate = le.finish(rig);
+                let gate = le.finish(rig.dropped.load(std::sync::atomic::Ordering::Relaxed));
                 store.materialise_live_run_except(
                     self.run.id,
                     &SegmentOptions::default(),
@@ -1131,187 +1223,6 @@ struct EventLoop {
     echo: Option<LiveEcho>,
 }
 
-/// One mic utterance's latest revision as the live gate saw it.
-struct MicUtt {
-    rev: u32,
-    words: Vec<LiveWord>,
-    spans: Vec<(i64, i64)>,
-    scores: Vec<WordScore>,
-    /// The drop flags the sink last got.
-    shown: Vec<bool>,
-}
-
-/// The live side of the echo gate (on the event thread).
-struct LiveEcho {
-    monitor: Arc<Mutex<EchoMonitor>>,
-    mode: EchoMode,
-    threshold: f32,
-    state: EchoState,
-    warned: bool,
-    utts: BTreeMap<u32, MicUtt>,
-    /// Utterances with words not scored yet.
-    pending: Vec<u32>,
-}
-
-/// What Stop materialises from the live gate.
-struct LiveGate {
-    gated: bool,
-    state: EchoState,
-    /// `(utt, rev, word index)` left out of the live run.
-    skip: std::collections::HashSet<(u32, u32, usize)>,
-    dropped: Vec<EchoDroppedWord>,
-    words: usize,
-    info: serde_json::Value,
-}
-
-impl LiveEcho {
-    fn gating(&self) -> bool {
-        self.mode == EchoMode::Always || self.state.status == EchoStatus::Coupled
-    }
-
-    fn score(&self, spans: &[(i64, i64)]) -> Vec<WordScore> {
-        self.monitor
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .score_words(spans)
-    }
-
-    /// The drop flags the sink should show for `u` now.
-    fn drops(&self, u: &MicUtt) -> Vec<bool> {
-        if self.gating() {
-            decide(&u.scores, GateBand::with_threshold(self.threshold))
-        } else {
-            vec![false; u.words.len()]
-        }
-    }
-
-    /// Scores a new mic revision; returns the words to show.
-    fn revision(&mut self, utt: u32, rev: u32, words: Vec<LiveWord>) -> Vec<LiveWord> {
-        let spans: Vec<(i64, i64)> = words
-            .iter()
-            .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
-            .collect();
-        let scores = self.score(&spans);
-        let mut u = MicUtt {
-            rev,
-            words,
-            spans,
-            scores,
-            shown: Vec::new(),
-        };
-        u.shown = self.drops(&u);
-        if u.scores.contains(&WordScore::Pending) && !self.pending.contains(&utt) {
-            self.pending.push(utt);
-        }
-        let shown = visible(&u);
-        self.utts.insert(utt, u);
-        shown
-    }
-
-    /// Scores the words still pending, and re-shows any utterance whose
-    /// shown words changed (`all`: every utterance, after a status change).
-    fn refresh(&mut self, all: bool) -> Vec<(u32, u32, Vec<LiveWord>)> {
-        let mut out = Vec::new();
-        let pending = std::mem::take(&mut self.pending);
-        for utt in &pending {
-            let Some(spans) = self.utts.get(utt).map(|u| u.spans.clone()) else {
-                continue;
-            };
-            let scores = self.score(&spans);
-            if scores.contains(&WordScore::Pending) {
-                self.pending.push(*utt);
-            }
-            if let Some(u) = self.utts.get_mut(utt) {
-                u.scores = scores;
-            }
-        }
-        let keys: Vec<u32> = if all {
-            self.utts.keys().copied().collect()
-        } else {
-            pending
-        };
-        for utt in keys {
-            let Some(drops) = self.utts.get(&utt).map(|u| self.drops(u)) else {
-                continue;
-            };
-            if let Some(u) = self.utts.get_mut(&utt) {
-                if u.shown != drops {
-                    u.shown = drops;
-                    out.push((utt, u.rev, visible(u)));
-                }
-            }
-        }
-        out
-    }
-
-    /// At Stop: the last pending words scored, the hysteresis over every
-    /// live mic word in time order, and what the live run leaves out.
-    fn finish(&mut self, rig: &EchoRig) -> LiveGate {
-        let _ = self.refresh(false);
-        let mon = rig.monitor.lock().unwrap_or_else(|e| e.into_inner());
-        let state = mon.state();
-        let gated = self.mode == EchoMode::Always || mon.ever_coupled();
-        let mut all: Vec<(i64, u32, u32, usize, WordScore)> = Vec::new();
-        for (&utt, u) in &self.utts {
-            for (i, s) in u.scores.iter().enumerate() {
-                all.push((u.spans[i].0, utt, u.rev, i, *s));
-            }
-        }
-        all.sort_by_key(|w| (w.0, w.1, w.3));
-        let flags = decide(
-            &all.iter().map(|w| w.4).collect::<Vec<_>>(),
-            GateBand::with_threshold(self.threshold),
-        );
-        let mut skip = std::collections::HashSet::new();
-        let mut dropped = Vec::new();
-        if gated {
-            for (w, d) in all.iter().zip(&flags) {
-                if *d {
-                    skip.insert((w.1, w.2, w.3));
-                    let lw = &self.utts[&w.1].words[w.3];
-                    dropped.push(EchoDroppedWord {
-                        start_ms: lw.start_ms,
-                        end_ms: lw.end_ms,
-                        text: lw.text.clone(),
-                        coefficient: w.4.coefficient().unwrap_or(0.0),
-                    });
-                }
-            }
-        }
-        let info = serde_json::json!({
-            "status": state.status,
-            "coupled": mon.ever_coupled(),
-            "coupling": round3(state.coupling),
-            "lag_ms": state.lag_ms.map(round3),
-            "erl_db": state.erl_db.map(round3),
-            "coupled_at_ms": mon.coupled_at_ms(),
-            "mic_words_before": all.len(),
-            "dropped": dropped.len(),
-            "threshold": round3(self.threshold),
-            "aec": false,
-            "mode": self.mode.as_str(),
-            "tap_frames_dropped": rig.dropped.load(std::sync::atomic::Ordering::Relaxed),
-        });
-        LiveGate {
-            gated,
-            state,
-            skip,
-            dropped,
-            words: all.len(),
-            info,
-        }
-    }
-}
-
-fn visible(u: &MicUtt) -> Vec<LiveWord> {
-    u.words
-        .iter()
-        .zip(&u.shown)
-        .filter(|(_, d)| !**d)
-        .map(|(w, _)| w.clone())
-        .collect()
-}
-
 /// Three decimals for `engine_info`.
 pub(crate) fn round3(v: f32) -> f64 {
     (f64::from(v) * 1_000.0).round() / 1_000.0
@@ -1329,6 +1240,7 @@ impl EventLoop {
                 Ev::Pipeline(ch, n) => self.on_pipeline(ch, n),
                 Ev::Feed(ch, n) => self.on_feed(ch, n),
                 Ev::Echo(state) => self.on_echo(state),
+                Ev::EchoOff => self.on_echo_off(),
                 Ev::Power(PowerEvent::Suspend) => {
                     for (_, c) in &self.cmds {
                         let _ = c.send(PipelineCommand::Flush);
@@ -1352,37 +1264,42 @@ impl EventLoop {
                 Ev::Feed(ch, n) => self.on_feed(ch, n),
                 Ev::Pipeline(ch, n) => self.on_pipeline(ch, n),
                 Ev::Echo(state) => self.on_echo(state),
+                Ev::EchoOff => self.on_echo_off(),
                 _ => {}
             }
         }
         self.echo.take()
     }
 
+    /// Echo handling turned off: every mic utterance shown gated is sent
+    /// again whole.
+    fn on_echo_off(&mut self) {
+        let Some(echo) = self.echo.as_mut() else {
+            return;
+        };
+        let updates = echo.turned_off();
+        self.show_mic(updates);
+    }
+
     fn on_echo(&mut self, state: EchoState) {
         let Some(echo) = self.echo.as_mut() else {
             return;
         };
-        echo.state = state;
         log::info!(
             "live echo: {:?}, coupling {:.2}, lag {:?} ms",
             state.status,
             state.coupling,
             state.lag_ms
         );
-        if state.status == EchoStatus::Coupled && !echo.warned {
-            echo.warned = true;
-            self.sink.warning(&LiveWarning::Echo {
-                coupling: state.coupling,
-                lag_ms: state.lag_ms.unwrap_or(0.0),
-                aec: false,
-            });
+        let (warning, updates) = echo.status(state);
+        if let Some(w) = warning {
+            self.sink.warning(&w);
         }
-        let updates = echo.refresh(true);
         self.show_mic(updates);
     }
 
     /// Sends re-gated mic utterances to the sink.
-    fn show_mic(&self, updates: Vec<(u32, u32, Vec<LiveWord>)>) {
+    fn show_mic(&self, updates: Vec<Update>) {
         for (utt, rev, words) in updates {
             self.sink.words(&WordsUpdate {
                 meeting_id: self.meeting,
@@ -1457,13 +1374,15 @@ impl EventLoop {
                 } else {
                     UNKNOWN_LABEL
                 };
+                // Times rounded as `live_utterances` stores them, so a view
+                // reloaded from the store ([`snapshot`]) shows the same words.
                 let live: Vec<LiveWord> = words
                     .iter()
                     .map(|w| {
                         let label = w.spk.clone().unwrap_or_else(|| default.to_owned());
                         LiveWord {
-                            start_ms: (w.t0_us / 1_000) as i64,
-                            end_ms: (w.t1_us / 1_000) as i64,
+                            start_ms: crate::transcript::us_to_ms(w.t0_us),
+                            end_ms: crate::transcript::us_to_ms(w.t1_us.max(w.t0_us)),
                             text: w.text.clone(),
                             speaker_id: self.speaker(ch, &label),
                             label,
@@ -1548,10 +1467,7 @@ impl EventLoop {
                 if reason != ChangeReason::Initial {
                     self.issues(|i| i.device_changes += 1);
                     if let Some(echo) = &self.echo {
-                        echo.monitor
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .device_changed();
+                        echo.device_changed();
                     }
                 }
                 if ch == Channel::Loopback {
@@ -1607,8 +1523,8 @@ impl EventLoop {
     ) {
         let at_ms = (at_sample / 16) as i64;
         if ch == Channel::Mic {
-            if let Some(echo) = self.echo.as_mut().filter(|e| !e.pending.is_empty()) {
-                let updates = echo.refresh(false);
+            if let Some(echo) = self.echo.as_mut().filter(|e| e.has_pending()) {
+                let updates = echo.refresh();
                 self.show_mic(updates);
             }
         }

@@ -26,7 +26,13 @@
 //! words that are the far end's echo before segmentation. The loopback is
 //! never touched. The counts and parameters go to `engine_info.echo`, the
 //! dropped words to the run's `echo_dropped` (for Restore), one count-only
-//! log line.
+//! log line. A recording whose echo handling the user turned off while it
+//! ran (`user_off` in the live run's `engine_info.echo`) is scanned but not
+//! gated: the counts are written with mode
+//! [`super::ECHO_OFF_FOR_RECORDING`], and there is no `echo_dropped`. The
+//! echo step never fails the post-pass: on an error (an unreadable WAV) the
+//! mic stays ungated, `engine_info.echo` is `{"error": "<message>"}` and the
+//! error is logged.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -202,35 +208,38 @@ pub fn map_words(words: &mut [TranscriptWord], map: &ClockMap, channel_end_ms: i
 }
 
 /// What the echo step did.
-struct EchoOutcome {
+pub(super) struct EchoOutcome {
     /// `engine_info.echo`: counts and parameters only.
-    summary: serde_json::Value,
+    pub(super) summary: serde_json::Value,
     /// For the run's `echo_dropped`.
-    dropped: Vec<EchoDroppedWord>,
-    gated: bool,
+    pub(super) dropped: Vec<EchoDroppedWord>,
+    pub(super) gated: bool,
     /// The count-only log line.
     log: String,
 }
 
 /// The echo step of the post-pass for the mic words (meeting time): scan,
-/// then the gate when it applies; returns the kept words.
+/// then the gate when it applies (never after the user turned it off for
+/// the recording: `user_off` in `live`, the live run's `engine_info.echo`);
+/// returns the drop flag of every word.
 fn gate_mic(
     mic: &Path,
     lb: &Path,
     clocks: Option<ClockPair>,
-    words: Vec<TranscriptWord>,
+    words: &[TranscriptWord],
     mode: EchoMode,
     threshold: f32,
     live: &serde_json::Value,
-) -> Result<(Vec<TranscriptWord>, EchoOutcome)> {
+) -> Result<(Vec<bool>, EchoOutcome)> {
     let t0 = Instant::now();
     let aec = live["aec"].as_bool().unwrap_or(false);
+    let user_off = live["user_off"].as_bool().unwrap_or(false);
     let profile = EchoProfile::scan(mic, lb, clocks)?;
     let scan_s = t0.elapsed().as_secs_f64();
-    let gated = profile.gates(mode, aec);
+    let gated = !user_off && profile.gates(mode, aec);
     let before = words.len();
     let mut dropped = Vec::new();
-    let kept = if gated {
+    let flags = if gated {
         // With clock maps the words are on meeting time, the profile's
         // timeline; without them both are channel time.
         let spans: Vec<(i64, i64)> = words
@@ -244,8 +253,7 @@ fn gate_mic(
             &profile,
             GateBand::with_threshold(threshold),
         )?;
-        let mut kept = Vec::with_capacity(g.kept);
-        for (w, (d, s)) in words.into_iter().zip(g.drop.iter().zip(&g.scores)) {
+        for (w, (d, s)) in words.iter().zip(g.drop.iter().zip(&g.scores)) {
             if *d {
                 dropped.push(EchoDroppedWord {
                     start_ms: w.start_ms,
@@ -253,13 +261,11 @@ fn gate_mic(
                     text: w.text.clone(),
                     coefficient: s.coefficient().unwrap_or(0.0),
                 });
-            } else {
-                kept.push(w);
             }
         }
-        kept
+        g.drop
     } else {
-        words
+        vec![false; words.len()]
     };
     // The live monitor's return loss is on pre-AGC levels; the WAVs only
     // give the post-AGC one.
@@ -275,7 +281,8 @@ fn gate_mic(
         "dropped": dropped.len(),
         "threshold": super::round3(threshold),
         "aec": aec,
-        "mode": mode.as_str(),
+        "mode": if user_off { super::ECHO_OFF_FOR_RECORDING } else { mode.as_str() },
+        "user_off": user_off,
     });
     let log = format!(
         "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{} at {threshold:.2}; scan {scan_s:.1} s, total {:.1} s",
@@ -285,11 +292,15 @@ fn gate_mic(
         profile.active_blocks,
         profile.blocks,
         dropped.len(),
-        if gated { "" } else { " (not gated)" },
+        match (gated, user_off) {
+            (true, _) => "",
+            (false, true) => " (not gated: turned off for this recording)",
+            (false, false) => " (not gated)",
+        },
         t0.elapsed().as_secs_f64()
     );
     Ok((
-        kept,
+        flags,
         EchoOutcome {
             summary,
             dropped,
@@ -297,6 +308,49 @@ fn gate_mic(
             log,
         },
     ))
+}
+
+/// The echo step of the post-pass ([`gate_mic`]), which never fails it: on
+/// an error the mic words stay as they are, `engine_info.echo` records
+/// `{"error": "<message>"}` and there is no `echo_dropped`. Returns the kept
+/// words.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn echo_step(
+    meeting: MeetingId,
+    mic: &Path,
+    lb: &Path,
+    clocks: Option<ClockPair>,
+    words: Vec<TranscriptWord>,
+    mode: EchoMode,
+    threshold: f32,
+    live: &serde_json::Value,
+) -> (Vec<TranscriptWord>, EchoOutcome) {
+    match gate_mic(mic, lb, clocks, &words, mode, threshold, live) {
+        Ok((flags, e)) => {
+            log::info!("post-pass meeting {meeting}: echo {}", e.log);
+            let kept = words
+                .into_iter()
+                .zip(flags)
+                .filter(|(_, d)| !d)
+                .map(|(w, _)| w)
+                .collect();
+            (kept, e)
+        }
+        Err(err) => {
+            log::warn!(
+                "post-pass meeting {meeting}: the echo step failed ({err}); the mic words are not gated"
+            );
+            (
+                words,
+                EchoOutcome {
+                    summary: serde_json::json!({ "error": err.to_string() }),
+                    dropped: Vec::new(),
+                    gated: false,
+                    log: String::new(),
+                },
+            )
+        }
+    }
 }
 
 /// Runs the post-pass (see the module docs). Reports `Progress` events;
@@ -391,10 +445,17 @@ pub fn run_post_pass(
             tw.sort_by_key(|w| w.start_ms);
             if ch == Channel::Mic && echo_mode != EchoMode::Off {
                 let clocks = ClockPair::usable(map_of(Channel::Mic), map_of(Channel::Loopback));
-                let (kept, e) =
-                    gate_mic(&mic, &lb, clocks, tw, echo_mode, echo_threshold, &live_echo)?;
+                let (kept, e) = echo_step(
+                    job.meeting,
+                    &mic,
+                    &lb,
+                    clocks,
+                    tw,
+                    echo_mode,
+                    echo_threshold,
+                    &live_echo,
+                );
                 tw = kept;
-                log::info!("post-pass meeting {}: echo {}", job.meeting, e.log);
                 echo = Some(e);
             }
             channels.push((ch, tw));
