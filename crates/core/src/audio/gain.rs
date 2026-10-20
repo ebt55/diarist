@@ -77,6 +77,8 @@ pub struct Agc {
     window_blocks: usize,
     /// Highest raw (pre-gain) peak since the last [`Agc::take_raw_peak`].
     raw_peak: f32,
+    /// `(samples, gain dB)` of each block of the last `process_*` call.
+    blocks: Vec<(usize, f32)>,
 }
 
 impl Agc {
@@ -89,6 +91,7 @@ impl Agc {
             window: VecDeque::with_capacity(window_blocks + 1),
             window_blocks,
             raw_peak: 0.0,
+            blocks: Vec::new(),
         }
     }
 
@@ -109,6 +112,13 @@ impl Agc {
     /// Highest raw peak (linear, 0..1) since the last call.
     pub fn take_raw_peak(&mut self) -> f32 {
         std::mem::take(&mut self.raw_peak)
+    }
+
+    /// `(samples, gain dB)` of every block of the last
+    /// [`Agc::process_f32`] / [`Agc::process_i16`] call, in order (the gain
+    /// track's source: `audio::gain_track`).
+    pub fn last_blocks(&self) -> &[(usize, f32)] {
+        &self.blocks
     }
 
     /// Updates the gain for a block of `n` samples whose raw peak is
@@ -151,9 +161,11 @@ impl Agc {
     /// Applies the gain in place to float samples (full scale 1.0).
     pub fn process_f32(&mut self, x: &mut [f32]) {
         let limit = lin(self.cfg.limiter_dbfs);
+        self.blocks.clear();
         for block in x.chunks_mut(BLOCK) {
             let peak = block.iter().fold(0.0f32, |m, s| m.max(s.abs()));
             let g_db = self.update(peak, block.len());
+            self.blocks.push((block.len(), g_db));
             if g_db > 0.0 {
                 let g = lin(g_db);
                 for s in block.iter_mut() {
@@ -166,9 +178,11 @@ impl Agc {
     /// Applies the gain in place to PCM16. At 0 dB samples pass bit-exact.
     pub fn process_i16(&mut self, x: &mut [i16]) {
         let limit = lin(self.cfg.limiter_dbfs) * 32_768.0;
+        self.blocks.clear();
         for block in x.chunks_mut(BLOCK) {
             let peak = block.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) as f32 / 32_768.0;
             let g_db = self.update(peak, block.len());
+            self.blocks.push((block.len(), g_db));
             if g_db > 0.0 {
                 let g = lin(g_db);
                 for s in block.iter_mut() {

@@ -22,6 +22,7 @@ pub mod echo;
 pub mod feed;
 pub mod flac;
 pub mod gain;
+pub mod gain_track;
 #[cfg(windows)]
 mod mf;
 pub mod mp4;

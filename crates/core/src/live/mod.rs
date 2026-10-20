@@ -682,6 +682,8 @@ impl Recorder {
                         meeting: meeting.id,
                         clock: Arc::clone(&clocks[&ch]),
                         agc: agc_for(ch),
+                        // Written only with AGC (`<ch>.gain`).
+                        gain_path: Some(folder.join(format!("{ch}.gain"))),
                         tap: echo_tap.as_ref().map(|(t, _)| t.clone()),
                         notify,
                     },

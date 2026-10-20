@@ -432,6 +432,19 @@ fn records_streams_and_runs_the_post_pass() {
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0].format, AudioFormat::Flac);
     assert_eq!(tracks[0].channels, 2);
+    // The loopback AGC's gain track stays beside the FLAC, a 10 ms value
+    // for every frame (the loud tone: 0 dB); the mic has no AGC and no track.
+    let gains = crate::audio::gain_track::GainTrack::read(&folder.join("loopback.gain"))
+        .unwrap()
+        .expect("loopback.gain");
+    assert!(
+        gains.frames() as u64 * 1_600 + 3_200 >= out.loopback_samples,
+        "{} frames for {} samples",
+        gains.frames(),
+        out.loopback_samples
+    );
+    assert!(gains.values().iter().all(|&g| g == 0.0));
+    assert!(!folder.join("mic.gain").exists());
     // Post-pass word times are meeting time too.
     let w = store.get_words(m, 2_000, 2_999).unwrap();
     assert!(w
