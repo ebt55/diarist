@@ -2,8 +2,11 @@
 //! the owner is stood in by FLEURS English utterances with known
 //! transcripts, placed at random times over the far end of a meeting held
 //! on speakers, with meeting 12's echo path (3 ms, 10 dB return loss) into
-//! the mic; the real post-pass runs with `echo.mode = off` and `auto`, and
-//! "me" is scored against the transcripts. `#[ignore]`d and gated:
+//! the mic; the real post-pass runs with `echo.mode = off` and `auto`
+//! (since plan 15 chunk B2a the canceller, then the gate), and "me" is
+//! scored against the transcripts, with the gate alone (the post-pass's
+//! scan and gate over the `off` run's words, what chunk A shipped) between
+//! them. `#[ignore]`d and gated:
 //!
 //! - `DIARIST_ECHO_FLEURS`: a `tools/eval` FLEURS folder (`audio.wav`,
 //!   `refs.jsonl`; `uv run python -I fleurs_fetch.py --langs en` writes
@@ -141,14 +144,16 @@ fn score(utts: &[Utt], me: &[(i64, i64, String)]) -> Scores {
     }
 }
 
-/// One post-pass over the fixture with `mode`; the "me" words.
+/// One post-pass over the fixture with `mode`; the "me" words, and the
+/// words the gate dropped.
+#[allow(clippy::type_complexity)]
 fn post_pass(
     out: &Path,
     engine: &NemoCliEngine,
     mic: &[i16],
     lb: &[i16],
     mode: &str,
-) -> Vec<(i64, i64, String)> {
+) -> (Vec<(i64, i64, String)>, Vec<(i64, i64, String)>) {
     let db = out.join(format!("{mode}.db"));
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
@@ -210,7 +215,12 @@ fn post_pass(
     let report = run_post_pass(&store, engine, &job, &CancelToken::default(), &|_| {}).unwrap();
     let run = store.get_run(report.current_run).unwrap();
     eprintln!("{mode}: engine_info.echo {}", run.engine_info["echo"]);
+    let mut dropped = Vec::new();
     if let Some(d) = store.echo_dropped(report.current_run).unwrap() {
+        dropped = d
+            .iter()
+            .map(|w| (w.start_ms, w.end_ms, w.text.clone()))
+            .collect();
         let mut c: Vec<f32> = d.iter().map(|w| w.coefficient).collect();
         c.sort_by(f32::total_cmp);
         let q = |f: f64| {
@@ -237,13 +247,14 @@ fn post_pass(
         .filter(|s| s.channel == Channel::Mic)
         .map(|s| s.id)
         .collect();
-    store
+    let kept = store
         .get_words(meeting.id, i64::MIN, i64::MAX)
         .unwrap()
         .into_iter()
         .filter(|w| mic_seg.contains(&w.segment_id))
         .map(|w| (w.start_ms, w.end_ms, w.text))
-        .collect()
+        .collect();
+    (kept, dropped)
 }
 
 #[test]
@@ -378,27 +389,87 @@ fn fleurs_owner_over_a_speaker_meeting() {
     engine.pass_language = false;
     engine.right_context = Some(13);
     engine.diar_preset = Some("v3-offline".into());
-    let off_words = post_pass(&out, &engine, &mic, &lb, "off");
+    let (off_words, _) = post_pass(&out, &engine, &mic, &lb, "off");
     let off = score(&utts, &off_words);
-    let on = score(&utts, &post_pass(&out, &engine, &mic, &lb, "auto"));
-    let sweep: Vec<GateBand> = std::env::var("DIARIST_ECHO_BANDS")
-        .ok()
-        .map(|v| {
-            v.split(';')
-                .filter_map(|b| {
-                    let f: Vec<f32> = b.split('/').filter_map(|x| x.trim().parse().ok()).collect();
-                    match f[..] {
-                        [keep_under, threshold, drop_at] => Some(GateBand {
-                            keep_under,
-                            threshold,
-                            drop_at,
-                        }),
-                        _ => None,
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let (on_words, on_dropped) = post_pass(&out, &engine, &mic, &lb, "auto");
+    let on = score(&utts, &on_words);
+    // The gate alone: the post-pass's scan and gate over the gate-off run's
+    // words (no clock maps in the fixture: meeting time is channel time).
+    let alone = {
+        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
+        let spans: Vec<(i64, i64)> = off_words
+            .iter()
+            .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
+            .collect();
+        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
+        let kept: Vec<(i64, i64, String)> = off_words
+            .iter()
+            .zip(&g.drop)
+            .filter(|(_, d)| !**d)
+            .map(|(w, _)| w.clone())
+            .collect();
+        score(&utts, &kept)
+    };
+    let bands_of = |var: &str| -> Vec<GateBand> {
+        std::env::var(var)
+            .ok()
+            .map(|v| {
+                v.split(';')
+                    .filter_map(|b| {
+                        let f: Vec<f32> =
+                            b.split('/').filter_map(|x| x.trim().parse().ok()).collect();
+                        match f[..] {
+                            [keep_under, threshold, drop_at] => Some(GateBand {
+                                keep_under,
+                                threshold,
+                                drop_at,
+                            }),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let sweep = bands_of("DIARIST_ECHO_BANDS");
+    // `DIARIST_ECHO_AEC_BANDS`: bands for the gate after the canceller,
+    // over the auto run's cancelled words (kept and dropped).
+    let aec_sweep = bands_of("DIARIST_ECHO_AEC_BANDS");
+    if !aec_sweep.is_empty() {
+        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
+        let mut pre: Vec<(i64, i64, String)> =
+            on_words.iter().chain(&on_dropped).cloned().collect();
+        pre.sort_by_key(|w| (w.0, w.1));
+        let spans: Vec<(i64, i64)> = pre.iter().map(|w| (w.0 * 16, w.1.max(w.0) * 16)).collect();
+        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
+        eprintln!("| Band after the canceller (keep / neighbours / drop) | \"me\" WER | over the far end | in far-end pauses | Echo words |");
+        eprintln!("|---|---|---|---|---|");
+        for b in &aec_sweep {
+            let d = decide_in_order(&spans, &g.scores, *b);
+            let kept: Vec<(i64, i64, String)> = pre
+                .iter()
+                .zip(&d)
+                .filter(|(_, d)| !**d)
+                .map(|(w, _)| w.clone())
+                .collect();
+            let s = score(&utts, &kept);
+            eprintln!(
+                "| {:.2} / {:.2} / {:.2} | {:.2} % | {:.2} % | {:.2} % | {} |",
+                b.keep_under,
+                b.threshold,
+                b.drop_at,
+                s.wer,
+                s.wer_double_talk,
+                s.wer_clear,
+                s.echo_words
+            );
+        }
+        let none = score(&utts, &pre);
+        eprintln!(
+            "| canceller, no gate | {:.2} % | {:.2} % | {:.2} % | {} |",
+            none.wer, none.wer_double_talk, none.wer_clear, none.echo_words
+        );
+    }
     if !sweep.is_empty() {
         // The post-pass's scan and gate on the gate-off run's words (no
         // clock maps in the fixture: meeting time is channel time).
@@ -431,29 +502,35 @@ fn fleurs_owner_over_a_speaker_meeting() {
             );
         }
     }
-    eprintln!("| | gate off | gate on |");
-    eprintln!("|---|---|---|");
+    let removed = |s: &Scores| 100.0 * (1.0 - s.echo_words as f64 / off.echo_words.max(1) as f64);
+    eprintln!("| | echo off | gate alone | canceller + gate |");
+    eprintln!("|---|---|---|---|");
     eprintln!(
-        "| \"me\" WER on the stood-in speech | {:.2} % | {:.2} % |",
-        off.wer, on.wer
+        "| \"me\" WER on the stood-in speech | {:.2} % | {:.2} % | {:.2} % |",
+        off.wer, alone.wer, on.wer
     );
     eprintln!(
-        "| the same, utterances over the far end | {:.2} % | {:.2} % |",
-        off.wer_double_talk, on.wer_double_talk
+        "| the same, utterances over the far end | {:.2} % | {:.2} % | {:.2} % |",
+        off.wer_double_talk, alone.wer_double_talk, on.wer_double_talk
     );
     eprintln!(
-        "| the same, utterances in far-end pauses | {:.2} % | {:.2} % |",
-        off.wer_clear, on.wer_clear
+        "| the same, utterances in far-end pauses | {:.2} % | {:.2} % | {:.2} % |",
+        off.wer_clear, alone.wer_clear, on.wer_clear
     );
-    eprintln!("| \"me\" words | {} | {} |", off.me_words, on.me_words);
     eprintln!(
-        "| echo words (outside every utterance) | {} | {} ({:.2} % removed) |",
+        "| \"me\" words | {} | {} | {} |",
+        off.me_words, alone.me_words, on.me_words
+    );
+    eprintln!(
+        "| echo words (outside every utterance) | {} | {} ({:.2} % removed) | {} ({:.2} % removed) |",
         off.echo_words,
+        alone.echo_words,
+        removed(&alone),
         on.echo_words,
-        100.0 * (1.0 - on.echo_words as f64 / off.echo_words.max(1) as f64)
+        removed(&on)
     );
     eprintln!(
-        "| words recognised in double-talk utterances | {} | {} |",
-        off.double_talk_words, on.double_talk_words
+        "| words recognised in double-talk utterances | {} | {} | {} |",
+        off.double_talk_words, alone.double_talk_words, on.double_talk_words
     );
 }
