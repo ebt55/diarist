@@ -43,7 +43,7 @@ CREATE TABLE transcript_runs (
   started_at    INTEGER NOT NULL,
   finished_at   INTEGER,
   status        TEXT NOT NULL CHECK (status IN ('running','done','failed')),
-  echo_dropped  TEXT                             -- 0003, JSON [{start_ms, end_ms, text, coefficient}]: mic words the echo gate removed (NULL: the gate never ran)
+  echo_dropped  TEXT                             -- 0003, JSON [{start_ms, end_ms, text, coefficient}]: mic words the echo gate removed (NULL: the gate never ran; [] on a run built by Restore)
 );
 CREATE INDEX runs_meeting ON transcript_runs(meeting_id);
 

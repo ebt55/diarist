@@ -1,6 +1,6 @@
 # Phase 3: live capture and live transcription
 
-Status: 3a to 3e delivered 15 Oct 2026 (core and CLI, including endpoint following and crash recovery); loopback auto gain added as a follow-up; 3f echo deferred. Measured in the integration test: channels aligned within 3 ms, first live word under 1 s after playback start on both channels, post-pass 8 s from Stop to done on a one-minute recording, FLAC at 26 percent of PCM, rename carried over. The UI half is Phase 3b (apps/desktop).
+Status: 3a to 3e delivered 15 Oct 2026 (core and CLI, including endpoint following and crash recovery); loopback auto gain added as a follow-up; 3f echo moved to plan 15. Measured in the integration test: channels aligned within 3 ms, first live word under 1 s after playback start on both channels, post-pass 8 s from Stop to done on a one-minute recording, FLAC at 26 percent of PCM, rename carried over. The UI half is Phase 3b (apps/desktop).
 
 ## Goal
 
@@ -46,9 +46,8 @@ Press Record: the app captures the microphone and the system render loopback, ke
 ### 3e CLI
 - `diarist-cli devices`; `diarist-cli record [--seconds N] [--title s]` prints live words with channel and label, Ctrl-C stops and runs the post-pass, prints a summary.
 
-### 3f Echo (v2.1, after 3a to 3e are verified)
-- If `is_aec_supported` on the mic client, set the loopback endpoint as the echo-cancellation reference and category Communications.
-- Otherwise correlation gate: for each mic word, if loopback energy in [t0 - 300 ms, t1] is high and normalized cross-correlation of the two 16 kHz signals exceeds a threshold, drop the mic word (it is the far end leaking into the mic). Threshold tuned on a recording made with speakers.
+### 3f Echo
+Superseded by `docs/plans/15-echo-without-headphones.md` (20 Oct 2026), which replaced both ideas here after measuring them: Windows' echo cancellation cancelled nothing on this PC (docs/research/14-echo-cancellation.md, section 1), and the correlation gate needed a 2 s block detector, a tracked lag and an asymmetric word span (plan 15, sections 2 and 3).
 
 ## Verification
 

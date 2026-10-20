@@ -407,6 +407,32 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   post-pass goes to the front of the queue, then the queue resumes. A failed
   or cancelled post-pass can be retried (`live::rerun_post_pass`) while the
   WAVs exist.
+- Echo (plan 15). The first detected coupling shows the echo warning with
+  "Turn off for this recording" (**N** while it shows;
+  `turn_off_echo_for_recording`, `Recorder::turn_off_echo`): the rest of the
+  recording and its post-pass are not gated, the live run's
+  `engine_info.echo` gets `user_off: true` and mode `off_for_recording` at
+  once (a crash keeps it), and `LiveStateView.echo_off` turns the banner
+  into "Echo handling is off for this recording". `live_snapshot` applies
+  the recorder's current gate decisions (`Recorder::echo_hidden`), so a
+  reloaded view shows what `live:words` showed.
+- The meeting details read the current run's `engine_info.echo`: "Echo
+  detected (coupling 0.72, 3 ms): N far-end words removed from "me"" with
+  Restore, and "Echo cancellation on" when `aec` is set.
+  `restore_echo_dropped(run_id)` (the meeting's current run) builds a new
+  run of the same kind from the run's words plus its `echo_dropped` as
+  `me` (engine labels kept, each channel re-segmented with the run's
+  `engine_info.segmentation` and interleaved as the post-pass does), carries
+  names, colours and reassignments over and makes the old run's merges
+  again, writes `engine_info.echo.restored: true` (`restored_from`,
+  `restored_words`, `dropped: 0`) and an empty `echo_dropped`, and makes it
+  current; the old run stays, and restoring it again replaces the earlier
+  restored run. A restored run offers "Remove echo words again"
+  (`remove_restored_echo(run_id)`: the old run becomes current, nothing is
+  deleted). `echo_dropped(run_id)` lists the removed words on demand ("Show
+  them"); `get_meeting` never carries them. Both refuse while the meeting
+  records or is finalized. When the post-pass echo step fails, the mic
+  stays ungated and `engine_info.echo` is `{"error": "<message>"}`.
 - Start refuses under 2560 MB of free VRAM, read from NVML (`core::gpu`;
   `nemo-speech doctor` when NVML is missing) as it is, with the live server
   already loaded; the message says how much is free and how much is needed.
@@ -424,8 +450,8 @@ All are in `settings::DEFAULTS` (and `generated/settingDefaults.ts`):
 | `capture.autoconvert` | `true` | Windows converts to 16 kHz; `false` captures at the mix format and resamples with rubato |
 | `record.mic_device`, `record.loopback_device` | `""` | Endpoint ids for new recordings (`""`: the default communications mic; the default output, following the app that plays) |
 | `record.diarize_mic` | `false` | Diarize the mic too (a room with several people) |
-| `echo.mode` | `auto` | Recording with speakers (plan 15): `auto` runs the echo monitor (2 s blocks, FFT correlation of the loopback against the mic) and gates the mic words that are the far end's echo once coupling is detected, live (what the view shows, and the live run at Stop) and in the post-pass; `off` runs nothing and gates nothing; `always` gates regardless of detection |
-| `echo.gate_threshold` | `0.5` | The neighbours' median correlation at or above which a mic word in the gate's middle band (0.20 to 0.60) is dropped; words at 0.60 or more always go, under 0.20 always stay; values outside 0.2 to 0.6 are clamped. Removed words are listed in the run's `echo_dropped` column, the counts in `engine_info.echo` |
+| `echo.mode` | `auto` | Recording with speakers (plan 15; Settings, "Recording with speakers (echo)": Detect and handle / Off / Always on): `auto` runs the echo monitor (2 s blocks, FFT correlation of the loopback against the mic) and gates the mic words that are the far end's echo from the first detected coupling to the end of the recording, live (what the view shows, and the live run at Stop) and in the post-pass; nothing is scored before that, so a headphone recording costs no gate work; `off` runs nothing and gates nothing; `always` gates regardless of detection. "Turn off for this recording" overrides it for one recording |
+| `echo.gate_threshold` | `0.5` | The neighbours' median correlation at or above which a mic word in the gate's middle band (0.20 to 0.60) is dropped; words at 0.60 or more always go, under 0.20 always stay; values outside 0.2 to 0.6 are clamped (Settings, under Advanced; the range comes from `ECHO_GATE` in `generated/settingDefaults.ts`). Removed words are listed in the run's `echo_dropped` column, the counts in `engine_info.echo`; Restore puts them back (above) |
 
 The level meters show the gain the AGC applied; their tooltip shows the
 peak before it.

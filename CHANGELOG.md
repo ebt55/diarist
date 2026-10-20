@@ -2,6 +2,25 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## [Unreleased]
+
+- Added: recording with speakers. Without headphones the microphone hears
+  the meeting, so the other side was transcribed twice, once more as "me"
+  a few milliseconds later. Diarist now notices when the microphone hears
+  the system audio (the two compared on 2 s blocks) and removes the echoed
+  words from "me", in the live view and in the final transcript; the other
+  side's own channel is never touched. On a 111-minute meeting recorded
+  with speakers it removed 99 percent of the duplicated words and kept
+  98.8 percent of the owner's own. The live view says when it hears echo
+  and offers "Turn off for this recording" (N). The meeting details say how
+  many words were removed, with Restore to put them back as "me" (and
+  "Remove echo words again"). Settings, Recording, "Recording with speakers
+  (echo)": Detect and handle (default), Off or Always on, with the gate
+  threshold under Advanced; Diagnostics says whether it is on and what it
+  removed from the last recording. Words you say while the other side
+  talks are still recognised from the mixture, so headphones remain the
+  cleanest setup.
+
 ## [0.1.0-beta.3] - 2026-10-17
 
 - Fixed: clicking a word after scrolling the transcript away from the
