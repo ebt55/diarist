@@ -370,7 +370,7 @@ mod tests {
                 .id
         };
         store.rename_speaker(id("spk_0"), "Alice", None).unwrap();
-        store.rename_speaker(id("me"), "Ebin", None).unwrap();
+        store.rename_speaker(id("me"), "Bob", None).unwrap();
         store.merge_speakers(id("spk_1"), id("spk_0")).unwrap();
 
         let r = restore_echo_dropped(store, run).unwrap();
@@ -405,7 +405,7 @@ mod tests {
             names.contains(&("spk_0".into(), "Alice".into())),
             "{names:?}"
         );
-        assert!(names.contains(&("me".into(), "Ebin".into())), "{names:?}");
+        assert!(names.contains(&("me".into(), "Bob".into())), "{names:?}");
         let new = store.run_speakers(r.run).unwrap();
         let spk1 = new.iter().find(|s| s.engine_label == "spk_1").unwrap();
         let spk0 = new.iter().find(|s| s.engine_label == "spk_0").unwrap();

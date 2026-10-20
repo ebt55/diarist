@@ -513,10 +513,10 @@ The window's far end talks almost continuously, so its AGC gain is near 0 dB and
 
 ### 2.9 Commands
 
-From the worktree root. `<scratch>` is the session scratchpad. `<data>` is `%LOCALAPPDATA%\app.diarist.desktop` and is opened read-only.
+From the worktree root. `<scratch>` is the session scratchpad. `<data>` is `%LOCALAPPDATA%\app.diarist.desktop` and is opened read-only. `<meeting 12>` is meeting 12's folder under `<data>\audio` (the owner's 19 Oct recording).
 
 ```text
-set DIARIST_ECHO_SAMPLE=<data>\audio\01M58D0GX74KVK9BE8Q2WSNA08
+set DIARIST_ECHO_SAMPLE=<data>\audio\<meeting 12>
 set DIARIST_ECHO_DB=<data>\diarist.db
 set DIARIST_ECHO_OUT=<scratch>\aec-spike\out
 cargo test --release -p diarist-core --test aec_spike -- --nocapture      (writes the WAVs and report.txt, about 100 s)
