@@ -14,6 +14,7 @@ use std::path::Path;
 
 use crate::error::Result;
 
+pub mod aec;
 pub mod capture;
 pub mod clock;
 pub mod decode;
