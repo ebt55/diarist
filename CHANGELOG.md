@@ -20,6 +20,20 @@ All notable changes to Diarist. Versions follow semantic versioning.
   removed from the last recording. Words you say while the other side
   talks are still recognised from the mixture, so headphones remain the
   cleanest setup.
+- Added: the processing after Stop cancels the echo before it transcribes
+  "me". When the microphone hears the meeting, Diarist's own echo
+  canceller takes the other side out of a temporary copy of the microphone
+  audio (what is stored stays as recorded), that copy is transcribed, and
+  the echo gate removes what is left. On the 111-minute meeting recorded
+  with speakers it kept 98.3 percent of the owner's own words and left 3.2
+  percent of "me" as copies of the other side; the owner's own words spoken
+  over the meeting's real echo came out with 7.6 percent of words wrong
+  instead of 17.1. It runs while the other side is transcribed, so the
+  processing after Stop takes no longer. The live view still removes echoed
+  words with the gate alone until the live canceller ships. New recordings
+  keep the system audio's automatic gain beside the audio (`loopback.gain`,
+  about 1.4 MB per hour, deleted with the audio) so the canceller can undo
+  it.
 
 ## [0.1.0-beta.3] - 2026-10-17
 
