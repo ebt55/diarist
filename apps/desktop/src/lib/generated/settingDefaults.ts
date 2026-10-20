@@ -32,3 +32,6 @@ export const SETTING_DEFAULTS = {
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
+
+/** `echo.gate_threshold`'s accepted range and the word gate's band around it (`diarist_core::audio::echo`). */
+export const ECHO_GATE = { min: 0.2, max: 0.6, keepUnder: 0.2, dropAt: 0.6 } as const;
