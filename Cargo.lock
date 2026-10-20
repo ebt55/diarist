@@ -1076,8 +1076,11 @@ dependencies = [
  "ctrlc",
  "diarist-core",
  "hound",
+ "rustfft",
  "serde_json",
  "tempfile",
+ "wasapi",
+ "windows 0.62.2",
 ]
 
 [[package]]
