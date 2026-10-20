@@ -24,7 +24,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -646,11 +646,45 @@ pub enum PipelineCommand {
 
 /// A copy of every frame for another consumer (the echo monitor, plan 15):
 /// a bounded channel the pipeline only ever `try_send`s to; a frame that
-/// does not fit (the consumer stalled) is dropped and counted.
-#[derive(Clone)]
+/// does not fit (the consumer stalled) is dropped and counted. The copy a
+/// full channel hands back is kept and copied into for the next offer, so a
+/// stalled consumer costs the pipeline thread no allocation.
 pub struct FrameTap {
     tx: SyncSender<Frame>,
     dropped: Arc<AtomicU64>,
+    /// The copy the channel refused last (each clone keeps its own).
+    spare: Mutex<Option<Frame>>,
+}
+
+impl Clone for FrameTap {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            dropped: Arc::clone(&self.dropped),
+            spare: Mutex::new(None),
+        }
+    }
+}
+
+/// `src` copied into `dst`, reusing its sample buffer.
+fn copy_frame(dst: &mut Frame, src: &Frame) {
+    let Frame {
+        channel,
+        start_sample,
+        pts_us,
+        pcm,
+        level,
+        gain_db,
+        raw_peak_dbfs,
+    } = src;
+    dst.pcm.clear();
+    dst.pcm.extend_from_slice(pcm);
+    dst.channel = *channel;
+    dst.start_sample = *start_sample;
+    dst.pts_us = *pts_us;
+    dst.level = *level;
+    dst.gain_db = *gain_db;
+    dst.raw_peak_dbfs = *raw_peak_dbfs;
 }
 
 impl FrameTap {
@@ -661,6 +695,7 @@ impl FrameTap {
             Self {
                 tx,
                 dropped: Arc::new(AtomicU64::new(0)),
+                spare: Mutex::new(None),
             },
             rx,
         )
@@ -668,8 +703,20 @@ impl FrameTap {
 
     /// Copies `frame` if there is room; never waits.
     pub fn offer(&self, frame: &Frame) {
-        if self.tx.try_send(frame.clone()).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        let mut spare = self.spare.lock().unwrap_or_else(|e| e.into_inner());
+        let copy = match spare.take() {
+            Some(mut f) => {
+                copy_frame(&mut f, frame);
+                f
+            }
+            None => frame.clone(),
+        };
+        match self.tx.try_send(copy) {
+            Ok(()) => {}
+            Err(TrySendError::Full(f) | TrySendError::Disconnected(f)) => {
+                *spare = Some(f);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1190,5 +1237,41 @@ mod tests {
         assert_eq!(frames_got as u64 + res.feed_dropped, 80);
         assert_eq!(tap_rx.try_iter().count(), 4);
         assert_eq!(tap_count.dropped(), 76);
+    }
+
+    #[test]
+    fn a_full_tap_copies_into_the_frame_it_refused() {
+        let (tap, rx) = FrameTap::new(1);
+        let frame = |k: u64, v: i16| Frame {
+            channel: Channel::Mic,
+            start_sample: k * 1_600,
+            pts_us: k * 100_000,
+            pcm: vec![v; FRAME_SAMPLES],
+            level: Level::default(),
+            gain_db: 0.5,
+            raw_peak_dbfs: -20.0,
+        };
+        tap.offer(&frame(0, 1));
+        tap.offer(&frame(1, 2));
+        let buf = |t: &FrameTap| {
+            t.spare
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|f| (f.pcm.as_ptr(), f.start_sample))
+        };
+        let (ptr, at) = buf(&tap).unwrap();
+        assert_eq!(at, 1_600);
+        // Still full: the same buffer takes the next frame.
+        tap.offer(&frame(2, 3));
+        assert_eq!(buf(&tap), Some((ptr, 3_200)));
+        assert_eq!(tap.dropped(), 2);
+        assert_eq!(rx.try_recv().unwrap(), frame(0, 1));
+        // Room again: the spare goes out with the next frame's contents.
+        tap.offer(&frame(3, 4));
+        assert_eq!(buf(&tap), None);
+        let got = rx.try_recv().unwrap();
+        assert_eq!((got.pcm.as_ptr(), &got), (ptr, &frame(3, 4)));
+        assert_eq!(tap.clone().dropped(), 2);
     }
 }

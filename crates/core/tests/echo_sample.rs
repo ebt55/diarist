@@ -21,7 +21,8 @@
 //!   the post-pass path, which reads WAVs.
 //!
 //! Prints the profile, the live monitor replayed over the whole recording
-//! (and over a 7 s shifted mic, the null), the gate's counts and timings.
+//! (and, with the offline scan, over a 7 s shifted mic: the null, with the
+//! wide lag window in play), the gate's counts and timings.
 //!
 //! `cargo test -p diarist-core --release --test echo_sample -- --nocapture`
 
@@ -219,9 +220,10 @@ fn replay(
     (
         changes,
         format!(
-            "{:?}, {blocks} blocks ({active} active, {skipped} skipped), coupled at {:?} ms",
+            "{:?}, {blocks} blocks ({active} active, {skipped} skipped), coupled at {:?} ms, {} relocks",
             mon.state(),
-            mon.coupled_at_ms()
+            mon.coupled_at_ms(),
+            mon.relocks()
         ),
         secs,
         active,
@@ -281,8 +283,10 @@ fn echo_on_a_stored_meeting() {
     let p = EchoProfile::scan_sources(&mic[..], &lb[..], clocks.clone());
     let scan_s = t.elapsed().as_secs_f64();
     eprintln!(
-        "profile: {:?} coupled {} coupling {:.3} lag {:?} ms drift {:?} ms/min erl {:?} dB, {} blocks ({} active), coupled at {:?} ms; scan {scan_s:.2} s",
-        p.status, p.coupled, p.coupling, p.lag_ms, p.drift_ms_per_min, p.erl_db, p.blocks, p.active_blocks, p.coupled_at_ms
+        "profile: {:?} coupled {} coupling {:.3} lag {:?} ms drift {:?} ms/min erl {:?} dB, {} blocks ({} active), coupled at {:?} ms, {} relocks, {} track points ({:.2} to {:.2} ms); scan {scan_s:.2} s",
+        p.status, p.coupled, p.coupling, p.lag_ms, p.drift_ms_per_min, p.erl_db, p.blocks, p.active_blocks, p.coupled_at_ms, p.relocks, p.track.len(),
+        p.track.iter().map(|q| q.1 / 16.0).fold(f32::INFINITY, f32::min),
+        p.track.iter().map(|q| q.1 / 16.0).fold(f32::NEG_INFINITY, f32::max)
     );
 
     // The live monitor over the whole recording, and over the null.
@@ -299,6 +303,19 @@ fn echo_on_a_stored_meeting() {
             nc.iter().all(|c| c.1 != EchoStatus::Coupled),
             "the null coupled"
         );
+        let t = Instant::now();
+        let pn = EchoProfile::scan_sources(&mic[shift..], &lb[..lb.len() - shift], clocks.clone());
+        eprintln!(
+            "null, offline: {:?} coupled {} coupling {:.3} lag {:?} ms, {} active blocks, {} relocks; scan {:.2} s",
+            pn.status,
+            pn.coupled,
+            pn.coupling,
+            pn.lag_ms,
+            pn.active_blocks,
+            pn.relocks,
+            t.elapsed().as_secs_f64()
+        );
+        assert!(!pn.coupled, "the null coupled offline");
     }
 
     // The gate: mic words on the timeline.

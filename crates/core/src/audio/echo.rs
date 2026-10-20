@@ -9,9 +9,11 @@
 //! 4,096-point block convolution) over a lag window, on a common timeline
 //! (meeting time through the clock maps, or raw indices without them).
 //!
-//! - [`EchoMonitor`] (live) keeps a 20 s high-passed PCM ring per channel on
-//!   meeting time ([`PcmRing`], fed from the pipelines' non-blocking taps)
-//!   and judges 2 s blocks ([`BlockDetector`]).
+//! - [`EchoMonitor`] (live) keeps a 60 s high-passed PCM ring per channel on
+//!   meeting time ([`PcmRing`], fed from the pipelines' non-blocking taps;
+//!   960,000 f32 samples, 3.84 MB per channel, 7.7 MB for both) and judges
+//!   2 s blocks ([`BlockDetector`]). Sixty seconds let the live gate score a
+//!   word that a revision restates up to about a minute after it was said.
 //! - [`EchoProfile::scan`] (post-pass) runs the same detector over the
 //!   stored WAVs, so the post-pass never depends on the live monitor (crash
 //!   recovery, re-runs). It returns the per-block lag track.
@@ -33,10 +35,17 @@
 //!   blocks with the median under 0.2.
 //! - Echo lag on meeting time 1 to 6 ms (median 3.3), flat; on raw indices
 //!   10 to 346 ms, drifting 3.1 ms per minute (mic clock −51.6 ppm). Lags are
-//!   causal (−5 to +60 ms at first: sidetone or "Listen to this device" puts
-//!   the owner on the loopback with the mic leading), then ±25 ms around the
-//!   tracked lag; −5 to +500 ms after a device change (Bluetooth and HDMI
-//!   add 100 to 300 ms).
+//!   causal (sidetone or "Listen to this device" puts the owner on the
+//!   loopback with the mic leading). The peak that counts lies in −5 to
+//!   +60 ms for the first [`NARROW_BLOCKS`] active blocks, then in −5 to
+//!   +500 ms (Bluetooth and HDMI outputs add 100 to 300 ms) until a lock,
+//!   then within ±25 ms of the tracked lag; a lock that [`LOST_BLOCKS`]
+//!   active blocks in a row miss, or a device change, goes back to −5 to
+//!   +500 ms and re-locks (an output switched mid-meeting, with or without
+//!   the device-change event). One FFT yields every lag of the span it
+//!   reads, so the windows only decide which peaks count; the
+//!   lag-consistency rule (7 of 10 within ±3 ms) keeps a spurious peak in
+//!   the wide window from coupling.
 //! - The mic ASR stamps echo words late (+75 ms median, +275 ms p90), hence
 //!   the asymmetric gate span. Word NCC: echo words median 0.74, the owner's
 //!   words during far-end speech 0.06 (p90 0.23). Under full double-talk a
@@ -96,13 +105,21 @@ pub const RELEASE_BLOCKS: u32 = 30;
 /// A block's peak lag counts for the lag track at this NCC.
 pub const LAG_CONFIDENT: f32 = 0.3;
 /// Lag windows in samples relative to the timeline position: causal
-/// acquisition (−5 to +60 ms), after a device change (−5 to +500 ms), and
-/// tracking (±25 ms around the tracked lag).
+/// acquisition (−5 to +60 ms), wide (−5 to +500 ms: no lock after
+/// [`NARROW_BLOCKS`], a lost lock, a device change), and tracking (±25 ms
+/// around the tracked lag).
 pub const ACQUIRE_LAGS: (i64, i64) = (-80, 960);
 pub const WIDE_LAGS: (i64, i64) = (-80, 8_000);
 pub const TRACK_HALF: i64 = 400;
-/// Active blocks without a confident lag before the track is dropped.
-const LOSE_AFTER: u32 = 30;
+/// Active blocks acquired in the causal window before the wide one counts.
+pub const NARROW_BLOCKS: u32 = 5;
+/// Active blocks in a row that miss a lock (no confident peak within ±3 ms
+/// of it) before the wide window counts again.
+pub const LOST_BLOCKS: u32 = 3;
+/// QPC time a clock-map segment runs past its samples before it is a jump
+/// (a suspend): 10 ms. Drift leaves under 0.1 ms per one-second segment,
+/// and a filled gap none.
+const JUMP_HNS: f64 = 100_000.0;
 /// Gate span around a word: 350 ms before, 160 ms after; lags ±20 ms.
 pub const GATE_BEFORE: i64 = 5_600;
 pub const GATE_AFTER: i64 = 2_560;
@@ -114,8 +131,8 @@ pub const GATE_KEEP_UNDER: f32 = 0.2;
 /// `echo.gate_threshold` default and accepted range.
 pub const GATE_THRESHOLD: f32 = 0.5;
 pub const GATE_THRESHOLD_RANGE: (f32, f32) = (0.2, 0.6);
-/// Live PCM ring per channel: 20 s.
-pub const RING_SAMPLES: usize = 320_000;
+/// Live PCM ring per channel: 60 s (960,000 f32 samples, 3.84 MB).
+pub const RING_SAMPLES: usize = 960_000;
 /// High-pass corner of both channels (as the measurement).
 const HIGHPASS_HZ: f64 = 100.0;
 /// Coupled blocks whose return loss is kept for the median.
@@ -306,6 +323,8 @@ pub struct Correlator {
     scratch: Vec<Complex<f32>>,
     out: Vec<f32>,
     pre: Vec<f64>,
+    /// |NCC| per lag of the last [`Self::correlate`].
+    ncc: Vec<f32>,
 }
 
 impl Default for Correlator {
@@ -320,6 +339,7 @@ impl Default for Correlator {
             scratch: Vec::new(),
             out: Vec::new(),
             pre: Vec::new(),
+            ncc: Vec::new(),
         }
     }
 }
@@ -338,13 +358,41 @@ impl Correlator {
     /// `None` when `x` has no energy (the coefficient is undefined); a
     /// silent `y` gives 0.
     pub fn peak(&mut self, x: &[f32], y: &[f32]) -> Option<(usize, f32)> {
+        self.correlate(x, y)
+            .then(|| self.peak_in(0, y.len() - x.len()))
+    }
+
+    /// The peak of the last [`Self::correlate`] over the lags `lo..=hi`
+    /// (clamped to what was correlated): `(k, coefficient)`, the first of
+    /// equal peaks; `(lo, 0)` when nothing was.
+    pub fn peak_in(&self, lo: usize, hi: usize) -> (usize, f32) {
+        let mut best = (lo, 0.0f32);
+        for (k, &c) in self
+            .ncc
+            .iter()
+            .enumerate()
+            .take(hi.saturating_add(1))
+            .skip(lo)
+        {
+            if c > best.1 {
+                best = (k, c);
+            }
+        }
+        best
+    }
+
+    /// The |NCC| of `x` against `y` at every lag `0..=y.len() - x.len()`,
+    /// kept for [`Self::peak_in`] (one FFT pass serves several lag windows);
+    /// false when `x` has no energy (undefined) or `y` is shorter than `x`.
+    pub fn correlate(&mut self, x: &[f32], y: &[f32]) -> bool {
+        self.ncc.clear();
         let n = x.len();
         if n == 0 || y.len() < n {
-            return None;
+            return false;
         }
         let ex: f64 = x.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
         if ex <= 0.0 {
-            return None;
+            return false;
         }
         let lags = y.len() - n + 1;
         self.pre.clear();
@@ -383,13 +431,21 @@ impl Correlator {
             let len = seg.min(n - s0);
             self.buf[..len].copy_from_slice(&x[s0..s0 + len]);
             self.buf[len..].fill(0.0);
-            r2c.process_with_scratch(&mut self.buf, &mut self.sx, &mut self.scratch)
-                .ok()?;
+            if r2c
+                .process_with_scratch(&mut self.buf, &mut self.sx, &mut self.scratch)
+                .is_err()
+            {
+                return false;
+            }
             let ylen = (len + lags - 1).min(y.len() - s0);
             self.buf[..ylen].copy_from_slice(&y[s0..s0 + ylen]);
             self.buf[ylen..].fill(0.0);
-            r2c.process_with_scratch(&mut self.buf, &mut self.sy, &mut self.scratch)
-                .ok()?;
+            if r2c
+                .process_with_scratch(&mut self.buf, &mut self.sy, &mut self.scratch)
+                .is_err()
+            {
+                return false;
+            }
             for ((a, p), q) in self.acc.iter_mut().zip(&self.sx).zip(&self.sy) {
                 *a += p.conj() * q;
             }
@@ -397,22 +453,24 @@ impl Correlator {
         }
         self.acc[0].im = 0.0;
         self.acc[bins - 1].im = 0.0;
-        c2r.process_with_scratch(&mut self.acc, &mut self.out, &mut self.scratch)
-            .ok()?;
+        if c2r
+            .process_with_scratch(&mut self.acc, &mut self.out, &mut self.scratch)
+            .is_err()
+        {
+            return false;
+        }
         let scale = 1.0 / size as f64;
         let floor = ex * 1e-10;
-        let mut best = (0usize, 0.0f32);
-        for k in 0..lags {
-            let ey = self.pre[k + n] - self.pre[k];
+        let (pre, out) = (&self.pre, &self.out);
+        self.ncc.extend((0..lags).map(|k| {
+            let ey = pre[k + n] - pre[k];
             if ey <= floor {
-                continue;
+                0.0
+            } else {
+                (f64::from(out[k]).abs() * scale / (ex * ey).sqrt()).min(1.0) as f32
             }
-            let c = (f64::from(self.out[k]).abs() * scale / (ex * ey).sqrt()).min(1.0) as f32;
-            if c > best.1 {
-                best = (k, c);
-            }
-        }
-        Some(best)
+        }));
+        true
     }
 }
 
@@ -439,8 +497,8 @@ pub trait EchoAudio {
     }
 }
 
-/// A 20 s ring of high-passed samples on meeting time (live), with the AGC
-/// gain of every frame.
+/// A ring of high-passed samples on meeting time (live; [`RING_SAMPLES`]),
+/// with the AGC gain of every frame.
 #[derive(Debug, Clone)]
 pub struct PcmRing {
     buf: Vec<f32>,
@@ -635,6 +693,22 @@ impl ClockPair {
             .round() as i64
     }
 
+    /// Whether timeline sample `t` falls inside a jump on either channel
+    /// (QPC moved on with no samples: a suspend). Every timeline sample of a
+    /// jump maps to the first channel sample after it.
+    fn in_jump(&self, t: i64) -> bool {
+        [&self.mic, &self.loopback].iter().any(|map| {
+            let q = map.origin_qpc as f64 + t as f64 * NOMINAL_HNS_PER_SAMPLE;
+            let pts = map.points();
+            let i = pts.partition_point(|p| (p.1 as f64) <= q);
+            i > 0 && i < pts.len() && {
+                let (a, b) = (pts[i - 1], pts[i]);
+                let sampled = a.1 as f64 + (b.0 - a.0) as f64 * NOMINAL_HNS_PER_SAMPLE;
+                q > sampled + JUMP_HNS
+            }
+        })
+    }
+
     /// Timeline sample of a channel sample.
     pub fn timeline(&self, channel: Channel, s: f64) -> f64 {
         let map = match channel {
@@ -758,19 +832,53 @@ impl PcmSource for WavSamples {
 
 // ---- the 2 s block detector -------------------------------------------------------
 
-/// The lag track: the median of the last five confident block lags, held
-/// once three of them agree within ±3 ms; on raw indices (no clock maps)
-/// the older lags and the prediction are moved forward with the drift
-/// fitted over the last 64 confident blocks once they span two minutes.
+/// The lag track (plan 15 section 3.1, re-acquisition included).
+///
+/// - Acquiring, the peak of the causal window (−5 to +60 ms) counts for the
+///   first [`NARROW_BLOCKS`] active blocks, then the wide one (−5 to
+///   +500 ms). The wide window is correlated all along (one FFT covers
+///   both), so its recent peaks are at hand when it starts to count.
+/// - A lock is the median of the last five confident lags of the window
+///   that counts once three of them agree within ±3 ms; then ±25 ms around
+///   it counts and the median keeps following it.
+/// - A lock that [`LOST_BLOCKS`] active blocks in a row do not confirm (no
+///   confident peak within ±3 ms: the output moved to HDMI or Bluetooth
+///   speakers, or the echo stopped) goes back to the wide window, and
+///   re-locks at once when three wide peaks of those blocks agree. A device
+///   change starts over in the wide window.
+/// - On raw indices (no clock maps) the older lags and the prediction are
+///   moved forward with the drift fitted over the last 64 confident blocks
+///   once they span two minutes, and the wide window sits on the predicted
+///   lag.
 #[derive(Debug, Clone, Default)]
 struct LagTrack {
     raw: bool,
+    /// Confident peaks `(t, lag)` of the window that counts, the last five.
     lags: VecDeque<(f64, f32)>,
+    /// Confident wide-window peaks since the lock was last confirmed.
+    wide_peaks: VecDeque<(f64, f32)>,
     center: Option<f32>,
     at: f64,
-    misses: u32,
+    locked: bool,
+    /// Active blocks in a row that missed the lock.
+    lost: u32,
+    /// Active blocks acquired in the causal window.
+    narrow: u32,
+    /// The wide window counts.
     wide: bool,
     fit: VecDeque<(f64, f32)>,
+    /// Blocks before a fresh lock that agree with it.
+    backfill: Vec<f64>,
+    ever_locked: bool,
+    relocks: u32,
+}
+
+/// Appends to a window of the last five.
+fn push_last5(v: &mut VecDeque<(f64, f32)>, p: (f64, f32)) {
+    v.push_back(p);
+    if v.len() > 5 {
+        v.pop_front();
+    }
 }
 
 impl LagTrack {
@@ -801,72 +909,140 @@ impl LagTrack {
         Some(c + self.drift().map_or(0.0, |d| (d * (t - self.at)) as f32))
     }
 
-    fn locked(&self) -> bool {
-        self.center.is_some() && self.misses < LOSE_AFTER
+    /// The wide window at `t` (on raw indices around the predicted lag).
+    fn wide_range(&self, t: f64) -> (i64, i64) {
+        let base = if self.raw {
+            self.predicted(t).map_or(0, |c| c.round() as i64)
+        } else {
+            0
+        };
+        (base + WIDE_LAGS.0, base + WIDE_LAGS.1)
     }
 
+    /// The window whose peak counts at `t`.
     fn search(&self, t: f64) -> (i64, i64) {
-        if self.wide && !self.locked() {
-            return WIDE_LAGS;
-        }
         match self.predicted(t) {
-            Some(c) if self.locked() => {
+            Some(c) if self.locked => {
                 let c = c.round() as i64;
                 (c - TRACK_HALF, c + TRACK_HALF)
             }
-            Some(c) if self.raw => {
-                let c = c.round() as i64;
-                (c + ACQUIRE_LAGS.0, c + ACQUIRE_LAGS.1)
-            }
+            _ if self.wide => self.wide_range(t),
             _ => ACQUIRE_LAGS,
         }
     }
 
-    fn observe(&mut self, t: f64, lag: f32, coef: f32) {
-        if coef < LAG_CONFIDENT {
-            self.misses += 1;
-            if self.misses >= LOSE_AFTER && !self.raw {
-                self.center = None;
-                self.lags.clear();
-            }
-            return;
-        }
-        self.misses = 0;
-        self.lags.push_back((t, lag));
-        if self.lags.len() > 5 {
-            self.lags.pop_front();
-        }
-        if self.lags.len() >= 3 {
-            // On raw indices the older lags are moved forward by the drift.
-            let d = self.drift().unwrap_or(0.0);
-            let v: Vec<f32> = self
-                .lags
-                .iter()
-                .map(|&(ti, l)| l + (d * (t - ti)) as f32)
-                .collect();
-            let m = median(&mut v.clone()).unwrap_or(lag);
-            let agree = v
-                .iter()
-                .filter(|l| (*l - m).abs() <= CONSISTENT_SAMPLES)
-                .count();
-            if agree >= 3 {
-                self.center = Some(m);
-                self.at = t;
-                self.wide = false;
+    /// Whether a block's peak confirms the lock.
+    fn confirms(&self, t: f64, lag: f32, coef: f32) -> bool {
+        self.locked
+            && coef >= LAG_CONFIDENT
+            && self
+                .predicted(t)
+                .is_some_and(|c| (lag - c).abs() <= CONSISTENT_SAMPLES)
+    }
+
+    /// One active block: the peak of the window that counted, and the wide
+    /// window's when it was correlated.
+    fn observe(&mut self, t: f64, lag: f32, coef: f32, wide: Option<(f32, f32)>) {
+        if let Some((l, c)) = wide {
+            if c >= LAG_CONFIDENT {
+                push_last5(&mut self.wide_peaks, (t, l));
             }
         }
-        if self.center.is_some() {
-            self.fit.push_back((t, lag));
-            if self.fit.len() > DRIFT_POINTS {
-                self.fit.pop_front();
+        let was_locked = self.locked;
+        if coef >= LAG_CONFIDENT {
+            push_last5(&mut self.lags, (t, lag));
+            self.try_lock(t);
+            if self.locked {
+                self.fit.push_back((t, lag));
+                if self.fit.len() > DRIFT_POINTS {
+                    self.fit.pop_front();
+                }
+            }
+        }
+        if was_locked {
+            if self.confirms(t, lag, coef) {
+                self.lost = 0;
+                self.wide_peaks.clear();
+            } else {
+                self.lost += 1;
+                if self.lost >= LOST_BLOCKS {
+                    self.locked = false;
+                    self.lost = 0;
+                    if !self.raw {
+                        self.center = None;
+                    }
+                    self.widen(t);
+                }
+            }
+        } else if !self.locked && !self.wide {
+            self.narrow += 1;
+            if self.narrow >= NARROW_BLOCKS {
+                self.widen(t);
             }
         }
     }
 
+    /// The wide window counts from now, with its recent peaks.
+    fn widen(&mut self, t: f64) {
+        self.wide = true;
+        self.lags = self.wide_peaks.clone();
+        self.try_lock(t);
+    }
+
+    /// Locks, or follows the lock, when three of the last five lags agree.
+    fn try_lock(&mut self, t: f64) {
+        if self.lags.len() < 3 {
+            return;
+        }
+        // On raw indices the older lags are moved forward by the drift.
+        let d = self.drift().unwrap_or(0.0);
+        let v: Vec<f32> = self
+            .lags
+            .iter()
+            .map(|&(ti, l)| l + (d * (t - ti)) as f32)
+            .collect();
+        let Some(m) = median(&mut v.clone()) else {
+            return;
+        };
+        let agree = |l: &f32| (*l - m).abs() <= CONSISTENT_SAMPLES;
+        if v.iter().filter(|l| agree(l)).count() < 3 {
+            return;
+        }
+        if !self.locked {
+            // A step past the tracking window is a new path: the drift
+            // fitted on the old one does not carry over.
+            if self
+                .predicted(t)
+                .is_some_and(|p| (p - m).abs() > TRACK_HALF as f32)
+            {
+                self.fit.clear();
+            }
+            self.backfill = self
+                .lags
+                .iter()
+                .zip(&v)
+                .filter(|(_, l)| agree(l))
+                .map(|(p, _)| p.0)
+                .collect();
+            self.relocks += u32::from(self.ever_locked);
+            self.ever_locked = true;
+            self.wide_peaks.clear();
+            self.narrow = 0;
+            self.lost = 0;
+        }
+        self.center = Some(m);
+        self.at = t;
+        self.locked = true;
+        self.wide = false;
+    }
+
+    /// A device changed: the wide window counts, nothing carries over.
     fn restart(&mut self) {
         *self = Self {
             raw: self.raw,
             wide: true,
+            ever_locked: self.ever_locked,
+            relocks: self.relocks,
             ..Self::default()
         };
     }
@@ -887,6 +1063,8 @@ pub struct BlockResult {
     pub mic_dbfs: f32,
     /// Echo return loss of a coupled block (pre-AGC).
     pub erl_db: Option<f32>,
+    /// The tracked lag (samples), when the block's peak confirmed the lock.
+    pub tracked: Option<f32>,
     pub status: EchoStatus,
 }
 
@@ -923,14 +1101,44 @@ impl BlockDetector {
         }
     }
 
-    /// The lag window (samples) for a block at `t`.
+    /// The lag window (samples) whose peak counts for a block at `t`.
     pub fn search(&self, t: i64) -> (i64, i64) {
         self.track.search(t as f64)
     }
 
+    /// How far past a block at `t` its mic span reaches (samples): the
+    /// counting window or the wide one, whichever ends later.
+    pub fn reach(&self, t: i64) -> i64 {
+        let t = t as f64;
+        self.track.search(t).1.max(self.track.wide_range(t).1)
+    }
+
+    /// The lag track holds a lock.
+    pub fn locked(&self) -> bool {
+        self.track.locked
+    }
+
+    /// Fresh locks after the first: a lock that [`LOST_BLOCKS`] blocks
+    /// missed found again (at a new lag after an output switch, or at the
+    /// same one after a stretch the echo did not confirm), or after a device
+    /// change.
+    pub fn relocks(&self) -> u32 {
+        self.track.relocks
+    }
+
+    /// The blocks before the newest fresh lock that agree with it
+    /// (timeline sample, tracked lag), handed out once: the offline track
+    /// then starts where the new lag did, not where it was confirmed.
+    pub fn take_backfill(&mut self) -> Vec<(i64, f32)> {
+        std::mem::take(&mut self.track.backfill)
+            .into_iter()
+            .filter_map(|t| self.track.predicted(t).map(|l| (t as i64, l)))
+            .collect()
+    }
+
     /// The tracked lag (samples) at `t`, if any.
     pub fn lag_at(&self, t: i64) -> Option<f32> {
-        if self.track.locked() || self.track.raw {
+        if self.track.locked || self.track.raw {
             self.track.predicted(t as f64)
         } else {
             None
@@ -967,7 +1175,10 @@ impl BlockDetector {
     }
 
     /// Judges one block: reads the loopback block at `t` and the mic over
-    /// the lag window, correlates, updates the state.
+    /// the lag window, correlates, updates the state. Acquiring, one
+    /// correlation covers the counting window and the wide one; a block
+    /// that misses a lock is also correlated over the wide window (the
+    /// peaks re-acquisition needs).
     pub fn block(
         &mut self,
         audio: &mut dyn EchoAudio,
@@ -988,37 +1199,70 @@ impl BlockDetector {
             lag: 0.0,
             mic_dbfs: -100.0,
             erl_db: None,
+            tracked: None,
             status: self.status,
         };
         if !r.active {
             return Some(r);
         }
-        let (lo, hi) = self.search(t);
-        if audio.read(Channel::Mic, t + lo, BLOCK + (hi - lo) as usize, y) != Avail::Ready {
+        let tf = t as f64;
+        let (lo, hi) = self.track.search(tf);
+        let (wlo, whi) = self.track.wide_range(tf);
+        let locked = self.track.locked;
+        let (rlo, rhi) = if locked {
+            (lo, hi)
+        } else {
+            (lo.min(wlo), hi.max(whi))
+        };
+        if audio.read(Channel::Mic, t + rlo, BLOCK + (rhi - rlo) as usize, y) != Avail::Ready {
             return None;
         }
-        let (k, c) = corr.peak(x, y).unwrap_or((0, 0.0));
+        let correlated = corr.correlate(x, y);
+        let (k, c) = corr.peak_in((lo - rlo) as usize, (hi - rlo) as usize);
         r.coefficient = c;
-        r.lag = (lo + k as i64) as f32;
+        r.lag = (rlo + k as i64) as f32;
         r.mic_dbfs = rms_dbfs(&y[k..k + BLOCK]);
-        self.observe(&mut r, &*audio);
+        let wide = if !locked {
+            correlated.then(|| {
+                let (k, c) = corr.peak_in((wlo - rlo) as usize, (whi - rlo) as usize);
+                ((rlo + k as i64) as f32, c)
+            })
+        } else if self.track.confirms(tf, r.lag, c) {
+            None
+        } else {
+            match audio.read(Channel::Mic, t + wlo, BLOCK + (whi - wlo) as usize, y) {
+                Avail::Ready => corr.peak(x, y).map(|(k, c)| ((wlo + k as i64) as f32, c)),
+                _ => None,
+            }
+        };
+        self.observe(&mut r, wide, &*audio);
         Some(r)
     }
 
-    fn observe(&mut self, r: &mut BlockResult, audio: &dyn EchoAudio) {
-        self.track.observe(r.t as f64, r.lag, r.coefficient);
+    fn observe(&mut self, r: &mut BlockResult, wide: Option<(f32, f32)>, audio: &dyn EchoAudio) {
+        let tf = r.t as f64;
+        self.track.observe(tf, r.lag, r.coefficient, wide);
+        r.tracked = if self.track.confirms(tf, r.lag, r.coefficient) {
+            self.track.predicted(tf)
+        } else {
+            None
+        };
         self.recent.push_back((r.coefficient, r.lag));
         if self.recent.len() > MEDIAN_BLOCKS {
             self.recent.pop_front();
         }
         let mut c: Vec<f32> = self.recent.iter().map(|v| v.0).collect();
         let med = median(&mut c).unwrap_or(0.0);
-        let consistent = self.track.center.map_or(0, |center| {
-            self.recent
-                .iter()
-                .filter(|v| (v.1 - center).abs() <= CONSISTENT_SAMPLES)
-                .count()
-        });
+        let consistent = self
+            .track
+            .center
+            .filter(|_| self.track.locked)
+            .map_or(0, |center| {
+                self.recent
+                    .iter()
+                    .filter(|v| (v.1 - center).abs() <= CONSISTENT_SAMPLES)
+                    .count()
+            });
         self.status = match self.status {
             EchoStatus::Coupled => {
                 if med < RELEASE_BELOW {
@@ -1067,14 +1311,112 @@ impl BlockDetector {
 /// The clocks of both channels while recording (mic, loopback).
 pub type SharedClocks = (Arc<Mutex<ClockMap>>, Arc<Mutex<ClockMap>>);
 
+/// [`ClockMap`]'s fitted slope (100 ns per sample), kept up to date as
+/// anchors are appended: the map refits over every anchor on each
+/// extrapolation (14,400 of them at 4 h, under the lock the pipeline also
+/// takes to add anchors). The same sums in the same order: the same value.
+#[derive(Debug, Default, Clone)]
+struct SlopeFit {
+    n: usize,
+    first: (i64, i64),
+    last: (i64, i64),
+    sums: [f64; 4],
+}
+
+impl SlopeFit {
+    fn slope(&mut self, pts: &[(i64, i64)]) -> f64 {
+        let stale = pts.len() < self.n
+            || (self.n > 0 && (pts[0] != self.first || pts[self.n - 1] != self.last));
+        if stale {
+            *self = Self::default();
+        }
+        let Some(&first) = pts.first() else {
+            return NOMINAL_HNS_PER_SAMPLE;
+        };
+        self.first = first;
+        let (x0, y0) = (first.0 as f64, first.1 as f64);
+        let [sx, sy, sxx, sxy] = &mut self.sums;
+        for &(x, y) in &pts[self.n..] {
+            let (x, y) = (x as f64 - x0, y as f64 - y0);
+            *sx += x;
+            *sy += y;
+            *sxx += x * x;
+            *sxy += x * y;
+        }
+        self.n = pts.len();
+        self.last = pts[pts.len() - 1];
+        if self.last.0 - first.0 < 16_000 {
+            return NOMINAL_HNS_PER_SAMPLE;
+        }
+        let n = self.n as f64;
+        let den = n * *sxx - *sx * *sx;
+        if den.abs() > f64::EPSILON {
+            (n * *sxy - *sx * *sy) / den
+        } else {
+            NOMINAL_HNS_PER_SAMPLE
+        }
+    }
+}
+
+/// [`ClockMap::qpc_at`], extrapolating with the slope `fit` keeps.
+fn qpc_cached(map: &ClockMap, fit: &mut SlopeFit, s: f64) -> f64 {
+    let pts = map.points();
+    match pts {
+        [] => map.origin_qpc as f64 + s * NOMINAL_HNS_PER_SAMPLE,
+        [p] => p.1 as f64 + (s - p.0 as f64) * fit.slope(pts),
+        [first, .., last] => {
+            if s <= first.0 as f64 {
+                first.1 as f64 + (s - first.0 as f64) * fit.slope(pts)
+            } else if s >= last.0 as f64 {
+                last.1 as f64 + (s - last.0 as f64) * fit.slope(pts)
+            } else {
+                map.qpc_at(s)
+            }
+        }
+    }
+}
+
+/// Where one channel's frames land on the timeline.
 #[derive(Debug, Default)]
 struct Placement {
     hp: HighPass,
-    /// Timeline minus channel sample, refreshed every 10 frames.
+    /// Timeline minus channel sample.
     offset: i64,
     frames: u32,
     next: Option<u64>,
+    /// The offset holds below this channel sample: the next anchor after
+    /// the last refresh (a jump or a gap starts a new segment at one).
+    until: u64,
+    /// Anchors the map had at the last refresh.
+    seen: usize,
+    fit: SlopeFit,
     scratch: Vec<f32>,
+}
+
+impl Placement {
+    /// Refreshes the offset for the frame at channel sample `s` when it may
+    /// sit elsewhere: every 10 frames, on a sample discontinuity, past the
+    /// next anchor, or when anchors arrived. A `Jump` or a `Gap` anchors both
+    /// its sides before its frames reach the tap, while `start_sample` runs
+    /// on contiguously across a jump.
+    fn place(&mut self, map: &ClockMap, s: u64) {
+        let due = self.frames.is_multiple_of(10)
+            || self.next != Some(s)
+            || s >= self.until
+            || map.len() != self.seen;
+        if !due {
+            return;
+        }
+        let sf = s as f64;
+        let q = qpc_cached(map, &mut self.fit, sf);
+        self.offset =
+            ((q - map.origin_qpc as f64) / NOMINAL_HNS_PER_SAMPLE).round() as i64 - s as i64;
+        let pts = map.points();
+        self.until = pts
+            .get(pts.partition_point(|p| p.0 as f64 <= sf))
+            .map_or(u64::MAX, |p| p.0.max(0) as u64);
+        self.seen = pts.len();
+    }
 }
 
 /// One live mic word's gate score.
@@ -1097,7 +1439,7 @@ impl WordScore {
 }
 
 /// The live coupling monitor: both channels' frames from the pipeline taps
-/// into a 20 s ring each on meeting time, 2 s blocks judged as they
+/// into a 60 s ring each on meeting time, 2 s blocks judged as they
 /// complete, and the live word gate scored from the same rings.
 #[derive(Debug)]
 pub struct EchoMonitor {
@@ -1113,8 +1455,6 @@ pub struct EchoMonitor {
     blocks: u64,
     active_blocks: u64,
     skipped_blocks: u64,
-    /// Frames the tap could not deliver (counted by the recorder).
-    pub dropped_frames: u64,
 }
 
 impl EchoMonitor {
@@ -1135,7 +1475,6 @@ impl EchoMonitor {
             blocks: 0,
             active_blocks: 0,
             skipped_blocks: 0,
-            dropped_frames: 0,
         }
     }
 
@@ -1169,15 +1508,9 @@ impl EchoMonitor {
         self.detector.lag_at(self.next_block)
     }
 
-    fn timeline_offset(&self, ch: Channel, frame: &Frame) -> i64 {
-        let Some((mic, lb)) = &self.clocks else {
-            return 0;
-        };
-        let map = if ch == Channel::Mic { mic } else { lb };
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
-        let t = (map.qpc_at(frame.start_sample as f64) - map.origin_qpc as f64)
-            / NOMINAL_HNS_PER_SAMPLE;
-        t.round() as i64 - frame.start_sample as i64
+    /// Lag re-acquisitions so far (see [`BlockDetector::relocks`]).
+    pub fn relocks(&self) -> u32 {
+        self.detector.relocks()
     }
 
     /// Adds one 100 ms frame of either channel; returns the new state when
@@ -1188,14 +1521,14 @@ impl EchoMonitor {
             Channel::Loopback => 1,
             Channel::Source => return None,
         };
-        let refresh = {
-            let p = &self.place[idx];
-            p.frames.is_multiple_of(10) || p.next != Some(frame.start_sample)
-        };
-        if refresh {
-            self.place[idx].offset = self.timeline_offset(frame.channel, frame);
-        }
         let p = &mut self.place[idx];
+        if let Some((mic, lb)) = &self.clocks {
+            let map = if idx == 0 { mic } else { lb };
+            p.place(
+                &map.lock().unwrap_or_else(|e| e.into_inner()),
+                frame.start_sample,
+            );
+        }
         p.frames = p.frames.wrapping_add(1);
         p.next = Some(frame.start_sample + frame.pcm.len() as u64);
         p.scratch.clear();
@@ -1225,8 +1558,7 @@ impl EchoMonitor {
                 self.skipped_blocks += 1;
                 continue;
             }
-            let (_, hi) = self.detector.search(t);
-            if self.mic.head() < t + BLOCK as i64 + hi {
+            if self.mic.head() < t + BLOCK as i64 + self.detector.reach(t) {
                 // Wait for the mic unless the loopback is far ahead.
                 if self.loopback.head() - self.mic.head() < (RING_SAMPLES / 2) as i64 {
                     break;
@@ -1296,10 +1628,17 @@ pub struct EchoProfile {
     pub active_blocks: usize,
     /// Timeline ms of the first coupled block.
     pub coupled_at_ms: Option<i64>,
-    /// Per confident block: (timeline sample, tracked lag in samples).
+    /// Per block that confirmed the lock, and the blocks a fresh lock
+    /// agrees with before it: (timeline sample, tracked lag in samples).
     pub track: Vec<(i64, f32)>,
+    /// Lag re-acquisitions ([`BlockDetector::relocks`]); meeting 12 has 13
+    /// in 111 minutes, its track never leaving 0.7 to 7.2 ms.
+    pub relocks: usize,
     /// The timeline is meeting time through these maps (else raw indices).
     pub clocks: Option<ClockPair>,
+    /// The track's drift slope on raw indices (0 on meeting time), for
+    /// [`Self::lag_at`].
+    slope: f64,
 }
 
 impl EchoProfile {
@@ -1333,6 +1672,11 @@ impl EchoProfile {
         let mut erl = Vec::new();
         for k in 0i64.. {
             let t = k * BLOCK as i64;
+            // A block inside a suspend would judge the first samples after it
+            // once more (the whole jump maps there).
+            if audio.clocks.as_ref().is_some_and(|c| c.in_jump(t)) {
+                continue;
+            }
             let s = audio
                 .clocks
                 .as_ref()
@@ -1351,12 +1695,15 @@ impl EchoProfile {
             if let Some(e) = r.erl_db {
                 erl.push(e);
             }
-            if r.coefficient >= LAG_CONFIDENT {
-                if let Some(l) = det.lag_at(t) {
-                    track.push((t, l));
-                }
+            // A fresh lock also covers the earlier blocks that agree with it
+            // (after an output switch, from the switch on).
+            track.extend(det.take_backfill());
+            if let Some(l) = r.tracked {
+                track.push((t, l));
             }
         }
+        track.sort_by_key(|p| p.0);
+        track.dedup_by_key(|p| p.0);
         let active_blocks = coefs.len();
         let mut lags: Vec<f32> = track.iter().map(|p| p.1).collect();
         let drift = fit_slope(&track)
@@ -1371,30 +1718,40 @@ impl EchoProfile {
             blocks,
             active_blocks,
             coupled_at_ms: det.coupled_at().map(|t| (t as f64 / PER_MS) as i64),
+            relocks: det.relocks() as usize,
+            slope: if clocks.is_none() {
+                fit_slope(&track).unwrap_or(0.0)
+            } else {
+                0.0
+            },
             track,
             clocks,
         }
     }
 
     /// The tracked lag (samples) at timeline sample `t`: linear between the
-    /// track's points; past its ends the end value (plus the fitted drift on
-    /// raw indices). `None` without a track.
+    /// track's points, except across a step the gate's ±20 ms cannot cover
+    /// (an output switched): there the lag of the block that holds `t`, the
+    /// nearer one across blocks neither covers. Past the track's ends the
+    /// end value (plus the fitted drift on raw indices). `None` without a
+    /// track.
     pub fn lag_at(&self, t: i64) -> Option<f32> {
         let tr = &self.track;
         let (first, last) = (tr.first()?, tr.last()?);
-        let drift = if self.clocks.is_none() {
-            fit_slope(tr).unwrap_or(0.0)
-        } else {
-            0.0
-        };
+        let carried = |p: &(i64, f32)| p.1 + (self.slope * (t - p.0) as f64) as f32;
         if t <= first.0 {
-            return Some(first.1 + (drift * (t - first.0) as f64) as f32);
+            return Some(carried(first));
         }
         if t >= last.0 {
-            return Some(last.1 + (drift * (t - last.0) as f64) as f32);
+            return Some(carried(last));
         }
         let i = tr.partition_point(|p| p.0 <= t);
         let (a, b) = (tr[i - 1], tr[i]);
+        let step = f64::from(b.1 - a.1) - self.slope * (b.0 - a.0) as f64;
+        if step.abs() > GATE_LAG_HALF as f64 {
+            let edge = ((a.0 + b.0 + BLOCK as i64) / 2).min(b.0);
+            return Some(if t < edge { a.1 } else { b.1 });
+        }
         let f = (t - a.0) as f32 / (b.0 - a.0).max(1) as f32;
         Some(a.1 + f * (b.1 - a.1))
     }
