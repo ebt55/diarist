@@ -17,6 +17,7 @@ use crate::error::Result;
 pub mod capture;
 pub mod clock;
 pub mod decode;
+pub mod echo;
 pub mod feed;
 pub mod flac;
 pub mod gain;

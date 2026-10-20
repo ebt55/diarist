@@ -1092,6 +1092,7 @@ dependencies = [
  "hound",
  "log",
  "nvml-wrapper",
+ "realfft",
  "rtrb",
  "rubato",
  "rusqlite",
