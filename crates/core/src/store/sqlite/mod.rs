@@ -40,9 +40,9 @@ use crate::error::CoreError;
 use crate::protocol::EngineWord;
 use crate::transcript::SegmentOptions;
 use crate::types::{
-    new_id, AudioTrack, Channel, ClockAnchor, Edit, EditKind, LiveUtterance, Meeting, MeetingId,
-    MeetingStatus, ModelCapabilities, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind,
-    RunStatus, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
+    new_id, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, EditKind, LiveUtterance,
+    Meeting, MeetingId, MeetingStatus, ModelCapabilities, ModelFile, ModelFileId, ReassignTarget,
+    RunId, RunKind, RunStatus, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -55,6 +55,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0002_counters",
         include_str!("migrations/0002_counters.sql"),
+    ),
+    (
+        "0003_echo_dropped",
+        include_str!("migrations/0003_echo_dropped.sql"),
     ),
 ];
 
@@ -239,8 +243,38 @@ impl RunStore for SqliteStore {
         self.list_live_utterances_impl(run)
     }
 
-    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()> {
-        self.materialise_live_run_impl(run, opts)
+    fn materialise_live_run_except(
+        &self,
+        run: RunId,
+        opts: &SegmentOptions,
+        skip: &dyn Fn(&LiveUtterance, usize) -> bool,
+    ) -> StoreResult<()> {
+        self.materialise_live_run_impl(run, opts, skip)
+    }
+
+    fn echo_dropped(&self, run: RunId) -> StoreResult<Option<Vec<EchoDroppedWord>>> {
+        let conn = self.lock()?;
+        get_run(&conn, run)?;
+        let json: Option<String> = conn.query_row(
+            "SELECT echo_dropped FROM transcript_runs WHERE id = ?1",
+            [run.0],
+            |r| r.get(0),
+        )?;
+        json.map(|j| {
+            serde_json::from_str(&j)
+                .map_err(|e| StoreError::Invalid(format!("echo_dropped of run {run}: {e}")))
+        })
+        .transpose()
+    }
+
+    fn set_echo_dropped(&self, run: RunId, words: &[EchoDroppedWord]) -> StoreResult<()> {
+        let json = serde_json::to_string(words)
+            .map_err(|e| StoreError::Invalid(format!("echo_dropped: {e}")))?;
+        let n = self.lock()?.execute(
+            "UPDATE transcript_runs SET echo_dropped = ?2 WHERE id = ?1",
+            params![run.0, json],
+        )?;
+        not_found_if_zero(n, "run", run.0)
     }
 
     fn live_speaker(
@@ -1972,8 +2006,11 @@ mod tests {
         // Back to schema 0001 as 0.1.0-beta.1 left it (no counters table).
         {
             let conn = Connection::open(&db).unwrap();
-            conn.execute_batch("DROP TABLE counters; PRAGMA user_version = 1;")
-                .unwrap();
+            conn.execute_batch(
+                "DROP TABLE counters; ALTER TABLE transcript_runs DROP COLUMN echo_dropped;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
         }
         let older = dir.path().join("diarist.db.bak-0");
         std::fs::write(&older, b"an older copy").unwrap();

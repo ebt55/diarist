@@ -16,6 +16,17 @@
 //! at 10 Hz per channel, degraded / recovered, warnings (loopback silent
 //! for 60 s while the mic is active) and device changes.
 //!
+//! Echo (plan 15, unless `echo.mode = off`): each pipeline also copies its
+//! frames to a non-blocking [`FrameTap`]; a monitor thread places both
+//! channels on meeting time in 20 s rings and judges 2 s blocks
+//! ([`EchoMonitor`]); the first detection is one [`LiveWarning::Echo`].
+//! Every mic word is still stored; while coupled (or with `always`) the sink
+//! gets the mic words the gate keeps ([`crate::audio::echo::gate_words`]'s
+//! scoring from the rings, once per revision, words whose span has not
+//! arrived shown and scored again at the next mic frame), and Stop
+//! materialises the live run without the dropped words (their list goes to
+//! the run's `echo_dropped`, the counts to `engine_info.echo`).
+//!
 //! [`Recorder::stop`] stops the captures, ends both WAVs at the same length,
 //! closes the sessions (their last finals still land), materialises the live
 //! run, resumes the queue and submits the post-pass ([`postpass`]) ahead of
@@ -56,14 +67,17 @@ use crate::audio::capture::{
     qpc_now_100ns, CaptureConfig, CaptureStatus, ChangeReason, PacketSource, SourceFactory,
 };
 use crate::audio::clock::ClockMap;
+use crate::audio::echo::{
+    decide, EchoMode, EchoMonitor, EchoState, EchoStatus, WordScore, COUPLED_AT,
+};
 use crate::audio::feed::{
     feed, spawn_feed_worker, FeedNotice, FeedReport, FeedTransition, FeedWorker, FEED_CAPACITY,
     FEED_RECOVER_BELOW,
 };
 use crate::audio::gain::AgcConfig;
 use crate::audio::pipeline::{
-    spawn_pipeline, Level, PipelineCommand, PipelineEvent, PipelineNotice, PipelineResult,
-    PipelineThreadConfig,
+    spawn_pipeline, FrameTap, Level, PipelineCommand, PipelineEvent, PipelineNotice,
+    PipelineResult, PipelineThreadConfig,
 };
 use crate::engine::{Engine, EngineEvent, EngineWord, LiveEngine, LiveOpts};
 use crate::error::{CoreError, Result};
@@ -73,8 +87,8 @@ use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, RunStore};
 use crate::transcript::{SegmentOptions, ME_LABEL, UNKNOWN_LABEL};
 use crate::types::{
-    AudioFormat, Channel, ClockAnchor, JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind,
-    RunStatus, Source, SpeakerId, TrackChannel, TranscriptRun,
+    AudioFormat, Channel, ClockAnchor, EchoDroppedWord, JobId, Meeting, MeetingId, MeetingStatus,
+    RunId, RunKind, RunStatus, Source, SpeakerId, TrackChannel, TranscriptRun,
 };
 use crate::views::JobEvent;
 
@@ -91,6 +105,8 @@ pub const MIN_FREE_BYTES: u64 = 2 << 30;
 pub const LOOPBACK_SILENT_WARNING: Duration = Duration::from_secs(60);
 /// Capture rings hold this many packets (about 20 s of 10 ms packets).
 const RING_PACKETS: usize = 2_048;
+/// Frames the echo tap holds for the monitor thread (both channels, 5 s).
+const ECHO_TAP_FRAMES: usize = 100;
 
 /// Free VRAM in MB (`None` when unknown), as it is at Start
 /// ([`crate::gpu::free_vram`]).
@@ -222,6 +238,15 @@ pub enum LiveWarning {
     },
     /// A capture or storage problem (recording continues).
     Capture { channel: Channel, message: String },
+    /// The meeting's sound reaches the microphone (speakers, no headphones):
+    /// echo first detected (plan 15). `coupling` is the median correlation
+    /// of the last 10 active 2 s blocks, `lag_ms` the echo's delay, `aec`
+    /// whether echo cancellation runs. Echoed words are removed from "me".
+    Echo {
+        coupling: f32,
+        lag_ms: f32,
+        aec: bool,
+    },
 }
 
 /// A capture opened on a (new) endpoint (`live:device_changed`).
@@ -328,6 +353,10 @@ pub struct StopOutcome {
     /// Frames each channel's feed did not send to the engine.
     pub feed_dropped: BTreeMap<String, u64>,
     pub feed_reports: BTreeMap<String, FeedReport>,
+    /// The echo monitor's last state (`None` with `echo.mode = off`).
+    pub echo: Option<EchoState>,
+    /// Live mic words the echo gate left out of the live run.
+    pub echo_dropped: usize,
     pub post_pass: PostPassHandle,
 }
 
@@ -349,7 +378,18 @@ enum Ev {
     Pipeline(Channel, PipelineNotice),
     Feed(Channel, FeedNotice),
     Power(PowerEvent),
+    /// The echo status changed.
+    Echo(EchoState),
     Stop,
+}
+
+/// The echo monitor of a recording and the thread that feeds it.
+struct EchoRig {
+    monitor: Arc<Mutex<EchoMonitor>>,
+    thread: Option<JoinHandle<()>>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+    mode: EchoMode,
+    threshold: f32,
 }
 
 struct Rig {
@@ -374,8 +414,9 @@ pub struct Recorder {
     rigs: Vec<Rig>,
     sources: Sources,
     events_tx: Sender<Ev>,
-    event_thread: Option<JoinHandle<()>>,
+    event_thread: Option<JoinHandle<Option<LiveEcho>>>,
     shared: Arc<Mutex<Shared>>,
+    echo: Option<EchoRig>,
     clocks: HashMap<Channel, Arc<Mutex<ClockMap>>>,
     _power: Option<PowerNotifications>,
     stopped: bool,
@@ -479,6 +520,8 @@ impl Recorder {
             .unwrap_or_else(|| settings::default_language(&stored));
         let autoconvert = autoconvert_setting(&stored);
         let agc_for = |ch: Channel| agc_setting(&stored, ch).then(AgcConfig::default);
+        let echo_mode = settings::echo_mode(&stored);
+        let echo_threshold = settings::echo_gate_threshold(&stored);
         let started_at = now_ms();
         let title = opts
             .title
@@ -529,6 +572,22 @@ impl Recorder {
         for ch in [Channel::Mic, Channel::Loopback] {
             clocks.insert(ch, Arc::new(Mutex::new(ClockMap::new(origin_qpc))));
         }
+        // Echo: both pipelines tap their frames into one channel; the
+        // monitor places them on meeting time through the shared clocks.
+        let echo_tap = (echo_mode != EchoMode::Off).then(|| FrameTap::new(ECHO_TAP_FRAMES));
+        let echo = echo_tap.as_ref().map(|(tap, _)| EchoRig {
+            monitor: Arc::new(Mutex::new(EchoMonitor::new(
+                COUPLED_AT,
+                Some((
+                    Arc::clone(&clocks[&Channel::Mic]),
+                    Arc::clone(&clocks[&Channel::Loopback]),
+                )),
+            ))),
+            thread: None,
+            dropped: tap.drop_counter(),
+            mode: echo_mode,
+            threshold: echo_threshold,
+        });
         let mut me = Self {
             ctx: ctx.clone(),
             meeting: meeting.clone(),
@@ -546,6 +605,7 @@ impl Recorder {
             clocks: clocks.clone(),
             _power: None,
             stopped: false,
+            echo: None,
         };
         let el = EventLoop {
             store: Arc::clone(&store),
@@ -565,6 +625,15 @@ impl Recorder {
             warned: false,
             quiet: QuietDetector::default(),
             loopback_device: String::new(),
+            echo: echo.as_ref().map(|e| LiveEcho {
+                monitor: Arc::clone(&e.monitor),
+                mode: e.mode,
+                threshold: e.threshold,
+                state: EchoState::default(),
+                warned: false,
+                utts: BTreeMap::new(),
+                pending: Vec::new(),
+            }),
         };
         let mut cmds = Vec::new();
         let result = (|| -> Result<()> {
@@ -586,6 +655,7 @@ impl Recorder {
                         meeting: meeting.id,
                         clock: Arc::clone(&clocks[&ch]),
                         agc: agc_for(ch),
+                        tap: echo_tap.as_ref().map(|(t, _)| t.clone()),
                         notify,
                     },
                     cons,
@@ -632,6 +702,28 @@ impl Recorder {
         })();
         let mut el = el;
         el.cmds = cmds;
+        // The monitor thread ends when both pipelines (the taps' senders)
+        // have ended.
+        if let (Some((tap, rx)), Some(mut rig)) = (echo_tap, echo) {
+            drop(tap);
+            let monitor = Arc::clone(&rig.monitor);
+            let tx = events_tx.clone();
+            rig.thread = std::thread::Builder::new()
+                .name("live-echo".into())
+                .spawn(move || {
+                    while let Ok(frame) = rx.recv() {
+                        let change = monitor
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(&frame);
+                        if let Some(state) = change {
+                            let _ = tx.send(Ev::Echo(state));
+                        }
+                    }
+                })
+                .ok();
+            me.echo = Some(rig);
+        }
         me.event_thread = Some(
             std::thread::Builder::new()
                 .name("live-events".into())
@@ -726,11 +818,21 @@ impl Recorder {
                 f.abort();
             }
         }
+        if let Some(t) = self.echo.as_mut().and_then(|e| e.thread.take()) {
+            let _ = t.join();
+        }
         let _ = self.events_tx.send(Ev::Stop);
         if let Some(t) = self.event_thread.take() {
             let _ = t.join();
         }
         self.stopped = true;
+    }
+
+    /// The echo monitor's state (`None` with `echo.mode = off`).
+    pub fn echo_state(&self) -> Option<EchoState> {
+        self.echo
+            .as_ref()
+            .map(|e| e.monitor.lock().unwrap_or_else(|p| p.into_inner()).state())
     }
 
     /// Stops the recording, finishes the live run and submits the post-pass.
@@ -765,6 +867,11 @@ impl Recorder {
                     }
                 }
             }
+        }
+        // The monitor has every frame once its thread ends (its senders
+        // went with the pipelines); its state changes are queued before Stop.
+        if let Some(t) = self.echo.as_mut().and_then(|e| e.thread.take()) {
+            let _ = t.join();
         }
         // 3. Same length for both WAVs, then finalize.
         let len = results
@@ -803,9 +910,11 @@ impl Recorder {
             }
         }
         let _ = self.events_tx.send(Ev::Stop);
-        if let Some(t) = self.event_thread.take() {
-            let _ = t.join();
-        }
+        let live_echo = self
+            .event_thread
+            .take()
+            .and_then(|t| t.join().ok())
+            .flatten();
         self.stopped = true;
         let issues = self
             .shared
@@ -821,7 +930,35 @@ impl Recorder {
         let ended_at = self.meeting.started_at + duration_ms;
         store.finish_meeting(self.meeting.id, ended_at, duration_ms)?;
         store.set_meeting_status(self.meeting.id, MeetingStatus::Processing)?;
-        store.materialise_live_run(self.run.id, &SegmentOptions::default())?;
+        let (echo, echo_dropped) = match (&self.echo, live_echo) {
+            (Some(rig), Some(mut le)) => {
+                let gate = le.finish(rig);
+                store.materialise_live_run_except(
+                    self.run.id,
+                    &SegmentOptions::default(),
+                    &|u, i| u.channel == Channel::Mic && gate.skip.contains(&(u.utt, u.rev, i)),
+                )?;
+                let mut info = store.get_run(self.run.id)?.engine_info;
+                info["echo"] = gate.info;
+                store.set_run_engine_info(self.run.id, info)?;
+                if gate.gated {
+                    store.set_echo_dropped(self.run.id, &gate.dropped)?;
+                }
+                log::info!(
+                    "live echo meeting {}: {:?}, {} of {} live mic words gated, {} tap frames dropped",
+                    self.meeting.id,
+                    gate.state.status,
+                    gate.dropped.len(),
+                    gate.words,
+                    rig.dropped.load(std::sync::atomic::Ordering::Relaxed)
+                );
+                (Some(gate.state), gate.dropped.len())
+            }
+            _ => {
+                store.materialise_live_run(self.run.id, &SegmentOptions::default())?;
+                (None, 0)
+            }
+        };
         store.finish_run(self.run.id, RunStatus::Done)?;
         store.set_current_run(self.meeting.id, self.run.id)?;
         register_wavs(
@@ -858,6 +995,8 @@ impl Recorder {
             issues,
             feed_dropped,
             feed_reports,
+            echo,
+            echo_dropped,
             post_pass,
         })
     }
@@ -989,19 +1128,204 @@ struct EventLoop {
     warned: bool,
     quiet: QuietDetector,
     loopback_device: String,
+    echo: Option<LiveEcho>,
+}
+
+/// One mic utterance's latest revision as the live gate saw it.
+struct MicUtt {
+    rev: u32,
+    words: Vec<LiveWord>,
+    spans: Vec<(i64, i64)>,
+    scores: Vec<WordScore>,
+    /// The drop flags the sink last got.
+    shown: Vec<bool>,
+}
+
+/// The live side of the echo gate (on the event thread).
+struct LiveEcho {
+    monitor: Arc<Mutex<EchoMonitor>>,
+    mode: EchoMode,
+    threshold: f32,
+    state: EchoState,
+    warned: bool,
+    utts: BTreeMap<u32, MicUtt>,
+    /// Utterances with words not scored yet.
+    pending: Vec<u32>,
+}
+
+/// What Stop materialises from the live gate.
+struct LiveGate {
+    gated: bool,
+    state: EchoState,
+    /// `(utt, rev, word index)` left out of the live run.
+    skip: std::collections::HashSet<(u32, u32, usize)>,
+    dropped: Vec<EchoDroppedWord>,
+    words: usize,
+    info: serde_json::Value,
+}
+
+impl LiveEcho {
+    fn gating(&self) -> bool {
+        self.mode == EchoMode::Always || self.state.status == EchoStatus::Coupled
+    }
+
+    fn score(&self, spans: &[(i64, i64)]) -> Vec<WordScore> {
+        self.monitor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .score_words(spans)
+    }
+
+    /// The drop flags the sink should show for `u` now.
+    fn drops(&self, u: &MicUtt) -> Vec<bool> {
+        if self.gating() {
+            decide(&u.scores, self.threshold)
+        } else {
+            vec![false; u.words.len()]
+        }
+    }
+
+    /// Scores a new mic revision; returns the words to show.
+    fn revision(&mut self, utt: u32, rev: u32, words: Vec<LiveWord>) -> Vec<LiveWord> {
+        let spans: Vec<(i64, i64)> = words
+            .iter()
+            .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
+            .collect();
+        let scores = self.score(&spans);
+        let mut u = MicUtt {
+            rev,
+            words,
+            spans,
+            scores,
+            shown: Vec::new(),
+        };
+        u.shown = self.drops(&u);
+        if u.scores.contains(&WordScore::Pending) && !self.pending.contains(&utt) {
+            self.pending.push(utt);
+        }
+        let shown = visible(&u);
+        self.utts.insert(utt, u);
+        shown
+    }
+
+    /// Scores the words still pending, and re-shows any utterance whose
+    /// shown words changed (`all`: every utterance, after a status change).
+    fn refresh(&mut self, all: bool) -> Vec<(u32, u32, Vec<LiveWord>)> {
+        let mut out = Vec::new();
+        let pending = std::mem::take(&mut self.pending);
+        for utt in &pending {
+            let Some(spans) = self.utts.get(utt).map(|u| u.spans.clone()) else {
+                continue;
+            };
+            let scores = self.score(&spans);
+            if scores.contains(&WordScore::Pending) {
+                self.pending.push(*utt);
+            }
+            if let Some(u) = self.utts.get_mut(utt) {
+                u.scores = scores;
+            }
+        }
+        let keys: Vec<u32> = if all {
+            self.utts.keys().copied().collect()
+        } else {
+            pending
+        };
+        for utt in keys {
+            let Some(drops) = self.utts.get(&utt).map(|u| self.drops(u)) else {
+                continue;
+            };
+            if let Some(u) = self.utts.get_mut(&utt) {
+                if u.shown != drops {
+                    u.shown = drops;
+                    out.push((utt, u.rev, visible(u)));
+                }
+            }
+        }
+        out
+    }
+
+    /// At Stop: the last pending words scored, the hysteresis over every
+    /// live mic word in time order, and what the live run leaves out.
+    fn finish(&mut self, rig: &EchoRig) -> LiveGate {
+        let _ = self.refresh(false);
+        let mon = rig.monitor.lock().unwrap_or_else(|e| e.into_inner());
+        let state = mon.state();
+        let gated = self.mode == EchoMode::Always || mon.ever_coupled();
+        let mut all: Vec<(i64, u32, u32, usize, WordScore)> = Vec::new();
+        for (&utt, u) in &self.utts {
+            for (i, s) in u.scores.iter().enumerate() {
+                all.push((u.spans[i].0, utt, u.rev, i, *s));
+            }
+        }
+        all.sort_by_key(|w| (w.0, w.1, w.3));
+        let flags = decide(&all.iter().map(|w| w.4).collect::<Vec<_>>(), self.threshold);
+        let mut skip = std::collections::HashSet::new();
+        let mut dropped = Vec::new();
+        if gated {
+            for (w, d) in all.iter().zip(&flags) {
+                if *d {
+                    skip.insert((w.1, w.2, w.3));
+                    let lw = &self.utts[&w.1].words[w.3];
+                    dropped.push(EchoDroppedWord {
+                        start_ms: lw.start_ms,
+                        end_ms: lw.end_ms,
+                        text: lw.text.clone(),
+                        coefficient: w.4.coefficient().unwrap_or(0.0),
+                    });
+                }
+            }
+        }
+        let info = serde_json::json!({
+            "status": state.status,
+            "coupled": mon.ever_coupled(),
+            "coupling": round3(state.coupling),
+            "lag_ms": state.lag_ms.map(round3),
+            "erl_db": state.erl_db.map(round3),
+            "coupled_at_ms": mon.coupled_at_ms(),
+            "mic_words_before": all.len(),
+            "dropped": dropped.len(),
+            "threshold": round3(self.threshold),
+            "aec": false,
+            "mode": self.mode.as_str(),
+            "tap_frames_dropped": rig.dropped.load(std::sync::atomic::Ordering::Relaxed),
+        });
+        LiveGate {
+            gated,
+            state,
+            skip,
+            dropped,
+            words: all.len(),
+            info,
+        }
+    }
+}
+
+fn visible(u: &MicUtt) -> Vec<LiveWord> {
+    u.words
+        .iter()
+        .zip(&u.shown)
+        .filter(|(_, d)| !**d)
+        .map(|(w, _)| w.clone())
+        .collect()
+}
+
+/// Three decimals for `engine_info`.
+pub(crate) fn round3(v: f32) -> f64 {
+    (f64::from(v) * 1_000.0).round() / 1_000.0
 }
 
 /// Level above which a channel counts as active.
 const ACTIVE_DBFS: f32 = -50.0;
 
 impl EventLoop {
-    fn run(mut self, rx: Receiver<Ev>) {
+    fn run(mut self, rx: Receiver<Ev>) -> Option<LiveEcho> {
         let _awake = KeepAwake::new();
         while let Ok(ev) = rx.recv() {
             match ev {
                 Ev::Stop => break,
                 Ev::Pipeline(ch, n) => self.on_pipeline(ch, n),
                 Ev::Feed(ch, n) => self.on_feed(ch, n),
+                Ev::Echo(state) => self.on_echo(state),
                 Ev::Power(PowerEvent::Suspend) => {
                     for (_, c) in &self.cmds {
                         let _ = c.send(PipelineCommand::Flush);
@@ -1024,8 +1348,47 @@ impl EventLoop {
             match ev {
                 Ev::Feed(ch, n) => self.on_feed(ch, n),
                 Ev::Pipeline(ch, n) => self.on_pipeline(ch, n),
+                Ev::Echo(state) => self.on_echo(state),
                 _ => {}
             }
+        }
+        self.echo.take()
+    }
+
+    fn on_echo(&mut self, state: EchoState) {
+        let Some(echo) = self.echo.as_mut() else {
+            return;
+        };
+        echo.state = state;
+        log::info!(
+            "live echo: {:?}, coupling {:.2}, lag {:?} ms",
+            state.status,
+            state.coupling,
+            state.lag_ms
+        );
+        if state.status == EchoStatus::Coupled && !echo.warned {
+            echo.warned = true;
+            self.sink.warning(&LiveWarning::Echo {
+                coupling: state.coupling,
+                lag_ms: state.lag_ms.unwrap_or(0.0),
+                aec: false,
+            });
+        }
+        let updates = echo.refresh(true);
+        self.show_mic(updates);
+    }
+
+    /// Sends re-gated mic utterances to the sink.
+    fn show_mic(&self, updates: Vec<(u32, u32, Vec<LiveWord>)>) {
+        for (utt, rev, words) in updates {
+            self.sink.words(&WordsUpdate {
+                meeting_id: self.meeting,
+                run_id: self.run,
+                channel: Channel::Mic,
+                utt,
+                rev,
+                words,
+            });
         }
     }
 
@@ -1104,6 +1467,11 @@ impl EventLoop {
                         }
                     })
                     .collect();
+                // Every word is stored; the sink gets what the gate keeps.
+                let live = match self.echo.as_mut() {
+                    Some(echo) if ch == Channel::Mic => echo.revision(utt, rev, live),
+                    _ => live,
+                };
                 self.sink.words(&WordsUpdate {
                     meeting_id: self.meeting,
                     run_id: self.run,
@@ -1176,6 +1544,12 @@ impl EventLoop {
             }) => {
                 if reason != ChangeReason::Initial {
                     self.issues(|i| i.device_changes += 1);
+                    if let Some(echo) = &self.echo {
+                        echo.monitor
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .device_changed();
+                    }
                 }
                 if ch == Channel::Loopback {
                     self.loopback_device = name.clone();
@@ -1229,6 +1603,12 @@ impl EventLoop {
         raw_peak_dbfs: f32,
     ) {
         let at_ms = (at_sample / 16) as i64;
+        if ch == Channel::Mic {
+            if let Some(echo) = self.echo.as_mut().filter(|e| !e.pending.is_empty()) {
+                let updates = echo.refresh(false);
+                self.show_mic(updates);
+            }
+        }
         self.sink.levels(&LevelsUpdate {
             channel: ch,
             at_ms,

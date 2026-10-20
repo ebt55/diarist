@@ -30,6 +30,10 @@ export function warningText(w: LiveWarning): string {
       return `System audio from ${w.device || "the output"} is very quiet (peaks ${Math.round(w.peak_dbfs)} dBFS); raise its Windows volume or pick another output.`;
     case "capture":
       return `${w.channel === "mic" ? "Microphone" : "System audio"}: ${w.message}`;
+    case "echo":
+      return w.aec
+        ? "Sound from the meeting reaches your microphone. Echo cancellation is on."
+        : `Sound from the meeting reaches your microphone. Echoed words are removed from "me"; headphones would help.`;
     default:
       return JSON.stringify(w);
   }

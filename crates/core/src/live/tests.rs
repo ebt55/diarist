@@ -943,3 +943,311 @@ fn recovers_interrupted_post_passes() {
     // Nothing left to recover.
     assert!(recover(&ctx).unwrap().is_empty());
 }
+
+// ---- echo (plan 15) ------------------------------------------------------------------
+
+/// Plays `signal(n)` (`n`: absolute sample index since `epoch`, so two
+/// sources line up on QPC time) in 10 ms packets at `speed` times real time.
+struct SignalSource {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+type Signal = Arc<dyn Fn(i64) -> i16 + Send + Sync>;
+
+impl SignalSource {
+    fn start(epoch: i64, speed: f64, signal: Signal, mut ring: rtrb::Producer<Packet>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let _ = ring.push(Packet::Control {
+                qpc_100ns: qpc_now_100ns(),
+                control: Control::DeviceChanged {
+                    device_id: "fake".into(),
+                    name: "Fake device".into(),
+                    reason: ChangeReason::Initial,
+                },
+            });
+            let start = qpc_now_100ns();
+            let t0 = Instant::now();
+            let mut k = 0i64;
+            while !s.load(Ordering::SeqCst) {
+                let due = Duration::from_secs_f64(0.01 * k as f64 / speed);
+                if let Some(d) = due.checked_sub(t0.elapsed()) {
+                    std::thread::sleep(d);
+                }
+                let q = start + k * 100_000;
+                let n0 = (q - epoch) / 625;
+                let pcm: Vec<i16> = (0..160).map(|i| signal(n0 + i)).collect();
+                let _ = ring.push(Packet::Audio {
+                    qpc_100ns: q,
+                    flags: PacketFlags::default(),
+                    data: PacketData::Pcm16(pcm),
+                });
+                k += 1;
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl PacketSource for SignalSource {
+    fn reopen(&self) {}
+    fn status(&self) -> CaptureStatus {
+        CaptureStatus::default()
+    }
+    fn stop(mut self: Box<Self>) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Records what the sink saw, warnings included.
+#[derive(Default)]
+struct WarnSink {
+    words: Mutex<Vec<WordsUpdate>>,
+    warnings: Mutex<Vec<LiveWarning>>,
+}
+impl LiveSink for WarnSink {
+    fn words(&self, u: &WordsUpdate) {
+        self.words.lock().unwrap().push(u.clone());
+    }
+    fn warning(&self, w: &LiveWarning) {
+        self.warnings.lock().unwrap().push(w.clone());
+    }
+}
+
+/// The far end on the loopback and, 3 ms later and 10 dB down, on the mic:
+/// a meeting on speakers, played four times faster than real time.
+fn echo_context(dir: &Path) -> (LiveContext, Arc<SqliteStore>) {
+    use crate::audio::echo::synth::{db, monologue};
+    let (mut ctx, store, _) = context(dir, None);
+    let (far, _) = monologue(41, 30 * 16_000, db(-28.0));
+    let far = Arc::new(far);
+    let epoch = qpc_now_100ns();
+    ctx.sources = Arc::new(move |cfg: CaptureConfig, ring| {
+        let far = Arc::clone(&far);
+        let len = far.len() as i64;
+        let signal: Signal = if cfg.channel == Channel::Mic {
+            Arc::new(move |n| {
+                let e = far[(n - 48).rem_euclid(len) as usize] * db(-10.0);
+                (e * 32_768.0).round() as i16 + ((n * 7_919) % 13 - 6) as i16
+            })
+        } else {
+            Arc::new(move |n| (far[n.rem_euclid(len) as usize] * 32_768.0).round() as i16)
+        };
+        Ok(Box::new(SignalSource::start(epoch, 4.0, signal, ring)) as Box<dyn PacketSource>)
+    });
+    (ctx, store)
+}
+
+/// Words of the latest revisions of `channel`.
+fn latest_words(rows: &[crate::types::LiveUtterance], channel: Channel) -> usize {
+    let mut best: BTreeMap<u32, &crate::types::LiveUtterance> = BTreeMap::new();
+    for r in rows.iter().filter(|r| r.channel == channel) {
+        if best.get(&r.utt).is_none_or(|b| b.rev < r.rev) {
+            best.insert(r.utt, r);
+        }
+    }
+    best.values().map(|r| r.words.len()).sum()
+}
+
+#[test]
+fn speakers_warn_once_and_echo_words_leave_the_live_run_and_the_post_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store) = echo_context(dir.path());
+    // The live run stays for the checks below.
+    store.set_setting(settings::KEEP_LIVE_RUNS, "true").unwrap();
+    let sink = Arc::new(WarnSink::default());
+    // The context (its queue) outlives the recorder, or the post-pass job
+    // is dropped with it.
+    let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
+    let m = rec.meeting_id();
+    // About 30 s of audio: coupling is decided on the tenth active 2 s block.
+    std::thread::sleep(Duration::from_millis(7_500));
+    assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
+    let out = rec.stop().unwrap();
+    let echo = out.echo.unwrap();
+    assert_eq!(echo.status, EchoStatus::Coupled);
+    assert!((echo.lag_ms.unwrap() - 3.0).abs() < 0.5, "{echo:?}");
+    assert!((9.0..13.0).contains(&echo.erl_db.unwrap()), "{echo:?}");
+    let warnings = sink.warnings.lock().unwrap().clone();
+    let echoes: Vec<&LiveWarning> = warnings
+        .iter()
+        .filter(|w| matches!(w, LiveWarning::Echo { .. }))
+        .collect();
+    assert_eq!(echoes.len(), 1, "{warnings:?}");
+    assert!(
+        matches!(echoes[0], LiveWarning::Echo { aec: false, coupling, .. } if *coupling > 0.5),
+        "{echoes:?}"
+    );
+    // Every mic word is stored; the live run leaves the echo out, and the
+    // sink was told to hide what it had shown.
+    let rows = store.list_live_utterances(out.live_run).unwrap();
+    let stored_mic = latest_words(&rows, Channel::Mic);
+    assert!(stored_mic >= 20, "{stored_mic}");
+    assert!(
+        out.echo_dropped + 2 >= stored_mic,
+        "{} of {stored_mic}",
+        out.echo_dropped
+    );
+    let live = store.get_run(out.live_run).unwrap();
+    assert_eq!(live.engine_info["echo"]["coupled"], true);
+    assert_eq!(live.engine_info["echo"]["aec"], false);
+    assert_eq!(
+        live.engine_info["echo"]["dropped"].as_u64(),
+        Some(out.echo_dropped as u64)
+    );
+    let listed = store.echo_dropped(out.live_run).unwrap().unwrap();
+    assert_eq!(listed.len(), out.echo_dropped);
+    assert!(listed
+        .iter()
+        .all(|w| w.coefficient >= 0.2 && w.text.starts_with('w')));
+    let hidden = sink
+        .words
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.channel == Channel::Mic && u.words.is_empty())
+        .count();
+    assert!(hidden > 0, "no mic update was gated");
+    // The post-pass rescans and gates its own mic words.
+    let report = out
+        .post_pass
+        .wait(Duration::from_secs(60))
+        .unwrap()
+        .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (e["coupled"].as_bool(), e["mode"].as_str()),
+        (Some(true), Some("auto"))
+    );
+    let before = e["mic_words_before"].as_u64().unwrap();
+    let dropped = e["dropped"].as_u64().unwrap();
+    assert!(before >= 20 && dropped + 2 >= before, "{e}");
+    assert!(e.get("dropped_words").is_none());
+    let mic_left = store
+        .get_words(m, i64::MIN, i64::MAX)
+        .unwrap()
+        .iter()
+        .filter(|w| w.text.starts_with('p') && w.raw_label.is_none())
+        .count() as u64;
+    assert_eq!(mic_left, before - dropped);
+    assert_eq!(
+        store
+            .echo_dropped(report.current_run)
+            .unwrap()
+            .unwrap()
+            .len() as u64,
+        dropped
+    );
+    drop(ctx);
+}
+
+/// A stored meeting whose first 28 s are the far end echoed into the mic
+/// and whose last 28 s are the owner alone, then the real post-pass with
+/// the fake engine's word per second.
+fn echo_post_pass(mode: Option<&str>, echo: bool) -> (Arc<SqliteStore>, PostPassReport) {
+    use crate::audio::echo::synth::{add_delayed, add_noise, db, monologue, to_i16};
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    if let Some(m) = mode {
+        store.set_setting(settings::ECHO_MODE, m).unwrap();
+    }
+    let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
+    let n = 60 * 16_000;
+    let (far, _) = monologue(51, 28 * 16_000, db(-28.0));
+    let (own, _) = monologue(52, 28 * 16_000, db(-33.0));
+    let mut lb = vec![0.0f32; n];
+    lb[..far.len()].copy_from_slice(&far);
+    add_noise(&mut lb, 53, db(-65.0));
+    let mut mic = vec![0.0f32; n];
+    mic[32 * 16_000..].copy_from_slice(&own);
+    if echo {
+        add_delayed(&mut mic, &lb, 48, db(-10.0));
+    }
+    add_noise(&mut mic, 54, db(-60.0));
+    let folder = dir.path().join("audio").join(&meeting.uid);
+    for (ch, x) in [("mic", &mic), ("loopback", &lb)] {
+        let mut w = crate::audio::wav::WavSink::create(&folder.join(format!("{ch}.wav"))).unwrap();
+        w.write(&to_i16(x)).unwrap();
+        w.finalize().unwrap();
+    }
+    let job = PostPassJob {
+        job_id: JobId::new(),
+        meeting: meeting.id,
+        live_run: live,
+        data_root: dir.path().to_path_buf(),
+        folder,
+        language: "en".into(),
+        diarize_mic: false,
+        transcribe: true,
+        keep_live_runs: true,
+        segment: SegmentOptions::default(),
+    };
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    (store, report)
+}
+
+#[test]
+fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
+    let mic_words = |store: &SqliteStore, run: RunId| -> Vec<i64> {
+        let m = store.get_run(run).unwrap().meeting_id;
+        store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .iter()
+            .filter(|w| w.text.starts_with('p') && w.raw_label.is_none())
+            .map(|w| w.start_ms / 1_000)
+            .collect()
+    };
+    // auto: the echoed seconds go, the owner's stay.
+    let (store, report) = echo_post_pass(None, true);
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(e["coupled"], true, "{e}");
+    assert_eq!(
+        (e["mic_words_before"].as_u64(), e["threshold"].as_f64()),
+        (Some(60), Some(0.35))
+    );
+    let kept = mic_words(&store, report.current_run);
+    assert!(kept.iter().all(|s| *s >= 27), "{kept:?}");
+    assert!((32..60).all(|s| kept.contains(&s)), "{kept:?}");
+    let dropped = store.echo_dropped(report.current_run).unwrap().unwrap();
+    assert_eq!(dropped.len() as u64, e["dropped"].as_u64().unwrap());
+    assert!(dropped
+        .iter()
+        .all(|w| w.start_ms < 30_000 && w.text.starts_with('p')));
+    // off: no echo key, no list, every word.
+    let (store, report) = echo_post_pass(Some("off"), true);
+    let run = store.get_run(report.current_run).unwrap();
+    assert!(run.engine_info.get("echo").is_none());
+    assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
+    assert_eq!(mic_words(&store, report.current_run).len(), 60);
+    // always, without echo: gated, nothing correlates, nothing goes.
+    let (store, report) = echo_post_pass(Some("always"), false);
+    let run = store.get_run(report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    assert_eq!(
+        (e["coupled"].as_bool(), e["dropped"].as_u64()),
+        (Some(false), Some(0))
+    );
+    assert_eq!(
+        store.echo_dropped(report.current_run).unwrap(),
+        Some(Vec::new())
+    );
+    assert_eq!(mic_words(&store, report.current_run).len(), 60);
+}

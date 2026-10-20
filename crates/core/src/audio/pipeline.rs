@@ -15,13 +15,16 @@
 //!
 //! [`spawn_pipeline`] runs one on its own thread: it drains the capture
 //! ring, writes the WAV ([`super::wav::WavSink`], flushed every second),
-//! offers frames to the engine feed (never blocking), records anchors
+//! copies every frame to an optional [`FrameTap`] (the echo monitor; never
+//! blocking, before the feed so a degraded feed does not starve it), offers
+//! frames to the engine feed (never blocking), records anchors
 //! through [`RunStore::add_clock_anchors`] in batches and into a shared
 //! [`ClockMap`], and reports levels, gaps, device changes and feed
 //! transitions through a callback.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -641,6 +644,46 @@ pub enum PipelineCommand {
     Stop { at_qpc: i64 },
 }
 
+/// A copy of every frame for another consumer (the echo monitor, plan 15):
+/// a bounded channel the pipeline only ever `try_send`s to; a frame that
+/// does not fit (the consumer stalled) is dropped and counted.
+#[derive(Clone)]
+pub struct FrameTap {
+    tx: SyncSender<Frame>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl FrameTap {
+    /// A tap holding up to `capacity` frames, and its receiving end.
+    pub fn new(capacity: usize) -> (Self, Receiver<Frame>) {
+        let (tx, rx) = sync_channel(capacity);
+        (
+            Self {
+                tx,
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            rx,
+        )
+    }
+
+    /// Copies `frame` if there is room; never waits.
+    pub fn offer(&self, frame: &Frame) {
+        if self.tx.try_send(frame.clone()).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Frames that did not fit (over every clone of this tap).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The drop counter alone (holding it does not keep the channel open).
+    pub fn drop_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dropped)
+    }
+}
+
 /// Where a pipeline thread writes.
 pub struct PipelineThreadConfig {
     pub channel: Channel,
@@ -655,6 +698,8 @@ pub struct PipelineThreadConfig {
     pub clock: Arc<Mutex<ClockMap>>,
     /// Automatic gain before the WAV and the feed (`None`: off).
     pub agc: Option<AgcConfig>,
+    /// Every frame is also offered here (`None`: no copy).
+    pub tap: Option<FrameTap>,
     pub notify: Arc<dyn Fn(Channel, PipelineNotice) + Send + Sync>,
 }
 
@@ -769,6 +814,9 @@ fn deliver(
                 raw_peak_dbfs: frame.raw_peak_dbfs,
             },
         );
+        if let Some(tap) = &cfg.tap {
+            tap.offer(&frame);
+        }
         if let Some(feed) = cfg.feed.as_mut() {
             if let Some(t) = feed.offer(frame) {
                 (cfg.notify)(cfg.channel, PipelineNotice::Feed(t));
@@ -1078,6 +1126,10 @@ mod tests {
         let wav = dir.path().join("mic.wav");
         // A 1 s feed so the test is quick; the worker stalls for 2 s.
         let (tx, rx) = feed(10, 2);
+        // A tap nobody reads: it fills, drops and counts; the WAV and the
+        // feed are not affected.
+        let (tap, tap_rx) = FrameTap::new(4);
+        let tap_count = tap.clone();
         let notices = Arc::new(Mutex::new(Vec::new()));
         let n2 = Arc::clone(&notices);
         let cfg = PipelineThreadConfig {
@@ -1089,6 +1141,7 @@ mod tests {
             meeting: MeetingId(1),
             clock: Arc::new(Mutex::new(ClockMap::new(ORIGIN))),
             agc: None,
+            tap: Some(tap),
             notify: Arc::new(move |_, n| {
                 if let PipelineNotice::Feed(t) = n {
                     n2.lock().unwrap().push(t);
@@ -1135,5 +1188,7 @@ mod tests {
         assert!(t.contains(&FeedTransition::Recovered), "{t:?}");
         assert!(res.feed_dropped > 0);
         assert_eq!(frames_got as u64 + res.feed_dropped, 80);
+        assert_eq!(tap_rx.try_iter().count(), 4);
+        assert_eq!(tap_count.dropped(), 76);
     }
 }

@@ -466,6 +466,18 @@ pub struct Word {
     pub overlap: bool,
 }
 
+/// A mic word the echo gate removed (`transcript_runs.echo_dropped`, plan
+/// 15): far-end speech the microphone picked up from the speakers. Meeting
+/// time; `coefficient` is the word's correlation with the loopback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EchoDroppedWord {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    pub coefficient: f32,
+}
+
 /// One revision of a live utterance (`live_utterances`), append-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveUtterance {

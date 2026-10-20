@@ -108,6 +108,7 @@ pub(crate) fn latest_revisions(rows: &[LiveUtterance]) -> Vec<&LiveUtterance> {
 pub(crate) fn transcript_from_live(
     latest: &[&LiveUtterance],
     opts: &SegmentOptions,
+    skip: &dyn Fn(&LiveUtterance, usize) -> bool,
 ) -> NewTranscript {
     let mut per_channel: BTreeMap<Channel, Vec<TranscriptWord>> = BTreeMap::new();
     for u in latest {
@@ -116,21 +117,24 @@ pub(crate) fn transcript_from_live(
         } else {
             UNKNOWN_LABEL
         };
-        per_channel
-            .entry(u.channel)
-            .or_default()
-            .extend(u.words.iter().map(|w| {
-                let j = LiveWordJson::from_engine(w);
-                TranscriptWord {
-                    channel: u.channel,
-                    start_ms: j.t0,
-                    end_ms: j.t1,
-                    text: j.text,
-                    confidence: j.conf,
-                    speaker: j.spk.clone().unwrap_or_else(|| default.to_owned()),
-                    raw_label: j.spk,
-                }
-            }));
+        per_channel.entry(u.channel).or_default().extend(
+            u.words
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !skip(u, *i))
+                .map(|(_, w)| {
+                    let j = LiveWordJson::from_engine(w);
+                    TranscriptWord {
+                        channel: u.channel,
+                        start_ms: j.t0,
+                        end_ms: j.t1,
+                        text: j.text,
+                        confidence: j.conf,
+                        speaker: j.spk.clone().unwrap_or_else(|| default.to_owned()),
+                        raw_label: j.spk,
+                    }
+                }),
+        );
     }
     build_transcript_channels(per_channel.into_iter().collect(), opts)
 }

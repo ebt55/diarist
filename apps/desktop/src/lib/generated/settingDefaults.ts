@@ -18,6 +18,8 @@ export const SETTING_DEFAULTS = {
   "capture.autoconvert": "true",
   "capture.loopback_agc": "true",
   "capture.mic_agc": "false",
+  "echo.mode": "auto",
+  "echo.gate_threshold": "0.35",
   "engine.preload": "false",
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",

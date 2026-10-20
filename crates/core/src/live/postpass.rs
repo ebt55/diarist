@@ -17,6 +17,16 @@
 //! Words that come back mostly unknown-token markers fail the post-pass
 //! before anything is stored ([`CoreError::UnknownTokens`]): the live run
 //! and the WAVs stay, so it can run again.
+//!
+//! Echo (plan 15; nothing with `echo.mode = off`): after the mic is
+//! transcribed, [`EchoProfile::scan`] judges the WAVs in 2 s blocks (always
+//! rescanned: crash recovery and re-runs have no live monitor) and, when it
+//! found coupling, a canceller ran (`aec` in the live run's
+//! `engine_info.echo`) or the mode is `always`, [`gate_wavs`] drops the mic
+//! words that are the far end's echo before segmentation. The loopback is
+//! never touched. The counts and parameters go to `engine_info.echo`, the
+//! dropped words to the run's `echo_dropped` (for Restore), one count-only
+//! log line.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,18 +34,21 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
+use crate::audio::echo::{gate_wavs, ClockPair, EchoMode, EchoProfile};
 use crate::audio::flac::encode_stereo;
 use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, FileJob};
 use crate::error::{CoreError, Result};
 use crate::models::languages;
 use crate::pipeline::CancelToken;
+use crate::settings;
 use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
 use crate::transcript::{
     build_transcript_channels, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
     UNKNOWN_LABEL,
 };
 use crate::types::{
-    AudioFormat, Channel, JobId, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, TrackChannel,
+    AudioFormat, Channel, EchoDroppedWord, JobId, MeetingId, MeetingStatus, RunId, RunKind,
+    RunStatus, TrackChannel,
 };
 use crate::views::{JobEvent, JobStage};
 
@@ -188,6 +201,98 @@ pub fn map_words(words: &mut [TranscriptWord], map: &ClockMap, channel_end_ms: i
     }
 }
 
+/// What the echo step did.
+struct EchoOutcome {
+    /// `engine_info.echo`: counts and parameters only.
+    summary: serde_json::Value,
+    /// For the run's `echo_dropped`.
+    dropped: Vec<EchoDroppedWord>,
+    gated: bool,
+    /// The count-only log line.
+    log: String,
+}
+
+/// The echo step of the post-pass for the mic words (meeting time): scan,
+/// then the gate when it applies; returns the kept words.
+fn gate_mic(
+    mic: &Path,
+    lb: &Path,
+    clocks: Option<ClockPair>,
+    words: Vec<TranscriptWord>,
+    mode: EchoMode,
+    threshold: f32,
+    live: &serde_json::Value,
+) -> Result<(Vec<TranscriptWord>, EchoOutcome)> {
+    let t0 = Instant::now();
+    let aec = live["aec"].as_bool().unwrap_or(false);
+    let profile = EchoProfile::scan(mic, lb, clocks)?;
+    let scan_s = t0.elapsed().as_secs_f64();
+    let gated = profile.gates(mode, aec);
+    let before = words.len();
+    let mut dropped = Vec::new();
+    let kept = if gated {
+        // With clock maps the words are on meeting time, the profile's
+        // timeline; without them both are channel time.
+        let spans: Vec<(i64, i64)> = words
+            .iter()
+            .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
+            .collect();
+        let g = gate_wavs(&spans, mic, lb, &profile, threshold)?;
+        let mut kept = Vec::with_capacity(g.kept);
+        for (w, (d, s)) in words.into_iter().zip(g.drop.iter().zip(&g.scores)) {
+            if *d {
+                dropped.push(EchoDroppedWord {
+                    start_ms: w.start_ms,
+                    end_ms: w.end_ms,
+                    text: w.text.clone(),
+                    coefficient: s.coefficient().unwrap_or(0.0),
+                });
+            } else {
+                kept.push(w);
+            }
+        }
+        kept
+    } else {
+        words
+    };
+    // The live monitor's return loss is on pre-AGC levels; the WAVs only
+    // give the post-AGC one.
+    let erl = live["erl_db"]
+        .as_f64()
+        .or(profile.erl_db.map(super::round3));
+    let summary = serde_json::json!({
+        "coupled": profile.coupled,
+        "coupling": super::round3(profile.coupling),
+        "lag_ms": profile.lag_ms.map(super::round3),
+        "erl_db": erl,
+        "mic_words_before": before,
+        "dropped": dropped.len(),
+        "threshold": super::round3(threshold),
+        "aec": aec,
+        "mode": mode.as_str(),
+    });
+    let log = format!(
+        "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{} at {threshold:.2}; scan {scan_s:.1} s, total {:.1} s",
+        profile.status,
+        profile.coupling,
+        profile.lag_ms,
+        profile.active_blocks,
+        profile.blocks,
+        dropped.len(),
+        if gated { "" } else { " (not gated)" },
+        t0.elapsed().as_secs_f64()
+    );
+    Ok((
+        kept,
+        EchoOutcome {
+            summary,
+            dropped,
+            gated,
+            log,
+        },
+    ))
+}
+
 /// Runs the post-pass (see the module docs). Reports `Progress` events;
 /// the caller sends the terminal `Done` / `Error` / `Cancelled`.
 pub fn run_post_pass(
@@ -224,6 +329,16 @@ pub fn run_post_pass(
             drift_ppm.insert(ch.to_string(), d);
         }
     }
+
+    // Echo: the settings now, and what the live run knew (a canceller).
+    let stored = settings::effective(store)?;
+    let echo_mode = settings::echo_mode(&stored);
+    let echo_threshold = settings::echo_gate_threshold(&stored);
+    let live_echo = store
+        .get_run(job.live_run)
+        .map(|r| r.engine_info["echo"].clone())
+        .unwrap_or(serde_json::Value::Null);
+    let mut echo: Option<EchoOutcome> = None;
 
     let mut transcribe_wall = Duration::ZERO;
     let mut carry = None;
@@ -268,6 +383,14 @@ pub fn run_post_pass(
             }
             map_words(&mut tw, &map_of(ch), (frames * 1_000 / 16_000) as i64);
             tw.sort_by_key(|w| w.start_ms);
+            if ch == Channel::Mic && echo_mode != EchoMode::Off {
+                let clocks = ClockPair::usable(map_of(Channel::Mic), map_of(Channel::Loopback));
+                let (kept, e) =
+                    gate_mic(&mic, &lb, clocks, tw, echo_mode, echo_threshold, &live_echo)?;
+                tw = kept;
+                log::info!("post-pass meeting {}: echo {}", job.meeting, e.log);
+                echo = Some(e);
+            }
             channels.push((ch, tw));
         }
         transcribe_wall = t0.elapsed();
@@ -305,6 +428,14 @@ pub fn run_post_pass(
                 },
             }),
         )?;
+        if let Some(e) = &echo {
+            let mut info = run.engine_info.clone();
+            info["echo"] = e.summary.clone();
+            store.set_run_engine_info(run.id, info)?;
+            if e.gated {
+                store.set_echo_dropped(run.id, &e.dropped)?;
+            }
+        }
         if let Err(e) = store.insert_transcript(run.id, &transcript) {
             let _ = store.finish_run(run.id, RunStatus::Failed);
             return Err(e.into());
@@ -315,7 +446,7 @@ pub fn run_post_pass(
         // run: the live run is kept for them (recorded before the WAVs go,
         // so crash recovery keeps it too).
         unplaced = unplaced_names(store, job.live_run, &report)?;
-        let mut info = run.engine_info.clone();
+        let mut info = store.get_run(run.id)?.engine_info;
         info["unplaced_names"] = serde_json::json!(unplaced);
         store.set_run_engine_info(run.id, info)?;
         log::info!(

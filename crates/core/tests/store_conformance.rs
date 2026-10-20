@@ -15,8 +15,9 @@ use diarist_core::store::{
 };
 use diarist_core::transcript::SegmentOptions;
 use diarist_core::types::{
-    AudioFormat, Channel, ClockAnchor, MeetingId, MeetingStatus, ModelCapabilities, ModelRole,
-    ModelSource, RunId, RunKind, RunStatus, SegmentId, Source, Speaker, SpeakerId, TrackChannel,
+    AudioFormat, Channel, ClockAnchor, EchoDroppedWord, MeetingId, MeetingStatus,
+    ModelCapabilities, ModelRole, ModelSource, RunId, RunKind, RunStatus, SegmentId, Source,
+    Speaker, SpeakerId, TrackChannel,
 };
 use diarist_core::views::{default_speaker_color, SegmentView};
 
@@ -91,6 +92,10 @@ const RUN_CASES: &[(&str, RunCase)] = &[
         live_speakers_survive_materialise,
     ),
     ("delete_audio_track", delete_audio_track),
+    (
+        "echo_dropped_and_gated_materialise",
+        echo_dropped_and_gated_materialise,
+    ),
 ];
 
 fn report(name: &str, e: Box<dyn std::any::Any + Send>) -> ! {
@@ -914,6 +919,81 @@ fn live_latest_revisions(store: &dyn RunStore) {
     // Live rows go with the run.
     store.delete_run(run).unwrap();
     assert!(is_not_found(store.list_live_utterances(run)));
+}
+
+/// The echo gate's list of removed words round-trips per run and goes with
+/// it; a gated materialisation leaves the skipped live words out while they
+/// stay stored.
+fn echo_dropped_and_gated_materialise(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let run = store
+        .create_run(m, RunKind::Live, serde_json::json!({}))
+        .unwrap()
+        .id;
+    assert_eq!(store.echo_dropped(run).unwrap(), None);
+    let words = vec![
+        EchoDroppedWord {
+            start_ms: 1_000,
+            end_ms: 1_200,
+            text: "copied".into(),
+            coefficient: 0.75,
+        },
+        EchoDroppedWord {
+            start_ms: 2_000,
+            end_ms: 2_300,
+            text: "twice".into(),
+            coefficient: 0.42,
+        },
+    ];
+    store.set_echo_dropped(run, &words).unwrap();
+    assert_eq!(store.echo_dropped(run).unwrap(), Some(words.clone()));
+    store.set_echo_dropped(run, &words[1..]).unwrap();
+    assert_eq!(store.echo_dropped(run).unwrap(), Some(words[1..].to_vec()));
+    store.set_echo_dropped(run, &[]).unwrap();
+    assert_eq!(store.echo_dropped(run).unwrap(), Some(Vec::new()));
+    assert!(is_not_found(store.echo_dropped(RunId(424_242))));
+    assert!(is_not_found(store.set_echo_dropped(RunId(424_242), &words)));
+    // Its engine_info does not carry the list.
+    assert_eq!(
+        store.get_run(run).unwrap().engine_info,
+        serde_json::json!({})
+    );
+
+    store
+        .append_live_utterance(
+            run,
+            Channel::Mic,
+            0,
+            0,
+            &[ew(0, 300, "echo", None), ew(400, 700, "mine", None)],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(
+            run,
+            Channel::Mic,
+            0,
+            1,
+            &[
+                ew(0, 300, "echo", None),
+                ew(400, 700, "mine", None),
+                ew(800, 900, "too", None),
+            ],
+        )
+        .unwrap();
+    // Only the latest revision is asked: word 0 of rev 1 goes.
+    store
+        .materialise_live_run_except(run, &SegmentOptions::default(), &|u, i| {
+            assert_eq!(u.rev, 1);
+            i == 0
+        })
+        .unwrap();
+    store.set_current_run(m, run).unwrap();
+    let texts: Vec<String> = segments(store, m).into_iter().map(|s| s.text).collect();
+    assert_eq!(texts, ["mine too"]);
+    assert_eq!(store.list_live_utterances(run).unwrap()[1].words.len(), 3);
+    store.delete_run(run).unwrap();
+    assert!(is_not_found(store.echo_dropped(run)));
 }
 
 fn live_speakers_survive_materialise(store: &dyn RunStore) {

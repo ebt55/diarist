@@ -19,9 +19,9 @@ use super::{
 use crate::protocol::EngineWord;
 use crate::transcript::{join_text, SegmentOptions};
 use crate::types::{
-    new_id, AudioTrack, Channel, ClockAnchor, Edit, EditKind, LiveUtterance, Meeting, MeetingId,
-    MeetingStatus, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind, RunStatus, Segment,
-    SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
+    new_id, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, EditKind, LiveUtterance,
+    Meeting, MeetingId, MeetingStatus, ModelFile, ModelFileId, ReassignTarget, RunId, RunKind,
+    RunStatus, Segment, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -94,6 +94,8 @@ pub(super) struct State {
     pub live: Vec<LiveUtterance>,
     /// `(meeting, channel, sample_index) -> qpc_100ns`.
     pub anchors: BTreeMap<(MeetingId, Channel, i64), i64>,
+    /// Words the echo gate removed, per run (`transcript_runs.echo_dropped`).
+    pub echo_dropped: HashMap<RunId, Vec<EchoDroppedWord>>,
 }
 
 impl State {
@@ -322,6 +324,7 @@ impl State {
     /// where it pointed there.
     fn remove_run(&mut self, run: RunId) {
         self.runs.remove(&run);
+        self.echo_dropped.remove(&run);
         for sid in self.run_segments.remove(&run).unwrap_or_default() {
             self.segments.remove(&sid);
         }
@@ -1420,7 +1423,12 @@ impl RunStore for MemoryStore {
             .collect())
     }
 
-    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()> {
+    fn materialise_live_run_except(
+        &self,
+        run: RunId,
+        opts: &SegmentOptions,
+        skip: &dyn Fn(&LiveUtterance, usize) -> bool,
+    ) -> StoreResult<()> {
         let transcript = {
             let st = self.lock()?;
             st.run(run)?;
@@ -1430,7 +1438,7 @@ impl RunStore for MemoryStore {
                 .filter(|u| u.run_id == run)
                 .cloned()
                 .collect();
-            transcript_from_live(&latest_revisions(&rows), opts)
+            transcript_from_live(&latest_revisions(&rows), opts, skip)
         };
         // Conflict (segments already there) and validation as for any insert;
         // speaker rows from `live_speaker` are kept.
@@ -1494,6 +1502,19 @@ impl RunStore for MemoryStore {
             .get_mut(&run)
             .ok_or_else(|| StoreError::not_found("run", run))?
             .engine_info = engine_info;
+        Ok(())
+    }
+
+    fn echo_dropped(&self, run: RunId) -> StoreResult<Option<Vec<EchoDroppedWord>>> {
+        let st = self.lock()?;
+        st.run(run)?;
+        Ok(st.echo_dropped.get(&run).cloned())
+    }
+
+    fn set_echo_dropped(&self, run: RunId, words: &[EchoDroppedWord]) -> StoreResult<()> {
+        let mut st = self.lock()?;
+        st.run(run)?;
+        st.echo_dropped.insert(run, words.to_vec());
         Ok(())
     }
 

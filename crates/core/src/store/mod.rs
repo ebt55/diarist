@@ -35,9 +35,10 @@ use thiserror::Error;
 use crate::protocol::EngineWord;
 use crate::transcript::SegmentOptions;
 use crate::types::{
-    AudioFormat, AudioTrack, Channel, ClockAnchor, Edit, LiveUtterance, Meeting, MeetingId,
-    MeetingStatus, ModelCapabilities, ModelFile, ModelRole, ModelSource, RunId, RunKind, RunStatus,
-    SegmentId, Source, Speaker, SpeakerId, TrackChannel, TrackId, TranscriptRun, Word, WordId,
+    AudioFormat, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, LiveUtterance, Meeting,
+    MeetingId, MeetingStatus, ModelCapabilities, ModelFile, ModelRole, ModelSource, RunId, RunKind,
+    RunStatus, SegmentId, Source, Speaker, SpeakerId, TrackChannel, TrackId, TranscriptRun, Word,
+    WordId,
 };
 use crate::views::{MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings};
 
@@ -357,7 +358,28 @@ pub trait RunStore: Store {
     /// Speaker rows created earlier with [`RunStore::live_speaker`] are
     /// reused with everything the user set on them (name, colour, merges).
     /// `Conflict` if the run already has segments.
-    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()>;
+    fn materialise_live_run(&self, run: RunId, opts: &SegmentOptions) -> StoreResult<()> {
+        self.materialise_live_run_except(run, opts, &|_, _| false)
+    }
+
+    /// [`RunStore::materialise_live_run`] without the words for which
+    /// `skip(revision, word index)` is true (the live echo gate: every word
+    /// stays stored in `live_utterances`; only the latest revisions are
+    /// asked).
+    fn materialise_live_run_except(
+        &self,
+        run: RunId,
+        opts: &SegmentOptions,
+        skip: &dyn Fn(&LiveUtterance, usize) -> bool,
+    ) -> StoreResult<()>;
+
+    /// The mic words the echo gate removed from `run`
+    /// (`transcript_runs.echo_dropped`); `None` when the gate never ran on it.
+    fn echo_dropped(&self, run: RunId) -> StoreResult<Option<Vec<EchoDroppedWord>>>;
+
+    /// Records the words the echo gate removed from `run` (replacing any
+    /// earlier list).
+    fn set_echo_dropped(&self, run: RunId, words: &[EchoDroppedWord]) -> StoreResult<()>;
 
     /// The speaker row of `(channel, engine_label)` in a live run that has
     /// not been materialised yet, created on first use, so provisional
