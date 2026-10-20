@@ -42,7 +42,8 @@ CREATE TABLE transcript_runs (
   engine_info   TEXT NOT NULL,                   -- JSON: runtime version, model names and hashes, presets, fusion settings
   started_at    INTEGER NOT NULL,
   finished_at   INTEGER,
-  status        TEXT NOT NULL CHECK (status IN ('running','done','failed'))
+  status        TEXT NOT NULL CHECK (status IN ('running','done','failed')),
+  echo_dropped  TEXT                             -- 0003, JSON [{start_ms, end_ms, text, coefficient}]: mic words the echo gate removed (NULL: the gate never ran)
 );
 CREATE INDEX runs_meeting ON transcript_runs(meeting_id);
 
