@@ -42,15 +42,16 @@
 //!   words during far-end speech 0.06 (p90 0.23). Under full double-talk a
 //!   word's NCC is about sqrt(echo share of the mic power): 0.47 for the
 //!   owner 5 dB over the echo, so the band sits above that. Hysteresis
-//!   ([`GateBand`]): keep under 0.20, drop at 0.55, in between the
+//!   ([`GateBand`]): keep under 0.20, drop at 0.60, in between the
 //!   neighbours decide at `echo.gate_threshold` (0.50). Chosen from a sweep
-//!   of 125 bands (docs/eval/2026-10-20-echo.md) as the band dropping the
-//!   most duplicates while the FLEURS double-talk fixture's "me" WER rises
-//!   at most 1 point: meeting 12 duplicates dropped 99.04 percent,
-//!   misrecognised echo during far-end speech 95.45, the owner's words kept
-//!   98.84 (97.09 during far-end speech); fixture +0.25 points (0.20 / 0.35
-//!   / 0.50 before: 99.37 percent of duplicates, the owner's words 98.50,
-//!   fixture +15.91 points).
+//!   of 125 bands (docs/eval/2026-10-20-echo.md), the owner's words ranked
+//!   over residual duplicates: meeting 12 duplicates dropped 98.97 percent,
+//!   misrecognised echo during far-end speech 95.05, the owner's words kept
+//!   98.84 (97.09 during far-end speech); the FLEURS double-talk fixture's
+//!   "me" WER −0.68 points. Drop at 0.55 would take 0.07 points more
+//!   duplicates for +0.25 on the fixture; the first band 0.20 / 0.35 / 0.50
+//!   took 99.37 percent of duplicates, kept 98.50 of the owner's words and
+//!   cost +15.91 points.
 //! - Echo return loss median 10.3 dB; per coupled block
 //!   `(loopback − loopback gain) − (mic − mic gain) − 20·log10(NCC)`, so the
 //!   AGCs do not move it and the NCC term isolates the echo's share of the
@@ -108,7 +109,7 @@ pub const GATE_AFTER: i64 = 2_560;
 pub const GATE_LAG_HALF: i64 = 320;
 /// Hysteresis ([`GateBand::DEFAULT`]): drop at or above, keep under; in
 /// between the neighbours decide at `echo.gate_threshold`.
-pub const GATE_DROP_AT: f32 = 0.55;
+pub const GATE_DROP_AT: f32 = 0.6;
 pub const GATE_KEEP_UNDER: f32 = 0.2;
 /// `echo.gate_threshold` default and accepted range.
 pub const GATE_THRESHOLD: f32 = 0.5;

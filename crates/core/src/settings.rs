@@ -46,9 +46,8 @@ pub const CAPTURE_MIC_AGC: &str = "capture.mic_agc";
 /// nothing is gated) or `always` (gate regardless of detection) ([`echo_mode`]).
 pub const ECHO_MODE: &str = "echo.mode";
 /// Correlation at or above which a mic word in the gate's hysteresis band
-/// (0.2 to 0.55) is dropped when its neighbours' median reaches it; 0.2 to
-/// 0.6 accepted
-/// ([`echo_gate_threshold`]).
+/// (0.2 to 0.6) is dropped when its neighbours' median reaches it; 0.2 to
+/// 0.6 accepted ([`echo_gate_threshold`]).
 pub const ECHO_GATE_THRESHOLD: &str = "echo.gate_threshold";
 /// Start `nemo-speech serve` at app launch instead of on the first Record
 /// or when the start sheet opens.
