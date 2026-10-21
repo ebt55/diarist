@@ -326,12 +326,14 @@ mod tests {
                         end_ms: 2_350,
                         text: "one".into(),
                         coefficient: 0.81,
+                        reason: None,
                     },
                     EchoDroppedWord {
                         start_ms: 2_470,
                         end_ms: 2_700,
                         text: "two".into(),
                         coefficient: 0.77,
+                        reason: None,
                     },
                 ],
             )

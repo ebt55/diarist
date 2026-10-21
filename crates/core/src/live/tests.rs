@@ -190,8 +190,12 @@ impl Engine for FakeFile {
             .map(|s| EngineWord {
                 t0_us: s * 1_000_000 + 50_000,
                 t1_us: s * 1_000_000 + 900_000,
+                // Each channel says its own words (the text layer would
+                // take the same words at the same time for echo).
                 text: if self.unknown.load(Ordering::SeqCst) {
                     "<unk><unk><unk>e<unk>".to_owned()
+                } else if job.diarize {
+                    format!("q{s}")
                 } else {
                     format!("p{s}")
                 },
@@ -1120,9 +1124,10 @@ fn speakers_warn_once_and_echo_words_leave_the_live_run_and_the_post_pass() {
     );
     let listed = store.echo_dropped(out.live_run).unwrap().unwrap();
     assert_eq!(listed.len(), out.echo_dropped);
-    assert!(listed
-        .iter()
-        .all(|w| w.coefficient >= 0.2 && w.text.starts_with('w')));
+    // The mic says only the far end's words, at its times: echo by text
+    // (scored or not), or by correlation.
+    assert!(listed.iter().all(|w| w.text.starts_with('w')
+        && (w.coefficient >= 0.2 || w.reason == Some(crate::types::EchoReason::Text))));
     let hidden = sink
         .words
         .lock()
@@ -1599,9 +1604,13 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
     let (kept, e) = postpass::echo_step(
         MeetingId(1),
         &mic,
+        &mic,
         &lb,
         prep,
-        words.clone(),
+        postpass::MicWords {
+            words: &words,
+            far: &[],
+        },
         EchoMode::Auto,
         0.5,
         &serde_json::Value::Null,
@@ -1753,7 +1762,7 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert!(e["aec_erl_db"].as_f64().unwrap() < 20.0, "{e}");
     assert!(e.get("aec_error").is_none(), "{e}");
     // The cancelled mic's words get the gate's band after the canceller.
-    assert_eq!(e["band"], serde_json::json!([0.4, 0.6, 0.8]), "{e}");
+    assert_eq!(e["band"], serde_json::json!([0.6, 0.7, 0.95]), "{e}");
     assert!(
         r.mic_job.ends_with(postpass::MIC_AEC_WAV),
         "{:?}",
@@ -1821,7 +1830,7 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         "{e}"
     );
     assert_eq!(e["aec"], false, "{e}");
-    assert_eq!(e["band"], serde_json::json!([0.2, 0.5, 0.6]), "{e}");
+    assert_eq!(e["band"], serde_json::json!([0.3, 0.5, 0.7]), "{e}");
     assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
     // With the loopback's gain track: replayed backwards for the reference.
@@ -1905,6 +1914,7 @@ fn restored_runs_are_not_the_live_run() {
                 end_ms: 1_300,
                 text: "echo".into(),
                 coefficient: 0.8,
+                reason: None,
             }],
         )
         .unwrap();
@@ -1959,6 +1969,7 @@ fn restored_runs_are_not_the_live_run() {
                 end_ms: 1_300,
                 text: "echo".into(),
                 coefficient: 0.8,
+                reason: None,
             }],
         )
         .unwrap();

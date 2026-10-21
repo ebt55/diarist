@@ -937,12 +937,14 @@ fn echo_dropped_and_gated_materialise(store: &dyn RunStore) {
             end_ms: 1_200,
             text: "copied".into(),
             coefficient: 0.75,
+            reason: Some(diarist_core::types::EchoReason::Correlation),
         },
         EchoDroppedWord {
             start_ms: 2_000,
             end_ms: 2_300,
             text: "twice".into(),
             coefficient: 0.42,
+            reason: None,
         },
     ];
     store.set_echo_dropped(run, &words).unwrap();

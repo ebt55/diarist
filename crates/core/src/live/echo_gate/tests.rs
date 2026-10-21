@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::*;
 use crate::audio::echo::synth::{add_delayed, add_noise, db, monologue, to_i16};
-use crate::audio::echo::{COUPLED_AT, GATE_DROP_AT, GATE_KEEP_UNDER, GATE_THRESHOLD};
+use crate::audio::echo::{decide, COUPLED_AT, GATE_DROP_AT, GATE_KEEP_UNDER, GATE_THRESHOLD};
 use crate::audio::pipeline::{Frame, Level};
 use crate::types::Channel;
 
@@ -116,7 +116,7 @@ impl Run {
                     self.warnings += usize::from(warning.is_some());
                     self.apply(updates);
                 }
-                if f.channel == Channel::Mic && self.gate.has_pending() {
+                if f.channel == Channel::Mic {
                     let updates = self.gate.refresh();
                     self.apply(updates);
                 }
@@ -127,8 +127,9 @@ impl Run {
     }
 
     fn revise(&mut self, utt: u32, rev: u32, words: Vec<LiveWord>) {
-        let shown = self.gate.revision(utt, rev, words);
+        let (shown, updates) = self.gate.revision(utt, rev, words);
         self.shown.insert(utt, (rev, shown));
+        self.apply(updates);
         self.most_pending = self.most_pending.max(self.gate.pending.len());
     }
 
@@ -232,9 +233,9 @@ fn hysteresis_decides_middle_band_words_by_their_neighbours_in_the_utterance() {
     // w5 sits in the middle band; its echoed neighbours drop it.
     assert!(band.contains(&coef(5)), "w5 at {}", coef(5));
     assert!(coef(4) >= GATE_DROP_AT && coef(7) >= GATE_DROP_AT);
-    // The owner's turn sits in the middle band too; its own neighbours keep it.
+    // The owner's turn sits under the drop bound; its own neighbours keep it.
     for i in 14..=16 {
-        assert!(band.contains(&coef(i)), "w{i} at {}", coef(i));
+        assert!(coef(i) < GATE_DROP_AT, "w{i} at {}", coef(i));
     }
     let shown = run.texts(0);
     assert!(!shown.contains(&"w5".to_owned()), "{shown:?}");
@@ -344,4 +345,60 @@ fn turning_the_gate_off_shows_everything_again_and_stops_scoring() {
         (gate.info["user_off"].as_bool(), gate.info["mode"].as_str()),
         (Some(true), Some(ECHO_OFF_FOR_RECORDING))
     );
+}
+
+fn said(t_ms: i64, text: &str) -> LiveWord {
+    LiveWord {
+        start_ms: t_ms,
+        end_ms: t_ms + 200,
+        text: text.into(),
+        label: "me".into(),
+        speaker_id: None,
+    }
+}
+
+#[test]
+fn far_end_words_arriving_after_the_mic_hide_its_copy_until_the_utterance_settles() {
+    // `always`, the owner alone on the mic (nothing correlates): the text
+    // layer alone. The mic utterance repeats the far end's words 0.3 s
+    // later, but the loopback's revision reaches the gate after it.
+    let secs = 24;
+    let (far, _) = monologue(41, secs * SEC, db(-28.0));
+    let (mut mic, _) = monologue(52, secs * SEC, db(-33.0));
+    add_noise(&mut mic, 4, db(-60.0));
+    let mut run = Run::new(EchoMode::Always, &mic, Some(&far));
+    run.play(6);
+    let texts = ["alpha", "bravo", "charlie", "delta"];
+    let mic_words: Vec<LiveWord> = texts
+        .iter()
+        .enumerate()
+        .map(|(k, t)| said(4_300 + 250 * k as i64, t))
+        .collect();
+    run.revise(0, 0, mic_words);
+    assert_eq!(run.texts(0).len(), 4, "nothing known yet: all shown");
+    let lb_words: Vec<LiveWord> = texts
+        .iter()
+        .enumerate()
+        .map(|(k, t)| said(4_000 + 250 * k as i64, t))
+        .collect();
+    let updates = run.gate.loopback(0, 0, &lb_words);
+    assert_eq!(updates.len(), 1, "the mic utterance is sent again");
+    run.apply(updates);
+    assert!(run.texts(0).is_empty(), "{:?}", run.texts(0));
+    // Within the 3 s the decision can still change ...
+    let updates = run.gate.loopback(0, 1, &[said(4_000, "echo")]);
+    run.apply(updates);
+    assert_eq!(run.texts(0).len(), 4);
+    let updates = run.gate.loopback(0, 2, &lb_words);
+    run.apply(updates);
+    assert!(run.texts(0).is_empty());
+    // ... after it, it is final.
+    run.play(12);
+    let updates = run.gate.loopback(0, 3, &[said(4_000, "echo")]);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert!(run.texts(0).is_empty());
+    // Stop decides with everything known: the far end's last revision
+    // no longer repeats them.
+    let gate = run.gate.finish(0);
+    assert!(gate.skip.is_empty(), "{:?}", gate.dropped);
 }

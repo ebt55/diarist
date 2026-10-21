@@ -3,11 +3,16 @@
 //!
 //! With the meeting on speakers the loopback reaches the mic a few
 //! milliseconds later and about 10 dB down, and the mic transcript repeats
-//! it as "me". Everything here is one statistic: the normalised
-//! cross-correlation (NCC) of the loopback against the mic, both high-passed
-//! at 100 Hz, computed by FFT at sample resolution ([`Correlator`]: a
-//! 4,096-point block convolution) over a lag window, on a common timeline
-//! (meeting time through the clock maps, or raw indices without them).
+//! it as "me". The detector and the correlation layer are one statistic:
+//! the normalised cross-correlation (NCC) of the loopback against the mic,
+//! both band-passed to 300 to 3,400 Hz ([`SpeechBand`]; plan 15 section
+//! 9.1, until round two a 100 Hz high-pass), computed by FFT at sample
+//! resolution ([`Correlator`]: a 4,096-point block convolution) over a lag
+//! window, on a common timeline (meeting time through the clock maps, or
+//! raw indices without them). The mic word gate is layered on top of it
+//! ([`layers`]: text matching against the loopback's words ([`text`]), the
+//! near-end level and the canceller's attenuation ([`presence`]), the
+//! correlation, an utterance rule).
 //!
 //! - [`EchoMonitor`] (live) keeps a 60 s high-passed PCM ring per channel on
 //!   meeting time ([`PcmRing`], fed from the pipelines' non-blocking taps;
@@ -17,12 +22,16 @@
 //! - [`EchoProfile::scan`] (post-pass) runs the same detector over the
 //!   stored WAVs, so the post-pass never depends on the live monitor (crash
 //!   recovery, re-runs). It returns the per-block lag track.
-//! - [`gate_words`] is the one word gate, for the post-pass and live: per
-//!   mic word the NCC over `[start − 350 ms, end + 160 ms]` at the tracked
-//!   lag ±20 ms, then [`decide`] with hysteresis.
+//! - [`score_spans`] scores a mic word for the correlation layer, for the
+//!   post-pass and live: the NCC over `[start − 350 ms, end + 160 ms]` at
+//!   the tracked lag ±20 ms; [`decide`] is its hysteresis, [`gate_words`]
+//!   the correlation gate alone (chunk A's).
 //!
 //! The numbers behind the constants (meeting 12, 19 Oct 2026, 111 minutes,
-//! speakers; plan 15 section 2):
+//! speakers; plan 15 section 2; measured with the 100 Hz high-pass and kept
+//! after the band-pass's re-measurement in docs/eval/2026-10-21-echo-round2.md:
+//! echo blocks now median 0.78 on meeting 12 and 0.67 on meeting 14, the
+//! nulls' p99 0.12 to 0.20, a headphone leak 0.17):
 //!
 //! - Loopback 2 s windows: speech at −35 to −25 dBFS, silence and noise at
 //!   −50 or below: a block is active at −45 dBFS ([`ACTIVE_DBFS`]).
@@ -126,15 +135,19 @@ pub const GATE_AFTER: i64 = 2_560;
 pub const GATE_LAG_HALF: i64 = 320;
 /// Hysteresis ([`GateBand::DEFAULT`]): drop at or above, keep under; in
 /// between the neighbours decide at `echo.gate_threshold`.
-pub const GATE_DROP_AT: f32 = 0.6;
-pub const GATE_KEEP_UNDER: f32 = 0.2;
+pub const GATE_DROP_AT: f32 = 0.7;
+pub const GATE_KEEP_UNDER: f32 = 0.3;
 /// `echo.gate_threshold` default and accepted range.
 pub const GATE_THRESHOLD: f32 = 0.5;
 pub const GATE_THRESHOLD_RANGE: (f32, f32) = (0.2, 0.6);
 /// Live PCM ring per channel: 60 s (960,000 f32 samples, 3.84 MB).
 pub const RING_SAMPLES: usize = 960_000;
-/// High-pass corner of both channels (as the measurement).
+/// High-pass corner of [`HighPass`] (the chunk A measurement's filter).
 const HIGHPASS_HZ: f64 = 100.0;
+/// [`SpeechBand`]'s corners: what the correlator, the presence levels and
+/// the floor see.
+pub const BAND_LOW_HZ: f64 = 300.0;
+pub const BAND_HIGH_HZ: f64 = 3_400.0;
 /// Coupled blocks whose return loss is kept for the median.
 const ERL_BLOCKS: usize = 600;
 /// Drift prediction on raw indices: confident blocks kept, and the span they
@@ -234,6 +247,23 @@ impl Biquad {
         }
     }
 
+    /// RBJ low-pass.
+    fn lowpass(f0: f64, q: f64) -> Self {
+        let w = std::f64::consts::TAU * f0 / 16_000.0;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: (1.0 - cos) / 2.0 / a0,
+            b1: (1.0 - cos) / a0,
+            b2: (1.0 - cos) / 2.0 / a0,
+            a1: -2.0 * cos / a0,
+            a2: (1.0 - alpha) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
     #[inline]
     fn run(&mut self, x: f64) -> f64 {
         let y = self.b0 * x + self.z1;
@@ -258,6 +288,47 @@ impl Default for HighPass {
 }
 
 impl HighPass {
+    /// Appends `pcm` filtered.
+    pub fn extend(&mut self, pcm: &[i16], out: &mut Vec<f32>) {
+        let settled = self
+            .0
+            .iter()
+            .all(|b| b.z1.abs() < 1e-9 && b.z2.abs() < 1e-9);
+        if settled && pcm.iter().all(|&s| s == 0) {
+            for b in &mut self.0 {
+                b.z1 = 0.0;
+                b.z2 = 0.0;
+            }
+            out.resize(out.len() + pcm.len(), 0.0);
+            return;
+        }
+        out.reserve(pcm.len());
+        for &s in pcm {
+            let a = self.0[0].run(f64::from(s) / 32_768.0);
+            out.push(self.0[1].run(a) as f32);
+        }
+    }
+}
+
+/// The speech band every echo statistic is taken in (plan 15 section 9.1):
+/// a 2nd-order Butterworth high-pass at 300 Hz and a 2nd-order low-pass at
+/// 3,400 Hz, output scaled to ±1. Below 300 Hz the room's rumble and above
+/// 3,400 Hz the jitter-decohered highs only add to the normalisation's
+/// energies; band-limited, meeting 14's echo blocks correlate at 0.72 to
+/// 0.80 instead of 0.50 to 0.57.
+#[derive(Debug, Clone, Copy)]
+pub struct SpeechBand([Biquad; 2]);
+
+impl Default for SpeechBand {
+    fn default() -> Self {
+        Self([
+            Biquad::highpass(BAND_LOW_HZ, std::f64::consts::FRAC_1_SQRT_2),
+            Biquad::lowpass(BAND_HIGH_HZ, std::f64::consts::FRAC_1_SQRT_2),
+        ])
+    }
+}
+
+impl SpeechBand {
     /// Appends `pcm` filtered.
     pub fn extend(&mut self, pcm: &[i16], out: &mut Vec<f32>) {
         let settled = self
@@ -608,7 +679,7 @@ impl EchoAudio for RingAudio<'_> {
 /// before the last request (reads must move forward, as words and blocks do).
 struct Stream<S> {
     src: S,
-    hp: HighPass,
+    hp: SpeechBand,
     raw: Vec<i16>,
     buf: Vec<f32>,
     base: i64,
@@ -623,7 +694,7 @@ impl<S: PcmSource> Stream<S> {
     fn new(src: S) -> Self {
         Self {
             src,
-            hp: HighPass::default(),
+            hp: SpeechBand::default(),
             raw: Vec::with_capacity(STREAM_CHUNK),
             buf: Vec::new(),
             base: 0,
@@ -775,6 +846,12 @@ pub trait PcmSource {
     /// Appends up to `max` samples to `out`; returns how many (fewer only at
     /// the end).
     fn pull(&mut self, out: &mut Vec<i16>, max: usize) -> usize;
+}
+
+impl<P: PcmSource + ?Sized> PcmSource for Box<P> {
+    fn pull(&mut self, out: &mut Vec<i16>, max: usize) -> usize {
+        (**self).pull(out, max)
+    }
 }
 
 impl PcmSource for &[i16] {
@@ -1379,7 +1456,7 @@ fn qpc_cached(map: &ClockMap, fit: &mut SlopeFit, s: f64) -> f64 {
 /// Where one channel's frames land on the timeline.
 #[derive(Debug, Default)]
 struct Placement {
-    hp: HighPass,
+    hp: SpeechBand,
     /// Timeline minus channel sample.
     offset: i64,
     frames: u32,
@@ -1455,6 +1532,10 @@ pub struct EchoMonitor {
     blocks: u64,
     active_blocks: u64,
     skipped_blocks: u64,
+    /// The mic's noise floor so far (loopback-silent frames of every judged
+    /// block).
+    floor: presence::FloorTracker,
+    levels: Vec<f32>,
 }
 
 impl EchoMonitor {
@@ -1475,11 +1556,23 @@ impl EchoMonitor {
             blocks: 0,
             active_blocks: 0,
             skipped_blocks: 0,
+            floor: presence::FloorTracker::default(),
+            levels: Vec::new(),
         }
     }
 
     pub fn state(&self) -> EchoState {
         self.detector.state()
+    }
+
+    /// The mic's noise floor so far (dBFS, speech band).
+    pub fn floor_db(&self) -> Option<f32> {
+        self.floor.floor_db()
+    }
+
+    /// Meeting time (ms) up to which the mic has arrived.
+    pub fn mic_head_ms(&self) -> i64 {
+        (self.mic.head() as f64 / PER_MS) as i64
     }
 
     pub fn ever_coupled(&self) -> bool {
@@ -1564,6 +1657,11 @@ impl EchoMonitor {
                     break;
                 }
             }
+            if self.mic.read(t, BLOCK, &mut self.x) == Avail::Ready
+                && self.loopback.read(t, BLOCK, &mut self.y) == Avail::Ready
+            {
+                self.floor.push(&self.x, &self.y);
+            }
             let mut audio = RingAudio {
                 mic: &self.mic,
                 loopback: &self.loopback,
@@ -1586,6 +1684,28 @@ impl EchoMonitor {
         changed
     }
 
+    /// The presence of live mic words (timeline spans in samples) from the
+    /// rings ([`presence::presence`]); `Err(NotYet)` for a span not fully
+    /// arrived, `Err(Gone)` for one overwritten.
+    pub fn presence_words(
+        &mut self,
+        spans: &[(i64, i64)],
+    ) -> Vec<std::result::Result<presence::Presence, Avail>> {
+        let mut audio = RingAudio {
+            mic: &self.mic,
+            loopback: &self.loopback,
+        };
+        let mut x = std::mem::take(&mut self.x);
+        let mut levels = std::mem::take(&mut self.levels);
+        let out = spans
+            .iter()
+            .map(|&s| presence::presence(&mut audio, None, s, &mut x, &mut levels))
+            .collect();
+        self.x = x;
+        self.levels = levels;
+        out
+    }
+
     /// Scores live mic words (timeline spans in samples, i.e. meeting ms ×
     /// 16) from the rings with [`gate_words`]' scoring.
     pub fn score_words(&mut self, spans: &[(i64, i64)]) -> Vec<WordScore> {
@@ -1598,7 +1718,17 @@ impl EchoMonitor {
         let mut y = std::mem::take(&mut self.y);
         let out = spans
             .iter()
-            .map(|&s| score_word(&mut audio, &mut self.corr, s, lag, &mut x, &mut y))
+            .map(|&s| {
+                score_word(
+                    &mut audio,
+                    &mut self.corr,
+                    s,
+                    lag,
+                    GatePad::DEFAULT,
+                    &mut x,
+                    &mut y,
+                )
+            })
             .collect();
         self.x = x;
         self.y = y;
@@ -1636,6 +1766,9 @@ pub struct EchoProfile {
     pub relocks: usize,
     /// The timeline is meeting time through these maps (else raw indices).
     pub clocks: Option<ClockPair>,
+    /// The peak coefficient of every active block, in time order (the
+    /// evaluation's distributions).
+    pub active: Vec<f32>,
     /// The track's drift slope on raw indices (0 on meeting time), for
     /// [`Self::lag_at`].
     slope: f64,
@@ -1667,6 +1800,7 @@ impl EchoProfile {
         let mut corr = Correlator::default();
         let (mut x, mut y) = (Vec::new(), Vec::new());
         let mut coefs = Vec::new();
+        let mut active = Vec::new();
         let mut track = Vec::new();
         let mut blocks = 0usize;
         let mut erl = Vec::new();
@@ -1692,6 +1826,7 @@ impl EchoProfile {
                 continue;
             }
             coefs.push(r.coefficient);
+            active.push(r.coefficient);
             if let Some(e) = r.erl_db {
                 erl.push(e);
             }
@@ -1726,6 +1861,7 @@ impl EchoProfile {
             },
             track,
             clocks,
+            active,
         }
     }
 
@@ -1794,8 +1930,29 @@ fn fit_slope(points: &[(i64, f32)]) -> Option<f64> {
 
 // ---- the word gate ----------------------------------------------------------------
 
+/// The padding of a word's correlation span (samples before its start and
+/// after its end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatePad {
+    pub before: i64,
+    pub after: i64,
+}
+
+impl GatePad {
+    pub const DEFAULT: Self = Self {
+        before: GATE_BEFORE,
+        after: GATE_AFTER,
+    };
+}
+
+impl Default for GatePad {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Scores one mic word (timeline samples of the mic): the loopback that
-/// would have produced it (the padded span `[start − 350 ms, end + 160 ms]`
+/// would have produced it (the padded span `[start − before, end + after]`
 /// moved back by `lag`) against the mic at `lag` ±20 ms (the causal
 /// acquisition window without a lag).
 fn score_word(
@@ -1803,12 +1960,13 @@ fn score_word(
     corr: &mut Correlator,
     (start, end): (i64, i64),
     lag: Option<f32>,
+    pad: GatePad,
     x: &mut Vec<f32>,
     y: &mut Vec<f32>,
 ) -> WordScore {
     let base = lag.map_or(0, |l| l.round() as i64);
-    let p0 = start - GATE_BEFORE - base;
-    let p1 = end.max(start) + GATE_AFTER - base;
+    let p0 = start - pad.before - base;
+    let p1 = end.max(start) + pad.after - base;
     let len = (p1 - p0) as usize;
     let (lo, hi) = match lag {
         Some(_) => (base - GATE_LAG_HALF, base + GATE_LAG_HALF),
@@ -1906,16 +2064,15 @@ pub struct GateReport {
     pub kept: usize,
 }
 
-/// The word gate (post-pass and live): scores every span (timeline samples,
-/// i.e. meeting ms × 16 with clock maps) against `audio` at the lag `lag_at`
-/// gives for its time, then [`decide`] over the spans in time order.
-pub fn gate_words(
+/// Scores every span (timeline samples, i.e. meeting ms × 16 with clock
+/// maps) against `audio` at the lag `lag_at` gives for its time, in time
+/// order (stored channels are read forward); the scores in input order.
+pub fn score_spans(
     spans: &[(i64, i64)],
     audio: &mut dyn EchoAudio,
     lag_at: &dyn Fn(i64) -> Option<f32>,
-    band: GateBand,
-) -> GateReport {
-    // Scored in time order: stored channels are read forward.
+    pad: GatePad,
+) -> Vec<WordScore> {
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by_key(|&i| spans[i]);
     let mut corr = Correlator::default();
@@ -1923,8 +2080,20 @@ pub fn gate_words(
     let mut scores = vec![WordScore::Undefined; spans.len()];
     for &i in &order {
         let s = spans[i];
-        scores[i] = score_word(audio, &mut corr, s, lag_at(s.0), &mut x, &mut y);
+        scores[i] = score_word(audio, &mut corr, s, lag_at(s.0), pad, &mut x, &mut y);
     }
+    scores
+}
+
+/// The correlation gate alone (chunk A's): [`score_spans`], then [`decide`]
+/// over the spans in time order.
+pub fn gate_words(
+    spans: &[(i64, i64)],
+    audio: &mut dyn EchoAudio,
+    lag_at: &dyn Fn(i64) -> Option<f32>,
+    band: GateBand,
+) -> GateReport {
+    let scores = score_spans(spans, audio, lag_at, GatePad::DEFAULT);
     let drop = decide_in_order(spans, &scores, band);
     let dropped = drop.iter().filter(|d| **d).count();
     GateReport {
@@ -1952,6 +2121,23 @@ pub fn gate_sources(
     gate_words(spans, &mut audio, &|t| profile.lag_at(t), band)
 }
 
+/// [`score_spans`] over stored channels, on the profile's timeline and lag
+/// track.
+pub fn score_sources(
+    spans: &[(i64, i64)],
+    mic: impl PcmSource,
+    loopback: impl PcmSource,
+    profile: &EchoProfile,
+    pad: GatePad,
+) -> Vec<WordScore> {
+    let mut audio = StreamAudio {
+        mic: Stream::new(mic),
+        loopback: Stream::new(loopback),
+        clocks: profile.clocks.clone(),
+    };
+    score_spans(spans, &mut audio, &|t| profile.lag_at(t), pad)
+}
+
 /// [`gate_sources`] over the two WAVs.
 pub fn gate_wavs(
     spans: &[(i64, i64)],
@@ -1977,6 +2163,10 @@ pub fn clamp_threshold(v: f32) -> f32 {
         GATE_THRESHOLD
     }
 }
+
+pub mod layers;
+pub mod presence;
+pub mod text;
 
 #[cfg(test)]
 pub(crate) mod synth;

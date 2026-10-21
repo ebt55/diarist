@@ -20,18 +20,21 @@
 //! frames to a non-blocking [`FrameTap`]; a monitor thread places both
 //! channels on meeting time in rings and judges 2 s blocks
 //! ([`EchoMonitor`]); the first detection is one [`LiveWarning::Echo`].
-//! Every mic word is still stored. From the first coupling on (with
-//! `always`, from the start) the sink gets the mic words the gate keeps
-//! ([`crate::audio::echo::gate_words`]'s scoring from the rings, each word
-//! scored once and its score kept across revisions; the `echo_gate` module
-//! has the rules), and Stop materialises the live run without the dropped
-//! words (their list goes to the run's `echo_dropped`, the counts to
-//! `engine_info.echo`). A later release (headphones put on) changes nothing
-//! already decided. The sink gets the gate's hysteresis per utterance, Stop
-//! decides it over every live mic word of the run in time order, so a
-//! middle-band word at an utterance's edge can be shown and still be left
-//! out of the live run, or the reverse. A recording that never couples is
-//! never scored. The sink's current decisions are kept per word, so
+//! Every mic word is still stored. The sink gets the mic words the layered
+//! gate keeps ([`crate::audio::echo::layers`]: text matching against the
+//! loopback's words, which reach the gate from the same loop, the near-end
+//! level from the rings, from the first coupling on (with `always`, from
+//! the start) the correlation; the [`echo_gate`] module has the rules), and
+//! Stop materialises the live run without the dropped words (their list
+//! goes to the run's `echo_dropped`, the counts per layer to
+//! `engine_info.echo`). A mic utterance's decision can change for 3 s
+//! after its latest revision (a loopback revision can make it echo), and
+//! the change is sent as the utterance again; a later release (headphones
+//! put on) changes nothing already decided. Stop decides every live mic
+//! word of the run at once, as the post-pass does, so a word can be shown
+//! and still be left out of the live run, or the reverse. On a recording
+//! that neither couples nor shows text matches nothing is removed. The
+//! sink's current decisions are kept per word, so
 //! [`snapshot_except`] gives a view that reopens mid-recording what the sink
 //! showed ([`Recorder::echo_hidden`]). [`Recorder::turn_off_echo`] (the
 //! banner's "Turn off for this recording") stops the gating for the rest of
@@ -49,7 +52,7 @@
 //! `processing`; [`rerun_post_pass`] queues a failed or cancelled post-pass
 //! again.
 
-mod echo_gate;
+pub mod echo_gate;
 pub mod postpass;
 pub mod power;
 mod recover;
@@ -1402,9 +1405,15 @@ impl EventLoop {
                     })
                     .collect();
                 // Every word is stored; the sink gets what the gate keeps.
-                let live = match self.echo.as_mut() {
+                // A loopback revision can change what an earlier mic
+                // utterance shows (the text layer).
+                let (live, regated) = match self.echo.as_mut() {
                     Some(echo) if ch == Channel::Mic => echo.revision(utt, rev, live),
-                    _ => live,
+                    Some(echo) => {
+                        let regated = echo.loopback(utt, rev, &live);
+                        (live, regated)
+                    }
+                    None => (live, Vec::new()),
                 };
                 self.sink.words(&WordsUpdate {
                     meeting_id: self.meeting,
@@ -1414,6 +1423,7 @@ impl EventLoop {
                     rev,
                     words: live,
                 });
+                self.show_mic(regated);
             }
             FeedNotice::Engine(EngineEvent::TextFinalUntil { t_us, .. }) => {
                 let until = (self.meeting_us(ch, t_us) / 1_000) as i64;
@@ -1535,7 +1545,7 @@ impl EventLoop {
     ) {
         let at_ms = (at_sample / 16) as i64;
         if ch == Channel::Mic {
-            if let Some(echo) = self.echo.as_mut().filter(|e| e.has_pending()) {
+            if let Some(echo) = self.echo.as_mut() {
                 let updates = echo.refresh();
                 self.show_mic(updates);
             }

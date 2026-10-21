@@ -468,7 +468,9 @@ pub struct Word {
 
 /// A mic word the echo gate removed (`transcript_runs.echo_dropped`, plan
 /// 15): far-end speech the microphone picked up from the speakers. Meeting
-/// time; `coefficient` is the word's correlation with the loopback.
+/// time; `coefficient` is the word's correlation with the loopback (0 when
+/// it was not scored), `reason` the layer that removed it (absent on runs
+/// from before plan 15 section 9).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EchoDroppedWord {
@@ -476,6 +478,46 @@ pub struct EchoDroppedWord {
     pub end_ms: i64,
     pub text: String,
     pub coefficient: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<EchoReason>,
+}
+
+/// Which layer of the echo gate removed a mic word (plan 15 section 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum EchoReason {
+    /// It repeats the far end's words, in a delay-consistent run.
+    Text,
+    /// The canceller removed most of its energy (post-pass).
+    Attenuation,
+    /// Its level sits at the mic's noise floor while the far end talks.
+    Level,
+    /// It correlates with the loopback.
+    Correlation,
+    /// A fragment inside an utterance the other layers found mostly echo.
+    Utterance,
+}
+
+impl EchoReason {
+    pub const ALL: [Self; 5] = [
+        Self::Text,
+        Self::Attenuation,
+        Self::Level,
+        Self::Correlation,
+        Self::Utterance,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Attenuation => "attenuation",
+            Self::Level => "level",
+            Self::Correlation => "correlation",
+            Self::Utterance => "utterance",
+        }
+    }
 }
 
 /// One revision of a live utterance (`live_utterances`), append-only.

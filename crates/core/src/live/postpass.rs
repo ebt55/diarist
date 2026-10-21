@@ -28,16 +28,21 @@
 //! runs over `mic.wav` with `loopback.wav` as the reference (its AGC
 //! replayed backwards from `loopback.gain` when there is one) into a
 //! temporary [`MIC_AEC_WAV`], which is transcribed instead of `mic.wav` and
-//! deleted right after. Then, when the profile found coupling, a canceller
-//! ran (here, or `aec` in the live run's `engine_info.echo`) or the mode is
-//! `always`, [`gate_wavs`] drops the mic words that are the far end's echo
-//! before segmentation, scoring each word's span against the raw `mic.wav`
-//! (the cancelled mic no longer correlates with the loopback), over the
-//! cancelled mic's words with a band of its own ([`band_after_canceller`]).
+//! deleted after the echo step. Then the layered gate
+//! ([`crate::audio::echo::layers`], plan 15 section 9) drops the mic words
+//! that are the far end's before segmentation: text matching against the
+//! loopback's words and the near-end level (on what was transcribed) on
+//! every recording, once the text matches show echo; the canceller's
+//! attenuation of each word where it ran; the correlation, scored against
+//! the raw `mic.wav` (the cancelled mic no longer correlates with the
+//! loopback), when the profile found coupling, a canceller ran (here, or
+//! `aec` in the live run's `engine_info.echo`) or the mode is `always`,
+//! with a band of its own after the canceller ([`band_after_canceller`]).
 //! The loopback is never touched. The counts and parameters go to
 //! `engine_info.echo` (with the canceller's `erle_db`, `aec_wall_s`,
-//! `aec_wait_s` and `gain_track`, and the gate's `band`), the dropped words
-//! to the run's `echo_dropped` (for Restore), one count-only log line. A recording whose echo handling the user turned off while it
+//! `aec_wait_s` and `gain_track`, the gate's `band`, `layers` and
+//! `floor_db` / `owner_db`), the dropped words with their reason to the
+//! run's `echo_dropped` (for Restore), one count-only log line. A recording whose echo handling the user turned off while it
 //! ran (`user_off` in the live run's `engine_info.echo`) is scanned but
 //! neither cancelled nor gated: the counts are written with mode
 //! [`super::ECHO_OFF_FOR_RECORDING`], and there is no `echo_dropped`. The
@@ -54,8 +59,12 @@ use std::time::{Duration, Instant};
 
 use crate::audio::aec::offline::{cancel_wavs, OfflineOptions, OfflineReport};
 use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
+use crate::audio::echo::layers::{self, GateWord, LayerOptions};
+use crate::audio::echo::presence::{floor_sources, presence_sources};
+use crate::audio::echo::text::{norm, FarIndex, TextWindow};
 use crate::audio::echo::{
-    gate_wavs, ClockPair, EchoMode, EchoProfile, GateBand, PcmSource, WavSamples, ACTIVE_DBFS,
+    score_sources, ClockPair, EchoMode, EchoProfile, GateBand, GatePad, PcmSource, WavSamples,
+    WordScore, ACTIVE_DBFS,
 };
 use crate::audio::flac::encode_stereo;
 use crate::audio::gain_track::{self, GainTrack};
@@ -119,22 +128,24 @@ pub const MIC_AEC_WAV: &str = "mic-aec.wav";
 pub const AEC_ERL_BELOW_DB: f32 = 20.0;
 
 /// The gate's band over the cancelled mic's words (still scored on the raw
-/// mic): keep under 0.40, drop at 0.80, in between the neighbours' median
-/// at `echo.gate_threshold` + 0.10 (0.60 by default). The canceller has
+/// mic): keep under 0.60, drop at 0.95, in between the neighbours' median at
+/// `echo.gate_threshold` + 0.20 (0.70 by default). The canceller has
 /// already removed most of the echo (meeting 12: duplicates 12,260 → 681),
 /// so the gate is there for its residue, while the owner's words spoken over
 /// the far end, now recognised, still correlate with it in the raw mic.
-/// With the band of the uncancelled mic (0.20 / 0.50 / 0.60) the gate took
-/// the spliced double-talk set's word error rate from 7.6 to 11.9 percent
-/// and the FLEURS fixture's from 9.4 to 19.5; with this one 7.6 and 12.6,
-/// while meeting 12 keeps 53 duplicates (3.2 percent, under the matcher's
-/// 4.0 percent chance level) instead of 11 and the same owner's words
-/// (docs/eval/2026-10-20-echo.md, "Post-pass canceller (B2a)").
+/// With the 300 to 3,400 Hz correlator (round two) the owner's words over
+/// continuous echo correlate higher than with the 100 Hz high-pass, and the
+/// round-one band (0.40 / 0.60 / 0.80) took the spliced double-talk set's
+/// word error rate from 7.6 to 9.0 percent; this band keeps it at 7.6 and
+/// the FLEURS fixture's at 12.61, and leaves meeting 12 1.95 percent
+/// duplicates among the kept words (docs/eval/2026-10-21-echo-round2.md).
+/// Not self-calibrated: every calibrated band was lower and cost the
+/// owner's words.
 pub fn band_after_canceller(threshold: f32) -> GateBand {
     GateBand {
-        keep_under: 0.40,
-        threshold: (threshold + 0.10).clamp(0.40, 0.80),
-        drop_at: 0.80,
+        keep_under: 0.60,
+        threshold: (threshold + 0.20).clamp(0.60, 0.95),
+        drop_at: 0.95,
     }
 }
 
@@ -428,21 +439,35 @@ pub(super) fn prepare_echo(
     }
 }
 
+/// The mic words of the post-pass (in time order) with the loopback's.
+pub(super) struct MicWords<'a> {
+    pub(super) words: &'a [TranscriptWord],
+    /// The loopback's words (meeting time), for the text layer.
+    pub(super) far: &'a [TranscriptWord],
+}
+
 /// The echo step of the post-pass for the mic words (meeting time) once
-/// they are transcribed: the gate when it applies (never after the user
-/// turned it off for the recording: `user_off` in `live`, the live run's
-/// `engine_info.echo`), on the raw mic; returns the drop flag of every
-/// word.
+/// they are transcribed: the layered gate ([`layers::gate`]) unless the user
+/// turned echo handling off for the recording (`user_off` in `live`, the
+/// live run's `engine_info.echo`). The text and level layers run on every
+/// recording, the canceller's attenuation where it ran, the correlation
+/// layer (scored on the raw mic) where the recording correlates (coupled, a
+/// canceller ran here or live, or `always`). Levels are taken on `heard`,
+/// what was transcribed (the canceller's output when it ran). Returns the
+/// drop flag of every word.
+#[allow(clippy::too_many_arguments)]
 fn gate_mic(
     mic: &Path,
+    heard: &Path,
     lb: &Path,
     prep: EchoPrep,
-    words: &[TranscriptWord],
+    m: &MicWords,
     mode: EchoMode,
     threshold: f32,
     live: &serde_json::Value,
 ) -> Result<(Vec<bool>, EchoOutcome)> {
     let t0 = Instant::now();
+    let words = m.words;
     let user_off = live["user_off"].as_bool().unwrap_or(false);
     let EchoPrep {
         profile,
@@ -453,42 +478,106 @@ fn gate_mic(
     let profile = profile?;
     let ran = run.as_ref().is_some_and(|a| a.result.is_ok());
     let aec = ran || live["aec"].as_bool().unwrap_or(false);
-    let gated = !user_off && profile.gates(mode, aec);
-    let band = if ran {
+    let correlation = !user_off && profile.gates(mode, aec);
+    let fixed = if ran {
         band_after_canceller(threshold)
     } else {
         GateBand::with_threshold(threshold)
     };
     let before = words.len();
     let mut dropped = Vec::new();
-    let flags = if gated {
+    let mut report = None;
+    let flags = if user_off {
+        vec![false; words.len()]
+    } else {
         // With clock maps the words are on meeting time, the profile's
         // timeline; without them both are channel time.
         let spans: Vec<(i64, i64)> = words
             .iter()
             .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
             .collect();
-        let g = gate_wavs(&spans, mic, lb, &profile, band)?;
-        for (w, (d, s)) in words.iter().zip(g.drop.iter().zip(&g.scores)) {
-            if *d {
+        let scores = if correlation {
+            score_sources(
+                &spans,
+                WavSamples::open(mic)?,
+                WavSamples::open(lb)?,
+                &profile,
+                GatePad::DEFAULT,
+            )
+        } else {
+            vec![WordScore::Undefined; spans.len()]
+        };
+        // The canceller's attenuation, for its layer (off: layers module).
+        let raw: Option<Box<dyn PcmSource>> = if ran && layers::ATTENUATION_LAYER {
+            Some(Box::new(WavSamples::open(mic)?))
+        } else {
+            None
+        };
+        let presence = presence_sources(
+            &spans,
+            WavSamples::open(heard)?,
+            raw,
+            WavSamples::open(lb)?,
+            profile.clocks.clone(),
+        );
+        let floor = floor_sources(
+            WavSamples::open(heard)?,
+            WavSamples::open(lb)?,
+            profile.clocks.clone(),
+        )
+        .floor_db();
+        // The file engine's utterance is the whole undiarized mic: the
+        // utterance rule's groups are its stretches with pauses up to
+        // `POCKET_GAP_MS`.
+        let groups = layers::gap_groups(words.iter().map(|w| (w.start_ms, w.end_ms)));
+        let gw: Vec<GateWord> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| GateWord {
+                start_ms: w.start_ms,
+                end_ms: w.end_ms,
+                norm: norm(&w.text),
+                group: groups[i],
+                score: scores[i],
+                presence: presence[i],
+            })
+            .collect();
+        let far = FarIndex::new(m.far.iter().map(|w| (w.start_ms, norm(&w.text))));
+        let r = layers::gate(
+            &gw,
+            &far,
+            floor,
+            &LayerOptions {
+                correlation,
+                canceller: ran,
+                fixed,
+                threshold,
+                window: TextWindow::DEFAULT,
+                calibrate: !ran,
+            },
+        );
+        for (i, w) in words.iter().enumerate() {
+            if let Some(reason) = r.reasons[i] {
                 dropped.push(EchoDroppedWord {
                     start_ms: w.start_ms,
                     end_ms: w.end_ms,
                     text: w.text.clone(),
-                    coefficient: s.coefficient().unwrap_or(0.0),
+                    coefficient: scores[i].coefficient().unwrap_or(0.0),
+                    reason: Some(reason),
                 });
             }
         }
-        g.drop
-    } else {
-        vec![false; words.len()]
+        let flags = r.reasons.iter().map(Option::is_some).collect();
+        report = Some(r);
+        flags
     };
+    let band = report.as_ref().map_or(fixed, |r| r.calibration.band);
     // The live monitor's return loss is on pre-AGC levels; the WAVs only
     // give the post-AGC one.
     let erl = live["erl_db"]
         .as_f64()
         .or(profile.erl_db.map(super::round3));
-    let report = run.as_ref().and_then(|a| a.result.as_ref().ok());
+    let aec_report = run.as_ref().and_then(|a| a.result.as_ref().ok());
     let mut summary = serde_json::json!({
         "coupled": profile.coupled,
         "coupling": super::round3(profile.coupling),
@@ -499,13 +588,16 @@ fn gate_mic(
         "threshold": super::round3(threshold),
         "band": [super::round3(band.keep_under), super::round3(band.threshold), super::round3(band.drop_at)],
         "aec": aec,
-        "erle_db": report.and_then(|r| r.erle_db).map(super::round3),
+        "erle_db": aec_report.and_then(|r| r.erle_db).map(super::round3),
         "aec_wall_s": run.as_ref().map(|a| super::round3(a.wall_s as f32)),
         "aec_wait_s": run.as_ref().map(|_| super::round3(wait_s as f32)),
         "gain_track": run.as_ref().is_some_and(|a| a.gain_track),
         "mode": if user_off { super::ECHO_OFF_FOR_RECORDING } else { mode.as_str() },
         "user_off": user_off,
     });
+    if let Some(r) = &report {
+        layer_summary(&mut summary, r, correlation);
+    }
     if let Some(a) = &run {
         summary["aec_erl_db"] = serde_json::json!(a.erl_db.map(super::round3));
         if a.mic_gain_track {
@@ -515,7 +607,7 @@ fn gate_mic(
             summary["aec_error"] = serde_json::json!(e.to_string());
         }
     }
-    let canceller = match (&run, report) {
+    let canceller = match (&run, aec_report) {
         (Some(a), Some(r)) => format!(
             "; canceller: ERLE {:?} dB over {} far-end blocks, lag {:?} ms, {} jumps, {} resets, {:.1} s ({}gain track), the mic waited {wait_s:.1} s",
             r.erle_db,
@@ -532,24 +624,42 @@ fn gate_mic(
         ),
         (None, _) => String::new(),
     };
+    let layer_log = report.as_ref().map_or(String::new(), |r| {
+        let c = &r.counts;
+        format!(
+            " (text {}, attenuation {}, level {}, correlation {}, utterance {}; band {:.2}/{:.2}/{:.2}{})",
+            c.text,
+            c.attenuation,
+            c.level,
+            c.correlation,
+            c.utterance,
+            band.keep_under,
+            band.threshold,
+            band.drop_at,
+            if r.calibration.calibrated { " calibrated" } else { "" }
+        )
+    });
     let log = format!(
-        "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{} at {threshold:.2}; scan {scan_s:.1} s, gate {:.1} s{canceller}",
+        "{:?} (coupling {:.2}, lag {:?} ms, {} of {} blocks active), {} of {before} mic words dropped{}{layer_log}; scan {scan_s:.1} s, gate {:.1} s{canceller}",
         profile.status,
         profile.coupling,
         profile.lag_ms,
         profile.active_blocks,
         profile.blocks,
         dropped.len(),
-        match (gated, user_off) {
-            (true, _) => "",
-            (false, true) => " (not gated: turned off for this recording)",
-            (false, false) => " (not gated)",
+        if user_off {
+            " (not gated: turned off for this recording)"
+        } else {
+            ""
         },
         t0.elapsed().as_secs_f64()
     );
     if let Some(Err(e)) = run.as_ref().map(|a| &a.result) {
         log::warn!("echo canceller failed: {e}");
     }
+    // `echo_dropped` as before for a correlated recording, and whenever a
+    // layer removed something.
+    let gated = !user_off && (correlation || !dropped.is_empty());
     Ok((
         flags,
         EchoOutcome {
@@ -561,6 +671,21 @@ fn gate_mic(
     ))
 }
 
+/// The layered gate's counts and parameters in `engine_info.echo`.
+pub(super) fn layer_summary(
+    summary: &mut serde_json::Value,
+    r: &layers::LayerReport,
+    correlation: bool,
+) {
+    summary["layers"] = serde_json::json!(r.counts);
+    summary["band_calibrated"] = serde_json::json!(r.calibration.calibrated);
+    summary["correlation"] = serde_json::json!(correlation);
+    summary["text_matched"] = serde_json::json!(r.run3);
+    summary["text_pairs"] = serde_json::json!(r.run2);
+    summary["floor_db"] = serde_json::json!(r.floor_db.map(super::round3));
+    summary["owner_db"] = serde_json::json!(r.owner_db.map(super::round3));
+}
+
 /// The echo step of the post-pass after the mic is transcribed
 /// ([`gate_mic`]), which never fails it: on an error the mic words stay as
 /// they are, `engine_info.echo` records `{"error": "<message>"}` and there
@@ -569,21 +694,23 @@ fn gate_mic(
 pub(super) fn echo_step(
     meeting: MeetingId,
     mic: &Path,
+    heard: &Path,
     lb: &Path,
     prep: EchoPrep,
-    words: Vec<TranscriptWord>,
+    m: MicWords,
     mode: EchoMode,
     threshold: f32,
     live: &serde_json::Value,
 ) -> (Vec<TranscriptWord>, EchoOutcome) {
-    match gate_mic(mic, lb, prep, &words, mode, threshold, live) {
+    match gate_mic(mic, heard, lb, prep, &m, mode, threshold, live) {
         Ok((flags, e)) => {
             log::info!("post-pass meeting {meeting}: echo {}", e.log);
-            let kept = words
-                .into_iter()
+            let kept = m
+                .words
+                .iter()
                 .zip(flags)
                 .filter(|(_, d)| !d)
-                .map(|(w, _)| w)
+                .map(|(w, _)| w.clone())
                 .collect();
             (kept, e)
         }
@@ -592,7 +719,7 @@ pub(super) fn echo_step(
                 "post-pass meeting {meeting}: the echo step failed ({err}); the mic words are not gated"
             );
             (
-                words,
+                m.words.to_vec(),
                 EchoOutcome {
                     summary: serde_json::json!({ "error": err.to_string() }),
                     dropped: Vec::new(),
@@ -736,14 +863,19 @@ pub fn run_post_pass(
         };
         let mut mic_words =
             transcribe_channel(1, Channel::Mic, mic_source, job.diarize_mic, mic_frames)?;
-        let _ = std::fs::remove_file(&aec_wav);
         if let Some(prep) = prep {
+            // The levels are taken on what was transcribed: the canceller's
+            // output while it is still there.
             let (kept, e) = echo_step(
                 job.meeting,
                 &mic,
+                mic_source,
                 &lb,
                 prep,
-                mic_words,
+                MicWords {
+                    words: &mic_words,
+                    far: &lb_words,
+                },
                 echo_mode,
                 echo_threshold,
                 &live_echo,
@@ -751,6 +883,7 @@ pub fn run_post_pass(
             mic_words = kept;
             echo = Some(e);
         }
+        let _ = std::fs::remove_file(&aec_wav);
         let mut channels: Vec<(Channel, Vec<TranscriptWord>)> =
             vec![(Channel::Loopback, lb_words), (Channel::Mic, mic_words)];
         transcribe_wall = t0.elapsed();
