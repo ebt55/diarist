@@ -3,10 +3,12 @@
 //! transcripts, placed at random times over the far end of a meeting held
 //! on speakers, with meeting 12's echo path (3 ms, 10 dB return loss) into
 //! the mic; the real post-pass runs with `echo.mode = off` and `auto`
-//! (since plan 15 chunk B2a the canceller, then the gate), and "me" is
-//! scored against the transcripts, with the gate alone (the post-pass's
-//! scan and gate over the `off` run's words, what chunk A shipped) between
-//! them. `#[ignore]`d and gated:
+//! (since plan 15 chunk B2a the canceller, then the gate; since section 9
+//! the layered gate), and "me" is scored against the transcripts, with the
+//! layered gate alone (no canceller, over the `off` run's words) between
+//! them. Then the control: the same owner with no echo at all (a headphone
+//! recording without a leak), `off` against `auto`, which must give the
+//! same words. `#[ignore]`d and gated:
 //!
 //! - `DIARIST_ECHO_FLEURS`: a `tools/eval` FLEURS folder (`audio.wav`,
 //!   `refs.jsonl`; `uv run python -I fleurs_fetch.py --langs en` writes
@@ -18,8 +20,15 @@
 //! - `DIARIST_ECHO_MINUTES` (default 10), `DIARIST_ECHO_OUT` (scratch
 //!   folder, default `%TEMP%\diarist-echo-fleurs`).
 //! - `DIARIST_ECHO_BANDS` (optional, `keep/threshold/drop;...`): each band
-//!   applied to the gate-off run's "me" words with the post-pass's own scan
-//!   and gate, one row per band; the auto run uses the shipped band.
+//!   applied to the gate-off run's "me" words at the correlation look-backs
+//!   350, 450 and 550 ms, the correlation layer alone and the layered gate.
+//! - `DIARIST_ECHO_AEC_SWEEP=1`: the after-canceller variants of the layered
+//!   gate (attenuation, correlation band, level layer) over the auto run's
+//!   words before the gate, the canceller run again here as the post-pass
+//!   runs it.
+//! - `DIARIST_ECHO_CONTROL=0` skips the headphone control;
+//!   `DIARIST_ECHO_DUMP` (a scratch folder) writes every after-canceller
+//!   word's features with its text (local analysis; delete it after).
 //!
 //! Per utterance, the hypothesis is the "me" words whose middle falls in
 //! the utterance's span (−0.2 s, +0.4 s); WER is summed edits over summed
@@ -31,9 +40,16 @@
 
 use std::path::{Path, PathBuf};
 
-use diarist_core::audio::echo::{decide_in_order, gate_sources, EchoProfile, GateBand};
+use diarist_core::audio::aec::offline::{cancel_recording, OfflineOptions};
+use diarist_core::audio::echo::layers::{self, GateWord, LayerCounts, LayerOptions};
+use diarist_core::audio::echo::presence::{floor_sources, presence_sources};
+use diarist_core::audio::echo::text::{self, norm, FarIndex, TextWindow};
+use diarist_core::audio::echo::{
+    decide_in_order, score_sources, EchoMode, EchoProfile, GateBand, GatePad, PcmSource, WordScore,
+};
 use diarist_core::audio::flac::decode_i16;
 use diarist_core::engine::NemoCliEngine;
+use diarist_core::live::postpass::band_after_canceller;
 use diarist_core::live::{run_post_pass, PostPassJob};
 use diarist_core::pipeline::CancelToken;
 use diarist_core::settings;
@@ -144,17 +160,27 @@ fn score(utts: &[Utt], me: &[(i64, i64, String)]) -> Scores {
     }
 }
 
-/// One post-pass over the fixture with `mode`; the "me" words, and the
-/// words the gate dropped.
-#[allow(clippy::type_complexity)]
+/// What one post-pass over the fixture gave.
+struct Pass {
+    /// "Me" words after the echo step.
+    me: Vec<(i64, i64, String)>,
+    /// The words the gate dropped.
+    dropped: Vec<(i64, i64, String)>,
+    /// The loopback's words.
+    far: Vec<(i64, i64, String)>,
+    echo: serde_json::Value,
+}
+
+/// One post-pass over the fixture with `mode` (`name` names its files).
 fn post_pass(
     out: &Path,
     engine: &NemoCliEngine,
     mic: &[i16],
     lb: &[i16],
     mode: &str,
-) -> (Vec<(i64, i64, String)>, Vec<(i64, i64, String)>) {
-    let db = out.join(format!("{mode}.db"));
+    name: &str,
+) -> Pass {
+    let db = out.join(format!("{name}.db"));
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
     }
@@ -185,7 +211,7 @@ fn post_pass(
         .materialise_live_run(live.id, &SegmentOptions::default())
         .unwrap();
     store.finish_run(live.id, RunStatus::Done).unwrap();
-    let folder = out.join(mode);
+    let folder = out.join(name);
     std::fs::create_dir_all(&folder).unwrap();
     let spec = hound::WavSpec {
         channels: 1,
@@ -214,7 +240,7 @@ fn post_pass(
     };
     let report = run_post_pass(&store, engine, &job, &CancelToken::default(), &|_| {}).unwrap();
     let run = store.get_run(report.current_run).unwrap();
-    eprintln!("{mode}: engine_info.echo {}", run.engine_info["echo"]);
+    eprintln!("{name}: engine_info.echo {}", run.engine_info["echo"]);
     let mut dropped = Vec::new();
     if let Some(d) = store.echo_dropped(report.current_run).unwrap() {
         dropped = d
@@ -229,17 +255,12 @@ fn post_pass(
                 .unwrap_or(0.0)
         };
         eprintln!(
-            "{mode}: dropped coefficients p10 {:.2} p50 {:.2} p90 {:.2}; {} at or over 0.5",
+            "{name}: dropped coefficients p10 {:.2} p50 {:.2} p90 {:.2}; {} at or over 0.5",
             q(0.1),
             q(0.5),
             q(0.9),
             c.iter().filter(|v| **v >= 0.5).count()
         );
-        std::fs::write(
-            out.join(format!("{mode}.dropped.json")),
-            serde_json::to_string(&d).unwrap(),
-        )
-        .unwrap();
     }
     let segs = store.get_segments(meeting.id, 0, u32::MAX).unwrap();
     let mic_seg: std::collections::HashSet<_> = segs
@@ -247,14 +268,101 @@ fn post_pass(
         .filter(|s| s.channel == Channel::Mic)
         .map(|s| s.id)
         .collect();
-    let kept = store
-        .get_words(meeting.id, i64::MIN, i64::MAX)
-        .unwrap()
-        .into_iter()
-        .filter(|w| mic_seg.contains(&w.segment_id))
-        .map(|w| (w.start_ms, w.end_ms, w.text))
+    let (mut me, mut far) = (Vec::new(), Vec::new());
+    for w in store.get_words(meeting.id, i64::MIN, i64::MAX).unwrap() {
+        let v = (w.start_ms, w.end_ms, w.text);
+        if mic_seg.contains(&w.segment_id) {
+            me.push(v);
+        } else {
+            far.push(v);
+        }
+    }
+    me.sort();
+    far.sort();
+    drop(store);
+    if std::env::var("DIARIST_ECHO_KEEP").as_deref() != Ok("1") {
+        let _ = std::fs::remove_dir_all(out.join(name));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", db.display()));
+        }
+    }
+    Pass {
+        me,
+        dropped,
+        far,
+        echo: run.engine_info["echo"].clone(),
+    }
+}
+
+/// The layered gate over the echo-off run's "me" words without the
+/// canceller (the gate alone): correlation (with `pad` and `band`) where
+/// the fixture couples, levels on the raw mic, text against the loopback's
+/// words. Returns the kept words and the counts per layer.
+#[allow(clippy::too_many_arguments)]
+fn layered_alone(
+    words: &[(i64, i64, String)],
+    far: &[(i64, i64, String)],
+    mic: &[i16],
+    lb: &[i16],
+    p: &EchoProfile,
+    pad: GatePad,
+    band: GateBand,
+    correlation_only: bool,
+) -> (Vec<(i64, i64, String)>, LayerCounts) {
+    let spans: Vec<(i64, i64)> = words
+        .iter()
+        .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
         .collect();
-    (kept, dropped)
+    let correlation = p.gates(EchoMode::Auto, false);
+    let scores = if correlation {
+        score_sources(&spans, mic, lb, p, pad)
+    } else {
+        vec![WordScore::Undefined; spans.len()]
+    };
+    if correlation_only {
+        let d = decide_in_order(&spans, &scores, band);
+        let kept = words
+            .iter()
+            .zip(&d)
+            .filter(|p| !*p.1)
+            .map(|p| p.0.clone())
+            .collect();
+        return (kept, LayerCounts::default());
+    }
+    let pres = presence_sources(&spans, mic, None, lb, None);
+    let floor = floor_sources(mic, lb, None).floor_db();
+    let groups = layers::gap_groups(words.iter().map(|w| (w.0, w.1)));
+    let gw: Vec<GateWord> = (0..words.len())
+        .map(|i| GateWord {
+            start_ms: words[i].0,
+            end_ms: words[i].1,
+            norm: norm(&words[i].2),
+            group: groups[i],
+            score: scores[i],
+            presence: pres[i],
+        })
+        .collect();
+    let fi = FarIndex::new(far.iter().map(|w| (w.0, norm(&w.2))));
+    let r = layers::gate(
+        &gw,
+        &fi,
+        floor,
+        &LayerOptions {
+            correlation,
+            canceller: false,
+            fixed: band,
+            threshold: band.threshold,
+            window: TextWindow::DEFAULT,
+            calibrate: true,
+        },
+    );
+    let kept = words
+        .iter()
+        .zip(&r.reasons)
+        .filter(|p| p.1.is_none())
+        .map(|p| p.0.clone())
+        .collect();
+    (kept, r.counts)
 }
 
 #[test]
@@ -355,27 +463,31 @@ fn fleurs_owner_over_a_speaker_meeting() {
         });
         t += len;
     }
-    // The mic: owner + the far end 3 ms later and 10 dB down + the room's
-    // floor (−59 dBFS).
-    let mut noise = 0x2545_F491_4F6C_DD1Du64;
-    let mic: Vec<i16> = (0..n)
-        .map(|i| {
-            noise ^= noise << 13;
-            noise ^= noise >> 7;
-            noise ^= noise << 17;
-            let w = ((noise >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0)
-                * 10f32.powf(-59.0 / 20.0)
-                * 3f32.sqrt();
-            let e = if i >= 48 {
-                f32::from(lb[i - 48]) / 32_768.0 * 10f32.powf(-10.0 / 20.0)
-            } else {
-                0.0
-            };
-            ((owner[i] + e + w) * 32_768.0)
-                .round()
-                .clamp(-32_768.0, 32_767.0) as i16
-        })
-        .collect();
+    // The mic: owner + the far end 3 ms later and 10 dB down (`echo`) + the
+    // room's floor (−59 dBFS). Without the echo it is a headphone recording
+    // with no leak: the control.
+    let make_mic = |echo: bool| -> Vec<i16> {
+        let mut noise = 0x2545_F491_4F6C_DD1Du64;
+        (0..n)
+            .map(|i| {
+                noise ^= noise << 13;
+                noise ^= noise >> 7;
+                noise ^= noise << 17;
+                let w = ((noise >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0)
+                    * 10f32.powf(-59.0 / 20.0)
+                    * 3f32.sqrt();
+                let e = if echo && i >= 48 {
+                    f32::from(lb[i - 48]) / 32_768.0 * 10f32.powf(-10.0 / 20.0)
+                } else {
+                    0.0
+                };
+                ((owner[i] + e + w) * 32_768.0)
+                    .round()
+                    .clamp(-32_768.0, 32_767.0) as i16
+            })
+            .collect()
+    };
+    let mic = make_mic(true);
     eprintln!(
         "fixture: {minutes} min, {} utterances ({} over the far end), {} reference words",
         utts.len(),
@@ -389,27 +501,38 @@ fn fleurs_owner_over_a_speaker_meeting() {
     engine.pass_language = false;
     engine.right_context = Some(13);
     engine.diar_preset = Some("v3-offline".into());
-    let (off_words, _) = post_pass(&out, &engine, &mic, &lb, "off");
-    let off = score(&utts, &off_words);
-    let (on_words, on_dropped) = post_pass(&out, &engine, &mic, &lb, "auto");
-    let on = score(&utts, &on_words);
-    // The gate alone: the post-pass's scan and gate over the gate-off run's
-    // words (no clock maps in the fixture: meeting time is channel time).
-    let alone = {
-        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
-        let spans: Vec<(i64, i64)> = off_words
-            .iter()
-            .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
-            .collect();
-        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
-        let kept: Vec<(i64, i64, String)> = off_words
-            .iter()
-            .zip(&g.drop)
-            .filter(|(_, d)| !**d)
-            .map(|(w, _)| w.clone())
-            .collect();
-        score(&utts, &kept)
-    };
+    let off_pass = post_pass(&out, &engine, &mic, &lb, "off", "off");
+    let off = score(&utts, &off_pass.me);
+    let on_pass = post_pass(&out, &engine, &mic, &lb, "auto", "auto");
+    let on = score(&utts, &on_pass.me);
+    // The gate alone (no canceller) over the gate-off run's words, with the
+    // post-pass's own scan (no clock maps in the fixture: meeting time is
+    // channel time): the layered gate, and the correlation layer by itself.
+    let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
+    eprintln!(
+        "fixture profile: {:?} coupling {:.3} lag {:?} ms erl {:?} dB; active blocks p50 {:?}",
+        p.status,
+        p.coupling,
+        p.lag_ms,
+        p.erl_db,
+        {
+            let mut a = p.active.clone();
+            a.sort_by(f32::total_cmp);
+            a.get(a.len() / 2).copied()
+        }
+    );
+    let (alone_words, alone_counts) = layered_alone(
+        &off_pass.me,
+        &off_pass.far,
+        &mic,
+        &lb,
+        &p,
+        GatePad::DEFAULT,
+        GateBand::default(),
+        false,
+    );
+    let alone = score(&utts, &alone_words);
+    eprintln!("layered gate alone: {alone_counts:?}");
     let bands_of = |var: &str| -> Vec<GateBand> {
         std::env::var(var)
             .ok()
@@ -431,79 +554,40 @@ fn fleurs_owner_over_a_speaker_meeting() {
             })
             .unwrap_or_default()
     };
+    // `DIARIST_ECHO_BANDS`: the gate alone per band and look-back (350,
+    // 450, 550 ms), the correlation layer by itself and the layered gate.
     let sweep = bands_of("DIARIST_ECHO_BANDS");
-    // `DIARIST_ECHO_AEC_BANDS`: bands for the gate after the canceller,
-    // over the auto run's cancelled words (kept and dropped).
-    let aec_sweep = bands_of("DIARIST_ECHO_AEC_BANDS");
-    if !aec_sweep.is_empty() {
-        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
-        let mut pre: Vec<(i64, i64, String)> =
-            on_words.iter().chain(&on_dropped).cloned().collect();
-        pre.sort_by_key(|w| (w.0, w.1));
-        let spans: Vec<(i64, i64)> = pre.iter().map(|w| (w.0 * 16, w.1.max(w.0) * 16)).collect();
-        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
-        eprintln!("| Band after the canceller (keep / neighbours / drop) | \"me\" WER | over the far end | in far-end pauses | Echo words |");
-        eprintln!("|---|---|---|---|---|");
-        for b in &aec_sweep {
-            let d = decide_in_order(&spans, &g.scores, *b);
-            let kept: Vec<(i64, i64, String)> = pre
-                .iter()
-                .zip(&d)
-                .filter(|(_, d)| !**d)
-                .map(|(w, _)| w.clone())
-                .collect();
-            let s = score(&utts, &kept);
-            eprintln!(
-                "| {:.2} / {:.2} / {:.2} | {:.2} % | {:.2} % | {:.2} % | {} |",
-                b.keep_under,
-                b.threshold,
-                b.drop_at,
-                s.wer,
-                s.wer_double_talk,
-                s.wer_clear,
-                s.echo_words
-            );
-        }
-        let none = score(&utts, &pre);
-        eprintln!(
-            "| canceller, no gate | {:.2} % | {:.2} % | {:.2} % | {} |",
-            none.wer, none.wer_double_talk, none.wer_clear, none.echo_words
-        );
-    }
     if !sweep.is_empty() {
-        // The post-pass's scan and gate on the gate-off run's words (no
-        // clock maps in the fixture: meeting time is channel time).
-        let p = EchoProfile::scan_sources(&mic[..], &lb[..], None);
-        let spans: Vec<(i64, i64)> = off_words
-            .iter()
-            .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
-            .collect();
-        let g = gate_sources(&spans, &mic[..], &lb[..], &p, GateBand::default());
-        eprintln!("| Band (keep / neighbours / drop) | \"me\" WER change | over the far end | in far-end pauses | Echo words removed |");
-        eprintln!("|---|---|---|---|---|");
-        for b in &sweep {
-            let d = decide_in_order(&spans, &g.scores, *b);
-            let kept: Vec<(i64, i64, String)> = off_words
-                .iter()
-                .zip(&d)
-                .filter(|(_, d)| !**d)
-                .map(|(w, _)| w.clone())
-                .collect();
-            let s = score(&utts, &kept);
-            eprintln!(
-                "| {:.2} / {:.2} / {:.2} | {:+.2} | {:+.2} | {:+.2} | {:.2} % |",
-                b.keep_under,
-                b.threshold,
-                b.drop_at,
-                s.wer - off.wer,
-                s.wer_double_talk - off.wer_double_talk,
-                s.wer_clear - off.wer_clear,
-                100.0 * (1.0 - s.echo_words as f64 / off.echo_words.max(1) as f64)
-            );
+        eprintln!("| Look-back | Band (keep / neighbours / drop) | Correlation alone: \"me\" WER | over the far end | Echo words left | Layered: \"me\" WER | over the far end | Echo words left |");
+        eprintln!("|---|---|---|---|---|---|---|---|");
+        for before_ms in [350i64, 450, 550] {
+            let pad = GatePad {
+                before: before_ms * 16,
+                after: GatePad::DEFAULT.after,
+            };
+            for b in &sweep {
+                let (c, _) =
+                    layered_alone(&off_pass.me, &off_pass.far, &mic, &lb, &p, pad, *b, true);
+                let (l, _) =
+                    layered_alone(&off_pass.me, &off_pass.far, &mic, &lb, &p, pad, *b, false);
+                let (c, l) = (score(&utts, &c), score(&utts, &l));
+                eprintln!(
+                    "| {before_ms} ms | {:.2} / {:.2} / {:.2} | {:.2} % | {:.2} % | {} | {:.2} % | {:.2} % | {} |",
+                    b.keep_under,
+                    b.threshold,
+                    b.drop_at,
+                    c.wer,
+                    c.wer_double_talk,
+                    c.echo_words,
+                    l.wer,
+                    l.wer_double_talk,
+                    l.echo_words
+                );
+            }
         }
     }
     let removed = |s: &Scores| 100.0 * (1.0 - s.echo_words as f64 / off.echo_words.max(1) as f64);
-    eprintln!("| | echo off | gate alone | canceller + gate |");
+    eprintln!("| | echo off | layered gate alone | canceller + layered gate |");
     eprintln!("|---|---|---|---|");
     eprintln!(
         "| \"me\" WER on the stood-in speech | {:.2} % | {:.2} % | {:.2} % |",
@@ -533,4 +617,245 @@ fn fleurs_owner_over_a_speaker_meeting() {
         "| words recognised in double-talk utterances | {} | {} | {} |",
         off.double_talk_words, alone.double_talk_words, on.double_talk_words
     );
+    eprintln!(
+        "auto: {} words dropped; layers {}",
+        on_pass.dropped.len(),
+        on_pass.echo["layers"]
+    );
+    if std::env::var("DIARIST_ECHO_AEC_SWEEP").as_deref() == Ok("1") {
+        aec_sweep(&utts, &on_pass, &mic, &lb, &p);
+    }
+
+    // The control: the same owner with headphones and no leak. `auto` must
+    // give exactly what `off` gives.
+    if std::env::var("DIARIST_ECHO_CONTROL").as_deref() != Ok("0") {
+        let hp = make_mic(false);
+        let a = post_pass(&out, &engine, &hp, &lb, "off", "hp-off");
+        let b = post_pass(&out, &engine, &hp, &lb, "auto", "hp-auto");
+        let fi = FarIndex::new(b.far.iter().map(|w| (w.0, norm(&w.2))));
+        let mic_t: Vec<(i64, String)> = b.me.iter().map(|w| (w.0, norm(&w.2))).collect();
+        let mic_r: Vec<(i64, &str)> = mic_t.iter().map(|w| (w.0, w.1.as_str())).collect();
+        let runs = text::runs(&mic_r, &fi, TextWindow::DEFAULT);
+        let shifted: Vec<(i64, &str)> =
+            mic_t.iter().map(|w| (w.0 + 45_000, w.1.as_str())).collect();
+        let chance = text::runs(&shifted, &fi, TextWindow::DEFAULT);
+        eprintln!(
+            "headphone control: {} \"me\" words off, {} auto, identical {}; status {}, dropped {}, text runs {} (chance {}), layers {}",
+            a.me.len(),
+            b.me.len(),
+            a.me == b.me,
+            b.echo["coupled"],
+            b.echo["dropped"],
+            runs.count3() + runs.count2(),
+            chance.count3() + chance.count2(),
+            b.echo["layers"]
+        );
+        assert_eq!(a.me, b.me, "the headphone control changed");
+        assert_eq!(b.echo["dropped"].as_u64(), Some(0));
+    }
+}
+
+/// The after-canceller variants of the layered gate (`DIARIST_ECHO_AEC_SWEEP=1`):
+/// the auto run's words before the gate, the canceller run again here as
+/// the post-pass runs it, each variant decided over the same features.
+fn aec_sweep(utts: &[Utt], auto: &Pass, mic: &[i16], lb: &[i16], p: &EchoProfile) {
+    let mut words: Vec<(i64, i64, String)> = auto.me.iter().chain(&auto.dropped).cloned().collect();
+    words.sort();
+    let hint = |t: i64| p.lag_at(t);
+    let mut o = OfflineOptions::post_pass(None);
+    o.lag_hint = Some(&hint);
+    let mut y: Vec<i16> = Vec::with_capacity(mic.len());
+    cancel_recording(&mic, &lb, &o, &mut |b| {
+        y.extend(
+            b.iter()
+                .map(|v| (v * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16),
+        );
+        Ok(())
+    })
+    .unwrap();
+    let spans: Vec<(i64, i64)> = words
+        .iter()
+        .map(|w| (w.0 * 16, w.1.max(w.0) * 16))
+        .collect();
+    let scores = score_sources(&spans, mic, lb, p, GatePad::DEFAULT);
+    let raw: Option<Box<dyn PcmSource>> = Some(Box::new(mic));
+    let pres = presence_sources(&spans, &y[..], raw, lb, None);
+    let floor = floor_sources(&y[..], lb, None).floor_db();
+    let groups = layers::gap_groups(words.iter().map(|w| (w.0, w.1)));
+    let gw: Vec<GateWord> = (0..words.len())
+        .map(|i| GateWord {
+            start_ms: words[i].0,
+            end_ms: words[i].1,
+            norm: norm(&words[i].2),
+            group: groups[i],
+            score: scores[i],
+            presence: pres[i],
+        })
+        .collect();
+    let fi = FarIndex::new(auto.far.iter().map(|w| (w.0, norm(&w.2))));
+    let opts = LayerOptions {
+        correlation: true,
+        canceller: true,
+        fixed: band_after_canceller(0.5),
+        threshold: 0.5,
+        window: TextWindow::DEFAULT,
+        calibrate: true,
+    };
+    if let Some(dir) = std::env::var_os("DIARIST_ECHO_DUMP").map(std::path::PathBuf::from) {
+        // Every word's features (local analysis; delete after).
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = layers::gate(&gw, &fi, floor, &opts);
+        let raw_pres = presence_sources(&spans, mic, None, lb, None);
+        let energy = |x: &[i16], a: usize, b: usize| -> f64 {
+            x[a.min(x.len())..b.min(x.len())]
+                .iter()
+                .map(|&v| (f64::from(v) / 32_768.0).powi(2))
+                .sum()
+        };
+        let inside = |w: &(i64, i64, String)| {
+            utts.iter().any(|u| {
+                let (a, b) = (
+                    (u.at as f64 / 16.0) as i64 - 200,
+                    ((u.at + u.len) as f64 / 16.0) as i64 + 400,
+                );
+                let mid = (w.0 + w.1) / 2;
+                (a..b).contains(&mid)
+            })
+        };
+        let mut t = String::from(
+            "start\tend\ttext\tin_utt\tlevel\tfar\tatt\tcoef\treason\traw_level\tspan_att\n",
+        );
+        for (i, w) in words.iter().enumerate() {
+            let p = gw[i].presence;
+            let (a, b) = (w.0 as usize * 16, (w.1.max(w.0 + 20)) as usize * 16);
+            let (er, ec) = (energy(mic, a, b), energy(&y, a, b));
+            let span_att = if er > 0.0 && ec > 0.0 {
+                10.0 * (er / ec).log10()
+            } else {
+                0.0
+            };
+            t.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\n",
+                w.0,
+                w.1,
+                norm(&w.2),
+                u8::from(inside(w)),
+                p.map_or(String::new(), |p| format!("{:.2}", p.level_db)),
+                p.map_or(String::new(), |p| u8::from(p.far_active).to_string()),
+                p.and_then(|p| p.attenuation_db)
+                    .map_or(String::new(), |a| format!("{a:.2}")),
+                gw[i]
+                    .score
+                    .coefficient()
+                    .map_or(String::new(), |c| format!("{c:.3}")),
+                r.reasons[i].map_or("", |r| r.as_str()),
+                raw_pres[i].map_or(String::new(), |p| format!("{:.2}", p.level_db)),
+                span_att
+            ));
+        }
+        std::fs::write(dir.join("fleurs.tsv"), t).unwrap();
+    }
+    let none = score(utts, &words);
+    eprintln!(
+        "after the canceller, no gate: WER {:.2} % (over the far end {:.2} %), {} echo words",
+        none.wer, none.wer_double_talk, none.echo_words
+    );
+    eprintln!("| Attenuation at / margin (dB) | and coefficient at | Correlation band | Level layer | Dropped | \"me\" WER | over the far end | Echo words left |");
+    eprintln!("|---|---|---|---|---|---|---|---|");
+    for v in aec_variants() {
+        let r = layers::gate_with(&gw, &fi, floor, &opts, &|c| v.apply(c));
+        let kept: Vec<(i64, i64, String)> = words
+            .iter()
+            .zip(&r.reasons)
+            .filter(|p| p.1.is_none())
+            .map(|p| p.0.clone())
+            .collect();
+        let s = score(utts, &kept);
+        eprintln!(
+            "{} {} ({:?}) | {:.2} % | {:.2} % | {} |",
+            v.label(),
+            r.dropped(),
+            r.counts,
+            s.wer,
+            s.wer_double_talk,
+            s.echo_words
+        );
+    }
+}
+
+/// One after-canceller variant of the layered gate's parameters.
+#[derive(Debug, Clone, Copy)]
+struct AecVariant {
+    attenuation_db: f32,
+    margin_db: f32,
+    min_coefficient: Option<f32>,
+    /// The correlation band (`None`: the correlation layer off).
+    band: Option<GateBand>,
+    level: bool,
+}
+
+impl AecVariant {
+    fn apply(&self, c: &mut layers::Context) {
+        c.attenuation = self.attenuation_db.is_finite();
+        c.attenuation_db = self.attenuation_db;
+        c.attenuation_margin_db = self.margin_db;
+        c.attenuation_min_coefficient = self.min_coefficient;
+        c.level_after_canceller = self.level;
+        match self.band {
+            Some(b) => {
+                c.band = b;
+                c.correlation_min_attenuation_db = None;
+            }
+            None => c.correlation_min_attenuation_db = Some(f32::INFINITY),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "| {} / {} | {} | {} | {} |",
+            self.attenuation_db,
+            self.margin_db,
+            self.min_coefficient.map_or("-".into(), |c| c.to_string()),
+            self.band.map_or("off".into(), |b| format!(
+                "{:.2}/{:.2}/{:.2}",
+                b.keep_under, b.threshold, b.drop_at
+            )),
+            if self.level { "on" } else { "off" }
+        )
+    }
+}
+
+/// The after-canceller variants (the same list in tests/echo_sample.rs,
+/// tests/echo_fleurs.rs and tests/aec_postpass.rs).
+fn aec_variants() -> Vec<AecVariant> {
+    let mut v = Vec::new();
+    for keep_under in [0.5f32, 0.6] {
+        for threshold in [0.7f32, 0.75, 0.8] {
+            for drop_at in [0.8f32, 0.85, 0.9, 0.95] {
+                for level in [false, true] {
+                    v.push(AecVariant {
+                        attenuation_db: f32::INFINITY,
+                        margin_db: 10.0,
+                        min_coefficient: None,
+                        band: Some(GateBand {
+                            keep_under,
+                            threshold,
+                            drop_at,
+                        }),
+                        level,
+                    });
+                }
+            }
+        }
+    }
+    for level in [false, true] {
+        v.push(AecVariant {
+            attenuation_db: f32::INFINITY,
+            margin_db: 10.0,
+            min_coefficient: None,
+            band: None,
+            level,
+        });
+    }
+    v
 }

@@ -21,6 +21,12 @@
 //!   track made by replaying the AGC's gain law backwards over the stored
 //!   loopback (what a recording made since chunk B2a carries), and the
 //!   signal-level comparison of a 10 ms track against one value per frame.
+//! - `DIARIST_ECHO_DUMP` (optional): a scratch folder for the spliced set's
+//!   per-word features with their text (local analysis; delete it after).
+//!
+//! The spliced set is also run through the layered gate (plan 15 section
+//! 9) with each after-canceller variant (attenuation, correlation band,
+//! level layer), the owner's word error rate per variant.
 //!
 //! Word classes (plan 15 section 2): a duplicate is a mic word with the
 //! text of a loopback word starting within ±0.8 s, or inside a matched
@@ -45,8 +51,11 @@ use std::time::{Duration, Instant};
 
 use diarist_core::audio::aec::offline::{cancel_recording, OfflineOptions, OfflineReport};
 use diarist_core::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
+use diarist_core::audio::echo::layers::{self, GateWord, LayerOptions};
+use diarist_core::audio::echo::presence::{floor_sources, presence_sources};
+use diarist_core::audio::echo::text::{FarIndex, TextWindow};
 use diarist_core::audio::echo::{
-    decide_in_order, gate_sources, ClockPair, EchoProfile, GateBand, HighPass, WordScore,
+    decide_in_order, gate_sources, ClockPair, EchoProfile, GateBand, HighPass, PcmSource, WordScore,
 };
 use diarist_core::audio::flac::decode_i16;
 use diarist_core::audio::gain_track::{GainTrack, GainTrackWriter};
@@ -990,7 +999,9 @@ fn the_post_pass_canceller_on_a_speaker_meeting() {
     drop((mic_h, out_h, cancelled));
 
     // 4. The spliced double talk (research 14 section 2.5), rebuilt.
-    let dt = spliced(&ctx, &engine, &mic, &lb, &mic_map, &clocks, &profile, &out);
+    let dt = spliced(
+        &ctx, &engine, &mic, &lb, &lb_words, &mic_map, &clocks, &profile, &out,
+    );
 
     // The gate's band after the canceller: meeting 12's cancelled words and
     // the spliced set's, scored once, decided per band.
@@ -1217,6 +1228,7 @@ fn spliced(
     engine: &NemoCliEngine,
     mic: &[i16],
     lb: &[i16],
+    far_words: &[W],
     mic_map: &ClockMap,
     clocks: &ClockPair,
     profile: &EchoProfile,
@@ -1445,6 +1457,129 @@ fn spliced(
             100.0 * edits as f64 / ref_n.max(1) as f64
         );
     }
+    // The layered gate over the same cancelled words (plan 15 section 9):
+    // levels on the canceller's output, the attenuation against the raw
+    // spliced mic, text against the loopback's words, each variant of the
+    // after-canceller parameters decided over the same features.
+    {
+        let heard = to_i16(&cancelled);
+        let raw: Option<Box<dyn PcmSource>> = Some(Box::new(&spliced_mic[..]));
+        let pres = presence_sources(&spans, &heard[..], raw, lb, Some(clocks.clone()));
+        let floor = floor_sources(&heard[..], lb, Some(clocks.clone())).floor_db();
+        let ms: Vec<(i64, i64)> = spans.iter().map(|s| (s.0 / 16, s.1 / 16)).collect();
+        let groups = layers::gap_groups(ms.iter().copied());
+        let gw: Vec<GateWord> = (0..aec_words.len())
+            .map(|i| GateWord {
+                start_ms: ms[i].0,
+                end_ms: ms[i].1,
+                norm: aec_words[i].norm.clone(),
+                group: groups[i],
+                score: g.scores[i],
+                presence: pres[i],
+            })
+            .collect();
+        let fi = FarIndex::new(
+            far_words
+                .iter()
+                .map(|w| ((w.start * 1_000.0).round() as i64, w.norm.clone())),
+        );
+        let opts = LayerOptions {
+            correlation: true,
+            canceller: true,
+            fixed: band_after_canceller(GateBand::DEFAULT.threshold),
+            threshold: GateBand::DEFAULT.threshold,
+            window: TextWindow::DEFAULT,
+            calibrate: true,
+        };
+        let reference = &asr["dt-near"];
+        let in_clip = |w: &W, &(a, b): &(f64, f64)| {
+            let mid = (w.start + w.end) / 2.0;
+            mid >= a - 0.1 && mid <= b + 0.1
+        };
+        let wer = |hyp: &[&W]| -> (f64, usize) {
+            let (mut e, mut n) = (0usize, 0usize);
+            for c in &clips {
+                let r: Vec<&str> = reference
+                    .iter()
+                    .filter(|w| in_clip(w, c))
+                    .map(|w| w.norm.as_str())
+                    .collect();
+                let h: Vec<&str> = hyp
+                    .iter()
+                    .filter(|w| in_clip(w, c))
+                    .map(|w| w.norm.as_str())
+                    .collect();
+                e += levenshtein(&r, &h);
+                n += r.len();
+            }
+            let outside = hyp
+                .iter()
+                .filter(|w| !clips.iter().any(|c| in_clip(w, c)))
+                .count();
+            (100.0 * e as f64 / n.max(1) as f64, outside)
+        };
+        if let Some(dir) = env_path("DIARIST_ECHO_DUMP") {
+            // Every word's features (local analysis; delete after).
+            std::fs::create_dir_all(&dir).unwrap();
+            let r = layers::gate(&gw, &fi, floor, &opts);
+            let raw_pres =
+                presence_sources(&spans, &spliced_mic[..], None, lb, Some(clocks.clone()));
+            let mut t = String::from(
+                "start\tend\ttext\tin_clip\tlevel\tfar\tatt\tcoef\treason\traw_level\tspan_att\n",
+            );
+            for (i, w) in aec_words.iter().enumerate() {
+                let p = gw[i].presence;
+                t.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\n",
+                    gw[i].start_ms,
+                    gw[i].end_ms,
+                    w.norm,
+                    u8::from(clips.iter().any(|c| in_clip(w, c))),
+                    p.map_or(String::new(), |p| format!("{:.2}", p.level_db)),
+                    p.map_or(String::new(), |p| u8::from(p.far_active).to_string()),
+                    p.and_then(|p| p.attenuation_db)
+                        .map_or(String::new(), |a| format!("{a:.2}")),
+                    gw[i]
+                        .score
+                        .coefficient()
+                        .map_or(String::new(), |c| format!("{c:.3}")),
+                    r.reasons[i].map_or("", |r| r.as_str()),
+                    raw_pres[i].map_or(String::new(), |p| format!("{:.2}", p.level_db)),
+                    -kept_db(w)
+                ));
+            }
+            std::fs::write(dir.join("spliced.tsv"), t).unwrap();
+            let mut raw_t = String::from("start\tend\ttext\tin_clip\n");
+            for w in &asr["dt-mix"] {
+                raw_t.push_str(&format!(
+                    "{:.3}\t{:.3}\t{}\t{}\n",
+                    w.start,
+                    w.end,
+                    w.norm,
+                    u8::from(clips.iter().any(|c| in_clip(w, c)))
+                ));
+            }
+            std::fs::write(dir.join("spliced.raw.tsv"), raw_t).unwrap();
+        }
+        eprintln!("| Spliced, layered: attenuation at / margin (dB) | and coefficient at | Correlation band | Level layer | Dropped | Owner's word error rate | Words outside the clips |");
+        eprintln!("|---|---|---|---|---|---|---|");
+        for v in aec_variants() {
+            let r = layers::gate_with(&gw, &fi, floor, &opts, &|c| v.apply(c));
+            let kept: Vec<&W> = aec_words
+                .iter()
+                .zip(&r.reasons)
+                .filter(|p| p.1.is_none())
+                .map(|p| p.0)
+                .collect();
+            let (e, outside) = wer(&kept);
+            eprintln!(
+                "{} {} ({:?}) | {e:.1} % | {outside} |",
+                v.label(),
+                r.dropped(),
+                r.counts
+            );
+        }
+    }
     if std::env::var("DIARIST_ECHO_KEEP").as_deref() != Ok("1") {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1495,4 +1630,81 @@ impl SplicedEval {
         }
         100.0 * edits as f64 / n.max(1) as f64
     }
+}
+
+/// One after-canceller variant of the layered gate's parameters.
+#[derive(Debug, Clone, Copy)]
+struct AecVariant {
+    attenuation_db: f32,
+    margin_db: f32,
+    min_coefficient: Option<f32>,
+    /// The correlation band (`None`: the correlation layer off).
+    band: Option<GateBand>,
+    level: bool,
+}
+
+impl AecVariant {
+    fn apply(&self, c: &mut layers::Context) {
+        c.attenuation = self.attenuation_db.is_finite();
+        c.attenuation_db = self.attenuation_db;
+        c.attenuation_margin_db = self.margin_db;
+        c.attenuation_min_coefficient = self.min_coefficient;
+        c.level_after_canceller = self.level;
+        match self.band {
+            Some(b) => {
+                c.band = b;
+                c.correlation_min_attenuation_db = None;
+            }
+            None => c.correlation_min_attenuation_db = Some(f32::INFINITY),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "| {} / {} | {} | {} | {} |",
+            self.attenuation_db,
+            self.margin_db,
+            self.min_coefficient.map_or("-".into(), |c| c.to_string()),
+            self.band.map_or("off".into(), |b| format!(
+                "{:.2}/{:.2}/{:.2}",
+                b.keep_under, b.threshold, b.drop_at
+            )),
+            if self.level { "on" } else { "off" }
+        )
+    }
+}
+
+/// The after-canceller variants (the same list in tests/echo_sample.rs,
+/// tests/echo_fleurs.rs and tests/aec_postpass.rs).
+fn aec_variants() -> Vec<AecVariant> {
+    let mut v = Vec::new();
+    for keep_under in [0.5f32, 0.6] {
+        for threshold in [0.7f32, 0.75, 0.8] {
+            for drop_at in [0.8f32, 0.85, 0.9, 0.95] {
+                for level in [false, true] {
+                    v.push(AecVariant {
+                        attenuation_db: f32::INFINITY,
+                        margin_db: 10.0,
+                        min_coefficient: None,
+                        band: Some(GateBand {
+                            keep_under,
+                            threshold,
+                            drop_at,
+                        }),
+                        level,
+                    });
+                }
+            }
+        }
+    }
+    for level in [false, true] {
+        v.push(AecVariant {
+            attenuation_db: f32::INFINITY,
+            margin_db: 10.0,
+            min_coefficient: None,
+            band: None,
+            level,
+        });
+    }
+    v
 }
