@@ -123,6 +123,8 @@ export function echoReasonText(reason: EchoReason | undefined): string {
       return "Its sound matches the meeting's.";
     case "utterance":
       return "It sat inside a phrase that was echo.";
+    case "transfer":
+      return "Before echo cancellation, the microphone heard the meeting's words there.";
     default:
       return "";
   }

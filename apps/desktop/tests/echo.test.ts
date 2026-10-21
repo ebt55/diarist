@@ -101,7 +101,7 @@ describe("settings", () => {
 
 describe("why a word was removed", () => {
   test("every reason has a sentence; older runs have none", () => {
-    for (const r of ["text", "attenuation", "level", "correlation", "utterance"] as const) {
+    for (const r of ["text", "attenuation", "level", "correlation", "utterance", "transfer"] as const) {
       expect(echoReasonText(r).length).toBeGreaterThan(10);
     }
     expect(echoReasonText(undefined)).toBe("");
