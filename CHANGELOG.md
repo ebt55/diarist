@@ -11,7 +11,7 @@ All notable changes to Diarist. Versions follow semantic versioning.
   words from "me", in the live view and in the final transcript; the other
   side's own channel is never touched. On a 111-minute meeting recorded
   with speakers it removed 99 percent of the duplicated words and kept
-  98.8 percent of the owner's own. The live view says when it hears echo
+  99.4 percent of the owner's own. The live view says when it hears echo
   and offers "Turn off for this recording" (N). The meeting details say how
   many words were removed, with Restore to put them back as "me" (and
   "Remove echo words again"). Settings, Recording, "Recording with speakers
@@ -25,7 +25,7 @@ All notable changes to Diarist. Versions follow semantic versioning.
   canceller takes the other side out of a temporary copy of the microphone
   audio (what is stored stays as recorded), that copy is transcribed, and
   the echo gate removes what is left. On the 111-minute meeting recorded
-  with speakers it kept 98.3 percent of the owner's own words and left 3.2
+  with speakers it kept 98.3 percent of the owner's own words and left 1.8
   percent of "me" as copies of the other side; the owner's own words spoken
   over the meeting's real echo came out with 7.6 percent of words wrong
   instead of 17.1. It runs while the other side is transcribed, so the
