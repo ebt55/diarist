@@ -1610,6 +1610,7 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
         postpass::MicWords {
             words: &words,
             far: &[],
+            raw: None,
         },
         EchoMode::Auto,
         0.5,
@@ -1674,8 +1675,32 @@ struct EchoRun {
     report: PostPassReport,
     /// The WAV the fake engine transcribed for the mic.
     mic_job: PathBuf,
+    /// The third job: the raw mic for the transfer gate (no live mic words).
+    raw_job: Option<(PathBuf, bool)>,
     /// `mic-aec.wav` was left in the meeting folder.
     aec_left: bool,
+}
+
+/// The fake file engine's mic words (`p<s>` each second) stored as the live
+/// run's mic utterances, one per second.
+fn live_mic_like_the_file_engine(store: &SqliteStore, run: RunId, secs: u64) {
+    for s in 0..secs {
+        store
+            .append_live_utterance(
+                run,
+                Channel::Mic,
+                s as u32,
+                0,
+                &[EngineWord {
+                    t0_us: s * 1_000_000 + 50_000,
+                    t1_us: s * 1_000_000 + 900_000,
+                    text: format!("p{s}"),
+                    conf: None,
+                    spk: None,
+                }],
+            )
+            .unwrap();
+    }
 }
 
 /// A stored meeting with [`echo_wavs`], then the real post-pass with the
@@ -1683,12 +1708,26 @@ struct EchoRun {
 /// handling was turned off for the recording; `gain`: the loopback has a
 /// gain track.
 fn echo_post_pass_with(mode: Option<&str>, echo: bool, user_off: bool, gain: bool) -> EchoRun {
+    echo_post_pass_full(mode, echo, user_off, gain, false)
+}
+
+/// [`echo_post_pass_with`]; `live_mic`: the live run has the mic's words.
+fn echo_post_pass_full(
+    mode: Option<&str>,
+    echo: bool,
+    user_off: bool,
+    gain: bool,
+    live_mic: bool,
+) -> EchoRun {
     let dir = tempfile::tempdir().unwrap();
     let (_ctx, store, file) = context(dir.path(), None);
     if let Some(m) = mode {
         store.set_setting(settings::ECHO_MODE, m).unwrap();
     }
     let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
+    if live_mic {
+        live_mic_like_the_file_engine(&store, live, 60);
+    }
     if user_off {
         let mut info = store.get_run(live).unwrap().engine_info;
         info["echo"] = serde_json::json!({"user_off": true, "mode": ECHO_OFF_FOR_RECORDING});
@@ -1717,7 +1756,7 @@ fn echo_post_pass_with(mode: Option<&str>, echo: bool, user_off: bool, gain: boo
     )
     .unwrap();
     let jobs = file.jobs.lock().unwrap().clone();
-    assert_eq!(jobs.len(), 2);
+    assert!((2..=3).contains(&jobs.len()), "{jobs:?}");
     assert!(jobs[0].0.ends_with("loopback.wav"), "{jobs:?}");
     if gain {
         assert!(
@@ -1729,6 +1768,7 @@ fn echo_post_pass_with(mode: Option<&str>, echo: bool, user_off: bool, gain: boo
         store,
         report,
         mic_job: jobs[1].0.clone(),
+        raw_job: jobs.get(2).cloned(),
         aec_left: folder.join(postpass::MIC_AEC_WAV).exists(),
     }
 }
@@ -1781,10 +1821,42 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert!(dropped
         .iter()
         .all(|w| w.start_ms < 30_000 && w.text.starts_with('p')));
+    // The transfer gate: the live run has no mic words, so the raw mic was
+    // transcribed (undiarized) and gated with the raw band; its echo words
+    // carry over to the cancelled words of the same text.
+    assert!(
+        r.raw_job
+            .as_ref()
+            .is_some_and(|(p, diarize)| p.ends_with("mic.wav") && !diarize),
+        "{:?}",
+        r.raw_job
+    );
+    let t = &e["transfer"];
+    assert_eq!(
+        (
+            t["source"].as_str(),
+            t["raw_words"].as_u64(),
+            t["guard"].as_str()
+        ),
+        (Some("transcribed"), Some(60), Some("level")),
+        "{e}"
+    );
+    assert_eq!(t["raw_band"], serde_json::json!([0.3, 0.5, 0.7]), "{e}");
+    assert!(t["raw_dropped"].as_u64().unwrap() >= 20, "{e}");
+    assert_eq!(t["plain"].as_u64(), Some(0), "{e}");
+    assert_eq!(
+        t["removed"].as_u64(),
+        e["layers"]["transfer"].as_u64().or(Some(0)),
+        "{e}"
+    );
+    assert!(dropped
+        .iter()
+        .filter(|w| w.reason == Some(crate::types::EchoReason::Transfer))
+        .all(|w| w.start_ms < 30_000));
     // off: no canceller, no echo key, no list, every word.
     let r = echo_post_pass_with(Some("off"), true, false, false);
     assert!(
-        r.mic_job.ends_with("mic.wav") && !r.aec_left,
+        r.mic_job.ends_with("mic.wav") && !r.aec_left && r.raw_job.is_none(),
         "{:?}",
         r.mic_job
     );
@@ -1794,9 +1866,13 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert_eq!(store.echo_dropped(report.current_run).unwrap(), None);
     assert_eq!(mic_words(&store, report.current_run).len(), 60);
     // always, without echo: cancelled and gated, nothing correlates,
-    // nothing goes.
+    // nothing goes. The raw gate takes the words the fake engine heard in
+    // the mic's noise floor while the far end talked (its level layer, which
+    // `always` engages, as live), but the canceller cut none of them: the
+    // transfer's guard keeps them.
     let r = echo_post_pass_with(Some("always"), false, false, false);
     assert!(r.mic_job.ends_with(postpass::MIC_AEC_WAV) && !r.aec_left);
+    assert!(r.raw_job.is_some());
     let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
@@ -1808,6 +1884,11 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         ),
         (Some(false), Some(0), Some(true))
     );
+    let t = &e["transfer"];
+    assert_eq!(t["raw_layers"]["correlation"], 0, "{e}");
+    assert!(t["raw_layers"]["level"].as_u64().unwrap() > 0, "{e}");
+    assert_eq!(t["removed"], 0, "{e}");
+    assert_eq!(t["guarded"], t["candidates"], "{e}");
     assert_eq!(
         store.echo_dropped(report.current_run).unwrap(),
         Some(Vec::new())
@@ -1816,7 +1897,7 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     // Turned off for the recording (the live run says so): scanned, neither
     // cancelled nor gated.
     let r = echo_post_pass_with(None, true, true, false);
-    assert!(r.mic_job.ends_with("mic.wav") && !r.aec_left);
+    assert!(r.mic_job.ends_with("mic.wav") && !r.aec_left && r.raw_job.is_none());
     let (store, report) = (r.store, r.report);
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
@@ -1845,6 +1926,73 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert!(e["erle_db"].as_f64().unwrap() >= 20.0, "{e}");
     let kept = mic_words(&r.store, r.report.current_run);
     assert!((32..60).all(|s| kept.contains(&s)), "{kept:?}");
+}
+
+#[test]
+fn the_transfer_takes_the_live_runs_mic_words_when_there_are_any() {
+    // The live run heard the mic: its words are the raw source, and the
+    // engine runs twice (loopback, the canceller's output), not three times.
+    let r = echo_post_pass_full(None, true, false, false, true);
+    assert!(
+        r.mic_job.ends_with(postpass::MIC_AEC_WAV),
+        "{:?}",
+        r.mic_job
+    );
+    assert!(r.raw_job.is_none(), "{:?}", r.raw_job);
+    let run = r.store.get_run(r.report.current_run).unwrap();
+    let e = &run.engine_info["echo"];
+    let t = &e["transfer"];
+    assert_eq!(
+        (t["source"].as_str(), t["raw_words"].as_u64()),
+        (Some("live"), Some(60)),
+        "{e}"
+    );
+    assert!(t["raw_dropped"].as_u64().unwrap() >= 20, "{e}");
+    let kept: Vec<i64> = r
+        .store
+        .get_words(run.meeting_id, i64::MIN, i64::MAX)
+        .unwrap()
+        .iter()
+        .filter(|w| w.text.starts_with('p') && w.raw_label.is_none())
+        .map(|w| w.start_ms / 1_000)
+        .collect();
+    assert!(kept.iter().all(|s| *s >= 27), "{kept:?}");
+    assert!((32..60).all(|s| kept.contains(&s)), "{kept:?}");
+    // The post-pass run has no live utterances.
+    assert!(postpass::live_mic_words(&*r.store, r.report.current_run).is_empty());
+}
+
+#[test]
+fn live_mic_words_are_the_latest_revisions_of_the_mic_on_meeting_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, _file) = context(dir.path(), None);
+    let (_meeting, live) = interrupted_meeting(&store, dir.path(), "Live words", false);
+    let word = |t: u64, text: &str| EngineWord {
+        t0_us: t * 1_000,
+        t1_us: t * 1_000 + 300_000,
+        text: text.into(),
+        conf: None,
+        spk: None,
+    };
+    for (utt, rev, words) in [
+        (1u32, 0u32, vec![word(5_000, "later")]),
+        (0, 0, vec![word(1_000, "first")]),
+        (0, 1, vec![word(1_000, "first"), word(1_500, "draft")]),
+        (0, 2, vec![word(1_000, "final"), word(1_400, "words")]),
+    ] {
+        store
+            .append_live_utterance(live, Channel::Mic, utt, rev, &words)
+            .unwrap();
+    }
+    let w = postpass::live_mic_words(&*store, live);
+    let got: Vec<(i64, &str)> = w.iter().map(|w| (w.start_ms, w.text.as_str())).collect();
+    // The loopback's "hello" is not the mic's.
+    assert_eq!(got, [(1_000, "final"), (1_400, "words"), (5_000, "later")]);
+    assert!(w
+        .iter()
+        .all(|w| w.channel == Channel::Mic && w.speaker == ME_LABEL));
+    // A run that is gone: none.
+    assert!(postpass::live_mic_words(&*store, RunId(9_999)).is_empty());
 }
 
 #[test]
@@ -1882,9 +2030,11 @@ fn recovery_and_a_rerun_cancel_the_echo_through_the_same_post_pass() {
         .unwrap()
         .unwrap();
     let jobs = file.jobs.lock().unwrap().clone();
-    let last: Vec<&PathBuf> = jobs.iter().rev().take(2).map(|j| &j.0).collect();
-    assert!(last[0].ends_with(postpass::MIC_AEC_WAV), "{jobs:?}");
-    assert!(last[1].ends_with("loopback.wav"), "{jobs:?}");
+    let last: Vec<&PathBuf> = jobs.iter().rev().take(3).map(|j| &j.0).collect();
+    // The live run has no mic words: the raw mic is transcribed last.
+    assert!(last[0].ends_with("mic.wav"), "{jobs:?}");
+    assert!(last[1].ends_with(postpass::MIC_AEC_WAV), "{jobs:?}");
+    assert!(last[2].ends_with("loopback.wav"), "{jobs:?}");
     let run = store.get_run(report.current_run).unwrap();
     let e = &run.engine_info["echo"];
     assert_eq!(
@@ -1892,6 +2042,7 @@ fn recovery_and_a_rerun_cancel_the_echo_through_the_same_post_pass() {
         (Some(true), Some(true)),
         "{e}"
     );
+    assert_eq!(e["transfer"]["source"], "transcribed", "{e}");
     assert!(e["dropped"].as_u64().unwrap() > 0, "{e}");
     assert!(!folder.join(postpass::MIC_AEC_WAV).exists());
     assert!(!folder.join("mic.wav").exists());

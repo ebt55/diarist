@@ -12,7 +12,9 @@
 //! raw indices without them). The mic word gate is layered on top of it
 //! ([`layers`]: text matching against the loopback's words ([`text`]), the
 //! near-end level and the canceller's attenuation ([`presence`]), the
-//! correlation, an utterance rule).
+//! correlation, an utterance rule); after the post-pass canceller its
+//! decision on the raw mic's words is transferred onto the cancelled
+//! transcript ([`transfer`]).
 //!
 //! - [`EchoMonitor`] (live) keeps a 60 s high-passed PCM ring per channel on
 //!   meeting time ([`PcmRing`], fed from the pipelines' non-blocking taps;
@@ -2167,6 +2169,7 @@ pub fn clamp_threshold(v: f32) -> f32 {
 pub mod layers;
 pub mod presence;
 pub mod text;
+pub mod transfer;
 
 #[cfg(test)]
 pub(crate) mod synth;

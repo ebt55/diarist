@@ -10,7 +10,8 @@
 //! to +0.65 s at p90, and the loopback's own stamps can be late too). Within
 //! any [`RUN_WORDS`] consecutive mic words spanning at most [`RUN_SPAN_MS`],
 //! the words that match distinct loopback tokens with lags no more than
-//! [`LAG_SPREAD_MS`] apart form a run ([`runs`]):
+//! [`TextWindow::spread_ms`] apart ([`LAG_SPREAD_MS`]) form a run
+//! ([`runs`]):
 //!
 //! - three or more such words are echo on text alone ([`Runs::run3`]): a
 //!   mis-transcribed middle word or a second far-end speaker's word in
@@ -23,23 +24,27 @@
 use std::collections::HashMap;
 
 /// The causal window of a match: the mic word's start minus the loopback
-/// word's start, from `lo_ms` (negative: the mic copy first) to `hi_ms`.
+/// word's start, from `lo_ms` (negative: the mic copy first) to `hi_ms`;
+/// a run's lags lie within `spread_ms` of each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextWindow {
     pub lo_ms: i64,
     pub hi_ms: i64,
+    pub spread_ms: i64,
 }
 
 impl TextWindow {
-    /// −0.15 to +1.0 s. The lower edge was measured at −0.5 s (research 16)
-    /// and −0.15 s (the external review): neither takes any of the owner's
-    /// words on meetings 12, 13 and 14, live or post-pass, and −0.15 s
-    /// halves the chance matches on meeting 12's live words (6 words of
-    /// 14,627 with the mic moved 45 s, against 12) for 2 percent fewer
-    /// duplicates found there (docs/eval/2026-10-21-echo-round2.md).
+    /// −0.15 to +1.0 s, lags within [`LAG_SPREAD_MS`]. The lower edge was
+    /// measured at −0.5 s (research 16) and −0.15 s (the external review):
+    /// neither takes any of the owner's words on meetings 12, 13 and 14,
+    /// live or post-pass, and −0.15 s halves the chance matches on meeting
+    /// 12's live words (6 words of 14,627 with the mic moved 45 s, against
+    /// 12) for 2 percent fewer duplicates found there
+    /// (docs/eval/2026-10-21-echo-round2.md).
     pub const DEFAULT: Self = Self {
         lo_ms: -150,
         hi_ms: 1_000,
+        spread_ms: LAG_SPREAD_MS,
     };
 }
 
@@ -53,8 +58,10 @@ impl Default for TextWindow {
 pub const RUN_WORDS: usize = 4;
 /// ... spanning at most this (first to last start).
 pub const RUN_SPAN_MS: i64 = 2_000;
-/// The lags of a run's matches lie within this of each other.
-pub const LAG_SPREAD_MS: i64 = 300;
+/// The lags of a run's matches lie within this of each other: 500 ms
+/// (plan 15 section 9.2; round two's 300 ms missed the canceller's
+/// residue, whose garbled copies are stamped up to 0.7 s late).
+pub const LAG_SPREAD_MS: i64 = 500;
 /// A content word has at least this many characters ...
 pub const CONTENT_CHARS: usize = 5;
 /// ... and is not one of these.
@@ -236,15 +243,15 @@ pub fn runs(mic: &[(i64, &str)], far: &FarIndex, window: TextWindow) -> Runs {
             continue;
         }
         // Every lag in the window as the run's smallest.
-        let window = &cands[i..=end];
-        for &(base, _) in window.iter().flatten() {
+        let span = &cands[i..=end];
+        for &(base, _) in span.iter().flatten() {
             chosen.clear();
             used.clear();
-            for (k, c) in (i..=end).zip(window) {
+            for (k, c) in (i..=end).zip(span) {
                 if let Some(&(_, j)) = c
                     .iter()
                     .filter(|(lag, j)| {
-                        *lag >= base && *lag - base <= LAG_SPREAD_MS && !used.contains(j)
+                        *lag >= base && *lag - base <= window.spread_ms && !used.contains(j)
                     })
                     .min_by_key(|(lag, _)| *lag - base)
                 {
@@ -327,13 +334,21 @@ mod tests {
         assert_eq!(r.run3, [true; 3]);
         let r = runs(&mic(&[(700, "we"), (900, "need"), (1_100, "more")]), &f, W);
         assert_eq!(r.run3, [false; 3]);
-        // The lags disagree by more than 0.3 s.
+        // The lags disagree by more than 0.5 s.
         let r = runs(
             &mic(&[(1_100, "we"), (1_800, "need"), (2_300, "more")]),
             &f,
             W,
         );
         assert_eq!(r.run3, [false; 3]);
+        // By 0.4 s: a run with the 500 ms spread, none with round two's 300.
+        let late = mic(&[(1_100, "we"), (1_500, "need"), (1_900, "more")]);
+        assert_eq!(runs(&late, &f, W).run3, [true; 3]);
+        let narrow = TextWindow {
+            spread_ms: 300,
+            ..W
+        };
+        assert_eq!(runs(&late, &f, narrow).run3, [false; 3]);
     }
 
     #[test]

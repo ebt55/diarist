@@ -3,4 +3,4 @@
 /**
  * Which layer of the echo gate removed a mic word (plan 15 section 9).
  */
-export type EchoReason = "text" | "attenuation" | "level" | "correlation" | "utterance";
+export type EchoReason = "text" | "attenuation" | "level" | "correlation" | "utterance" | "transfer";

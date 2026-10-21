@@ -38,11 +38,23 @@
 //! loopback), when the profile found coupling, a canceller ran (here, or
 //! `aec` in the live run's `engine_info.echo`) or the mode is `always`,
 //! with a band of its own after the canceller ([`band_after_canceller`]).
+//! Where the canceller ran here, the transfer gate
+//! ([`crate::audio::echo::transfer`], plan 15 section 9.2) also decides on
+//! the raw mic's words, which the speech model heard cleanly: the live
+//! run's mic words ([`live_mic_words`]; crash recovery and re-runs keep
+//! the live run until the post-pass is done), or, when it has none, one
+//! more pass of the file engine over `mic.wav` (undiarized, its progress
+//! the last quarter of the bar); the layered gate with the raw band on
+//! them, against the raw mic, and its echo decisions carried over to the
+//! cancelled words they overlap (reason `transfer`). A raw transcription
+//! that fails leaves the post-canceller layers alone (`transfer.error`).
 //! The loopback is never touched. The counts and parameters go to
 //! `engine_info.echo` (with the canceller's `erle_db`, `aec_wall_s`,
 //! `aec_wait_s` and `gain_track`, the gate's `band`, `layers` and
-//! `floor_db` / `owner_db`), the dropped words with their reason to the
-//! run's `echo_dropped` (for Restore), one count-only log line. A recording whose echo handling the user turned off while it
+//! `floor_db` / `owner_db`, the transfer's `transfer`: its raw `source`,
+//! counts per guard and the raw gate's), the dropped words with their
+//! reason to the run's `echo_dropped` (for Restore), one count-only log
+//! line. A recording whose echo handling the user turned off while it
 //! ran (`user_off` in the live run's `engine_info.echo`) is scanned but
 //! neither cancelled nor gated: the counts are written with mode
 //! [`super::ECHO_OFF_FOR_RECORDING`], and there is no `echo_dropped`. The
@@ -60,8 +72,9 @@ use std::time::{Duration, Instant};
 use crate::audio::aec::offline::{cancel_wavs, OfflineOptions, OfflineReport};
 use crate::audio::clock::{channel_anchors, origin_from_anchors, ClockMap};
 use crate::audio::echo::layers::{self, GateWord, LayerOptions};
-use crate::audio::echo::presence::{floor_sources, presence_sources};
+use crate::audio::echo::presence::{floor_sources, presence_sources, Presence};
 use crate::audio::echo::text::{norm, FarIndex, TextWindow};
+use crate::audio::echo::transfer;
 use crate::audio::echo::{
     score_sources, ClockPair, EchoMode, EchoProfile, GateBand, GatePad, PcmSource, WavSamples,
     WordScore, ACTIVE_DBFS,
@@ -79,8 +92,8 @@ use crate::transcript::{
     UNKNOWN_LABEL,
 };
 use crate::types::{
-    AudioFormat, Channel, EchoDroppedWord, JobId, MeetingId, MeetingStatus, RunId, RunKind,
-    RunStatus, TrackChannel,
+    AudioFormat, Channel, EchoDroppedWord, JobId, LiveUtterance, MeetingId, MeetingStatus, RunId,
+    RunKind, RunStatus, TrackChannel,
 };
 use crate::views::{JobEvent, JobStage};
 
@@ -444,6 +457,61 @@ pub(super) struct MicWords<'a> {
     pub(super) words: &'a [TranscriptWord],
     /// The loopback's words (meeting time), for the text layer.
     pub(super) far: &'a [TranscriptWord],
+    /// After the canceller: the raw mic's words for the transfer gate
+    /// ([`transfer`]), or why there are none (`None`: not asked for).
+    pub(super) raw: Option<std::result::Result<RawMic, String>>,
+}
+
+/// Where the transfer gate's raw-mic words came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RawSource {
+    /// The live run's mic words ([`live_mic_words`]).
+    Live,
+    /// The file engine over `mic.wav` (the live run has no mic words).
+    Transcribed,
+}
+
+impl RawSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Transcribed => "transcribed",
+        }
+    }
+}
+
+/// The raw (uncancelled) mic's words, on meeting time, in time order.
+pub(super) struct RawMic {
+    pub(super) words: Vec<TranscriptWord>,
+    pub(super) source: RawSource,
+    /// How long getting them took (s).
+    pub(super) wall_s: f64,
+}
+
+/// The live run's mic words: every word of each mic utterance's latest
+/// revision, on meeting time as the live run stored them (through its own
+/// clock maps, from the anchors the post-pass maps with), in time order.
+/// Empty when the run or its mic words are gone.
+pub(super) fn live_mic_words(store: &dyn RunStore, run: RunId) -> Vec<TranscriptWord> {
+    let rows = match store.list_live_utterances(run) {
+        Ok(r) => r,
+        Err(e) => {
+            log::info!("post-pass: no live mic words for the echo transfer ({e})");
+            return Vec::new();
+        }
+    };
+    let mut latest: BTreeMap<u32, LiveUtterance> = BTreeMap::new();
+    for u in rows.into_iter().filter(|u| u.channel == Channel::Mic) {
+        if latest.get(&u.utt).is_none_or(|old| u.rev >= old.rev) {
+            latest.insert(u.utt, u);
+        }
+    }
+    let mut words: Vec<TranscriptWord> = latest
+        .values()
+        .flat_map(|u| words_from_engine(Channel::Mic, &u.words, ME_LABEL))
+        .collect();
+    words.sort_by_key(|w| (w.start_ms, w.end_ms));
+    words
 }
 
 /// The echo step of the post-pass for the mic words (meeting time) once
@@ -487,28 +555,36 @@ fn gate_mic(
     let before = words.len();
     let mut dropped = Vec::new();
     let mut report = None;
+    let mut transfer_info: Option<serde_json::Value> = None;
+    let mut transfer_log = String::new();
     let flags = if user_off {
         vec![false; words.len()]
     } else {
         // With clock maps the words are on meeting time, the profile's
         // timeline; without them both are channel time.
-        let spans: Vec<(i64, i64)> = words
-            .iter()
-            .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
-            .collect();
-        let scores = if correlation {
-            score_sources(
-                &spans,
-                WavSamples::open(mic)?,
-                WavSamples::open(lb)?,
-                &profile,
-                GatePad::DEFAULT,
-            )
-        } else {
-            vec![WordScore::Undefined; spans.len()]
+        let spans_of = |ws: &[TranscriptWord]| -> Vec<(i64, i64)> {
+            ws.iter()
+                .map(|w| (w.start_ms * 16, w.end_ms.max(w.start_ms) * 16))
+                .collect()
         };
-        // The canceller's attenuation, for its layer (off: layers module).
-        let raw: Option<Box<dyn PcmSource>> = if ran && layers::ATTENUATION_LAYER {
+        let spans = spans_of(words);
+        let score = |spans: &[(i64, i64)]| -> Result<Vec<WordScore>> {
+            Ok(if correlation {
+                score_sources(
+                    spans,
+                    WavSamples::open(mic)?,
+                    WavSamples::open(lb)?,
+                    &profile,
+                    GatePad::DEFAULT,
+                )
+            } else {
+                vec![WordScore::Undefined; spans.len()]
+            })
+        };
+        let scores = score(&spans)?;
+        // The canceller's attenuation, for the transfer's level guard (and
+        // the attenuation layer, off: layers module).
+        let raw: Option<Box<dyn PcmSource>> = if ran {
             Some(Box::new(WavSamples::open(mic)?))
         } else {
             None
@@ -529,33 +605,117 @@ fn gate_mic(
         // The file engine's utterance is the whole undiarized mic: the
         // utterance rule's groups are its stretches with pauses up to
         // `POCKET_GAP_MS`.
-        let groups = layers::gap_groups(words.iter().map(|w| (w.start_ms, w.end_ms)));
-        let gw: Vec<GateWord> = words
-            .iter()
-            .enumerate()
-            .map(|(i, w)| GateWord {
-                start_ms: w.start_ms,
-                end_ms: w.end_ms,
-                norm: norm(&w.text),
-                group: groups[i],
-                score: scores[i],
-                presence: presence[i],
-            })
-            .collect();
+        let gate_words =
+            |ws: &[TranscriptWord], scores: &[WordScore], presence: &[Option<Presence>]| {
+                let groups = layers::gap_groups(ws.iter().map(|w| (w.start_ms, w.end_ms)));
+                ws.iter()
+                    .enumerate()
+                    .map(|(i, w)| GateWord {
+                        start_ms: w.start_ms,
+                        end_ms: w.end_ms,
+                        norm: norm(&w.text),
+                        group: groups[i],
+                        score: scores[i],
+                        presence: presence[i],
+                    })
+                    .collect::<Vec<GateWord>>()
+            };
+        let gw = gate_words(words, &scores, &presence);
         let far = FarIndex::new(m.far.iter().map(|w| (w.start_ms, norm(&w.text))));
-        let r = layers::gate(
-            &gw,
-            &far,
-            floor,
-            &LayerOptions {
-                correlation,
-                canceller: ran,
-                fixed,
-                threshold,
-                window: TextWindow::DEFAULT,
-                calibrate: !ran,
-            },
-        );
+        let opts = LayerOptions {
+            correlation,
+            canceller: ran,
+            fixed,
+            threshold,
+            window: TextWindow::DEFAULT,
+            calibrate: !ran,
+        };
+        let r = match m.raw.as_ref().filter(|_| ran) {
+            // The transfer gate (plan 15 section 9.2): the layered gate on
+            // the raw mic's words with the raw band, against the raw mic,
+            // transferred onto the cancelled words.
+            Some(Ok(raw_mic)) => {
+                let t_gate = Instant::now();
+                let rw = &raw_mic.words;
+                let raw_spans = spans_of(rw);
+                let raw_scores = score(&raw_spans)?;
+                let raw_presence = presence_sources(
+                    &raw_spans,
+                    WavSamples::open(mic)?,
+                    None,
+                    WavSamples::open(lb)?,
+                    profile.clocks.clone(),
+                );
+                let raw_floor = floor_sources(
+                    WavSamples::open(mic)?,
+                    WavSamples::open(lb)?,
+                    profile.clocks.clone(),
+                )
+                .floor_db();
+                let raw_gw = gate_words(rw, &raw_scores, &raw_presence);
+                let raw_opts = LayerOptions {
+                    canceller: false,
+                    fixed: GateBand::with_threshold(threshold),
+                    calibrate: true,
+                    ..opts
+                };
+                let t = transfer::gate(
+                    &raw_gw,
+                    raw_floor,
+                    &raw_opts,
+                    &gw,
+                    floor,
+                    &opts,
+                    &far,
+                    transfer::GUARD,
+                );
+                let c = t.transfer;
+                let rb = t.raw.calibration.band;
+                let mut info = serde_json::json!({
+                    "source": raw_mic.source.as_str(),
+                    "raw_words": rw.len(),
+                    "raw_dropped": t.raw.dropped(),
+                    "raw_layers": t.raw.counts,
+                    "raw_band": [super::round3(rb.keep_under), super::round3(rb.threshold), super::round3(rb.drop_at)],
+                    "raw_band_calibrated": t.raw.calibration.calibrated,
+                    "raw_wall_s": super::round3(raw_mic.wall_s as f32),
+                    "guard": transfer::GUARD.as_str(),
+                    "gate_s": super::round3(t_gate.elapsed().as_secs_f32()),
+                    "removed": t.counts.transfer,
+                });
+                if let (Some(o), serde_json::Value::Object(cs)) =
+                    (info.as_object_mut(), serde_json::json!(c))
+                {
+                    o.extend(cs);
+                }
+                transfer_info = Some(info);
+                transfer_log = format!(
+                    "; transfer from the {} mic words ({} of {} echo, {:.1} s): {} of {} candidates (text {}, level {}, plain {}), {} beyond the layers, {} without a raw word",
+                    raw_mic.source.as_str(),
+                    t.raw.dropped(),
+                    rw.len(),
+                    raw_mic.wall_s,
+                    c.removed(),
+                    c.candidates,
+                    c.text,
+                    c.level,
+                    c.plain,
+                    t.counts.transfer,
+                    c.unmatched
+                );
+                let mut r = t.after;
+                r.reasons = t.reasons;
+                r.counts = t.counts;
+                r
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    transfer_info = Some(serde_json::json!({ "error": e }));
+                    transfer_log = format!("; no transfer ({e})");
+                }
+                layers::gate(&gw, &far, floor, &opts)
+            }
+        };
         for (i, w) in words.iter().enumerate() {
             if let Some(reason) = r.reasons[i] {
                 dropped.push(EchoDroppedWord {
@@ -598,6 +758,9 @@ fn gate_mic(
     if let Some(r) = &report {
         layer_summary(&mut summary, r, correlation);
     }
+    if let Some(t) = transfer_info {
+        summary["transfer"] = t;
+    }
     if let Some(a) = &run {
         summary["aec_erl_db"] = serde_json::json!(a.erl_db.map(super::round3));
         if a.mic_gain_track {
@@ -627,12 +790,13 @@ fn gate_mic(
     let layer_log = report.as_ref().map_or(String::new(), |r| {
         let c = &r.counts;
         format!(
-            " (text {}, attenuation {}, level {}, correlation {}, utterance {}; band {:.2}/{:.2}/{:.2}{})",
+            " (text {}, attenuation {}, level {}, correlation {}, utterance {}, transfer {}; band {:.2}/{:.2}/{:.2}{}{transfer_log})",
             c.text,
             c.attenuation,
             c.level,
             c.correlation,
             c.utterance,
+            c.transfer,
             band.keep_under,
             band.threshold,
             band.drop_at,
@@ -784,8 +948,9 @@ pub fn run_post_pass(
     let mut live_deleted = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
-        // One channel through the file engine, on meeting time.
-        let transcribe_channel = |i: u64,
+        // One channel through the file engine, on meeting time; `part`:
+        // the `k`-th of `n` equal parts of the progress.
+        let transcribe_channel = |(k, n): (u64, u64),
                                   ch: Channel,
                                   wav: &Path,
                                   diarize: bool,
@@ -794,7 +959,7 @@ pub fn run_post_pass(
             if cancel.is_cancelled() {
                 return Err(CoreError::Cancelled);
             }
-            let base = i * audio_ms;
+            let base = k * audio_ms;
             let words = transcribe(
                 engine,
                 FileJob {
@@ -805,7 +970,7 @@ pub fn run_post_pass(
                     diar_preset: DiarPreset::Streaming,
                 },
                 cancel,
-                &|done, _| progress(JobStage::Transcribing, (base + done) / 2, total_ms),
+                &|done, _| progress(JobStage::Transcribing, (base + done) / n, total_ms),
             )?;
             let default = if ch == Channel::Mic && !diarize {
                 ME_LABEL
@@ -838,7 +1003,7 @@ pub fn run_post_pass(
                     prepare_echo(mic, lb, aec_wav, clocks, echo_mode, live_echo, &halt)
                 })
             });
-            let lb_words = transcribe_channel(0, Channel::Loopback, &lb, true, lb_frames);
+            let lb_words = transcribe_channel((0, 2), Channel::Loopback, &lb, true, lb_frames);
             if lb_words.is_err() {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -856,13 +1021,51 @@ pub fn run_post_pass(
             (lb_words, prep)
         });
         let lb_words = lb_words?;
-        let mic_source = if prep.as_ref().is_some_and(EchoPrep::cancelled) {
-            &aec_wav
-        } else {
-            &mic
+        let cancelled = prep.as_ref().is_some_and(EchoPrep::cancelled);
+        let mic_source = if cancelled { &aec_wav } else { &mic };
+        // The transfer gate's raw-mic words (plan 15 section 9.2): the live
+        // run's, else one more pass of the file engine over `mic.wav`
+        // (crash recovery and re-runs alike: the live run is kept until the
+        // post-pass is done).
+        let user_off = live_echo["user_off"].as_bool().unwrap_or(false);
+        let t_live = Instant::now();
+        let live_raw = (cancelled && !user_off).then(|| live_mic_words(store, job.live_run));
+        let live_s = t_live.elapsed().as_secs_f64();
+        let transcribe_raw = live_raw.as_ref().is_some_and(Vec::is_empty);
+        let mic_part = if transcribe_raw { (2, 4) } else { (1, 2) };
+        let mut mic_words = transcribe_channel(
+            mic_part,
+            Channel::Mic,
+            mic_source,
+            job.diarize_mic,
+            mic_frames,
+        )?;
+        let raw = match live_raw {
+            None => None,
+            Some(words) if !words.is_empty() => Some(Ok(RawMic {
+                words,
+                source: RawSource::Live,
+                wall_s: live_s,
+            })),
+            Some(_) => {
+                let t_raw = Instant::now();
+                match transcribe_channel((3, 4), Channel::Mic, &mic, false, mic_frames) {
+                    Ok(words) => Some(Ok(RawMic {
+                        words,
+                        source: RawSource::Transcribed,
+                        wall_s: t_raw.elapsed().as_secs_f64(),
+                    })),
+                    Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                    Err(e) => {
+                        log::warn!(
+                            "post-pass meeting {}: the raw mic's transcription for the echo transfer failed ({e}); the cancelled words are gated without it",
+                            job.meeting
+                        );
+                        Some(Err(format!("raw mic transcription: {e}")))
+                    }
+                }
+            }
         };
-        let mut mic_words =
-            transcribe_channel(1, Channel::Mic, mic_source, job.diarize_mic, mic_frames)?;
         if let Some(prep) = prep {
             // The levels are taken on what was transcribed: the canceller's
             // output while it is still there.
@@ -875,6 +1078,7 @@ pub fn run_post_pass(
                 MicWords {
                     words: &mic_words,
                     far: &lb_words,
+                    raw,
                 },
                 echo_mode,
                 echo_threshold,

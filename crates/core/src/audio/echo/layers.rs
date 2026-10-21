@@ -35,6 +35,10 @@
 //! The owner's level ([`CalibrationStats::owner_db`]) is the median level
 //! of the words in no text run spoken while the far end was silent (else of
 //! all words in no text run), from at least [`OWNER_MIN_WORDS`].
+//!
+//! After the post-pass canceller the decision also runs on the raw mic's
+//! words and is carried over to the cancelled ones ([`super::transfer`],
+//! reason [`EchoReason::Transfer`]).
 
 use std::collections::BTreeMap;
 
@@ -474,6 +478,13 @@ pub struct LayerCounts {
     pub level: usize,
     pub correlation: usize,
     pub utterance: usize,
+    /// The post-pass transfer gate ([`super::transfer`]; only there).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub transfer: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl LayerCounts {
@@ -486,13 +497,19 @@ impl LayerCounts {
                 EchoReason::Level => &mut c.level,
                 EchoReason::Correlation => &mut c.correlation,
                 EchoReason::Utterance => &mut c.utterance,
+                EchoReason::Transfer => &mut c.transfer,
             } += 1;
         }
         c
     }
 
     pub fn total(&self) -> usize {
-        self.text + self.attenuation + self.level + self.correlation + self.utterance
+        self.text
+            + self.attenuation
+            + self.level
+            + self.correlation
+            + self.utterance
+            + self.transfer
     }
 }
 

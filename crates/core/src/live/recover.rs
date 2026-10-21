@@ -2,7 +2,9 @@
 //!
 //! - Meetings left in `recording`: WAV headers repaired from the file
 //!   lengths, the live run materialised into a readable transcript, and the
-//!   post-pass queued like after a normal Stop.
+//!   post-pass queued like after a normal Stop (its echo transfer gate takes
+//!   the live run's stored mic words, or transcribes `mic.wav` when there
+//!   are none: [`super::postpass`]).
 //! - Meetings left in `processing` (the post-pass was queued or running):
 //!   with both WAVs still there, the output of the interrupted post-pass is
 //!   discarded and the post-pass queued again. Without them (the post-pass

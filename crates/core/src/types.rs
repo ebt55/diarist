@@ -498,15 +498,19 @@ pub enum EchoReason {
     Correlation,
     /// A fragment inside an utterance the other layers found mostly echo.
     Utterance,
+    /// After the post-pass canceller: the uncancelled mic's word at the same
+    /// time was echo (plan 15 section 9.2).
+    Transfer,
 }
 
 impl EchoReason {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Text,
         Self::Attenuation,
         Self::Level,
         Self::Correlation,
         Self::Utterance,
+        Self::Transfer,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -516,6 +520,7 @@ impl EchoReason {
             Self::Level => "level",
             Self::Correlation => "correlation",
             Self::Utterance => "utterance",
+            Self::Transfer => "transfer",
         }
     }
 }
