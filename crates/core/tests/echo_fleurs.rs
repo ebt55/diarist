@@ -26,6 +26,11 @@
 //!   gate (attenuation, correlation band, level layer) over the auto run's
 //!   words before the gate, the canceller run again here as the post-pass
 //!   runs it.
+//! - The transfer gate (plan 15 section 9.2) per guard over the same
+//!   words (`DIARIST_ECHO_TRANSFER=0` skips it): the off run's "me" words
+//!   are the raw mic's transcription, as the post-pass makes it when the
+//!   live run has no mic words (the auto run's live run has none, so its
+//!   post-pass transcribes the raw mic once more).
 //! - `DIARIST_ECHO_CONTROL=0` skips the headphone control;
 //!   `DIARIST_ECHO_DUMP` (a scratch folder) writes every after-canceller
 //!   word's features with its text (local analysis; delete it after).
@@ -44,6 +49,7 @@ use diarist_core::audio::aec::offline::{cancel_recording, OfflineOptions};
 use diarist_core::audio::echo::layers::{self, GateWord, LayerCounts, LayerOptions};
 use diarist_core::audio::echo::presence::{floor_sources, presence_sources};
 use diarist_core::audio::echo::text::{self, norm, FarIndex, TextWindow};
+use diarist_core::audio::echo::transfer::{self, Guard};
 use diarist_core::audio::echo::{
     decide_in_order, score_sources, EchoMode, EchoProfile, GateBand, GatePad, PcmSource, WordScore,
 };
@@ -625,6 +631,9 @@ fn fleurs_owner_over_a_speaker_meeting() {
     if std::env::var("DIARIST_ECHO_AEC_SWEEP").as_deref() == Ok("1") {
         aec_sweep(&utts, &on_pass, &mic, &lb, &p);
     }
+    if std::env::var("DIARIST_ECHO_TRANSFER").as_deref() != Ok("0") {
+        transfer_sweep(&utts, &on_pass, &off_pass, &mic, &lb, &p);
+    }
 
     // The control: the same owner with headphones and no leak. `auto` must
     // give exactly what `off` gives.
@@ -652,6 +661,125 @@ fn fleurs_owner_over_a_speaker_meeting() {
         );
         assert_eq!(a.me, b.me, "the headphone control changed");
         assert_eq!(b.echo["dropped"].as_u64(), Some(0));
+    }
+}
+
+/// The transfer gate's guards (module docs) over the auto run's words
+/// before the gate, the canceller run again here as the post-pass runs it,
+/// the off run's words as the raw mic's; and the post-canceller layers
+/// alone at both lag spreads.
+fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16], p: &EchoProfile) {
+    let mut words: Vec<(i64, i64, String)> = auto.me.iter().chain(&auto.dropped).cloned().collect();
+    words.sort();
+    let hint = |t: i64| p.lag_at(t);
+    let mut o = OfflineOptions::post_pass(None);
+    o.lag_hint = Some(&hint);
+    let mut y: Vec<i16> = Vec::with_capacity(mic.len());
+    cancel_recording(&mic, &lb, &o, &mut |b| {
+        y.extend(
+            b.iter()
+                .map(|v| (v * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16),
+        );
+        Ok(())
+    })
+    .unwrap();
+    let gate_words = |ws: &[(i64, i64, String)], heard: &[i16], cancelled: bool| {
+        let spans: Vec<(i64, i64)> = ws.iter().map(|w| (w.0 * 16, w.1.max(w.0) * 16)).collect();
+        let scores = score_sources(&spans, mic, lb, p, GatePad::DEFAULT);
+        let raw: Option<Box<dyn PcmSource>> =
+            cancelled.then(|| Box::new(mic) as Box<dyn PcmSource>);
+        let pres = presence_sources(&spans, heard, raw, lb, None);
+        let groups = layers::gap_groups(ws.iter().map(|w| (w.0, w.1)));
+        (0..ws.len())
+            .map(|i| GateWord {
+                start_ms: ws[i].0,
+                end_ms: ws[i].1,
+                norm: norm(&ws[i].2),
+                group: groups[i],
+                score: scores[i],
+                presence: pres[i],
+            })
+            .collect::<Vec<GateWord>>()
+    };
+    let gw = gate_words(&words, &y, true);
+    let raw_gw = gate_words(&off.me, mic, false);
+    let floor = floor_sources(&y[..], lb, None).floor_db();
+    let raw_floor = floor_sources(mic, lb, None).floor_db();
+    let fi = FarIndex::new(auto.far.iter().map(|w| (w.0, norm(&w.2))));
+    let after = LayerOptions {
+        correlation: true,
+        canceller: true,
+        fixed: band_after_canceller(0.5),
+        threshold: 0.5,
+        window: TextWindow::DEFAULT,
+        calibrate: false,
+    };
+    let raw_opts = LayerOptions {
+        canceller: false,
+        fixed: GateBand::default(),
+        calibrate: true,
+        ..after
+    };
+    let line = |name: &str, reasons: &[Option<diarist_core::types::EchoReason>], extra: String| {
+        let kept: Vec<(i64, i64, String)> = words
+            .iter()
+            .zip(reasons)
+            .filter(|p| p.1.is_none())
+            .map(|p| p.0.clone())
+            .collect();
+        let s = score(utts, &kept);
+        eprintln!(
+            "| {name} | {extra} | {} | {:.2} % | {:.2} % | {:.2} % | {} |",
+            words.len() - kept.len(),
+            s.wer,
+            s.wer_double_talk,
+            s.wer_clear,
+            s.echo_words
+        );
+    };
+    eprintln!("| Transfer gate (FLEURS): guard | Raw echo, candidates, removed (text, level, plain) | Dropped | \"me\" WER | over the far end | in far-end pauses | Echo words left |");
+    eprintln!("|---|---|---|---|---|---|---|");
+    line(
+        "canceller, no gate",
+        &vec![None; words.len()],
+        String::new(),
+    );
+    for spread_ms in [300i64, 500] {
+        let o = LayerOptions {
+            window: TextWindow {
+                spread_ms,
+                ..TextWindow::DEFAULT
+            },
+            ..after
+        };
+        let r = layers::gate(&gw, &fi, floor, &o);
+        line(
+            &format!("layers alone, spread {spread_ms} ms"),
+            &r.reasons,
+            format!("{:?}", r.counts),
+        );
+    }
+    for guard in Guard::ALL {
+        let t = transfer::gate(
+            &raw_gw, raw_floor, &raw_opts, &gw, floor, &after, &fi, guard,
+        );
+        let c = t.transfer;
+        line(
+            guard.as_str(),
+            &t.reasons,
+            format!(
+                "{} of {} {:?}; {}, {} ({}, {}, {}); {:?}",
+                t.raw.dropped(),
+                raw_gw.len(),
+                t.raw.counts,
+                c.candidates,
+                c.removed(),
+                c.text,
+                c.level,
+                c.plain,
+                t.counts
+            ),
+        );
     }
 }
 

@@ -41,7 +41,17 @@
 //!   (coupled, return loss under 20 dB), then the layered gate on the words
 //!   the post-pass transcribed (`mic-aec.words.json`, or the canceller's
 //!   output transcribed here; `mic.words.json` where it does not engage),
-//!   with the levels on the canceller's output.
+//!   with the levels on the canceller's output. Where the canceller runs,
+//!   the transfer gate (plan 15 section 9.2) as the post-pass runs it: the
+//!   raw mic's words from the live run (its latest mic revisions) or, for
+//!   a meeting without one, the raw mic transcribed here once (EN model,
+//!   lookahead 13, timed; cached as `<uid>.raw-words.json`, else
+//!   `mic.words.json`), and every guard of [`transfer::Guard`] for both
+//!   sources (`transfer` lines; "clean owner's": the owner's words the
+//!   canceller cut by under 3 dB).
+//! - Both paths: the text layer's lag spread at 300 ms (round two) and
+//!   500 ms (`spread` lines: run words, duplicates and owner's among them,
+//!   chance with the mic 45 s later).
 //! - Live path: the live run's every revision (`live_utterances` in arrival
 //!   order) through the live gate ([`LiveEcho`]) with the monitor fed both
 //!   channels in 100 ms frames up to each revision's arrival (its last word
@@ -64,6 +74,7 @@ use diarist_core::audio::clock::{channel_anchors, origin_from_anchors, ClockMap}
 use diarist_core::audio::echo::layers::{self, GateWord, LayerCounts, LayerOptions};
 use diarist_core::audio::echo::presence::{floor_sources, presence_sources};
 use diarist_core::audio::echo::text::{self, norm, FarIndex, TextWindow};
+use diarist_core::audio::echo::transfer::{self, Guard};
 use diarist_core::audio::echo::{
     decide_in_order, score_sources, ClockPair, EchoMode, EchoMonitor, EchoProfile, EchoStatus,
     GateBand, GatePad, PcmSource, WordScore, COUPLED_AT, GATE_AFTER,
@@ -886,6 +897,80 @@ fn post_pass_path(m: &Meeting, out: &Path, engine: Option<&NemoCliEngine>) -> Op
     };
     let lab = m.labels.as_ref().map(|l| label_owners(l));
     score_row(&mut row, &words, &drop, &m.lb_words, lab.as_deref());
+    spread_check(&format!("{} post-pass", m.uid), &words, &m.lb_words);
+    if aec.is_none() {
+        // Round two's lag spread under the whole decision: the same words?
+        let narrow = layers::gate(
+            &gw,
+            &far,
+            floor.floor_db(),
+            &LayerOptions {
+                window: TextWindow {
+                    spread_ms: 300,
+                    ..TextWindow::DEFAULT
+                },
+                ..opts
+            },
+        );
+        let differ = (0..gw.len())
+            .filter(|&i| narrow.reasons[i].is_some() != r.reasons[i].is_some())
+            .count();
+        eprintln!(
+            "spread {} post-pass: the whole gate at 300 ms drops {} {:?}, at 500 ms {} {:?}; {differ} decisions differ",
+            m.uid,
+            narrow.dropped(),
+            narrow.counts,
+            r.dropped(),
+            r.counts
+        );
+    }
+    if aec.is_some() {
+        // The shipped decision is the transfer gate's; the row above was
+        // the post-canceller layers alone.
+        print_row(&format!("{} (layers alone)", m.uid), &row);
+        let narrow = layers::gate(
+            &gw,
+            &far,
+            floor.floor_db(),
+            &LayerOptions {
+                window: TextWindow {
+                    spread_ms: 300,
+                    ..TextWindow::DEFAULT
+                },
+                ..opts
+            },
+        );
+        let mut x = Row {
+            path: "post-pass, layers alone, spread 300 (round two)".into(),
+            counts: narrow.counts,
+            band: correlation.then_some(narrow.calibration.band),
+            ..Row::default()
+        };
+        let d: Vec<bool> = narrow.reasons.iter().map(Option::is_some).collect();
+        score_row(&mut x, &words, &d, &m.lb_words, lab.as_deref());
+        print_row(&m.uid, &x);
+        let sources = raw_sources(m, out, engine);
+        if let Some(t) = transfer_rows(
+            m,
+            &words,
+            &gw,
+            &far,
+            floor.floor_db(),
+            &opts,
+            &sources,
+            lab.as_deref(),
+        ) {
+            row = Row {
+                path: format!("post-pass (transfer, {})", t.0),
+                band: correlation.then_some(r.calibration.band),
+                calibrated: r.calibration.calibrated,
+                floor: r.floor_db,
+                owner: r.owner_db,
+                text3: r.run3,
+                ..t.1
+            };
+        }
+    }
     if flag("DIARIST_ECHO_SWEEP") {
         sweep(
             m,
@@ -923,6 +1008,309 @@ fn post_pass_path(m: &Meeting, out: &Path, engine: Option<&NemoCliEngine>) -> Op
     Some(row)
 }
 
+/// The text layer alone at round two's lag spread and the shipped one
+/// (module docs), over words in time order against `lb`.
+fn spread_check(tag: &str, words: &[W], lb: &[W]) {
+    let mt = Matcher::new(lb);
+    let all: Vec<&W> = words.iter().collect();
+    let dup = mt.dups(&all, 0.0);
+    let own = owners(&dup);
+    let far = FarIndex::new(lb.iter().map(|w| (w.start, w.norm.clone())));
+    let mic: Vec<(i64, &str)> = words.iter().map(|w| (w.start, w.norm.as_str())).collect();
+    let shifted: Vec<(i64, &str)> = words
+        .iter()
+        .map(|w| (w.start + (CHANCE_SHIFT * 1e3) as i64, w.norm.as_str()))
+        .collect();
+    for spread_ms in [300i64, 500] {
+        let window = TextWindow {
+            spread_ms,
+            ..TextWindow::DEFAULT
+        };
+        let r = text::runs(&mic, &far, window);
+        let c = text::runs(&shifted, &far, window);
+        let n = |f: &dyn Fn(usize) -> bool| (0..words.len()).filter(|&i| f(i)).count();
+        eprintln!(
+            "spread {tag}: {spread_ms} ms: run3 {} words (duplicates {}, owner's {}), run2 {} (owner's {}); chance run3 {} run2 {}; of {} words ({} duplicates, {} owner's)",
+            r.count3(),
+            n(&|i| r.run3[i] && dup[i]),
+            n(&|i| r.run3[i] && own[i]),
+            r.count2(),
+            n(&|i| r.run2[i] && own[i]),
+            c.count3(),
+            c.count2(),
+            words.len(),
+            n(&|i| dup[i]),
+            n(&|i| own[i])
+        );
+    }
+}
+
+/// The raw mic's words for the transfer gate (module docs): the live run's
+/// latest mic revisions, and the raw mic transcribed (with its wall time).
+fn raw_sources(
+    m: &Meeting,
+    out: &Path,
+    engine: Option<&NemoCliEngine>,
+) -> Vec<(&'static str, Vec<W>, Option<f64>)> {
+    let mut v = Vec::new();
+    if !m.live.is_empty() {
+        let mut latest: BTreeMap<u32, &Rev> = BTreeMap::new();
+        for r in m.live.iter().filter(|r| r.channel == Channel::Mic) {
+            if latest.get(&r.utt).is_none_or(|o| r.rev >= o.rev) {
+                latest.insert(r.utt, r);
+            }
+        }
+        let mut w: Vec<W> = latest
+            .values()
+            .flat_map(|r| r.words.iter())
+            .map(|w| W::new(w.start_ms, w.end_ms, &w.text))
+            .collect();
+        w.sort_by_key(|w| (w.start, w.end));
+        v.push(("live", w, None));
+    }
+    let mic_map = m.clocks.as_ref().map(|c| &c.mic);
+    let cache = out.join(format!("{}.raw-words.json", m.uid));
+    if !cache.is_file() {
+        if let Some(engine) = engine {
+            let wav = out.join(format!("{}.mic.wav", m.uid));
+            let mut w = diarist_core::audio::wav::WavSink::create(&wav).unwrap();
+            w.write(&m.mic).unwrap();
+            w.finalize().unwrap();
+            let t = Instant::now();
+            let ws = transcribe(engine, &wav);
+            let secs = t.elapsed().as_secs_f64();
+            let _ = std::fs::remove_file(&wav);
+            eprintln!(
+                "{}: transcribed the raw mic ({:.1} min) in {secs:.1} s",
+                m.uid,
+                m.mic.len() as f64 / 960_000.0
+            );
+            let j = serde_json::json!({"secs": secs, "words": ws.iter().map(|(s, e, t)| serde_json::json!({"start": s, "end": e, "word": t})).collect::<Vec<_>>()});
+            std::fs::write(&cache, serde_json::to_vec(&j).unwrap()).unwrap();
+        }
+    }
+    if cache.is_file() {
+        let j: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        v.push((
+            "transcribed",
+            words_json(&cache, mic_map),
+            j["secs"].as_f64(),
+        ));
+    } else if let Some(w) = &m.raw_words {
+        v.push(("transcribed (stored mic.words.json)", w.clone(), None));
+    }
+    v
+}
+
+/// The transfer gate over the cancelled words `words` (their gate words
+/// `gw`, the post-canceller options `opts`) per raw source and guard; the
+/// shipped one's row (the live source when there is one).
+#[allow(clippy::too_many_arguments)]
+fn transfer_rows(
+    m: &Meeting,
+    words: &[W],
+    gw: &[GateWord],
+    far: &FarIndex,
+    floor_db: Option<f32>,
+    opts: &LayerOptions,
+    sources: &[(&'static str, Vec<W>, Option<f64>)],
+    lab: Option<&[(W, bool)]>,
+) -> Option<(&'static str, Row)> {
+    let mt = Matcher::new(&m.lb_words);
+    let all: Vec<&W> = words.iter().collect();
+    let own = owners(&mt.dups(&all, 0.0));
+    let clean: Vec<bool> = (0..words.len())
+        .map(|i| {
+            own[i]
+                && gw[i]
+                    .presence
+                    .and_then(|p| p.attenuation_db)
+                    .is_none_or(|a| a < 3.0)
+        })
+        .collect();
+    let n_clean = clean.iter().filter(|c| **c).count();
+    // The post-canceller layers alone, at both lag spreads.
+    for spread_ms in [300i64, 500] {
+        let o = LayerOptions {
+            window: TextWindow {
+                spread_ms,
+                ..TextWindow::DEFAULT
+            },
+            ..*opts
+        };
+        let r = layers::gate(gw, far, floor_db, &o);
+        let d: Vec<bool> = r.reasons.iter().map(Option::is_some).collect();
+        let mut x = Row::default();
+        score_row(&mut x, words, &d, &m.lb_words, lab);
+        let clean_kept = (0..words.len()).filter(|&i| clean[i] && !d[i]).count();
+        eprintln!(
+            "transfer {} layers alone, spread {spread_ms} ms: dropped {} {:?}; kept {}, residual {} ({:.2} %, chance {:.2} %), owner's {} of {} ({:.2} %), clean owner's {clean_kept} of {n_clean} ({:.2} %){}",
+            m.uid,
+            r.dropped(),
+            r.counts,
+            x.kept,
+            x.dups_kept,
+            pct(x.dups_kept, x.kept),
+            pct(x.chance_kept, x.kept),
+            x.own_kept,
+            x.own,
+            pct(x.own_kept, x.own),
+            pct(clean_kept, n_clean),
+            x.labelled.map_or(String::new(), |(k, f, n)| format!(
+                "; labels {k} ({:.2} %), fair {f} ({:.2} %) of {n}",
+                pct(k, n),
+                pct(f, n)
+            ))
+        );
+    }
+    let raw_floor = floor_sources(&m.mic[..], &m.lb[..], m.clocks.clone()).floor_db();
+    let mut shipped = None;
+    for (name, raw, secs) in sources {
+        let spans = spans_of(raw);
+        let scores = if opts.correlation {
+            score_sources(&spans, &m.mic[..], &m.lb[..], &m.profile, GatePad::DEFAULT)
+        } else {
+            vec![WordScore::Undefined; spans.len()]
+        };
+        let pres = presence_sources(&spans, &m.mic[..], None, &m.lb[..], m.clocks.clone());
+        let groups = layers::gap_groups(raw.iter().map(|w| (w.start, w.end)));
+        let raw_gw: Vec<GateWord> = (0..raw.len())
+            .map(|i| GateWord {
+                start_ms: raw[i].start,
+                end_ms: raw[i].end,
+                norm: raw[i].norm.clone(),
+                group: groups[i],
+                score: scores[i],
+                presence: pres[i],
+            })
+            .collect();
+        let raw_opts = LayerOptions {
+            canceller: false,
+            fixed: GateBand::default(),
+            calibrate: true,
+            ..*opts
+        };
+        let mut decisions: Vec<Vec<Option<EchoReason>>> = Vec::new();
+        let mut raw_reasons: Vec<Option<EchoReason>> = Vec::new();
+        for guard in Guard::ALL {
+            let t = transfer::gate(
+                &raw_gw, raw_floor, &raw_opts, gw, floor_db, opts, far, guard,
+            );
+            let d: Vec<bool> = t.reasons.iter().map(Option::is_some).collect();
+            let mut x = Row {
+                path: format!("post-pass, transfer from {name}, guard {}", guard.as_str()),
+                counts: t.counts,
+                ..Row::default()
+            };
+            score_row(&mut x, words, &d, &m.lb_words, lab);
+            let clean_kept = (0..words.len()).filter(|&i| clean[i] && !d[i]).count();
+            let c = t.transfer;
+            let rb = t.raw.calibration.band;
+            eprintln!(
+                "transfer {} {name} {}: raw {} words ({}), {} echo {:?} (band {:.2}/{:.2}/{:.2}{}); candidates {}, removed {} (text {}, level {}, plain {}), guarded {}, unmatched {}; dropped {} {:?}; kept {}, residual {} ({:.2} %, chance {:.2} %), owner's {} of {} ({:.2} %), clean owner's {} of {n_clean} ({:.2} %){}",
+                m.uid,
+                guard.as_str(),
+                raw.len(),
+                secs.map_or("-".into(), |s| format!("{s:.1} s")),
+                t.raw.dropped(),
+                t.raw.counts,
+                rb.keep_under,
+                rb.threshold,
+                rb.drop_at,
+                if t.raw.calibration.calibrated { " cal" } else { "" },
+                c.candidates,
+                c.removed(),
+                c.text,
+                c.level,
+                c.plain,
+                c.guarded,
+                c.unmatched,
+                t.dropped(),
+                t.counts,
+                x.kept,
+                x.dups_kept,
+                pct(x.dups_kept, x.kept),
+                pct(x.chance_kept, x.kept),
+                x.own_kept,
+                x.own,
+                pct(x.own_kept, x.own),
+                clean_kept,
+                pct(clean_kept, n_clean),
+                x.labelled.map_or(String::new(), |(k, f, n)| format!(
+                    "; labels {k} ({:.2} %), fair {f} ({:.2} %) of {n}",
+                    pct(k, n),
+                    pct(f, n)
+                ))
+            );
+            if guard == transfer::GUARD && shipped.is_none() {
+                shipped = Some((*name, x));
+            }
+            decisions.push(t.reasons.clone());
+            raw_reasons = t.raw.reasons.clone();
+        }
+        if let Some(dir) = env_path("DIARIST_ECHO_DUMP") {
+            // Every cancelled word with its raw neighbours and each guard's
+            // decision (local analysis; delete it after).
+            std::fs::create_dir_all(&dir).unwrap();
+            let dup = mt.dups(&all, 0.0);
+            let mut f = String::from("start\tend\ttext\tdup\town\tatt\tlevel\tfar\tcoef");
+            for g in Guard::ALL {
+                f.push_str(&format!("\t{}", g.as_str()));
+            }
+            f.push_str(
+                "\traw
+",
+            );
+            for (i, w) in words.iter().enumerate() {
+                let p = gw[i].presence;
+                let near: Vec<String> = raw
+                    .iter()
+                    .zip(&raw_reasons)
+                    .filter(|(r, _)| {
+                        r.start <= w.end.max(w.start) + transfer::OVERLAP_MS
+                            && r.end.max(r.start) >= w.start - transfer::OVERLAP_MS
+                    })
+                    .map(|(r, why)| format!("{}:{}", r.text, why.map_or("", |x| x.as_str())))
+                    .collect();
+                f.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    w.start,
+                    w.end,
+                    w.text.replace('\t', " "),
+                    u8::from(dup[i]),
+                    u8::from(own[i]),
+                    p.and_then(|p| p.attenuation_db)
+                        .map_or(String::new(), |a| format!("{a:.2}")),
+                    p.map_or(String::new(), |p| format!("{:.2}", p.level_db)),
+                    p.map_or(String::new(), |p| u8::from(p.far_active).to_string()),
+                    gw[i]
+                        .score
+                        .coefficient()
+                        .map_or(String::new(), |c| format!("{c:.3}")),
+                ));
+                for d in &decisions {
+                    f.push_str(&format!("\t{}", d[i].map_or("", |r| r.as_str())));
+                }
+                f.push_str(&format!(
+                    "\t{}
+",
+                    near.join("|")
+                ));
+            }
+            std::fs::write(
+                dir.join(format!(
+                    "{}.transfer.{}.tsv",
+                    m.uid,
+                    name.split(' ').next().unwrap_or(name)
+                )),
+                f,
+            )
+            .unwrap();
+        }
+    }
+    shipped
+}
+
 /// The parameter sweeps over one path's words (module docs).
 #[allow(clippy::too_many_arguments)]
 fn sweep(
@@ -946,7 +1334,7 @@ fn sweep(
     for lo in [-500i64, -150] {
         let window = TextWindow {
             lo_ms: lo,
-            hi_ms: 1_000,
+            ..TextWindow::DEFAULT
         };
         let mic: Vec<(i64, &str)> = gw.iter().map(|w| (w.start_ms, w.norm.as_str())).collect();
         let r = text::runs(&mic, far, window);
@@ -1261,6 +1649,7 @@ fn live_path(m: &Meeting) -> Option<Row> {
         .map(|w| W::new(w.start_ms, w.end_ms, &w.text))
         .collect();
     lbw.sort_by_key(|w| w.start);
+    spread_check(&format!("{} live", m.uid), &words, &lbw);
     let info = &fin.info;
     let counts = LayerCounts {
         text: info["layers"]["text"].as_u64().unwrap_or(0) as usize,
@@ -1268,6 +1657,7 @@ fn live_path(m: &Meeting) -> Option<Row> {
         level: info["layers"]["level"].as_u64().unwrap_or(0) as usize,
         correlation: info["layers"]["correlation"].as_u64().unwrap_or(0) as usize,
         utterance: info["layers"]["utterance"].as_u64().unwrap_or(0) as usize,
+        transfer: 0,
     };
     let band = info["band"].as_array().map(|b| GateBand {
         keep_under: b[0].as_f64().unwrap_or(0.0) as f32,
@@ -1635,6 +2025,7 @@ fn echo_on_stored_meetings() {
         for f in &folders {
             let uid = f.file_name().unwrap().to_string_lossy().into_owned();
             let _ = std::fs::remove_file(out.join(format!("{uid}.aec-words.json")));
+            let _ = std::fs::remove_file(out.join(format!("{uid}.raw-words.json")));
         }
     }
 }

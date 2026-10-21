@@ -26,7 +26,13 @@
 //!
 //! The spliced set is also run through the layered gate (plan 15 section
 //! 9) with each after-canceller variant (attenuation, correlation band,
-//! level layer), the owner's word error rate per variant.
+//! level layer), the owner's word error rate per variant, and through the
+//! transfer gate (plan 15 section 9.2) with every guard: the raw spliced
+//! window's words (transcribed here) gated with the raw band against the
+//! raw spliced mic, carried over to the cancelled words. Since the
+//! transfer gate, the real post-pass (`auto`, its live run has no mic
+//! words) transcribes the raw mic once more; `engine_info.echo.transfer`
+//! has its wall time.
 //!
 //! Word classes (plan 15 section 2): a duplicate is a mic word with the
 //! text of a loopback word starting within ±0.8 s, or inside a matched
@@ -54,8 +60,10 @@ use diarist_core::audio::clock::{channel_anchors, origin_from_anchors, ClockMap}
 use diarist_core::audio::echo::layers::{self, GateWord, LayerOptions};
 use diarist_core::audio::echo::presence::{floor_sources, presence_sources};
 use diarist_core::audio::echo::text::{FarIndex, TextWindow};
+use diarist_core::audio::echo::transfer::{self, Guard};
 use diarist_core::audio::echo::{
-    decide_in_order, gate_sources, ClockPair, EchoProfile, GateBand, HighPass, PcmSource, WordScore,
+    decide_in_order, gate_sources, score_sources, ClockPair, EchoProfile, GateBand, GatePad,
+    HighPass, PcmSource, WordScore,
 };
 use diarist_core::audio::flac::decode_i16;
 use diarist_core::audio::gain_track::{GainTrack, GainTrackWriter};
@@ -925,6 +933,10 @@ fn the_post_pass_canceller_on_a_speaker_meeting() {
     // 2. The post-pass as shipped: canceller, then the gate.
     let auto = post_pass_cached(&out, "auto", &engine, &mic, &lb, &anchors, "auto", None);
     eprintln!("auto: engine_info.echo {}", auto.echo);
+    eprintln!(
+        "auto: transfer from the {} mic words in {} s",
+        auto.echo["transfer"]["source"], auto.echo["transfer"]["raw_wall_s"]
+    );
     assert_eq!(auto.echo["aec"], true, "the canceller did not engage");
     let before_gate = merged(&auto.mic, &auto.dropped);
 
@@ -935,7 +947,10 @@ fn the_post_pass_canceller_on_a_speaker_meeting() {
     row("post-pass, echo off", &score(&ctx, &off.mic));
     row("gate alone (chunk A)", &score(&ctx, &gate_alone));
     row("canceller, before the gate", &score(&ctx, &before_gate));
-    row("canceller + gate (B2a)", &score(&ctx, &auto.mic));
+    row(
+        "canceller + transfer gate (shipped)",
+        &score(&ctx, &auto.mic),
+    );
 
     // 3. Wall time.
     eprintln!();
@@ -1577,6 +1592,98 @@ fn spliced(
                 v.label(),
                 r.dropped(),
                 r.counts
+            );
+        }
+        // The transfer gate (plan 15 section 9.2): the raw window's words
+        // on meeting time, gated with the raw band against the raw spliced
+        // mic, carried over to the cancelled words with each guard; the
+        // post-canceller layers as the post-pass runs them (fixed band).
+        let raw_words = &asr["dt-mix"];
+        let raw_spans: Vec<(i64, i64)> = raw_words
+            .iter()
+            .map(|w| {
+                let s = (meeting_s(w.start) * 16_000.0).round() as i64;
+                (s, ((meeting_s(w.end) * 16_000.0).round() as i64).max(s))
+            })
+            .collect();
+        let raw_scores = score_sources(&raw_spans, &spliced_mic[..], lb, profile, GatePad::DEFAULT);
+        let raw_pres =
+            presence_sources(&raw_spans, &spliced_mic[..], None, lb, Some(clocks.clone()));
+        let raw_floor = floor_sources(&spliced_mic[..], lb, Some(clocks.clone())).floor_db();
+        let raw_ms: Vec<(i64, i64)> = raw_spans.iter().map(|s| (s.0 / 16, s.1 / 16)).collect();
+        let raw_groups = layers::gap_groups(raw_ms.iter().copied());
+        let raw_gw: Vec<GateWord> = (0..raw_words.len())
+            .map(|i| GateWord {
+                start_ms: raw_ms[i].0,
+                end_ms: raw_ms[i].1,
+                norm: raw_words[i].norm.clone(),
+                group: raw_groups[i],
+                score: raw_scores[i],
+                presence: raw_pres[i],
+            })
+            .collect();
+        let after = LayerOptions {
+            calibrate: false,
+            ..opts
+        };
+        let raw_opts = LayerOptions {
+            canceller: false,
+            fixed: GateBand::default(),
+            calibrate: true,
+            ..opts
+        };
+        let in_clips = |i: usize| clips.iter().any(|c| in_clip(&aec_words[i], c));
+        eprintln!("| Spliced, transfer gate: guard | Raw words echo | Candidates | Removed (text, level, plain) | Dropped | Of them in the owner's clips | Owner's word error rate | Words outside the clips |");
+        eprintln!("|---|---|---|---|---|---|---|---|");
+        for spread_ms in [300i64, 500] {
+            let o = LayerOptions {
+                window: TextWindow {
+                    spread_ms,
+                    ..TextWindow::DEFAULT
+                },
+                ..after
+            };
+            let r = layers::gate(&gw, &fi, floor, &o);
+            let kept: Vec<&W> = aec_words
+                .iter()
+                .zip(&r.reasons)
+                .filter(|p| p.1.is_none())
+                .map(|p| p.0)
+                .collect();
+            let (e, outside) = wer(&kept);
+            eprintln!(
+                "| layers alone, spread {spread_ms} ms | - | - | - | {} {:?} | {} | {e:.1} % | {outside} |",
+                r.dropped(),
+                r.counts,
+                (0..aec_words.len()).filter(|&i| r.reasons[i].is_some() && in_clips(i)).count()
+            );
+        }
+        for guard in Guard::ALL {
+            let t = transfer::gate(
+                &raw_gw, raw_floor, &raw_opts, &gw, floor, &after, &fi, guard,
+            );
+            let kept: Vec<&W> = aec_words
+                .iter()
+                .zip(&t.reasons)
+                .filter(|p| p.1.is_none())
+                .map(|p| p.0)
+                .collect();
+            let (e, outside) = wer(&kept);
+            let c = t.transfer;
+            eprintln!(
+                "| {} | {} of {} {:?} | {} | {} ({}, {}, {}) | {} {:?} | {} | {e:.1} % | {outside} |",
+                guard.as_str(),
+                t.raw.dropped(),
+                raw_words.len(),
+                t.raw.counts,
+                c.candidates,
+                c.removed(),
+                c.text,
+                c.level,
+                c.plain,
+                t.dropped(),
+                t.counts,
+                (0..aec_words.len()).filter(|&i| t.reasons[i].is_some() && in_clips(i)).count()
             );
         }
     }
