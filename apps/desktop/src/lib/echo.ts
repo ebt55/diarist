@@ -1,6 +1,7 @@
 // Recording with speakers (plan 15): the words shown for the echo handling
 // in the live banner, the meeting details and Settings. Plain functions, so
 // `bun test` covers the wording.
+import type { EchoReason } from "./generated/EchoReason";
 import { ECHO_GATE } from "./generated/settingDefaults";
 
 /** The live warning (`LiveWarning::Echo`), before its action. */
@@ -107,6 +108,24 @@ export function echoLine(e: EchoInfo | null): EchoLine | null {
     actionLabel: "Restore",
     aec: e.aec,
   };
+}
+
+/** Why a removed word was taken for echo (the "Show them" list's tooltip); empty for older runs. */
+export function echoReasonText(reason: EchoReason | undefined): string {
+  switch (reason) {
+    case "text":
+      return "It repeats what the meeting said a moment before.";
+    case "attenuation":
+      return "Echo cancellation removed most of its sound.";
+    case "level":
+      return "It was at the microphone's noise floor while the meeting talked.";
+    case "correlation":
+      return "Its sound matches the meeting's.";
+    case "utterance":
+      return "It sat inside a phrase that was echo.";
+    default:
+      return "";
+  }
 }
 
 /** `echo.mode` as `diarist_core::audio::echo::EchoMode::parse` reads it. */

@@ -18,6 +18,7 @@ import type { Toggled } from "./generated/Toggled";
 import type { WarningNote } from "./generated/WarningNote";
 import type { WordsUpdate } from "./generated/WordsUpdate";
 import { ME_COLOR, SPEAKER_PALETTE } from "./generated/palette";
+import { RevisionsSeen } from "./liveLag";
 import { OpenOnce } from "./openOnce";
 import { armedNote, stopDialog, stopPress } from "./stopConfirm";
 import { app, type ConfirmRequest } from "./state.svelte";
@@ -159,6 +160,8 @@ class LiveStore {
   /** The open "Stop recording?" question, if any. */
   #asking: ConfirmRequest | null = null;
   #lag: Record<string, Lag> = {};
+  /** Revisions already counted by the latency statistic (re-sends are not). */
+  #revs = new RevisionsSeen();
 
   get active(): boolean {
     return this.phase === "recording" || this.phase === "stopping";
@@ -324,6 +327,7 @@ class LiveStore {
     this.mic = null;
     this.loopback = null;
     this.#lag = {};
+    this.#revs.clear();
   }
 
   /** A deleted meeting was the last recording: its rows and id go. */
@@ -371,7 +375,7 @@ class LiveStore {
     if (this.meetingId !== null && u.meeting_id !== this.meetingId) return;
     this.#utts.set(`${u.channel}:${u.utt}`, splitRows(u));
     const last = u.words[u.words.length - 1];
-    if (last && this.startedAt !== null) {
+    if (last && this.startedAt !== null && this.#revs.fresh(u.channel, u.utt, u.rev)) {
       const lag = Date.now() - this.startedAt - last.end_ms;
       const l = (this.#lag[u.channel] ??= { n: 0, sum: 0, max: 0, first: null });
       l.n++;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { api, errorText, type ExportFormat, type Waveform } from "../lib/api";
-  import { echoInfo, echoLine } from "../lib/echo";
+  import { echoInfo, echoLine, echoReasonText } from "../lib/echo";
   import { formatClock, formatDate, formatDuration } from "../lib/format";
   import type { EchoDroppedWord } from "../lib/generated/EchoDroppedWord";
   import type { MeetingDetail } from "../lib/generated/MeetingDetail";
@@ -647,7 +647,7 @@
               {#if removed}
                 <p class="removed-list">
                   {#each removed.words.slice(0, REMOVED_SHOWN) as w, i (i)}
-                    <span class="rw"
+                    <span class="rw" title={echoReasonText(w.reason) || undefined}
                       ><button type="button" class="link mono" title="Play from here" onclick={() => player.seek(w.start_ms)}
                         >{formatClock(w.start_ms)}</button
                       >

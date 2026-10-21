@@ -11,6 +11,7 @@ import {
   echoInfo,
   echoLine,
   echoMode,
+  echoReasonText,
   echoThreshold,
   echoWarningText,
 } from "../src/lib/echo";
@@ -94,6 +95,15 @@ describe("settings", () => {
     expect(echoThreshold("0.333")).toBe("0.33");
     expect(echoThreshold("high")).toBeNull();
     expect(echoThreshold(" ")).toBeNull();
-    expect(ECHO_THRESHOLD_HELP).toContain("0.60 or more is always removed, under 0.20 always kept");
+    expect(ECHO_THRESHOLD_HELP).toContain("0.70 or more is always removed, under 0.30 always kept");
+  });
+});
+
+describe("why a word was removed", () => {
+  test("every reason has a sentence; older runs have none", () => {
+    for (const r of ["text", "attenuation", "level", "correlation", "utterance"] as const) {
+      expect(echoReasonText(r).length).toBeGreaterThan(10);
+    }
+    expect(echoReasonText(undefined)).toBe("");
   });
 });
