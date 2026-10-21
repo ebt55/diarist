@@ -1456,11 +1456,39 @@ fn a_long_echoed_mic_utterance_keeps_its_first_words_out_of_the_view_and_the_liv
     let sink = Arc::new(WarnSink::default());
     let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
     let m = rec.meeting_id();
-    // Longer than the monitor's ring (40 s with a 20 s ring), revised at
-    // 10, 20, 30 and 40 s; played four times faster than real time.
+    // Longer than the monitor's ring (80 s with a 60 s ring), revised every
+    // 10 s; played four times faster than real time (about 20 s). Waits for
+    // the sink to get the revision at 80 s (bounded), not for a time: a busy
+    // machine plays and revises it later.
     let secs = (crate::audio::echo::RING_SAMPLES / 16_000) as u64 + 20;
-    std::thread::sleep(Duration::from_millis(secs * 250 + 500));
+    let revs = (secs / 10) as u32;
+    let latest = || {
+        sink.words
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|u| u.channel == Channel::Mic && u.utt == 0)
+            .cloned()
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let view = loop {
+        let view = latest();
+        let coupled = rec
+            .echo_state()
+            .is_some_and(|s| s.status == EchoStatus::Coupled);
+        if coupled && view.as_ref().is_some_and(|v| v.rev + 1 >= revs) {
+            break view.unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rev {:?}, coupled {coupled}",
+            view.map(|v| v.rev)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
+    assert!(view.rev + 1 >= revs, "rev {}", view.rev);
     let early = |words: &[(i64, &str)]| -> Vec<String> {
         words
             .iter()
@@ -1468,16 +1496,6 @@ fn a_long_echoed_mic_utterance_keeps_its_first_words_out_of_the_view_and_the_liv
             .map(|(_, w)| w.to_string())
             .collect()
     };
-    let view = sink
-        .words
-        .lock()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|u| u.channel == Channel::Mic && u.utt == 0)
-        .cloned()
-        .unwrap();
-    assert!(view.rev + 1 >= (secs / 10) as u32, "rev {}", view.rev);
     let shown: Vec<(i64, &str)> = view
         .words
         .iter()
