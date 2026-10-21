@@ -35,6 +35,24 @@ All notable changes to Diarist. Versions follow semantic versioning.
   about 1.4 MB per hour, deleted with the audio) so the canceller can undo
   it.
 
+- Changed: recording with speakers, and headphones that leak, leave far
+  fewer copies of the other side in "me". Diarist now also checks "me"
+  against what the other side said a moment before (three or more words
+  repeated with one delay go; single words never), against the
+  microphone's noise floor while the other side talks (a word that quiet
+  cannot be you; never near your own level), and drops stray fragments
+  inside a phrase that was echo; the sound comparison now looks at the
+  speech band only. On the two 21 Oct test recordings the copies left in
+  "me" went from 69 of 386 words to 2 of 292 (headphones) and from 22 of
+  340 to 4 of 325 (speakers), and in the live run from 158 of 476 to 2 of
+  311. A recording where the microphone does not hear the meeting comes
+  out exactly as before. The live view can take a word back within 3 s
+  of showing it, when the other side's words for the same moment arrive
+  later. The meeting details' "Show them" list says why each word was
+  removed.
+- Fixed: the "live latency" log line counted the live view's echo
+  corrections as latency (34 s on one recording).
+
 ## [0.1.0-beta.3] - 2026-10-17
 
 - Fixed: clicking a word after scrolling the transcript away from the
