@@ -25,11 +25,13 @@ All notable changes to Diarist. Versions follow semantic versioning.
   canceller takes the other side out of a temporary copy of the microphone
   audio (what is stored stays as recorded), that copy is transcribed, and
   the echo gate removes what is left. On the 111-minute meeting recorded
-  with speakers it kept 98.3 percent of the owner's own words and left 1.8
+  with speakers it kept 98.3 percent of the owner's own words and left 0.6
   percent of "me" as copies of the other side; the owner's own words spoken
-  over the meeting's real echo came out with 7.6 percent of words wrong
+  over the meeting's real echo came out with 8.1 percent of words wrong
   instead of 17.1. It runs while the other side is transcribed, so the
-  processing after Stop takes no longer. The live view still removes echoed
+  processing after Stop takes only seconds longer (about 45 s more for two
+  hours when the live transcript has no "me" words and the microphone is
+  transcribed once more). The live view still removes echoed
   words with the gate alone until the live canceller ships. New recordings
   keep the system audio's automatic gain beside the audio (`loopback.gain`,
   about 1.4 MB per hour, deleted with the audio) so the canceller can undo
@@ -44,12 +46,26 @@ All notable changes to Diarist. Versions follow semantic versioning.
   inside a phrase that was echo; the sound comparison now looks at the
   speech band only. On the two 21 Oct test recordings the copies left in
   "me" went from 69 of 386 words to 2 of 292 (headphones) and from 22 of
-  340 to 4 of 325 (speakers), and in the live run from 158 of 476 to 2 of
-  311. A recording where the microphone does not hear the meeting comes
+  340 to none of 308 (speakers, with the change below), and in the live run
+  from 158 of 476 to 1 of 310. A recording where the microphone does not hear the meeting comes
   out exactly as before. The live view can take a word back within 3 s
   of showing it, when the other side's words for the same moment arrive
   later. The meeting details' "Show them" list says why each word was
   removed.
+- Changed: on speakers with a loud meeting, the processing after Stop
+  left more copies of the other side in "me" than the live view (on one
+  7.5-minute recording 21 of 293 words against 1 of 231): what the echo
+  canceller leaves of a loud echo comes out as garbled fragments. It now
+  also decides on the microphone as recorded, which the speech model hears
+  cleanly (the live transcript's "me" words, or the microphone transcribed
+  once more), and removes the cancelled words that sit where that decision
+  found echo, when the canceller took sound out of them and they are well
+  under your own level. On that recording none are left (the live view's
+  result) and every word of yours the canceller left alone stays but one;
+  on the 111-minute meeting the copies left went from 1.8 to 0.6 percent
+  with exactly the same words of the owner kept. The meeting details list
+  these as "Before echo cancellation, the microphone heard the meeting's
+  words there."
 - Fixed: the "live latency" log line counted the live view's echo
   corrections as latency (34 s on one recording).
 
