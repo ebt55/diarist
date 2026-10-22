@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0-beta.3",
-  "notes": "Diarist 0.1.0-beta.3: see CHANGELOG.md",
-  "pub_date": "2026-10-17T07:02:31Z",
+  "version": "0.1.0-beta.4",
+  "notes": "Diarist 0.1.0-beta.4: see CHANGELOG.md",
+  "pub_date": "2026-10-22T08:15:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTOFJqekN5RnhTOTdFeUpwU2VJMFZad0JQMDRSam5BN01IQXFJUzlxMldZaGhWdjhtNnZUQnlWVWswYW5tRVJlKzI4MnA2THJCQ3N5KzZuNGxTWU5KTjl6UGREZ0YvbmdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjIwMzg2CWZpbGU6RGlhcmlzdF8wLjEuMC1iZXRhLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wLWJldGEuMwpFcmpoZE5NeDl3M1MrWnhkS0w1Y0grSjhaaExzdldYdWhDSUpMUjI2VUN2WWNoTFJKWjZNNDJ0MCsyOTRsVS9ib2FiVHZTbHBsNU9iWE5pYjBWbExDdz09Cg==",
-      "url": "https://github.com/ebt55/diarist/releases/download/v0.1.0-beta.3/Diarist_0.1.0-beta.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTOFJqekN5RnhTOTQ1cmJwZE4wYWkyYlI2SXVJM0ZRS256cWNuR2xCa2tkMTRzNWcxZk56SE0relpaY28xc2doWmVUY1VHc21Edm9NdnAwMm53ei9vRkYrSTVZQTVLUUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjU2NDk2CWZpbGU6RGlhcmlzdF8wLjEuMC1iZXRhLjRfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4wLWJldGEuNAo3WS9lbElmbmVGc1NGeXQxOEtMckk4QjkzVGZ1QTZFdHYwSmwybzhiMlBpRm1GMDhFa1dNK3ZhY1d5aVUvNnVHMXA1T0gvZXc2N1ZiaVMyd2k2NE1BQT09Cg==",
+      "url": "https://github.com/ebt55/diarist/releases/download/v0.1.0-beta.4/Diarist_0.1.0-beta.4_x64-setup.exe"
     }
   }
 }
