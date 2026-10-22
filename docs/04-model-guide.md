@@ -1,6 +1,6 @@
 # Model and hardware guide
 
-Status: v0.3, 16 Oct 2026, for 0.1.0-beta.3. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03, 08 and 12 and docs/eval on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
+Status: v0.3, 16 Oct 2026, for 0.1.0-beta.4. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03, 08 and 12 and docs/eval on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
 
 ## 1. What runs inside Diarist
 

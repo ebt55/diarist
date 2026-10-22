@@ -220,10 +220,12 @@ def transcribe(
     ):
         if (audio_dir / name).is_file():
             shutil.copyfile(audio_dir / name, d / dest)
-    # diarist-cli's stderr line: `engine <v> | asr <file> | diarizer <file>`, since
-    # beta.2 also `| lookahead <n> | diar preset <name>`, then `| engine args ...`.
+    # diarist-cli's stderr line: `engine <v> | asr <file> | diarizer <file>`; since
+    # beta.2 also `| device <d>` after the engine (`<d> (--device)` when overridden)
+    # and `| lookahead <n> | diar preset <name>`, then `| engine args ...`.
     eng = re.search(
-        r"^engine (\S+) \| asr (.+?) \| diarizer (.+?)(?: \| lookahead (.+?))?(?: \| diar preset (.+?))?"
+        r"^engine (?P<engine>\S+)(?: \| device (?P<device>.+?))? \| asr (?P<asr>.+?) \| diarizer (?P<diar>.+?)"
+        r"(?: \| lookahead (?P<lookahead>.+?))?(?: \| diar preset (?P<preset>.+?))?"
         r"(?: \| engine args .*)?\s*$",
         p.stderr,
         re.M,
@@ -252,12 +254,13 @@ def transcribe(
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
         "engine_args": list(cfg.get("engine_args") or []),
-        "engine_version": eng.group(1) if eng else None,
-        "asr_file": eng.group(2) if eng else None,
-        "diarizer_file": eng.group(3) if eng else None,
+        "engine_version": eng["engine"] if eng else None,
+        "asr_file": eng["asr"] if eng else None,
+        "diarizer_file": eng["diar"] if eng else None,
         # What the CLI says it passed (its run's EngineInfo); None from older builds.
-        "right_context": eng.group(4) if eng else None,
-        "diar_preset": eng.group(5) if eng else None,
+        "device": eng["device"].removesuffix(" (--device)") if eng and eng["device"] else None,
+        "right_context": eng["lookahead"] if eng else None,
+        "diar_preset": eng["preset"] if eng else None,
         "cli_sha256": sha256_file(CLI),
         "finished": dt.datetime.now().isoformat(timespec="seconds"),
         "cli_stdout": [ln for ln in p.stdout.splitlines() if not ln.strip().startswith("title")],

@@ -32,7 +32,7 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.3"
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.4"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
 cargo run -p diarist-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
