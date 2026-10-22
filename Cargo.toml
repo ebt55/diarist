@@ -9,7 +9,7 @@ edition = "2021"
 # resolver prefer dependency versions that support this rust-version.
 rust-version = "1.90"
 license = "MIT"
-authors = ["Diarist contributors"]
+authors = ["Ebin Babu Thomas"]
 publish = false
 
 [workspace.dependencies]

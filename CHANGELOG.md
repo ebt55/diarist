@@ -68,6 +68,13 @@ All notable changes to Diarist. Versions follow semantic versioning.
   words there."
 - Fixed: the "live latency" log line counted the live view's echo
   corrections as latency (34 s on one recording).
+- Changed: the copyright holder is named. `LICENSE` and the crate metadata
+  say "Ebin Babu Thomas" instead of "Diarist contributors". The Diarist
+  name, logo and icons (`branding/`, `apps/desktop/src-tauri/icons/`) are
+  no longer offered under CC BY 4.0: they may be used unmodified to refer
+  to Diarist or to package the official builds, not on forks or other
+  products (`branding/README.md`). Copies taken under CC BY 4.0 keep that
+  licence. The code stays MIT.
 
 ## [0.1.0-beta.3] - 2026-10-17
 

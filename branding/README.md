@@ -198,8 +198,18 @@ developer's PC (`taskbar-sheet-*.png`; `tools/` collects the neighbours and draw
 
 ## Licence
 
-The Diarist marks in this folder (logo, app icons, mono and tray marks, wordmarks, social preview) are
-licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): reuse and adapt
-them with attribution to the Diarist project. The code in this repository stays MIT. The
-letterforms in the wordmark and social preview are outlines of Inter by The Inter Project
-Authors, licensed under the SIL Open Font License 1.1.
+The Diarist logo, app icons, mono and tray marks, wordmarks and social preview in this
+folder, and the icon set generated from them in `apps/desktop/src-tauri/icons/`, are
+copyright Ebin Babu Thomas and are not covered by the MIT licence. "Diarist" is the name of
+the official project. You may use the name and these files unmodified to refer to Diarist:
+in articles, reviews and talks, in links to this repository or diarist.dev, and in package
+listings (winget, Scoop, Chocolatey and the like) that install the unmodified official
+builds. You may not use them, or anything confusingly similar, on a fork, a modified build
+or any other product: forks pick their own name and icon. For anything else, open an issue
+and ask.
+
+Earlier versions of these files were offered under CC BY 4.0; copies taken under that
+licence keep it. The `explorations/taskbar-sheet-*.png` screenshots include other vendors'
+icons, which belong to their owners and appear only for comparison. The letterforms in the
+wordmark and social preview are outlines of Inter by The Inter Project Authors, licensed
+under the SIL Open Font License 1.1.

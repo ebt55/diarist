@@ -199,6 +199,7 @@ Rust, bun and the VS Build Tools: see [docs/DEV.md](docs/DEV.md) and
 MIT for the code in this repository ([LICENSE](LICENSE)). The runtime
 (Apache-2.0) and the models (OpenMDW-1.1, NVIDIA Open Model License,
 CC-BY-4.0) are not part of the installer; you download them at first run under
-their own licences. The logo and wordmark in `branding/` are CC-BY-4.0
+their own licences. The Diarist name, logo and icons are not MIT: use them to refer to
+Diarist or to package the official builds, not on forks or other products
 ([branding/README.md](branding/README.md)). Third-party notices:
 [LICENSES.md](LICENSES.md).
