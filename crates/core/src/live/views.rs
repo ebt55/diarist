@@ -69,6 +69,9 @@ pub struct LiveStateView {
     /// (`JobQueue::is_paused`): queued imports show "waiting for the
     /// recording to stop".
     pub queue_paused: bool,
+    /// Echo handling was turned off for this recording (the echo banner's
+    /// "Turn off for this recording", `Recorder::turn_off_echo`).
+    pub echo_off: bool,
     /// Why the last start or stop failed.
     pub error: Option<String>,
 }

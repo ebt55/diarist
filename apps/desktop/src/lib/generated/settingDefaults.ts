@@ -18,6 +18,8 @@ export const SETTING_DEFAULTS = {
   "capture.autoconvert": "true",
   "capture.loopback_agc": "true",
   "capture.mic_agc": "false",
+  "echo.mode": "auto",
+  "echo.gate_threshold": "0.5",
   "engine.preload": "false",
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",
@@ -30,3 +32,6 @@ export const SETTING_DEFAULTS = {
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
+
+/** `echo.gate_threshold`'s accepted range and the word gate's band around it (`diarist_core::audio::echo`). */
+export const ECHO_GATE = { min: 0.2, max: 0.6, keepUnder: 0.3, dropAt: 0.7 } as const;

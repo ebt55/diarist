@@ -2,18 +2,33 @@
 
 use std::collections::BTreeMap;
 
-use super::{LiveWord, WordsUpdate};
+use super::{live_run_of, LiveWord, WordsUpdate};
 use crate::store::{RunStore, StoreResult};
 use crate::transcript::{ME_LABEL, UNKNOWN_LABEL};
-use crate::types::{Channel, LiveUtterance, MeetingId, RunKind, SpeakerId};
+use crate::types::{Channel, LiveUtterance, MeetingId, SpeakerId};
 
 /// The newest revision of every utterance of the meeting's latest live run,
 /// in `live:words` shape and utterance order per channel (empty without a
 /// live run). Labels and speaker rows follow the recorder's rules: an
-/// undiarized mic is `me`, untagged loopback words `spk_unknown`.
+/// undiarized mic is `me`, untagged loopback words `spk_unknown`. Every
+/// stored word is in it; [`snapshot_except`] leaves out what the live echo
+/// gate hides.
 pub fn snapshot(store: &dyn RunStore, meeting: MeetingId) -> StoreResult<Vec<WordsUpdate>> {
+    snapshot_except(store, meeting, &|_, _, _, _| false)
+}
+
+/// [`snapshot`] without the words for which `hide(channel, utt, rev, word
+/// index)` is true: the running recorder's live echo gate
+/// ([`super::Recorder::echo_hidden`]), so a view that opens mid-recording
+/// shows what the sink showed. An utterance whose words are all hidden
+/// stays, empty, as the sink sent it.
+pub fn snapshot_except(
+    store: &dyn RunStore,
+    meeting: MeetingId,
+    hide: &dyn Fn(Channel, u32, u32, usize) -> bool,
+) -> StoreResult<Vec<WordsUpdate>> {
     let runs = store.list_runs(meeting)?;
-    let Some(run) = runs.iter().rev().find(|r| r.kind == RunKind::Live) else {
+    let Some(run) = live_run_of(&runs) else {
         return Ok(Vec::new());
     };
     let diarize_mic = store.get_meeting(meeting)?.meeting.diarize_mic;
@@ -35,7 +50,9 @@ pub fn snapshot(store: &dyn RunStore, meeting: MeetingId) -> StoreResult<Vec<Wor
             let words = u
                 .words
                 .iter()
-                .map(|w| {
+                .enumerate()
+                .filter(|(i, _)| !hide(u.channel, u.utt, u.rev, *i))
+                .map(|(_, w)| {
                     let label = if u.channel == Channel::Mic && !diarize_mic {
                         ME_LABEL.to_owned()
                     } else {

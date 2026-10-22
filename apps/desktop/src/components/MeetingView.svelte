@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { api, errorText, type ExportFormat, type Waveform } from "../lib/api";
+  import { echoInfo, echoLine, echoReasonText } from "../lib/echo";
   import { formatClock, formatDate, formatDuration } from "../lib/format";
+  import type { EchoDroppedWord } from "../lib/generated/EchoDroppedWord";
   import type { MeetingDetail } from "../lib/generated/MeetingDetail";
   import type { MeetingId } from "../lib/generated/MeetingId";
   import type { SegmentId } from "../lib/generated/SegmentId";
@@ -89,6 +91,47 @@
       ? (app.postPassErrors.get(meetingId) ?? "The post-pass did not finish.")
       : null,
   );
+  /** The echo line of the details (plan 15): what the echo handling did to "me", with Restore. */
+  const echoData = $derived(isLive || finalizing ? null : echoInfo(detail?.current_run?.engine_info));
+  const echo = $derived(echoLine(echoData));
+  let echoBusy = $state(false);
+  /** The removed words, fetched when the list is opened. */
+  let removed = $state.raw<{ run: number; words: EchoDroppedWord[] } | null>(null);
+  const REMOVED_SHOWN = 300;
+
+  async function echoAction() {
+    const run = detail?.current_run;
+    const line = echo;
+    if (!run || !line?.action || echoBusy) return;
+    echoBusy = true;
+    try {
+      if (line.action === "restore") {
+        await api.restoreEchoDropped(run.id);
+        const n = echoData?.dropped ?? 0;
+        app.toast("success", `${n} far-end word${n === 1 ? " is" : "s are"} back in "me". Remove echo words again switches back.`);
+      } else {
+        await api.removeRestoredEcho(run.id);
+        app.toast("info", `The echo words are out of "me" again; Restore puts them back.`);
+      }
+      removed = null;
+      await reload();
+    } catch (e) {
+      app.error(`${line.actionLabel} did not work (${errorText(e)}); reopen the meeting and try again`);
+    } finally {
+      echoBusy = false;
+    }
+  }
+
+  async function loadRemoved(e: Event) {
+    const run = detail?.current_run;
+    if (!(e.currentTarget as HTMLDetailsElement).open || !run || removed?.run === run.id) return;
+    try {
+      removed = { run: run.id, words: await api.echoDropped(run.id) };
+    } catch (err) {
+      app.error(`Could not list the removed words (${errorText(err)}); close the list and open it again`);
+    }
+  }
+
   /** Why an imported file failed (this session): unknown tokens, an engine error. */
   const importError = $derived(
     meeting?.source === "file" && meeting.status === "failed" ? (app.postPassErrors.get(meetingId) ?? null) : null,
@@ -469,7 +512,7 @@
     if (e.ctrlKey || e.altKey || e.metaKey || isTyping(e)) return;
     const onButton = e.target instanceof HTMLButtonElement || e.target instanceof HTMLAnchorElement;
     // No audio to play while recording.
-    if (isLive && !["F2", "p", "P", "g", "G"].includes(key)) return;
+    if (isLive && !["F2", "p", "P", "g", "G", "n", "N"].includes(key)) return;
     switch (key) {
       case " ":
         if (onButton) return;
@@ -505,6 +548,12 @@
       case "g":
       case "G":
         document.querySelector<HTMLElement>(".legend .spk-chip")?.focus();
+        break;
+      case "n":
+      case "N":
+        // The echo banner's "Turn off for this recording", while it shows.
+        if (!isLive || !live.echoActionShown) return;
+        void live.turnOffEcho();
         break;
       default:
         return;
@@ -583,6 +632,39 @@
           {/if}
         </div>
       </div>
+      {#if echo}
+        <div class="echo-line">
+          <span>{echo.text}</span>
+          {#if echo.aec}<span class="chip">Echo cancellation on</span>{/if}
+          {#if echo.action}
+            <button type="button" class="link" disabled={echoBusy} onclick={echoAction}>
+              {echoBusy ? "Working…" : echo.actionLabel}
+            </button>
+          {/if}
+          {#if echo.action === "restore"}
+            <details class="removed" ontoggle={loadRemoved}>
+              <summary>Show them</summary>
+              {#if removed}
+                <p class="removed-list">
+                  {#each removed.words.slice(0, REMOVED_SHOWN) as w, i (i)}
+                    <span class="rw" title={echoReasonText(w.reason) || undefined}
+                      ><button type="button" class="link mono" title="Play from here" onclick={() => player.seek(w.start_ms)}
+                        >{formatClock(w.start_ms)}</button
+                      >
+                      {w.text}</span
+                    >
+                  {/each}
+                  {#if removed.words.length > REMOVED_SHOWN}
+                    <span>and {removed.words.length - REMOVED_SHOWN} more</span>
+                  {/if}
+                </p>
+              {:else}
+                <p class="removed-list">Loading…</p>
+              {/if}
+            </details>
+          {/if}
+        </div>
+      {/if}
     </header>
 
     <SpeakerLegend
@@ -730,6 +812,31 @@
     border-color: var(--warning-border);
     background: var(--warning-bg);
     color: var(--warning-fg);
+  }
+  .echo-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    align-items: baseline;
+    margin-top: 4px;
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+  .removed[open] {
+    flex-basis: 100%;
+  }
+  .removed summary {
+    width: max-content;
+    cursor: pointer;
+  }
+  .removed-list {
+    max-height: 9em;
+    margin: 4px 0 0;
+    overflow-y: auto;
+  }
+  .rw {
+    margin-right: 10px;
+    white-space: nowrap;
   }
   .banner {
     display: flex;

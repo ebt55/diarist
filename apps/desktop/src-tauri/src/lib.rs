@@ -314,6 +314,10 @@ pub fn run() {
             live::recording_status,
             live::live_snapshot,
             live::rerun_post_pass,
+            live::turn_off_echo_for_recording,
+            commands::echo_dropped,
+            commands::restore_echo_dropped,
+            commands::remove_restored_echo,
             commands::language_table,
         ])
         .setup(move |app| {

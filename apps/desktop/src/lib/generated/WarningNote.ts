@@ -17,4 +17,4 @@ peak_dbfs: number,
 /**
  * AGC gain at the time.
  */
-gain_db: number, } | { "kind": "capture", channel: Channel, message: string, });
+gain_db: number, } | { "kind": "capture", channel: Channel, message: string, } | { "kind": "echo", coupling: number, lag_ms: number, aec: boolean, });

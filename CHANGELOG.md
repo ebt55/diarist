@@ -4,6 +4,70 @@ All notable changes to Diarist. Versions follow semantic versioning.
 
 ## [Unreleased]
 
+- Added: recording with speakers. Without headphones the microphone hears
+  the meeting, so the other side was transcribed twice, once more as "me"
+  a few milliseconds later. Diarist now notices when the microphone hears
+  the system audio (the two compared on 2 s blocks) and removes the echoed
+  words from "me", in the live view and in the final transcript; the other
+  side's own channel is never touched. On a 111-minute meeting recorded
+  with speakers it removed 99 percent of the duplicated words and kept
+  99.4 percent of the owner's own. The live view says when it hears echo
+  and offers "Turn off for this recording" (N). The meeting details say how
+  many words were removed, with Restore to put them back as "me" (and
+  "Remove echo words again"). Settings, Recording, "Recording with speakers
+  (echo)": Detect and handle (default), Off or Always on, with the gate
+  threshold under Advanced; Diagnostics says whether it is on and what it
+  removed from the last recording. Words you say while the other side
+  talks are still recognised from the mixture, so headphones remain the
+  cleanest setup.
+- Added: the processing after Stop cancels the echo before it transcribes
+  "me". When the microphone hears the meeting, Diarist's own echo
+  canceller takes the other side out of a temporary copy of the microphone
+  audio (what is stored stays as recorded), that copy is transcribed, and
+  the echo gate removes what is left. On the 111-minute meeting recorded
+  with speakers it kept 98.3 percent of the owner's own words and left 0.6
+  percent of "me" as copies of the other side; the owner's own words spoken
+  over the meeting's real echo came out with 8.1 percent of words wrong
+  instead of 17.1. It runs while the other side is transcribed, so the
+  processing after Stop takes only seconds longer (about 45 s more for two
+  hours when the live transcript has no "me" words and the microphone is
+  transcribed once more). The live view still removes echoed
+  words with the gate alone until the live canceller ships. New recordings
+  keep the system audio's automatic gain beside the audio (`loopback.gain`,
+  about 1.4 MB per hour, deleted with the audio) so the canceller can undo
+  it.
+
+- Changed: recording with speakers, and headphones that leak, leave far
+  fewer copies of the other side in "me". Diarist now also checks "me"
+  against what the other side said a moment before (three or more words
+  repeated with one delay go; single words never), against the
+  microphone's noise floor while the other side talks (a word that quiet
+  cannot be you; never near your own level), and drops stray fragments
+  inside a phrase that was echo; the sound comparison now looks at the
+  speech band only. On the two 21 Oct test recordings the copies left in
+  "me" went from 69 of 386 words to 2 of 292 (headphones) and from 22 of
+  340 to none of 308 (speakers, with the change below), and in the live run
+  from 158 of 476 to 1 of 310. A recording where the microphone does not hear the meeting comes
+  out exactly as before. The live view can take a word back within 3 s
+  of showing it, when the other side's words for the same moment arrive
+  later. The meeting details' "Show them" list says why each word was
+  removed.
+- Changed: on speakers with a loud meeting, the processing after Stop
+  left more copies of the other side in "me" than the live view (on one
+  7.5-minute recording 21 of 293 words against 1 of 231): what the echo
+  canceller leaves of a loud echo comes out as garbled fragments. It now
+  also decides on the microphone as recorded, which the speech model hears
+  cleanly (the live transcript's "me" words, or the microphone transcribed
+  once more), and removes the cancelled words that sit where that decision
+  found echo, when the canceller took sound out of them and they are well
+  under your own level. On that recording none are left (the live view's
+  result) and every word of yours the canceller left alone stays but one;
+  on the 111-minute meeting the copies left went from 1.8 to 0.6 percent
+  with exactly the same words of the owner kept. The meeting details list
+  these as "Before echo cancellation, the microphone heard the meeting's
+  words there."
+- Fixed: the "live latency" log line counted the live view's echo
+  corrections as latency (34 s on one recording).
 - Changed: the copyright holder is named. `LICENSE` and the crate metadata
   say "Ebin Babu Thomas" instead of "Diarist contributors". The Diarist
   name, logo and icons (`branding/`, `apps/desktop/src-tauri/icons/`) are

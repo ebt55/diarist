@@ -34,6 +34,11 @@ warnings: Array<WarningNote>, post_passes: Array<PostPassView>,
  */
 queue_paused: boolean, 
 /**
+ * Echo handling was turned off for this recording (the echo banner's
+ * "Turn off for this recording", `Recorder::turn_off_echo`).
+ */
+echo_off: boolean, 
+/**
  * Why the last start or stop failed.
  */
 error: string | null, };

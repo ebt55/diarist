@@ -1,7 +1,9 @@
 //! Running a live meeting's post-pass again (after it failed or was
 //! cancelled): the recorded WAVs must still be there.
 
-use super::{register_wavs, submit_post_pass, LiveContext, PostPassHandle, PostPassJob};
+use super::{
+    live_run_of, register_wavs, submit_post_pass, LiveContext, PostPassHandle, PostPassJob,
+};
 use crate::error::Result;
 use crate::settings;
 use crate::store::{RunStore, StoreError};
@@ -25,8 +27,11 @@ pub(super) fn discard_unfinished_post_passes(
 }
 
 /// Queues the post-pass of a live meeting again, behind jobs already queued:
-/// the file engine over the recorded `mic.wav` and `loopback.wav`, names and
-/// edits carried over from the latest live run (see [`super::postpass`]).
+/// the file engine over the recorded `mic.wav` and `loopback.wav` (with the
+/// echo canceller when it engages, and its transfer gate on the live run's
+/// mic words, or on `mic.wav` transcribed once more when the live run has
+/// none), names and edits carried over from the latest live run, never a
+/// copy Restore made of it ([`super::live_run_of`]; see [`super::postpass`]).
 /// The meeting becomes `processing`; the handle reports the result.
 ///
 /// Refuses (`Store(Invalid)`) a meeting that is not a live recording, has no
@@ -50,11 +55,7 @@ pub fn rerun_post_pass(ctx: &LiveContext, meeting: MeetingId) -> Result<PostPass
         }
         MeetingStatus::Done | MeetingStatus::Failed => {}
     }
-    let live_run = store
-        .list_runs(meeting)?
-        .into_iter()
-        .rev()
-        .find(|r| r.kind == RunKind::Live)
+    let live_run = live_run_of(&store.list_runs(meeting)?)
         .map(|r| r.id)
         .ok_or_else(|| {
             StoreError::Invalid("This meeting has no live transcript to replace.".into())

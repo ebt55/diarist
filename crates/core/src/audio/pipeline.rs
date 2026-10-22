@@ -14,14 +14,19 @@
 //! resampled with rubato first ([`MixResampler`]).
 //!
 //! [`spawn_pipeline`] runs one on its own thread: it drains the capture
-//! ring, writes the WAV ([`super::wav::WavSink`], flushed every second),
-//! offers frames to the engine feed (never blocking), records anchors
+//! ring, writes the WAV ([`super::wav::WavSink`], flushed every second) and,
+//! with AGC, the gain track beside it ([`super::gain_track`]: the gain of
+//! every 10 ms of the timeline, which the post-pass echo canceller replays
+//! backwards), copies every frame to an optional [`FrameTap`] (the echo monitor; never
+//! blocking, before the feed so a degraded feed does not starve it), offers
+//! frames to the engine feed (never blocking), records anchors
 //! through [`RunStore::add_clock_anchors`] in batches and into a shared
 //! [`ClockMap`], and reports levels, gaps, device changes and feed
 //! transitions through a callback.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -35,6 +40,7 @@ use crate::audio::capture::{
 use crate::audio::clock::ClockMap;
 use crate::audio::feed::{FeedTransition, FeedTx};
 use crate::audio::gain::{dbfs, Agc, AgcConfig};
+use crate::audio::gain_track::{GainTrackWriter, SAMPLES_PER_VALUE, VALUES_PER_RECORD};
 use crate::audio::wav::WavSink;
 use crate::error::Result;
 use crate::store::RunStore;
@@ -149,6 +155,8 @@ pub struct Outputs {
     /// `(sample_index, qpc_100ns)`.
     pub anchors: Vec<(u64, i64)>,
     pub events: Vec<PipelineEvent>,
+    /// With AGC: the gain record of every finished frame (the gain track).
+    pub gains: Vec<GainRecord>,
 }
 
 impl Outputs {
@@ -157,7 +165,17 @@ impl Outputs {
         self.frames.clear();
         self.anchors.clear();
         self.events.clear();
+        self.gains.clear();
     }
+}
+
+/// The AGC gain over one 100 ms frame of the timeline: a value per 10 ms
+/// (the mean gain of its samples), a record of the gain track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GainRecord {
+    /// The frame's first sample.
+    pub start_sample: u64,
+    pub values: [f32; VALUES_PER_RECORD],
 }
 
 /// Places one channel's packets on the session timeline.
@@ -180,6 +198,13 @@ pub struct ChannelPipeline {
     after_synthetic: bool,
     mix: Option<MixResampler>,
     agc: Option<Agc>,
+    /// With AGC: the gain of each sample of the packet being placed.
+    packet_gains: Vec<f32>,
+    /// With AGC: gain sums and sample counts per 10 ms of the open frame.
+    gain_sum: [f64; VALUES_PER_RECORD],
+    gain_n: [u32; VALUES_PER_RECORD],
+    /// The gain of the last sample placed (a zero fill keeps it).
+    fill_gain: f32,
     stats: PipelineStats,
 }
 
@@ -198,7 +223,21 @@ impl ChannelPipeline {
             after_synthetic: false,
             mix: None,
             agc: None,
+            packet_gains: Vec::new(),
+            gain_sum: [0.0; VALUES_PER_RECORD],
+            gain_n: [0; VALUES_PER_RECORD],
+            fill_gain: 0.0,
             stats: PipelineStats::default(),
+        }
+    }
+
+    /// The gain of each sample the AGC just processed (empty without AGC).
+    fn take_block_gains(&mut self) {
+        self.packet_gains.clear();
+        if let Some(agc) = &self.agc {
+            for &(n, g) in agc.last_blocks() {
+                self.packet_gains.extend(std::iter::repeat_n(g, n));
+            }
         }
     }
 
@@ -285,6 +324,7 @@ impl ChannelPipeline {
                             }
                             agc.process_i16(&mut samples);
                         }
+                        self.take_block_gains();
                         self.place(qpc_100ns, samples, flags, out);
                         Ok(())
                     }
@@ -305,6 +345,7 @@ impl ChannelPipeline {
                             if let Some(agc) = self.agc.as_mut() {
                                 agc.process_f32(&mut chunk);
                             }
+                            self.take_block_gains();
                             let pcm: Vec<i16> = chunk.into_iter().map(to_i16).collect();
                             let f = PacketFlags {
                                 discontinuity: flags.discontinuity,
@@ -380,7 +421,9 @@ impl ChannelPipeline {
         }
         if skip < n {
             let q0 = q + skip as i64 * HNS_PER_SAMPLE;
-            self.emit(&samples[skip..], q0, out);
+            let gains = std::mem::take(&mut self.packet_gains);
+            self.emit(&samples[skip..], gains.get(skip..n), q0, out);
+            self.packet_gains = gains;
         }
         self.next_qpc = Some(q + n as i64 * HNS_PER_SAMPLE);
     }
@@ -389,14 +432,16 @@ impl ChannelPipeline {
         let zeros = [0i16; FRAME_SAMPLES];
         while n > 0 {
             let k = (n as usize).min(FRAME_SAMPLES);
-            self.emit(&zeros[..k], q0, out);
+            self.emit(&zeros[..k], None, q0, out);
             q0 += k as i64 * HNS_PER_SAMPLE;
             n -= k as u64;
         }
     }
 
-    /// Appends samples whose first one is at QPC `q0`.
-    fn emit(&mut self, pcm: &[i16], q0: i64, out: &mut Outputs) {
+    /// Appends samples whose first one is at QPC `q0`; with AGC, `gains`
+    /// holds the gain of each (`None`: zero fill, at the gain of the last
+    /// sample placed).
+    fn emit(&mut self, pcm: &[i16], gains: Option<&[f32]>, q0: i64, out: &mut Outputs) {
         let len = pcm.len() as u64;
         while self.next_anchor < self.position + len {
             let idx = self.next_anchor;
@@ -405,9 +450,28 @@ impl ChannelPipeline {
             self.next_anchor += ANCHOR_EVERY;
         }
         out.samples.extend_from_slice(pcm);
+        let tracked = self.agc.is_some();
+        let current = self.fill_gain;
         let mut rest = pcm;
+        let mut done = 0usize;
         while !rest.is_empty() {
             let k = (FRAME_SAMPLES - self.frame.len()).min(rest.len());
+            if tracked {
+                let at = self.frame.len();
+                for j in 0..k {
+                    let g = gains
+                        .and_then(|g| g.get(done + j))
+                        .copied()
+                        .unwrap_or(current);
+                    let b = (at + j) / SAMPLES_PER_VALUE;
+                    self.gain_sum[b] += f64::from(g);
+                    self.gain_n[b] += 1;
+                }
+            }
+            done += k;
+            if let Some(&g) = gains.and_then(|g| g.get(..done)).and_then(<[f32]>::last) {
+                self.fill_gain = g;
+            }
             self.frame.extend_from_slice(&rest[..k]);
             rest = &rest[k..];
             if self.frame.len() == FRAME_SAMPLES {
@@ -427,6 +491,25 @@ impl ChannelPipeline {
             Some(agc) => (agc.gain_db(), dbfs(agc.take_raw_peak()).max(-100.0)),
             None => (0.0, level.peak_dbfs),
         };
+        if self.agc.is_some() {
+            // Blocks a partial last frame did not reach repeat its last one.
+            let mut values = [gain_db; VALUES_PER_RECORD];
+            if let Some(first) = self.gain_n.iter().position(|&n| n > 0) {
+                let mut last = 0.0f32;
+                for (k, v) in values.iter_mut().enumerate().skip(first) {
+                    if self.gain_n[k] > 0 {
+                        last = (self.gain_sum[k] / f64::from(self.gain_n[k])) as f32;
+                    }
+                    *v = last;
+                }
+            }
+            out.gains.push(GainRecord {
+                start_sample: start,
+                values,
+            });
+            self.gain_sum = [0.0; VALUES_PER_RECORD];
+            self.gain_n = [0; VALUES_PER_RECORD];
+        }
         out.frames.push(Frame {
             channel: self.channel,
             start_sample: start,
@@ -641,6 +724,93 @@ pub enum PipelineCommand {
     Stop { at_qpc: i64 },
 }
 
+/// A copy of every frame for another consumer (the echo monitor, plan 15):
+/// a bounded channel the pipeline only ever `try_send`s to; a frame that
+/// does not fit (the consumer stalled) is dropped and counted. The copy a
+/// full channel hands back is kept and copied into for the next offer, so a
+/// stalled consumer costs the pipeline thread no allocation.
+pub struct FrameTap {
+    tx: SyncSender<Frame>,
+    dropped: Arc<AtomicU64>,
+    /// The copy the channel refused last (each clone keeps its own).
+    spare: Mutex<Option<Frame>>,
+}
+
+impl Clone for FrameTap {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            dropped: Arc::clone(&self.dropped),
+            spare: Mutex::new(None),
+        }
+    }
+}
+
+/// `src` copied into `dst`, reusing its sample buffer.
+fn copy_frame(dst: &mut Frame, src: &Frame) {
+    let Frame {
+        channel,
+        start_sample,
+        pts_us,
+        pcm,
+        level,
+        gain_db,
+        raw_peak_dbfs,
+    } = src;
+    dst.pcm.clear();
+    dst.pcm.extend_from_slice(pcm);
+    dst.channel = *channel;
+    dst.start_sample = *start_sample;
+    dst.pts_us = *pts_us;
+    dst.level = *level;
+    dst.gain_db = *gain_db;
+    dst.raw_peak_dbfs = *raw_peak_dbfs;
+}
+
+impl FrameTap {
+    /// A tap holding up to `capacity` frames, and its receiving end.
+    pub fn new(capacity: usize) -> (Self, Receiver<Frame>) {
+        let (tx, rx) = sync_channel(capacity);
+        (
+            Self {
+                tx,
+                dropped: Arc::new(AtomicU64::new(0)),
+                spare: Mutex::new(None),
+            },
+            rx,
+        )
+    }
+
+    /// Copies `frame` if there is room; never waits.
+    pub fn offer(&self, frame: &Frame) {
+        let mut spare = self.spare.lock().unwrap_or_else(|e| e.into_inner());
+        let copy = match spare.take() {
+            Some(mut f) => {
+                copy_frame(&mut f, frame);
+                f
+            }
+            None => frame.clone(),
+        };
+        match self.tx.try_send(copy) {
+            Ok(()) => {}
+            Err(TrySendError::Full(f) | TrySendError::Disconnected(f)) => {
+                *spare = Some(f);
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Frames that did not fit (over every clone of this tap).
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The drop counter alone (holding it does not keep the channel open).
+    pub fn drop_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dropped)
+    }
+}
+
 /// Where a pipeline thread writes.
 pub struct PipelineThreadConfig {
     pub channel: Channel,
@@ -655,6 +825,11 @@ pub struct PipelineThreadConfig {
     pub clock: Arc<Mutex<ClockMap>>,
     /// Automatic gain before the WAV and the feed (`None`: off).
     pub agc: Option<AgcConfig>,
+    /// With AGC, the gain track goes here (`audio::gain_track`; `None`: not
+    /// written).
+    pub gain_path: Option<PathBuf>,
+    /// Every frame is also offered here (`None`: no copy).
+    pub tap: Option<FrameTap>,
     pub notify: Arc<dyn Fn(Channel, PipelineNotice) + Send + Sync>,
 }
 
@@ -677,6 +852,10 @@ pub fn spawn_pipeline(
     commands: Receiver<PipelineCommand>,
 ) -> Result<JoinHandle<Result<PipelineResult>>> {
     let mut wav = WavSink::create(&cfg.wav_path)?;
+    let mut gains = match (&cfg.gain_path, cfg.agc) {
+        (Some(p), Some(_)) => Some(GainTrackWriter::create(p)?),
+        _ => None,
+    };
     std::thread::Builder::new()
         .name(format!("pipeline-{}", cfg.channel))
         .spawn(move || {
@@ -691,6 +870,7 @@ pub fn spawn_pipeline(
                         if let Err(e) = wav.flush() {
                             (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
                         }
+                        flush_gains(&cfg, &mut gains);
                         write_anchors(&cfg, &mut pending, true);
                     }
                     Ok(PipelineCommand::Stop { at_qpc }) => stop_at = Some(at_qpc),
@@ -705,15 +885,16 @@ pub fn spawn_pipeline(
                     if let Err(e) = p.push(packet, &mut out) {
                         (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
                     }
-                    deliver(&mut cfg, &mut wav, &mut out, &mut pending);
+                    deliver(&mut cfg, &mut wav, &mut gains, &mut out, &mut pending);
                 }
                 if let Some(at) = stop_at {
                     p.fill_to(at, &mut out);
                     p.finish(&mut out);
-                    deliver(&mut cfg, &mut wav, &mut out, &mut pending);
+                    deliver(&mut cfg, &mut wav, &mut gains, &mut out, &mut pending);
                     if let Err(e) = wav.flush() {
                         (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
                     }
+                    flush_gains(&cfg, &mut gains);
                     write_anchors(&cfg, &mut pending, true);
                     let feed_dropped = cfg.feed.as_ref().map_or(0, FeedTx::dropped);
                     // Dropping the feed tells the worker the stream has ended.
@@ -732,16 +913,32 @@ pub fn spawn_pipeline(
         .map_err(|e| audio_err(format!("spawn pipeline thread: {e}")))
 }
 
-/// Writes outputs to the WAV, feed, clock and notices; clears `out`.
+fn flush_gains(cfg: &PipelineThreadConfig, gains: &mut Option<GainTrackWriter>) {
+    if let Some(Err(e)) = gains.as_mut().map(GainTrackWriter::flush) {
+        (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
+    }
+}
+
+/// Writes outputs to the WAV, gain track, feed, clock and notices; clears
+/// `out`.
 fn deliver(
     cfg: &mut PipelineThreadConfig,
     wav: &mut WavSink,
+    gains: &mut Option<GainTrackWriter>,
     out: &mut Outputs,
     pending: &mut Vec<ClockAnchor>,
 ) {
     if !out.samples.is_empty() {
         if let Err(e) = wav.write(&out.samples) {
             (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
+        }
+    }
+    if let Some(w) = gains.as_mut() {
+        for r in &out.gains {
+            if let Err(e) = w.push(r.start_sample, &r.values) {
+                (cfg.notify)(cfg.channel, PipelineNotice::Error(e.to_string()));
+                break;
+            }
         }
     }
     if !out.anchors.is_empty() {
@@ -769,6 +966,9 @@ fn deliver(
                 raw_peak_dbfs: frame.raw_peak_dbfs,
             },
         );
+        if let Some(tap) = &cfg.tap {
+            tap.offer(&frame);
+        }
         if let Some(feed) = cfg.feed.as_mut() {
             if let Some(t) = feed.offer(frame) {
                 (cfg.notify)(cfg.channel, PipelineNotice::Feed(t));
@@ -1078,6 +1278,10 @@ mod tests {
         let wav = dir.path().join("mic.wav");
         // A 1 s feed so the test is quick; the worker stalls for 2 s.
         let (tx, rx) = feed(10, 2);
+        // A tap nobody reads: it fills, drops and counts; the WAV and the
+        // feed are not affected.
+        let (tap, tap_rx) = FrameTap::new(4);
+        let tap_count = tap.clone();
         let notices = Arc::new(Mutex::new(Vec::new()));
         let n2 = Arc::clone(&notices);
         let cfg = PipelineThreadConfig {
@@ -1089,6 +1293,8 @@ mod tests {
             meeting: MeetingId(1),
             clock: Arc::new(Mutex::new(ClockMap::new(ORIGIN))),
             agc: None,
+            gain_path: Some(dir.path().join("mic.gain")),
+            tap: Some(tap),
             notify: Arc::new(move |_, n| {
                 if let PipelineNotice::Feed(t) = n {
                     n2.lock().unwrap().push(t);
@@ -1135,5 +1341,192 @@ mod tests {
         assert!(t.contains(&FeedTransition::Recovered), "{t:?}");
         assert!(res.feed_dropped > 0);
         assert_eq!(frames_got as u64 + res.feed_dropped, 80);
+        assert_eq!(tap_rx.try_iter().count(), 4);
+        assert_eq!(tap_count.dropped(), 76);
+        assert!(
+            !dir.path().join("mic.gain").exists(),
+            "no AGC, no gain track"
+        );
+    }
+
+    /// 10 ms packets: a -70 dBFS tone, 300 ms without packets, then a
+    /// -12 dBFS tone (the gain falls; the limiter caps the first block).
+    fn agc_packets() -> (Vec<Packet>, Vec<i16>) {
+        let tone = |k: i64, amp: f32| -> Vec<i16> {
+            (0..160)
+                .map(|i| {
+                    let t = (k * 160 + i) as f32 / 16_000.0;
+                    ((t * 300.0 * std::f32::consts::TAU).sin() * amp).round() as i16
+                })
+                .collect()
+        };
+        let mut packets = Vec::new();
+        let mut timeline = Vec::new();
+        for k in 0..100i64 {
+            let x = tone(k, 10.4);
+            timeline.extend_from_slice(&x);
+            packets.push(Packet::Audio {
+                qpc_100ns: ORIGIN + k * 100_000,
+                flags: PacketFlags::default(),
+                data: PacketData::Pcm16(x),
+            });
+        }
+        timeline.extend(std::iter::repeat_n(0, 4_800));
+        for k in 130..250i64 {
+            let x = tone(k, 8_200.0);
+            timeline.extend_from_slice(&x);
+            packets.push(Packet::Audio {
+                qpc_100ns: ORIGIN + k * 100_000,
+                flags: PacketFlags::default(),
+                data: PacketData::Pcm16(x),
+            });
+        }
+        (packets, timeline)
+    }
+
+    #[test]
+    fn the_gain_track_undoes_the_agc_on_the_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("loopback.wav");
+        let gain_path = crate::audio::gain_track::path_for(&wav);
+        let cfg = PipelineThreadConfig {
+            channel: Channel::Loopback,
+            origin_qpc: ORIGIN,
+            wav_path: wav.clone(),
+            feed: None,
+            store: None,
+            meeting: MeetingId(1),
+            clock: Arc::new(Mutex::new(ClockMap::new(ORIGIN))),
+            agc: Some(AgcConfig::default()),
+            gain_path: Some(gain_path.clone()),
+            tap: None,
+            notify: Arc::new(|_, _| {}),
+        };
+        let (mut prod, cons) = rtrb::RingBuffer::new(1_024);
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let handle = spawn_pipeline(cfg, cons, cmd_rx).unwrap();
+        let (packets, raw) = agc_packets();
+        for pk in packets {
+            prod.push(pk).unwrap();
+        }
+        cmd_tx
+            .send(PipelineCommand::Stop {
+                at_qpc: ORIGIN + 250 * 100_000,
+            })
+            .unwrap();
+        let res = handle.join().unwrap().unwrap();
+        assert_eq!(res.wav.finalize().unwrap(), raw.len() as u64);
+        let stored: Vec<f32> = hound::WavReader::open(&wav)
+            .unwrap()
+            .into_samples::<i16>()
+            .map(|s| f32::from(s.unwrap()))
+            .collect();
+        let track = crate::audio::gain_track::GainTrack::read(&gain_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(track.frames(), raw.len().div_ceil(FRAME_SAMPLES));
+        // Raised by 40 dB at the ceiling, held over the gap, then down.
+        assert!((track.gain_db_at(15_000) - 40.0).abs() < 0.01);
+        assert!((track.gain_db_at(17_000) - 40.0).abs() < 0.01);
+        let g_loud = track.gain_db_at(21_000);
+        assert!(g_loud > 0.0 && g_loud < 12.0, "{g_loud}");
+        assert_eq!(track.gain_db_at(raw.len() as u64 - 1), 0.0);
+        // Replayed backwards, the WAV is the capture again, to the PCM16
+        // rounding after the gain (and the limiter's clamp at -1 dBFS, which
+        // the first loud block's peak touches).
+        let mut back = stored.clone();
+        track.undo(0, &mut back);
+        for (i, (b, r)) in back.iter().zip(&raw).enumerate() {
+            let tol = 1.0 / 10f32.powf(track.gain_db_at(i as u64) / 20.0) + 1e-3;
+            assert!(
+                (b - f32::from(*r)).abs() <= tol,
+                "sample {i}: {b} against {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn gain_records_follow_the_timeline_not_the_packets() {
+        // 250-sample packets: the AGC's 10 ms blocks straddle the
+        // timeline's; each record value is the mean gain of its samples.
+        let mut p =
+            ChannelPipeline::new(Channel::Loopback, ORIGIN).with_agc(Some(AgcConfig::default()));
+        let mut out = Outputs::default();
+        let mut gains_per_sample = Vec::new();
+        let mut records = Vec::new();
+        for k in 0..64i64 {
+            let x: Vec<i16> = (0..250)
+                .map(|i| {
+                    let t = (k * 250 + i) as f32 / 16_000.0;
+                    ((t * 440.0 * std::f32::consts::TAU).sin()
+                        * if k < 32 { 30.0 } else { 3_000.0 })
+                    .round() as i16
+                })
+                .collect();
+            p.push(
+                Packet::Audio {
+                    qpc_100ns: ORIGIN + k * 250 * 625,
+                    flags: PacketFlags::default(),
+                    data: PacketData::Pcm16(x),
+                },
+                &mut out,
+            )
+            .unwrap();
+            gains_per_sample.extend_from_slice(&p.packet_gains);
+            records.append(&mut out.gains);
+            out.clear();
+        }
+        p.finish(&mut out);
+        records.append(&mut out.gains);
+        assert_eq!(records.len(), 10, "16,000 samples: ten frames");
+        for (f, r) in records.iter().enumerate() {
+            assert_eq!(r.start_sample, f as u64 * 1_600);
+            for (b, v) in r.values.iter().enumerate() {
+                let a = f * 1_600 + b * 160;
+                let mean = gains_per_sample[a..a + 160]
+                    .iter()
+                    .map(|&g| f64::from(g))
+                    .sum::<f64>()
+                    / 160.0;
+                assert!((f64::from(*v) - mean).abs() < 1e-4, "frame {f} block {b}");
+            }
+        }
+        assert!(records[0].values[0] > 25.0 && records[9].values[9] < 10.0);
+    }
+
+    #[test]
+    fn a_full_tap_copies_into_the_frame_it_refused() {
+        let (tap, rx) = FrameTap::new(1);
+        let frame = |k: u64, v: i16| Frame {
+            channel: Channel::Mic,
+            start_sample: k * 1_600,
+            pts_us: k * 100_000,
+            pcm: vec![v; FRAME_SAMPLES],
+            level: Level::default(),
+            gain_db: 0.5,
+            raw_peak_dbfs: -20.0,
+        };
+        tap.offer(&frame(0, 1));
+        tap.offer(&frame(1, 2));
+        let buf = |t: &FrameTap| {
+            t.spare
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|f| (f.pcm.as_ptr(), f.start_sample))
+        };
+        let (ptr, at) = buf(&tap).unwrap();
+        assert_eq!(at, 1_600);
+        // Still full: the same buffer takes the next frame.
+        tap.offer(&frame(2, 3));
+        assert_eq!(buf(&tap), Some((ptr, 3_200)));
+        assert_eq!(tap.dropped(), 2);
+        assert_eq!(rx.try_recv().unwrap(), frame(0, 1));
+        // Room again: the spare goes out with the next frame's contents.
+        tap.offer(&frame(3, 4));
+        assert_eq!(buf(&tap), None);
+        let got = rx.try_recv().unwrap();
+        assert_eq!((got.pcm.as_ptr(), &got), (ptr, &frame(3, 4)));
+        assert_eq!(tap.clone().dropped(), 2);
     }
 }

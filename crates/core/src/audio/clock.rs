@@ -97,26 +97,58 @@ impl ClockMap {
             .map(|s| (s / NOMINAL_HNS_PER_SAMPLE - 1.0) * 1e6)
     }
 
+    /// The fitted slope, else the nominal one (extrapolation only: it is a
+    /// pass over every anchor).
+    fn slope(&self) -> f64 {
+        self.fitted_slope().unwrap_or(NOMINAL_HNS_PER_SAMPLE)
+    }
+
     /// QPC time of (fractional) sample `s`: linear between the surrounding
     /// anchors; outside them, extrapolated with the fitted slope.
     pub fn qpc_at(&self, s: f64) -> f64 {
-        let slope = self.fitted_slope().unwrap_or(NOMINAL_HNS_PER_SAMPLE);
         match self.points.as_slice() {
             [] => self.origin_qpc as f64 + s * NOMINAL_HNS_PER_SAMPLE,
-            [p] => p.1 as f64 + (s - p.0 as f64) * slope,
+            [p] => p.1 as f64 + (s - p.0 as f64) * self.slope(),
             pts => {
                 let first = pts[0];
                 let last = pts[pts.len() - 1];
                 if s <= first.0 as f64 {
-                    return first.1 as f64 + (s - first.0 as f64) * slope;
+                    return first.1 as f64 + (s - first.0 as f64) * self.slope();
                 }
                 if s >= last.0 as f64 {
-                    return last.1 as f64 + (s - last.0 as f64) * slope;
+                    return last.1 as f64 + (s - last.0 as f64) * self.slope();
                 }
                 let i = pts.partition_point(|p| (p.0 as f64) <= s);
                 let (a, b) = (pts[i - 1], pts[i]);
                 let t = (s - a.0 as f64) / (b.0 - a.0) as f64;
                 a.1 as f64 + t * (b.1 - a.1) as f64
+            }
+        }
+    }
+
+    /// The inverse of [`Self::qpc_at`]: the (fractional) sample of this
+    /// channel captured at QPC time `qpc`. Inside a jump (QPC moved with no
+    /// samples) it stays between the last sample before and the first after.
+    pub fn sample_at(&self, qpc: f64) -> f64 {
+        match self.points.as_slice() {
+            [] => (qpc - self.origin_qpc as f64) / NOMINAL_HNS_PER_SAMPLE,
+            [p] => p.0 as f64 + (qpc - p.1 as f64) / self.slope(),
+            pts => {
+                let first = pts[0];
+                let last = pts[pts.len() - 1];
+                if qpc <= first.1 as f64 {
+                    return first.0 as f64 + (qpc - first.1 as f64) / self.slope();
+                }
+                if qpc >= last.1 as f64 {
+                    return last.0 as f64 + (qpc - last.1 as f64) / self.slope();
+                }
+                let i = pts.partition_point(|p| (p.1 as f64) <= qpc).max(1);
+                let (a, b) = (pts[i - 1], pts[i]);
+                if b.1 <= a.1 {
+                    return b.0 as f64;
+                }
+                let t = (qpc - a.1 as f64) / (b.1 - a.1) as f64;
+                a.0 as f64 + t * (b.0 - a.0) as f64
             }
         }
     }
@@ -188,6 +220,25 @@ mod tests {
         assert_eq!(m.meeting_ms(30_000), 30_006);
         // Past the last anchor: extrapolated with the same slope.
         assert_eq!(m.meeting_ms(70_000), 70_014);
+        // The inverse, inside, before and after the anchors.
+        for s in [-1_000.0, 0.0, 12_345.5, 480_000.0, 959_999.0, 1_200_000.0] {
+            let back = m.sample_at(m.qpc_at(s));
+            assert!((back - s).abs() < 1e-3, "{s} -> {back}");
+        }
+    }
+
+    #[test]
+    fn inverse_inside_a_jump_stays_between_its_two_samples() {
+        let mut m = ClockMap::new(0);
+        m.push(0, 0);
+        m.push(15_999, 9_999_375);
+        // Suspended for an hour: the next sample is 3,600 s later.
+        m.push(16_000, 36_010_000_000);
+        m.push(32_000, 36_020_000_000);
+        let inside = m.sample_at(20_000_000_000.0);
+        assert!((15_999.0..=16_000.0).contains(&inside), "{inside}");
+        assert!((m.sample_at(36_015_000_000.0) - 24_000.0).abs() < 1e-6);
+        assert_eq!(ClockMap::new(1_000).sample_at(1_000.0 + 625.0 * 16.0), 16.0);
     }
 
     #[test]

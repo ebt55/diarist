@@ -217,6 +217,7 @@ impl LiveState {
             warnings: Vec::new(),
             post_passes: lock(&self.post_passes).values().cloned().collect(),
             queue_paused,
+            echo_off: slot.recorder.as_ref().is_some_and(Recorder::echo_off),
             error: slot.error.clone(),
         };
         if let Some(s) = &slot.session {
@@ -1354,10 +1355,39 @@ fn file_name(p: &std::path::Path) -> String {
 }
 
 /// The newest revision of every utterance of the recording's live run, in
-/// `live:words` shape (for a view that opens after words arrived).
+/// `live:words` shape (for a view that opens after words arrived), without
+/// the mic words the live echo gate hides now, so the view shows what the
+/// `live:words` events showed.
 pub(crate) fn snapshot(app: &AppHandle, meeting: MeetingId) -> CmdResult<Vec<WordsUpdate>> {
     let (store, _, _, _) = app_parts(app);
-    live::snapshot(&*store, meeting).map_err(|e| e.to_string())
+    let hidden = lock(&handle(app).slot)
+        .recorder
+        .as_ref()
+        .filter(|r| r.meeting_id() == meeting)
+        .map(Recorder::echo_hidden)
+        .unwrap_or_default();
+    live::snapshot_except(&*store, meeting, &|c, u, r, i| {
+        hidden.contains(&(c, u, r, i))
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// The echo banner's "Turn off for this recording" (`Recorder::turn_off_echo`):
+/// `false` when nothing was turned off (no recording, `echo.mode = off`, or
+/// already off). Emits `live:state` (its `echo_off`).
+pub(crate) fn turn_off_echo(app: &AppHandle) -> CmdResult<bool> {
+    let changed = {
+        let live = handle(app);
+        let slot = lock(&live.slot);
+        let Some(rec) = slot.recorder.as_ref() else {
+            return Err("No recording is running.".into());
+        };
+        rec.turn_off_echo().map_err(|e| {
+            format!("Echo handling could not be turned off ({e}); try again, or stop the recording")
+        })?
+    };
+    emit_state(app);
+    Ok(changed)
 }
 
 // ---- commands ----------------------------------------------------------------------------------
@@ -1428,4 +1458,10 @@ pub async fn live_snapshot(app: AppHandle, meeting_id: MeetingId) -> CmdResult<V
 #[tauri::command(rename_all = "snake_case")]
 pub async fn rerun_post_pass(app: AppHandle, meeting_id: MeetingId) -> CmdResult<JobId> {
     blocking(move || requeue_post_pass(&app, meeting_id)).await
+}
+
+/// "Turn off for this recording" on the echo banner (see [`turn_off_echo`]).
+#[tauri::command]
+pub async fn turn_off_echo_for_recording(app: AppHandle) -> CmdResult<bool> {
+    blocking(move || turn_off_echo(&app)).await
 }

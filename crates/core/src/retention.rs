@@ -4,7 +4,9 @@
 //!
 //! What goes: the `playback.flac` and the WAVs under `audio\<uid>\` (the
 //! registered tracks of format `flac` or `wav`, plus unregistered `*.wav`
-//! and `*.flac` a crash left behind) and their waveform caches. What stays:
+//! and `*.flac` a crash left behind), their waveform caches, and the AGC
+//! gain tracks beside them (`*.gain`, `crate::audio::gain_track`: kept as
+//! long as the audio they describe). What stays:
 //! the database (meetings, runs, words, speakers, edits), the engine JSON
 //! and RTTM files in the meeting folder, and an import's original file,
 //! which is the user's and lives outside the data root. Meetings still
@@ -73,13 +75,14 @@ pub struct RetentionReport {
     pub errors: Vec<String>,
 }
 
+/// Audio retention deletes: the WAVs and FLACs, and the gain tracks.
 fn is_audio_file(p: &Path) -> bool {
     matches!(
         p.extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("wav" | "flac")
+        Some("wav" | "flac" | "gain")
     )
 }
 
@@ -298,6 +301,11 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("audio").join(&old.uid).join("words.json"), b"{}").unwrap();
         std::fs::write(
+            root.join("audio").join(&old.uid).join("loopback.gain"),
+            [0u8; 16],
+        )
+        .unwrap();
+        std::fs::write(
             root.join("audio")
                 .join(&old.uid)
                 .join("playback.flac.peaks.json"),
@@ -349,14 +357,18 @@ mod tests {
         let p = plan(&store, root, 30, NOW).unwrap();
         assert_eq!(p.meetings.len(), 1, "{p:?}");
         assert_eq!(p.meetings[0].title, "old");
-        assert_eq!((p.files, p.bytes), (2, 1000));
+        assert_eq!((p.files, p.bytes), (3, 1016));
         assert_eq!(p.pinned_skipped, 1);
         assert!(plan(&store, root, 0, NOW).unwrap().meetings.is_empty());
 
         let r = apply(&store, &p);
-        assert_eq!((r.meetings, r.files, r.bytes), (1, 2, 1000), "{r:?}");
+        assert_eq!((r.meetings, r.files, r.bytes), (1, 3, 1016), "{r:?}");
         let folder = root.join("audio").join(&old.uid);
         assert!(!folder.join("playback.flac").exists() && !folder.join("loopback.wav").exists());
+        assert!(
+            !folder.join("loopback.gain").exists(),
+            "the gain track goes with the FLAC"
+        );
         assert!(!folder.join("playback.flac.peaks.json").exists());
         assert!(folder.join("words.json").is_file(), "engine output stays");
         assert!(store.list_audio_tracks(old.id).unwrap().is_empty());

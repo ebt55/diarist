@@ -10,6 +10,7 @@ Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjud
 - The segment owns the speaker. Words keep the engine's raw label and, from v1.5, the fusion margin and overlap flag, so a smoothing pass can be compared with what the engine said.
 - User edits survive new runs: display names and colours are carried over by time-overlap matching; segment reassignments are stored as time-ranged edits and re-applied.
 - Audio is disposable, transcripts are not. Per-channel 16 kHz WAVs during recording; one stereo FLAC (left mic, right loopback) after the post-pass, WAVs deleted; retention default 30 days unless a meeting is pinned (`audio_keep`). Eval-set meetings are pinned by the harness. A later re-diarization or fusion re-run only reaches meetings whose audio still exists, and Settings says so. Imports keep the original file as the playback source.
+- **Gain tracks.** A channel recorded with automatic gain (the loopback by default, the mic with `capture.mic_agc`) also writes `<channel>.gain` beside its WAV: the gain in dB the AGC applied to every 10 ms of the timeline, a 16-byte header (`DGTK`, version 1, 10 values per record, 16,000 Hz, 160 samples per value) and one record of ten little-endian `f32` per 100 ms frame, appended and flushed every second with the WAV. A crash leaves whole records plus at most a partial one, which the reader drops, so nothing needs repairing; 1.44 MB per hour. The post-pass echo canceller divides the loopback by it to get the reference the speakers played (`crates/core/src/audio/gain_track.rs`, `audio/aec/offline.rs`). It is not an `audio_tracks` row: it stays in the meeting folder as long as the FLAC, goes with the folder when the meeting is deleted, and audio retention deletes it with the FLAC. The post-pass's echo-cancelled mic, `mic-aec.wav`, exists only while the mic is transcribed and is deleted right after (and with the WAVs).
 - Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
 - **Ids are never reused.** A rowid table hands out `max(id) + 1`, so deleting the newest meeting gave its id to the next one and anything that remembered the old meeting by id saw the new one. Since migration 0002, meeting and transcript run ids come from the `counters` table (`next_meeting_id`, `next_run_id`, started at `max(id) + 1` of a 0.1.0-beta.1 database) and advance in the same transaction as the insert. Speakers, segments and words still take `max(id) + 1`; they belong to one run and the UI reloads them with it.
 - **A copy before every upgrade.** Before pending migrations run on an existing database, the backup API copies it to `diarist.db.bak-<old schema version>` next to it; only the newest copy is kept, and the open stops if the copy cannot be made. Copy diagnostics names it.
@@ -42,7 +43,8 @@ CREATE TABLE transcript_runs (
   engine_info   TEXT NOT NULL,                   -- JSON: runtime version, model names and hashes, presets, fusion settings
   started_at    INTEGER NOT NULL,
   finished_at   INTEGER,
-  status        TEXT NOT NULL CHECK (status IN ('running','done','failed'))
+  status        TEXT NOT NULL CHECK (status IN ('running','done','failed')),
+  echo_dropped  TEXT                             -- 0003, JSON [{start_ms, end_ms, text, coefficient}]: mic words the echo gate removed (NULL: the gate never ran; [] on a run built by Restore)
 );
 CREATE INDEX runs_meeting ON transcript_runs(meeting_id);
 

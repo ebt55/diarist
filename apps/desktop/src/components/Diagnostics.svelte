@@ -67,6 +67,10 @@
     try {
       if (action === "setup") app.route = "setup";
       else if (action === "settings") app.route = "settings";
+      else if (action.startsWith("settings:")) {
+        app.settingsAnchor = action.slice("settings:".length);
+        app.route = "settings";
+      }
       else if (action === "open_models") await api.openModelsFolder();
       else if (action === "open_engine") await api.openEngineFolder();
       else if (action === "sound_settings") await api.openSoundSettings();
@@ -190,7 +194,7 @@
           <li class="check st-{c.status}">
             <span class="mark" aria-hidden="true">{c.status === "pass" ? "✓" : c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "–"}</span>
             <span class="what"><strong>{c.label}</strong> <span class="sr-only">{c.status}</span><span class="detail">{c.detail}</span></span>
-            {#if c.fix && c.status !== "pass"}
+            {#if c.fix}
               <button type="button" class="btn small" onclick={() => fix(c)} disabled={fixing !== null}>{fixing === c.id ? "…" : c.fix_label}</button>
             {/if}
           </li>

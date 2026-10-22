@@ -80,6 +80,7 @@
         ["↑ ↓", "Move between live lines"],
         ["R", "Rename the line's speaker"],
         ["End", "Follow the live text again"],
+        ["N", "Echo banner: turn echo handling off for this recording"],
         ["Ctrl 2", "Focus the live transcript"],
       ],
     ],

@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AudioDevice } from "./generated/AudioDevice";
 import type { DataRootInfo } from "./generated/DataRootInfo";
 import type { DownloadItem } from "./generated/DownloadItem";
+import type { EchoDroppedWord } from "./generated/EchoDroppedWord";
 import type { EngineStatus } from "./generated/EngineStatus";
 import type { JobEvent } from "./generated/JobEvent";
 import type { HealthCheck } from "./generated/HealthCheck";
@@ -23,6 +24,7 @@ import type { MoveResult } from "./generated/MoveResult";
 import type { Readiness } from "./generated/Readiness";
 import type { RetentionPlan } from "./generated/RetentionPlan";
 import type { RetentionReport } from "./generated/RetentionReport";
+import type { RunId } from "./generated/RunId";
 import type { RuntimePackage } from "./generated/RuntimePackage";
 import type { RuntimeRelease } from "./generated/RuntimeRelease";
 import type { SearchHit } from "./generated/SearchHit";
@@ -139,6 +141,14 @@ export const api = {
   recordingStatus: () => invoke<LiveStatusView>("recording_status"),
   liveSnapshot: (meeting_id: MeetingId) => invoke<WordsUpdate[]>("live_snapshot", { meeting_id }),
   rerunPostPass: (meeting_id: MeetingId) => invoke<JobId>("rerun_post_pass", { meeting_id }),
+  /** The echo banner's "Turn off for this recording"; false when there was nothing to turn off. */
+  turnOffEchoForRecording: () => invoke<boolean>("turn_off_echo_for_recording"),
+  /** The mic words the echo gate removed from a run (read on demand only). */
+  echoDropped: (run_id: RunId) => invoke<EchoDroppedWord[]>("echo_dropped", { run_id }),
+  /** Restore: the removed words back into "me" as a new current run; returns it. */
+  restoreEchoDropped: (run_id: RunId) => invoke<RunId>("restore_echo_dropped", { run_id }),
+  /** "Remove echo words again": the run without them becomes current; returns it. */
+  removeRestoredEcho: (run_id: RunId) => invoke<RunId>("remove_restored_echo", { run_id }),
 
   readLogTail: (max_lines: number) => invoke<string>("read_log_tail", { max_lines }),
   lastEngineStderr: () => invoke<string | null>("last_engine_stderr"),

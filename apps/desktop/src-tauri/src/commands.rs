@@ -17,10 +17,10 @@ use diarist_core::models::{self, legacy, relocate, DataPaths, Manifest};
 use diarist_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
 use diarist_core::retention::{self, RetentionPlan, RetentionReport};
 use diarist_core::settings;
-use diarist_core::store::{RunStore, Store};
+use diarist_core::store::{RunStore, Store, StoreError};
 use diarist_core::types::{
-    AudioTrack, JobId, MeetingId, ModelFile, ModelFileId, ModelRole, SegmentId, SpeakerId,
-    TrackChannel, Word, WordId,
+    AudioTrack, EchoDroppedWord, JobId, MeetingId, MeetingStatus, ModelFile, ModelFileId,
+    ModelRole, RunId, SegmentId, Source, SpeakerId, TrackChannel, Word, WordId,
 };
 use diarist_core::views::{
     DataRootInfo, DownloadItem, DownloadKind, DownloadProgress, EngineStatus, JobEvent,
@@ -357,6 +357,69 @@ pub async fn delete_meeting(
     with_store(&store, move |s| s.delete_meeting(id)).await?;
     log::info!("deleted meeting {id}");
     Ok(())
+}
+
+// ---- Echo (plan 15) ----------------------------------------------------------------
+
+/// A core error as the user should read it (the message of `Invalid` and
+/// `Conflict`, which say what to do).
+fn user_error(e: CoreError) -> String {
+    match e {
+        CoreError::Store(StoreError::Invalid(m) | StoreError::Conflict(m)) => m,
+        other => other.to_string(),
+    }
+}
+
+/// The mic words the echo gate removed from `run_id` (empty when it removed
+/// none). Read only on demand (the meeting details' list), never with
+/// `get_meeting`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn echo_dropped(
+    store: State<'_, AppStore>,
+    run_id: RunId,
+) -> CmdResult<Vec<EchoDroppedWord>> {
+    with_store(&store, move |s| {
+        s.echo_dropped(run_id).map(Option::unwrap_or_default)
+    })
+    .await
+}
+
+/// Restore: the words the echo gate removed from `run_id` (the meeting's
+/// current run) go back into "me" as a new current run; the old run stays
+/// (`diarist_core::live::restore_echo_dropped`). Returns the new run.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn restore_echo_dropped(store: State<'_, AppStore>, run_id: RunId) -> CmdResult<RunId> {
+    let store = Arc::clone(&store.0);
+    blocking(move || {
+        diarist_core::live::restore_echo_dropped(store.as_ref(), run_id)
+            .map(|r| r.run)
+            .map_err(user_error)
+    })
+    .await
+}
+
+/// "Remove echo words again": the run a restore was built from becomes
+/// current again (`diarist_core::live::remove_restored_echo`). Returns it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_restored_echo(store: State<'_, AppStore>, run_id: RunId) -> CmdResult<RunId> {
+    let store = Arc::clone(&store.0);
+    blocking(move || {
+        diarist_core::live::remove_restored_echo(store.as_ref(), run_id).map_err(user_error)
+    })
+    .await
+}
+
+/// `engine_info.echo` of the newest finished live recording's current run,
+/// when it has one (the "Recording with speakers" row).
+fn last_recording_echo(store: &dyn RunStore) -> Option<serde_json::Value> {
+    let last = store
+        .list_meetings()
+        .ok()?
+        .into_iter()
+        .filter(|m| m.source == Source::Live && m.status == MeetingStatus::Done)
+        .max_by_key(|m| m.started_at)?;
+    let echo = store.get_meeting(last.id).ok()?.current_run?.engine_info["echo"].clone();
+    echo.is_object().then_some(echo)
 }
 
 // ---- Export ------------------------------------------------------------------------
@@ -1937,6 +2000,14 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
     });
     // 8b. Windows' microphone privacy switches for desktop apps.
     out.push(diagnostics::mic_privacy_check(&diagnostics::mic_consent()));
+    // 8c. Recording with speakers: echo handling, and what it did last time.
+    let echo_mode = settings::effective(store)
+        .map(|s| settings::echo_mode(&s))
+        .unwrap_or_default();
+    out.push(diagnostics::echo_check(
+        echo_mode,
+        last_recording_echo(store).as_ref(),
+    ));
 
     // 9. Live server reachable when it should be.
     let live = crate::live::status(app);

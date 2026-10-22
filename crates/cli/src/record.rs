@@ -137,6 +137,11 @@ impl LiveSink for CliSink {
                 "!! system audio from {device} is very quiet (peaks {peak_dbfs:.0} dBFS); raise its Windows volume or pick another output"
             ),
             LiveWarning::Capture { channel, message } => eprintln!("!! {channel}: {message}"),
+            LiveWarning::Echo {
+                coupling, lag_ms, ..
+            } => eprintln!(
+                "!! meeting sound reaches the mic (echo {coupling:.2}, {lag_ms:.0} ms); echoed words removed from \"me\""
+            ),
         }
     }
 

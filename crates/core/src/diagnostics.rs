@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 
+use crate::audio::echo::EchoMode;
 use crate::gpu::{GpuAdapter, GpuInfo};
 use crate::models::{
     device_for, engine_backend, selected_file, Backend, DataPaths, DataRootSource,
@@ -22,9 +23,10 @@ pub struct HealthCheck {
     pub status: String,
     /// What was found, and the next step when it is not a pass.
     pub detail: String,
-    /// A UI action that fixes it: `setup`, `download:<name>`, `open_models`,
-    /// `open_engine`, `settings`, `sound_settings`, `mic_privacy`, `start_engine`,
-    /// `rescan`.
+    /// A UI action that fixes it (or, on a passing row, changes it):
+    /// `setup`, `download:<name>`, `open_models`, `open_engine`, `settings`,
+    /// `settings:<field>` (Settings scrolled to that field), `sound_settings`,
+    /// `mic_privacy`, `start_engine`, `rescan`.
     pub fix: Option<String>,
     pub fix_label: Option<String>,
 }
@@ -377,6 +379,74 @@ pub fn mic_privacy_check(c: &MicConsent) -> HealthCheck {
         }
     };
     HealthCheck::new(id, label, "fail", detail).fix("mic_privacy", "Privacy settings")
+}
+
+/// The "Recording with speakers" row (plan 15): whether echo handling is on
+/// (`echo.mode`) and, from `last` (`engine_info.echo` of the newest finished
+/// live recording's current run, when it has one), what it did there. It
+/// names no meeting, since the row is also in the copied report. Always
+/// offers Settings, where the switch is.
+pub fn echo_check(mode: EchoMode, last: Option<&serde_json::Value>) -> HealthCheck {
+    let (id, label) = ("echo", "Recording with speakers");
+    let note = last.map(last_echo_note).unwrap_or_default();
+    let (status, state) = match mode {
+        EchoMode::Off => (
+            "skip",
+            "Echo handling is off: what the microphone picks up from the speakers stays in \
+             \"me\". Turn it on in Settings, Recording, if you record without headphones.",
+        ),
+        EchoMode::Auto => (
+            "pass",
+            "Echo handling is on: when the microphone hears the meeting from the speakers, \
+             the echoed words are removed from \"me\".",
+        ),
+        EchoMode::Always => (
+            "pass",
+            "Echo handling is always on: in every recording, the words the microphone picks \
+             up from the speakers are removed from \"me\".",
+        ),
+    };
+    HealthCheck::new(id, label, status, format!("{state}{note}")).fix("settings:echo", "Settings")
+}
+
+/// What the last recording's echo step did, as a sentence after a space.
+fn last_echo_note(e: &serde_json::Value) -> String {
+    let coupled = e["coupled"].as_bool().unwrap_or(false);
+    let coupling = e["coupling"].as_f64().unwrap_or(0.0);
+    let lag = e["lag_ms"]
+        .as_f64()
+        .map(|l| format!(", {l:.0} ms"))
+        .unwrap_or_default();
+    let heard = format!(
+        " In the last recording the microphone heard the speakers (coupling {coupling:.2}{lag})"
+    );
+    let n = |key: &str| e[key].as_u64().unwrap_or(0);
+    let words = |n: u64| if n == 1 { "word" } else { "words" };
+    if e["restored"].as_bool() == Some(true) {
+        let r = n("restored_words");
+        let were = if r == 1 { "was" } else { "were" };
+        format!(
+            "{heard}; its {r} removed {} {were} put back with Restore.",
+            words(r)
+        )
+    } else if e["user_off"].as_bool() == Some(true) {
+        if coupled {
+            format!("{heard}; echo handling was turned off for it, so nothing was removed.")
+        } else {
+            " Echo handling was turned off during the last recording.".into()
+        }
+    } else if coupled || n("dropped") > 0 {
+        let d = n("dropped");
+        format!(
+            "{heard}: {d} far-end {} removed from \"me\" (Restore in that meeting's details \
+             puts them back).",
+            words(d)
+        )
+    } else if e.get("coupled").is_some() {
+        " The last recording had no echo.".into()
+    } else {
+        String::new()
+    }
 }
 
 /// The user's profile folder (`%USERPROFILE%`, `$HOME` elsewhere).
@@ -907,6 +977,62 @@ mod tests {
         );
         // This PC's own values read without failing, whatever they are.
         let _ = mic_privacy_check(&mic_consent());
+    }
+
+    #[test]
+    fn the_echo_row_says_whether_it_is_on_and_what_the_last_recording_did() {
+        let on = echo_check(EchoMode::Auto, None);
+        assert_eq!((on.id.as_str(), on.status.as_str()), ("echo", "pass"));
+        assert_eq!(on.label, "Recording with speakers");
+        assert!(
+            on.detail.starts_with("Echo handling is on"),
+            "{}",
+            on.detail
+        );
+        assert_eq!(on.fix.as_deref(), Some("settings:echo"));
+        let off = echo_check(EchoMode::Off, None);
+        assert_eq!(off.status, "skip");
+        assert!(
+            off.detail.starts_with("Echo handling is off"),
+            "{}",
+            off.detail
+        );
+        assert_eq!(off.fix.as_deref(), Some("settings:echo"));
+        assert!(echo_check(EchoMode::Always, None)
+            .detail
+            .starts_with("Echo handling is always on"));
+        let note = |e: serde_json::Value| echo_check(EchoMode::Auto, Some(&e)).detail;
+        let removed = note(serde_json::json!({
+            "coupled": true, "coupling": 0.7213, "lag_ms": 3.25, "dropped": 312
+        }));
+        assert!(
+            removed.ends_with(
+                "In the last recording the microphone heard the speakers (coupling 0.72, 3 ms): \
+                 312 far-end words removed from \"me\" (Restore in that meeting's details puts \
+                 them back)."
+            ),
+            "{removed}"
+        );
+        let restored = note(serde_json::json!({
+            "coupled": true, "coupling": 0.7, "restored": true, "restored_words": 1, "dropped": 0
+        }));
+        assert!(
+            restored.ends_with("(coupling 0.70); its 1 removed word was put back with Restore."),
+            "{restored}"
+        );
+        let user_off = note(serde_json::json!({
+            "coupled": true, "coupling": 0.7, "user_off": true, "dropped": 0
+        }));
+        assert!(
+            user_off.ends_with("echo handling was turned off for it, so nothing was removed."),
+            "{user_off}"
+        );
+        let clear = note(serde_json::json!({"coupled": false, "coupling": 0.04, "dropped": 0}));
+        assert!(
+            clear.ends_with(" The last recording had no echo."),
+            "{clear}"
+        );
+        assert!(note(serde_json::json!({})).ends_with("from \"me\"."));
     }
 
     #[test]

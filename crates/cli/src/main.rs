@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(windows)]
+mod aec_probe;
 mod crash_test;
 mod record;
 use diarist_core::audio::capture::{self, DeviceFlow};
@@ -197,6 +199,41 @@ enum Command {
         #[arg(long)]
         device: Option<String>,
     },
+    /// Measure Windows' acoustic echo cancellation on the mic: plays a test
+    /// signal on the speakers and records the mic as the app opens it, with
+    /// AEC off and on (docs/research/14-echo-cancellation.md).
+    #[command(hide = true)]
+    AecProbe {
+        /// Folder for ref.wav, the mic recordings and report.txt.
+        #[arg(long)]
+        out: PathBuf,
+        /// Length of the generated test signal.
+        #[arg(long, default_value_t = 12)]
+        seconds: u32,
+        /// Capture endpoint id or name (default: the default communications mic).
+        #[arg(long)]
+        mic: Option<String>,
+        /// Render endpoint id or name to play to and to use as the AEC
+        /// reference (default: the default output).
+        #[arg(long)]
+        render: Option<String>,
+        /// Stream category of the AEC-on runs.
+        #[arg(long, default_value = "communications",
+              value_parser = ["communications", "speech", "other", "gamechat"])]
+        category: String,
+        /// Play this 16 kHz 16-bit PCM WAV instead of the generated signal.
+        #[arg(long)]
+        wav: Option<PathBuf>,
+        /// Also check ducking: the loopback level of a tone a second process
+        /// plays while mic streams of each category are open.
+        #[arg(long)]
+        ducking: bool,
+        /// Also check double talk: --render must feed the mic (CABLE Input
+        /// with --mic "CABLE Output"); the default output plays the far end
+        /// and is the AEC reference.
+        #[arg(long)]
+        double_talk: bool,
+    },
     /// Reproduce a crash to test the local reports in <data root>\logs
     /// (docs/plans/11-hardening.md 8a).
     #[command(hide = true, group = clap::ArgGroup::new("what").required(true))]
@@ -336,6 +373,43 @@ fn run(cli: &Cli) -> CliResult {
             return crash_test::run(cli.data_dir.as_deref(), *panic, *segv, *engine)
                 .map_err(CliError::Failed)
         }
+        Command::AecProbe {
+            out,
+            seconds,
+            mic,
+            render,
+            category,
+            wav,
+            ducking,
+            double_talk,
+        } => {
+            #[cfg(windows)]
+            return aec_probe::run(aec_probe::Args {
+                out: out.clone(),
+                seconds: *seconds,
+                mic: mic.clone(),
+                render: render.clone(),
+                category: category.clone(),
+                wav: wav.clone(),
+                ducking: *ducking,
+                double_talk: *double_talk,
+            })
+            .map_err(CliError::Failed);
+            #[cfg(not(windows))]
+            {
+                let _ = (
+                    out,
+                    seconds,
+                    mic,
+                    render,
+                    category,
+                    wav,
+                    ducking,
+                    double_talk,
+                );
+                return Err(CliError::Failed("aec-probe needs Windows".into()));
+            }
+        }
         Command::Play { device, wav } => {
             let stop = std::sync::atomic::AtomicBool::new(false);
             let r = capture::play_wav(device.as_deref(), wav, &stop)?;
@@ -356,7 +430,11 @@ fn run(cli: &Cli) -> CliResult {
     }
     let ctx = Ctx::open(cli)?;
     match &cli.command {
-        Command::Version | Command::Devices | Command::Play { .. } | Command::Crash { .. } => {
+        Command::Version
+        | Command::Devices
+        | Command::Play { .. }
+        | Command::Crash { .. }
+        | Command::AecProbe { .. } => {
             unreachable!()
         }
         Command::Transcribe {
@@ -1454,6 +1532,38 @@ mod tests {
             bare.command,
             Command::Record { seconds: None, .. }
         ));
+    }
+
+    #[test]
+    fn parses_aec_probe() {
+        let cli = Cli::try_parse_from(["diarist-cli", "aec-probe", "--out", "x"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::AecProbe { seconds: 12, ref category, ducking: false, .. } if category == "communications"
+        ));
+        let cli = Cli::try_parse_from([
+            "diarist-cli",
+            "aec-probe",
+            "--out",
+            "x",
+            "--category",
+            "speech",
+            "--ducking",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::AecProbe { ref category, ducking: true, .. } if category == "speech"
+        ));
+        assert!(Cli::try_parse_from([
+            "diarist-cli",
+            "aec-probe",
+            "--out",
+            "x",
+            "--category",
+            "loud"
+        ])
+        .is_err());
     }
 
     #[test]

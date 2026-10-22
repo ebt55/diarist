@@ -92,6 +92,9 @@ access (the addresses and hashes are on the setup screen and in
   (it asks first). **Ctrl+Alt+R** starts a recording from any app; pressed
   again it asks before stopping: the in-app question when the window is
   visible, otherwise press it a second time within 3 seconds.
+- Without headphones the microphone also hears the meeting; Diarist notices
+  that and removes the echoed words from "me" (Settings, "Recording with
+  speakers"), though headphones still give the cleanest result.
 - The window can be closed while recording; recording continues in the
   notification area.
 - **Settings**: start with Windows (in the notification area), where audio is

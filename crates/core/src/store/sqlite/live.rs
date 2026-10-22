@@ -101,6 +101,7 @@ impl SqliteStore {
         &self,
         run: RunId,
         opts: &SegmentOptions,
+        skip: &dyn Fn(&LiveUtterance, usize) -> bool,
     ) -> StoreResult<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -112,7 +113,7 @@ impl SqliteStore {
             )));
         }
         let rows = live_rows(&tx, run)?;
-        let transcript = transcript_from_live(&latest_revisions(&rows), opts);
+        let transcript = transcript_from_live(&latest_revisions(&rows), opts, skip);
         validate_transcript(&transcript)?;
         write_transcript(&tx, run, meeting, &transcript, true)?;
         tx.commit()?;
