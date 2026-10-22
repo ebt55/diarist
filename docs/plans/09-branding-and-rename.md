@@ -10,7 +10,7 @@ Deliverables:
 - `branding/logo.svg` (master, 512 viewBox, no text), `branding/logo-mono.svg` (single colour for favicons and tray), `branding/wordmark.svg` (icon plus the name set in a humanist sans, e.g. Inter or IBM Plex Sans, as outlines so no font dependency), `branding/tray-recording.svg` (mono tile with a red dot).
 - The Tauri icon set regenerated from the master with `bunx tauri icon branding/logo.svg` (icon.ico with 16 to 256 px, icon.png, Square*.png, StoreLogo.png) into `apps/desktop/src-tauri/icons/`.
 - A 1200 x 630 social preview `branding/social.png` rendered from SVG (resvg or the browser) for the GitHub repository.
-- `branding/README.md`: colours (hex), clear space, minimum size, light and dark usage, "do not" list (no gradients, no stretching, no extra text), licence (CC-BY-4.0 for the marks so forks can keep attribution clear).
+- `branding/README.md`: colours (hex), clear space, minimum size, light and dark usage, "do not" list (no gradients, no stretching, no extra text), licence (CC-BY-4.0 for the marks so forks can keep attribution clear; changed 20 Oct 2026: the marks are now copyright Ebin Babu Thomas with a written permission for unmodified use, see `branding/README.md`).
 
 Constraints: pure SVG, no raster effects, no embedded fonts, under 8 kB each; the 16 px rendering of the mono icon must stay legible (test by rasterising at 16, 24, 32 px and viewing the PNGs); contrast of each bar colour against both #ffffff and #0f1115 at least 3:1.
 
