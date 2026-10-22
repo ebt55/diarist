@@ -1,11 +1,11 @@
 # Installing Diarist
 
-Version 0.1.0-beta.3 (a beta pre-release). For which GPU and which models, see "Choosing your package and
+Version 0.1.0-beta.4 (a beta pre-release). For which GPU and which models, see "Choosing your package and
 models" in the [README](../README.md#choosing-your-package-and-models).
 
 ## 1. Install
 
-1. Download `Diarist_0.1.0-beta.3_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.4_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases).
 2. Run it. Windows SmartScreen warns because the installer is not code-signed
    yet: choose "More info", then "Run anyway". It installs for your user only,

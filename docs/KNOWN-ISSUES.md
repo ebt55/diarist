@@ -1,6 +1,6 @@
 # Known issues
 
-Status: 17 Oct 2026, for 0.1.0-beta.3. Kept by hand from the research notes in `docs/research`, the model guide (`docs/04-model-guide.md`), the evaluation notes in `docs/eval` and the changelog. Each row says where the problem sits (upstream in the runtime, in a model, by design, or Diarist's own), what the app does about it today, and what a fix waits on. Rows link to the upstream issue where one exists. Something missing here: [open an issue](https://github.com/ebt55/diarist/issues).
+Status: 22 Oct 2026, for 0.1.0-beta.4. Kept by hand from the research notes in `docs/research`, the model guide (`docs/04-model-guide.md`), the evaluation notes in `docs/eval` and the changelog. Each row says where the problem sits (upstream in the runtime, in a model, by design, or Diarist's own), what the app does about it today, and what a fix waits on. Rows link to the upstream issue where one exists. Something missing here: [open an issue](https://github.com/ebt55/diarist/issues).
 
 ## The runtime (NeMo-Speech.cpp 0.2.0)
 

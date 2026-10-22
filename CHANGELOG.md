@@ -2,7 +2,15 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.1.0-beta.4] - 2026-10-22
+
+The fourth beta pre-release. Diarist can now record a meeting played on
+speakers: when the microphone hears the other side, the echoed words are
+kept out of "me", live and in the final transcript, and the processing
+after Stop cancels the echo before it transcribes you. Measured on one PC
+with five recordings; headphones still give the cleanest "me". The
+copyright holder is now named, and the Diarist name, logo and icons are
+no longer under CC BY 4.0; the code stays MIT.
 
 - Added: recording with speakers. Without headphones the microphone hears
   the meeting, so the other side was transcribed twice, once more as "me"
