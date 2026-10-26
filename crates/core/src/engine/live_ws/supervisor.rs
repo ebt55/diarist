@@ -417,7 +417,7 @@ fn launch(cfg: &ServeConfig, st: &mut State) -> std::result::Result<(), String> 
     }
     let child = cmd
         .spawn()
-        .map_err(|e| format!("cannot start {:?}: {e}", cmd.get_program()))?;
+        .map_err(|e| format!("cannot start {}: {e}", process::program_shown(&cmd)))?;
     st.child = Some(child);
     st.endpoint = Some(ServeEndpoint { port, api_key: key });
     st.launched_at = Instant::now();

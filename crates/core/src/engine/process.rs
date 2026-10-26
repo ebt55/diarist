@@ -145,6 +145,18 @@ pub fn exe_arg(engine_dir: &Path) -> OsString {
     path_arg(&exe_path(engine_dir))
 }
 
+/// `text` with extended-length paths in the plain form (`\\?\C:\x` as
+/// `C:\x`, `\\?\UNC\server\share\x` as `\\server\share\x`), for messages that
+/// are shown or stored: [`path_arg`]'s form is only for other programs.
+pub fn plain_paths(text: &str) -> String {
+    text.replace(r"\\?\UNC\", r"\\").replace(r"\\?\", "")
+}
+
+/// The program `cmd` runs, quoted and in the plain form, for messages.
+pub fn program_shown(cmd: &Command) -> String {
+    format!("\"{}\"", plain_paths(&cmd.get_program().to_string_lossy()))
+}
+
 /// A `Command` for the runtime with the reduced `PATH`, the model directory
 /// (when given), stdin closed and no console window. Global flags such as
 /// `--json` are the caller's business. Starts at any path length
@@ -182,7 +194,7 @@ pub fn run_with_timeout_ticking(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
-        .map_err(|e| CoreError::Engine(format!("spawn {:?}: {e}", cmd.get_program())))?;
+        .map_err(|e| CoreError::Engine(format!("spawn {}: {e}", program_shown(&cmd))))?;
     let stdout = drain(&mut child, true);
     let stderr = drain(&mut child, false);
     let start = Instant::now();
@@ -203,8 +215,8 @@ pub fn run_with_timeout_ticking(
             let _ = child.kill();
             let _ = child.wait();
             return Err(CoreError::Engine(format!(
-                "{:?} timed out after {} s",
-                cmd.get_program(),
+                "{} timed out after {} s",
+                program_shown(&cmd),
                 timeout.as_secs()
             )));
         }
@@ -272,6 +284,16 @@ mod tests {
             let device = format!(r"\\.\C:\data\{}\model.gguf", "d".repeat(250));
             assert_eq!(path_arg(Path::new(&device)), OsString::from(&device));
         }
+    }
+
+    #[test]
+    fn messages_show_the_plain_form() {
+        assert_eq!(
+            plain_paths(r#"model file \\?\C:\d\m.gguf and \\?\UNC\srv\sh\x.wav"#),
+            r#"model file C:\d\m.gguf and \\srv\sh\x.wav"#
+        );
+        let cmd = Command::new(r"\\?\C:\e\bin\nemo-speech.exe");
+        assert_eq!(program_shown(&cmd), r#""C:\e\bin\nemo-speech.exe""#);
     }
 
     #[cfg(windows)]
@@ -402,6 +424,11 @@ mod tests {
         };
         assert_eq!(devices(&long), devices(&short), "{long:?}");
         assert_eq!(long.runtime_warnings, short.runtime_warnings);
+        eprintln!(
+            "doctor from the long root: accelerator {}, devices {:?}",
+            long.accelerator_available,
+            devices(&long)
+        );
     }
 
     #[test]

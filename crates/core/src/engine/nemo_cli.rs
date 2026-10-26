@@ -257,7 +257,9 @@ pub fn map_failure(exit_code: Option<i32>, stderr: &str) -> (ErrorCode, String) 
     } else {
         format!("{head}\n{tail}")
     };
-    (code, message)
+    // The runtime echoes the `\\?\` paths it was given; the message is
+    // shown and stored with the plain ones.
+    (code, process::plain_paths(&message))
 }
 
 /// Parses RTTM lines (`SPEAKER <rec> 1 <start> <dur> <NA> <NA> speaker_<N> <NA> <NA>`).
@@ -358,7 +360,7 @@ fn run_child(
     let mut child = cmd.spawn().map_err(|e| {
         RunFailure::Failed(
             ErrorCode::Crash,
-            format!("cannot start {:?}: {e}", cmd.get_program()),
+            format!("cannot start {}: {e}", process::program_shown(&cmd)),
         )
     })?;
     let stderr = child.stderr.take();
