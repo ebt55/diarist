@@ -470,6 +470,18 @@ pub struct Word {
     pub margin: Option<f32>,
     /// v1.5 fusion: another speaker was active during the word.
     pub overlap: bool,
+    /// The ASR's text where `text` (the display text, punctuated) differs
+    /// from it; absent when they are the same (`words.raw_text` NULL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub raw_text: Option<String>,
+}
+
+impl Word {
+    /// The ASR's text of the word: `raw_text`, else `text`.
+    pub fn asr_text(&self) -> &str {
+        self.raw_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// A mic word the echo gate removed (`transcript_runs.echo_dropped`, plan
@@ -707,6 +719,7 @@ mod tests {
             raw_label: Some("spk_1".into()),
             margin: None,
             overlap: false,
+            raw_text: None,
         };
         let run2: TranscriptRun =
             serde_json::from_str(&serde_json::to_string(&run).unwrap()).unwrap();

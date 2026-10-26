@@ -243,6 +243,7 @@ fn post_pass(
         transcribe: true,
         keep_live_runs: true,
         segment: SegmentOptions::default(),
+        punct: diarist_core::punct::PunctSource::None,
     };
     let report = run_post_pass(&store, engine, &job, &CancelToken::default(), &|_| {}).unwrap();
     let run = store.get_run(report.current_run).unwrap();

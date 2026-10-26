@@ -65,6 +65,7 @@ pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
 pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
 pub use rerun::rerun_post_pass;
+pub(crate) use restore::{check_idle, segment_options};
 pub use restore::{remove_restored_echo, restore_echo_dropped, EchoRestore};
 pub use snapshot::{snapshot, snapshot_except};
 pub use views::{
@@ -101,6 +102,7 @@ use crate::engine::{Engine, EngineEvent, EngineWord, LiveEngine, LiveOpts};
 use crate::error::{CoreError, Result};
 use crate::models::free_disk_bytes;
 use crate::pipeline::JobQueue;
+use crate::punct::PunctSource;
 use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, RunStore};
 use crate::transcript::{SegmentOptions, ME_LABEL, UNKNOWN_LABEL};
@@ -156,6 +158,10 @@ pub struct LiveContext {
     pub live_engine_info: serde_json::Value,
     /// Post-pass progress and its terminal event.
     pub on_job_event: Option<JobEventFn>,
+    /// The post-pass's punctuation (plan 16 section 3.2): the caller's data
+    /// paths ([`PunctSource::Data`]), so the CLI's and the eval harness's
+    /// `--models-dir` overrides apply.
+    pub punct: PunctSource,
 }
 
 /// Which endpoints to record (ids from [`crate::audio::capture::list_devices`]).
@@ -1080,6 +1086,7 @@ impl Recorder {
             transcribe,
             keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
             segment: SegmentOptions::default(),
+            punct: self.ctx.punct.clone(),
         };
         let post_pass = submit_post_pass(&self.ctx, job, true);
         Ok(StopOutcome {
@@ -1229,13 +1236,17 @@ struct EventLoop {
 }
 
 /// The meeting's live run among its runs (in creation order): the latest of
-/// kind `live` that is not a copy Restore made of one (a restored run has
-/// `engine_info.echo.restored_from`, holds no live utterances and must not
-/// stand in for the recording in a re-run, crash recovery or a snapshot).
+/// kind `live` that is not a copy made of one, by Restore
+/// (`engine_info.echo.restored_from`) or by adding or removing punctuation
+/// (`engine_info.punctuation.rebuilt_from`): a copy holds no live utterances
+/// and must not stand in for the recording in a re-run, crash recovery or a
+/// snapshot.
 pub(crate) fn live_run_of(runs: &[TranscriptRun]) -> Option<&TranscriptRun> {
-    runs.iter()
-        .rev()
-        .find(|r| r.kind == RunKind::Live && r.engine_info["echo"]["restored_from"].is_null())
+    runs.iter().rev().find(|r| {
+        r.kind == RunKind::Live
+            && r.engine_info["echo"]["restored_from"].is_null()
+            && r.engine_info["punctuation"]["rebuilt_from"].is_null()
+    })
 }
 
 /// Three decimals for `engine_info`.

@@ -76,7 +76,10 @@ fn cimc_77_minutes_matches_the_reference() {
             title: Some("CIMC kickoff".into()),
             diarize: true,
         },
-        &ImportOptions::new(tmp.path(), &Default::default()),
+        &ImportOptions::new(
+            &diarist_core::models::DataPaths::at(tmp.path()),
+            &Default::default(),
+        ),
         &CancelToken::default(),
         &|_| {},
     )

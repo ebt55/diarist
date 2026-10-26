@@ -30,8 +30,10 @@ pub(super) fn discard_unfinished_post_passes(
 /// the file engine over the recorded `mic.wav` and `loopback.wav` (with the
 /// echo canceller when it engages, and its transfer gate on the live run's
 /// mic words, or on `mic.wav` transcribed once more when the live run has
-/// none), names and edits carried over from the latest live run, never a
-/// copy Restore made of it ([`super::live_run_of`]; see [`super::postpass`]).
+/// none) of the latest live run, never a copy Restore or a punctuation
+/// rebuild made of it ([`super::live_run_of`]); names and edits carry over
+/// from the current run when it is such a copy of the live run, else from
+/// the live run (see [`super::postpass`]).
 /// The meeting becomes `processing`; the handle reports the result.
 ///
 /// Refuses (`Store(Invalid)`) a meeting that is not a live recording, has no
@@ -88,6 +90,7 @@ pub fn rerun_post_pass(ctx: &LiveContext, meeting: MeetingId) -> Result<PostPass
             transcribe: true,
             keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
             segment: SegmentOptions::default(),
+            punct: ctx.punct.clone(),
         },
         false,
     ))

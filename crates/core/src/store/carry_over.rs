@@ -51,6 +51,13 @@
 //!    splitting segments where an edit covers only part of one. The target is
 //!    resolved by display name; a `user_N` speaker is created when no speaker
 //!    of the new run has that name.
+//!
+//! [`carry_over_identity`] is the carry for a run rebuilt from another
+//! one's words and labels (punctuation added or removed, echo words
+//! restored, plan 16 section 3.9): speakers are matched by `(channel,
+//! engine_label)`, with no alignment and no region minimum, and keep their
+//! name, colour, global id, merge, `needs_review` and name anchor; then the
+//! `reassign` edits are replayed as in step 6.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -122,6 +129,8 @@ pub(crate) struct SpeakerUpdate {
     pub anchor: Option<(i64, i64)>,
     pub color: Option<String>,
     pub global_id: Option<i64>,
+    /// The merge root (a speaker of the same run).
+    pub merged_into: Option<SpeakerId>,
     /// Always written.
     pub review: bool,
 }
@@ -517,15 +526,40 @@ pub(crate) fn carry_over(
     }
 
     // 6. Replay reassign edits.
-    for edit in b.edits(old_run.meeting_id)? {
+    replay_edits(
+        b,
+        old_run.meeting_id,
+        to_run,
+        &old_speakers,
+        &old_match,
+        &shift_of,
+        &mut report,
+    )?;
+    report.needs_review.sort();
+    report.needs_review.dedup();
+    Ok(report)
+}
+
+/// Step 6: replays the meeting's `reassign` edits onto `to_run` at word
+/// level (old run times moved by `shift_of(channel)`).
+fn replay_edits(
+    b: &mut dyn CarryBackend,
+    meeting: MeetingId,
+    to_run: RunId,
+    old_speakers: &[Speaker],
+    old_match: &HashMap<SpeakerId, SpeakerId>,
+    shift_of: &dyn Fn(Channel) -> i64,
+    report: &mut CarryOverReport,
+) -> StoreResult<()> {
+    for edit in b.edits(meeting)? {
         let target = resolve_target(
             b,
             to_run,
             edit.channel,
             &edit.payload,
-            &old_speakers,
-            &old_match,
-            &mut report,
+            old_speakers,
+            old_match,
+            report,
         )?;
         let shift = shift_of(edit.channel);
         let covered = b.covered_words(
@@ -568,6 +602,84 @@ pub(crate) fn carry_over(
             b.regroup(seg_id, &groups)?;
         }
     }
+    Ok(())
+}
+
+/// The identity carry (module docs) over any backend: `to_run` was built
+/// from `from_run`'s words with the same labels. The caller provides
+/// atomicity.
+pub(crate) fn carry_over_identity(
+    b: &mut dyn CarryBackend,
+    from_run: RunId,
+    to_run: RunId,
+) -> StoreResult<CarryOverReport> {
+    if from_run == to_run {
+        return Err(StoreError::Invalid(
+            "carry-over needs two different runs".into(),
+        ));
+    }
+    let old_run = b.run(from_run)?;
+    let new_run = b.run(to_run)?;
+    if old_run.meeting_id != new_run.meeting_id {
+        return Err(StoreError::Invalid(
+            "carry-over runs belong to different meetings".into(),
+        ));
+    }
+    let mut report = CarryOverReport::default();
+    let old_speakers = b.speakers(from_run)?;
+    let new_speakers = b.speakers(to_run)?;
+    let new_by_key: HashMap<(Channel, &str), SpeakerId> = new_speakers
+        .iter()
+        .map(|s| ((s.channel, s.engine_label.as_str()), s.id))
+        .collect();
+    let mut old_match: HashMap<SpeakerId, SpeakerId> = HashMap::new();
+    for s in &old_speakers {
+        if let Some(&x) = new_by_key.get(&(s.channel, s.engine_label.as_str())) {
+            old_match.insert(s.id, x);
+            report.matched.push((s.id, x));
+        }
+    }
+    for s in &old_speakers {
+        let Some(&x) = old_match.get(&s.id) else {
+            continue;
+        };
+        let anchor = match (s.name_anchor_start_ms, s.name_anchor_end_ms) {
+            (Some(a0), Some(a1)) => Some((a0, a1)),
+            _ => None,
+        };
+        let u = SpeakerUpdate {
+            name: s.display_name.clone(),
+            anchor,
+            color: s.color.clone(),
+            global_id: s.global_id,
+            merged_into: s
+                .merged_into
+                .and_then(|r| old_match.get(&r).copied())
+                .filter(|&r| r != x),
+            review: s.needs_review,
+        };
+        b.update_speaker(x, &u)?;
+        if let Some(name) = &u.name {
+            report.named.push((x, name.clone()));
+        }
+        if u.review {
+            report.needs_review.push(x);
+        }
+    }
+    for c in [Channel::Mic, Channel::Loopback, Channel::Source] {
+        if new_speakers.iter().any(|s| s.channel == c) {
+            report.shift_ms.insert(c, 0);
+        }
+    }
+    replay_edits(
+        b,
+        old_run.meeting_id,
+        to_run,
+        &old_speakers,
+        &old_match,
+        &|_| 0,
+        &mut report,
+    )?;
     report.needs_review.sort();
     report.needs_review.dedup();
     Ok(report)

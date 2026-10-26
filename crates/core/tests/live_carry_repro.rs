@@ -545,6 +545,7 @@ fn finish(
         transcribe: true,
         keep_live_runs: true,
         segment: SegmentOptions::default(),
+        punct: diarist_core::punct::PunctSource::None,
     };
     let t = Instant::now();
     let report =

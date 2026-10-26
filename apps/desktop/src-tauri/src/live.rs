@@ -770,6 +770,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             min_free_bytes: MIN_FREE_BYTES,
             live_engine_info: engine_info(&built.selection, &built.device),
             on_job_event: Some(job_event_fn(app, Arc::clone(&meeting_slot))),
+            punct: diarist_core::punct::PunctSource::Data(paths.clone()),
         };
         let title = req
             .title
@@ -1230,6 +1231,7 @@ fn offline_context(
         min_free_bytes: MIN_FREE_BYTES,
         live_engine_info: engine_info(&built.selection, &built.device),
         on_job_event: Some(job_event_fn(app, meeting)),
+        punct: diarist_core::punct::PunctSource::Data(paths.clone()),
     })
 }
 

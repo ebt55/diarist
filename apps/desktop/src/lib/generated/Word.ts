@@ -18,4 +18,9 @@ margin: number | null,
 /**
  * v1.5 fusion: another speaker was active during the word.
  */
-overlap: boolean, };
+overlap: boolean, 
+/**
+ * The ASR's text where `text` (the display text, punctuated) differs
+ * from it; absent when they are the same (`words.raw_text` NULL).
+ */
+raw_text?: string, };

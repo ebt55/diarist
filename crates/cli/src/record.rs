@@ -280,6 +280,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
                 );
             }
         })),
+        punct: diarist_core::punct::PunctSource::Data(ctx.paths.clone()),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let s2 = Arc::clone(&stop);

@@ -18,6 +18,21 @@
 //! before anything is stored ([`CoreError::UnknownTokens`]): the live run
 //! and the WAVs stay, so it can run again.
 //!
+//! Punctuation (plan 16 section 3.2), with the job's [`PunctSource`]: after
+//! the echo step and the unknown-token check, before segmentation, both
+//! channels are punctuated, each as its own stream
+//! ([`crate::punct::punctuate_loaded`]); the report is the run's
+//! `engine_info.punctuation`, and `echo_dropped` keeps the raw words. Names
+//! carry over from the meeting's current run when it is a copy of the live
+//! run (Restore, a punctuation rebuild; plan 16 section 3.9 step 7), else
+//! from the live run. With `transcribe = false` and a punctuator, the live
+//! run is not promoted as it is: a `post_pass` run is built from its words
+//! (raw text, the engine's labels), punctuated, with `promoted_live`, the
+//! live run's `engine_info.echo` and `echo_dropped`, speakers carried by
+//! identity; it becomes current and the live run goes as after a
+//! transcribing post-pass. Without a punctuator (or `off`) the live run is
+//! promoted as before.
+//!
 //! Echo (plan 15; nothing with `echo.mode = off`), on a thread of its own
 //! while the loopback is transcribed ([`prepare_echo`]):
 //! [`EchoProfile::scan`] judges the WAVs in 2 s blocks (always rescanned:
@@ -85,6 +100,8 @@ use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, File
 use crate::error::{CoreError, Result};
 use crate::models::languages;
 use crate::pipeline::CancelToken;
+use crate::punct::rebuild::{current_channels, descends_from};
+use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
 use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
 use crate::transcript::{
@@ -113,6 +130,8 @@ pub struct PostPassJob {
     pub transcribe: bool,
     pub keep_live_runs: bool,
     pub segment: SegmentOptions,
+    /// Where the punctuator comes from (the context's data paths).
+    pub punct: PunctSource,
 }
 
 impl PostPassJob {
@@ -276,6 +295,89 @@ fn unplaced_names(
         .filter(|n| !placed.contains(n.as_str()))
         .collect();
     Ok(unplaced.len())
+}
+
+/// The run the post-pass carries names and edits from (plan 16 section 3.9
+/// step 7): the meeting's current run when it is a copy of `live_run` (a
+/// Restore or a punctuation rebuild of it, or of a copy of it), so names
+/// given on the copy survive; else `live_run`.
+fn carry_source(store: &dyn RunStore, meeting: MeetingId, live_run: RunId) -> RunId {
+    match store.get_meeting(meeting).map(|d| d.current_run) {
+        Ok(Some(c)) if c.id != live_run && descends_from(store, &c, live_run) => c.id,
+        _ => live_run,
+    }
+}
+
+/// `transcribe = false` with a punctuator: a `post_pass` run built from the
+/// live run's words (the meeting's current run), punctuated, made current.
+/// Returns the run, its carry-over and the unplaced names.
+fn promote_punctuated(
+    store: &dyn RunStore,
+    job: &PostPassJob,
+    loaded: &mut crate::punct::Loaded,
+    cancel: &CancelToken,
+) -> Result<(RunId, CarryOverReport, usize)> {
+    let live = store.get_run(job.live_run)?;
+    let mut channels = current_channels(store, job.meeting)?;
+    let punctuation = punctuate_loaded(
+        loaded,
+        &mut channels,
+        &job.segment,
+        &RunLanguage::new(&job.language),
+        &|| cancel.is_cancelled(),
+    );
+    if cancel.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    let transcript = build_transcript_channels(channels, &job.segment);
+    let mut info = live.engine_info.clone();
+    if !info.is_object() {
+        info = serde_json::json!({});
+    }
+    info["promoted_live"] = serde_json::json!(job.live_run.0);
+    info["live_run"] = serde_json::json!(job.live_run.0);
+    info["language"] = serde_json::json!(job.language);
+    info["diarize_mic"] = serde_json::json!(job.diarize_mic);
+    info["segmentation"] = serde_json::json!({
+        "max_gap_ms": job.segment.max_gap_ms,
+        "sentence_gap_ms": job.segment.sentence_gap_ms,
+        "max_words": job.segment.max_words,
+    });
+    info["punctuation"] = punctuation.to_json();
+    let run = store.create_run(job.meeting, RunKind::PostPass, info)?;
+    let built = (|| -> Result<(CarryOverReport, usize)> {
+        if let Some(dropped) = store.echo_dropped(job.live_run)? {
+            store.set_echo_dropped(run.id, &dropped)?;
+        }
+        store.insert_transcript(run.id, &transcript)?;
+        store.finish_run(run.id, RunStatus::Done)?;
+        // The same words and labels: speakers carry by identity.
+        let report = store.carry_over_identity(job.live_run, run.id)?;
+        let unplaced = unplaced_names(store, job.live_run, &report)?;
+        let mut info = store.get_run(run.id)?.engine_info;
+        info["unplaced_names"] = serde_json::json!(unplaced);
+        store.set_run_engine_info(run.id, info)?;
+        Ok((report, unplaced))
+    })();
+    let (report, unplaced) = match built {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = store.delete_run(run.id);
+            return Err(e);
+        }
+    };
+    store.set_current_run(job.meeting, run.id)?;
+    log::info!(
+        "post-pass meeting {}: live run {} promoted as punctuated run {} ({}, {} marks), {} named, {} unplaced names",
+        job.meeting,
+        job.live_run,
+        run.id,
+        punctuation.reason.as_str(),
+        punctuation.marks_added.unwrap_or(0),
+        report.named.len(),
+        unplaced
+    );
+    Ok((run.id, report, unplaced))
 }
 
 /// Maps a channel's words from channel time to meeting time and clamps
@@ -946,6 +1048,9 @@ pub fn run_post_pass(
     let mut carry = None;
     let mut unplaced = 0;
     let mut live_deleted = false;
+    // A post-pass run replaced the live run (transcribed, or promoted with
+    // punctuation).
+    let mut replaced_live = job.transcribe;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
         // One channel through the file engine, on meeting time; `part`:
@@ -1103,6 +1208,21 @@ pub fn run_post_pass(
         progress(JobStage::Saving, audio_ms, total_ms);
         // Mic first on equal start times.
         channels.reverse();
+        // Punctuation after the echo gate, before segmentation; the
+        // session is dropped right after.
+        let punctuation = {
+            let mut loaded = job.punct.load(store);
+            punctuate_loaded(
+                &mut loaded,
+                &mut channels,
+                &job.segment,
+                &RunLanguage::new(&job.language),
+                &|| cancel.is_cancelled(),
+            )
+        };
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         let transcript = build_transcript_channels(channels, &job.segment);
         let info = engine.info();
         let run = store.create_run(
@@ -1123,6 +1243,7 @@ pub fn run_post_pass(
                     "sentence_gap_ms": job.segment.sentence_gap_ms,
                     "max_words": job.segment.max_words,
                 },
+                "punctuation": punctuation.to_json(),
             }),
         )?;
         if let Some(e) = &echo {
@@ -1138,11 +1259,14 @@ pub fn run_post_pass(
             return Err(e.into());
         }
         store.finish_run(run.id, RunStatus::Done)?;
-        let report = store.carry_over(job.live_run, run.id)?;
+        // From the live run, or from a copy of it the user named speakers
+        // on (Restore, a punctuation rebuild).
+        let source = carry_source(store, job.meeting, job.live_run);
+        let report = store.carry_over(source, run.id)?;
         // Names given on the live run that reached no speaker of the new
         // run: the live run is kept for them (recorded before the WAVs go,
         // so crash recovery keeps it too).
-        unplaced = unplaced_names(store, job.live_run, &report)?;
+        unplaced = unplaced_names(store, source, &report)?;
         let mut info = store.get_run(run.id)?.engine_info;
         info["unplaced_names"] = serde_json::json!(unplaced);
         store.set_run_engine_info(run.id, info)?;
@@ -1160,7 +1284,18 @@ pub fn run_post_pass(
         run.id
     } else {
         store.set_current_run(job.meeting, job.live_run)?;
-        job.live_run
+        match job.punct.load(store) {
+            Ok(p) => {
+                let mut loaded: crate::punct::Loaded = Ok(p);
+                let (run, report, n) = promote_punctuated(store, job, &mut loaded, cancel)?;
+                carry = Some(report);
+                unplaced = n;
+                replaced_live = true;
+                run
+            }
+            // No punctuator (or `off`): the live run is the final one.
+            Err(_) => job.live_run,
+        }
     };
 
     // The playback track: stereo FLAC, then the WAVs go. A post-pass that
@@ -1200,7 +1335,7 @@ pub fn run_post_pass(
 
     // A live run with a name nobody in the new run received stays, as if
     // `keep_live_runs` were on for this meeting.
-    if job.transcribe && !job.keep_live_runs && unplaced == 0 {
+    if replaced_live && !job.keep_live_runs && unplaced == 0 {
         store.delete_run(job.live_run)?;
         live_deleted = true;
     }

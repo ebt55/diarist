@@ -209,7 +209,7 @@ fn run_import(
             ""
         }
     );
-    let mut opts = ImportOptions::new(&paths.root, &settings);
+    let mut opts = ImportOptions::new(paths, &settings);
     opts.language = language;
     opts.diarize_runner = Some(built.diarize_runner);
     let started = Instant::now();
@@ -385,13 +385,19 @@ pub async fn echo_dropped(
 }
 
 /// Restore: the words the echo gate removed from `run_id` (the meeting's
-/// current run) go back into "me" as a new current run; the old run stays
+/// current run) go back into "me" as a new current run, punctuated again
+/// with the selected punctuation model; the old run stays
 /// (`diarist_core::live::restore_echo_dropped`). Returns the new run.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn restore_echo_dropped(store: State<'_, AppStore>, run_id: RunId) -> CmdResult<RunId> {
+pub async fn restore_echo_dropped(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    run_id: RunId,
+) -> CmdResult<RunId> {
     let store = Arc::clone(&store.0);
+    let punct = diarist_core::punct::PunctSource::Data(paths.paths.clone());
     blocking(move || {
-        diarist_core::live::restore_echo_dropped(store.as_ref(), run_id)
+        diarist_core::live::restore_echo_dropped(store.as_ref(), &punct, run_id)
             .map(|r| r.run)
             .map_err(user_error)
     })

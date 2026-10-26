@@ -60,7 +60,7 @@ impl CarryBackend for TxBackend<'_, '_> {
                 name_anchor_start_ms = COALESCE(?3, name_anchor_start_ms),
                 name_anchor_end_ms = COALESCE(?4, name_anchor_end_ms),
                 color = COALESCE(?5, color), global_id = COALESCE(?6, global_id),
-                needs_review = ?7
+                needs_review = ?7, merged_into = COALESCE(?8, merged_into)
              WHERE id = ?1",
             params![
                 id.0,
@@ -69,7 +69,8 @@ impl CarryBackend for TxBackend<'_, '_> {
                 u.anchor.map(|a| a.1),
                 u.color,
                 u.global_id,
-                u.review
+                u.review,
+                u.merged_into.map(|m| m.0)
             ],
         )?;
         Ok(())

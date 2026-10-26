@@ -279,6 +279,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
         min_free_bytes: 0,
         live_engine_info: serde_json::json!({"runtime": "fake live"}),
         on_job_event: None,
+        punct: crate::punct::PunctSource::None,
     };
     (ctx, store, file)
 }
@@ -1606,6 +1607,7 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
         confidence: None,
         speaker: ME_LABEL.into(),
         raw_label: None,
+        raw_text: None,
     }];
     let gone = Path::new("does-not-exist");
     let (mic, lb) = (gone.join("mic.wav"), gone.join("loopback.wav"));
@@ -1764,6 +1766,7 @@ fn echo_post_pass_full(
         transcribe: true,
         keep_live_runs: true,
         segment: SegmentOptions::default(),
+        punct: crate::punct::PunctSource::None,
     };
     let report = run_post_pass(
         &*store,
@@ -2094,7 +2097,9 @@ fn restored_runs_are_not_the_live_run() {
         .set_meeting_status(m.id, MeetingStatus::Failed)
         .unwrap();
     // Restore: a new live-kind run, current, that says where it came from.
-    let restored = super::restore::restore_echo_dropped(&*store, live).unwrap();
+    let restored =
+        super::restore::restore_echo_dropped(&*store, &crate::punct::PunctSource::None, live)
+            .unwrap();
     let r = store.get_run(restored.run).unwrap();
     assert_eq!(r.kind, RunKind::Live);
     assert_eq!(
@@ -2111,8 +2116,17 @@ fn restored_runs_are_not_the_live_run() {
         !snap.is_empty() && snap.iter().all(|u| u.run_id == live),
         "{snap:?}"
     );
-    // The re-run carries over from the live run, not the restored copy,
-    // and replaces it; the restored copy is kept (not current).
+    // A name given on the restored copy (plan 16 section 3.9 step 7).
+    let bea = store
+        .run_speakers(restored.run)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == "spk_0")
+        .unwrap();
+    store.rename_speaker(bea.id, "Bea", None).unwrap();
+    // The re-run transcribes the live run's recording, carries names over
+    // from the restored copy (the current run, a copy of the live run), and
+    // replaces the live run; the restored copy is kept (not current).
     let report = rerun_post_pass(&ctx, m.id)
         .unwrap()
         .wait(Duration::from_secs(30))
@@ -2121,6 +2135,13 @@ fn restored_runs_are_not_the_live_run() {
     let run = store.get_run(report.current_run).unwrap();
     assert_eq!(run.kind, RunKind::PostPass);
     assert_eq!(run.engine_info["live_run"].as_i64(), Some(live.0));
+    assert!(
+        report
+            .speakers
+            .contains(&(Channel::Loopback, "spk_0".into(), Some("Bea".into()))),
+        "{:?}",
+        report.speakers
+    );
     assert!(report.live_run_deleted);
     assert!(store.get_run(live).is_err());
     assert!(store.get_run(restored.run).is_ok());
@@ -2142,7 +2163,9 @@ fn restored_runs_are_not_the_live_run() {
             }],
         )
         .unwrap();
-    let restored2 = super::restore::restore_echo_dropped(&*store, live2).unwrap();
+    let restored2 =
+        super::restore::restore_echo_dropped(&*store, &crate::punct::PunctSource::None, live2)
+            .unwrap();
     store
         .set_meeting_status(m2.id, MeetingStatus::Processing)
         .unwrap();
@@ -2161,4 +2184,310 @@ fn restored_runs_are_not_the_live_run() {
         Some(live2.0)
     );
     assert!(store.get_run(restored2.run).is_ok());
+}
+
+// ---- punctuation (plan 16) ---------------------------------------------------
+
+/// A post-pass job over `interrupted_meeting`'s WAVs.
+fn punct_job(
+    dir: &Path,
+    meeting: &Meeting,
+    live: RunId,
+    transcribe: bool,
+    punct: crate::punct::PunctSource,
+) -> PostPassJob {
+    PostPassJob {
+        job_id: JobId::new(),
+        meeting: meeting.id,
+        live_run: live,
+        data_root: dir.to_path_buf(),
+        folder: dir.join("audio").join(&meeting.uid),
+        language: "en".into(),
+        diarize_mic: false,
+        transcribe,
+        keep_live_runs: false,
+        segment: SegmentOptions::default(),
+        punct,
+    }
+}
+
+fn fixture(marks: &'static [(&'static str, crate::punct::Mark)]) -> crate::punct::PunctSource {
+    crate::punct::PunctSource::factory(move || {
+        crate::punct::fixture::FixturePunctuator::marks(marks)
+    })
+}
+
+fn word_texts(store: &dyn RunStore, m: MeetingId) -> Vec<(String, Option<String>)> {
+    store
+        .get_words(m, i64::MIN, i64::MAX)
+        .unwrap()
+        .into_iter()
+        .map(|w| (w.text, w.raw_text))
+        .collect()
+}
+
+#[test]
+fn the_post_pass_punctuates_after_the_echo_gate_and_before_segmentation() {
+    use crate::punct::Mark;
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    // With a punctuator: both channels, each its own stream.
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Punct", true);
+    let job = punct_job(
+        dir.path(),
+        &m,
+        live,
+        true,
+        fixture(&[("p2", Mark::Period), ("q2", Mark::Question)]),
+    );
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!(run.kind, RunKind::PostPass);
+    let p = &run.engine_info["punctuation"];
+    assert_eq!(p["applied"], true, "{p}");
+    assert_eq!(p["words"], 6);
+    assert_eq!(p["channels"]["mic"], "ok");
+    assert_eq!(p["channels"]["loopback"], "ok");
+    let words = word_texts(&*store, m.id);
+    let shown: Vec<&str> = words.iter().map(|w| w.0.as_str()).collect();
+    assert_eq!(shown, ["P0", "Q0", "p1", "q1", "p2.", "q2?"]);
+    assert_eq!(words[0].1.as_deref(), Some("p0"));
+    assert_eq!(words[2].1, None);
+    assert_eq!(file.jobs.lock().unwrap().len(), 2);
+
+    // Without one: the ASR's words and the reason.
+    let (m2, live2) = interrupted_meeting(&store, dir.path(), "Plain", true);
+    let job = punct_job(
+        dir.path(),
+        &m2,
+        live2,
+        true,
+        crate::punct::PunctSource::None,
+    );
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!(
+        run.engine_info["punctuation"],
+        serde_json::json!({"applied": false, "reason": "no_model"})
+    );
+    let words = word_texts(&*store, m2.id);
+    assert_eq!(words[0], ("p0".to_owned(), None));
+}
+
+#[test]
+fn a_promoted_live_run_is_punctuated_as_a_post_pass_run() {
+    use crate::punct::Mark;
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Promote", true);
+    // The live gate removed a word; the user named the loopback speaker.
+    let dropped = [crate::types::EchoDroppedWord {
+        start_ms: 1_000,
+        end_ms: 1_300,
+        text: "echo".into(),
+        coefficient: 0.8,
+        reason: None,
+    }];
+    store.set_echo_dropped(live, &dropped).unwrap();
+    let mut info = store.get_run(live).unwrap().engine_info;
+    info["echo"] = serde_json::json!({"coupled": true, "dropped": 1, "aec": false, "mode": "auto"});
+    store.set_run_engine_info(live, info).unwrap();
+    let alice = store
+        .run_speakers(live)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == "spk_0")
+        .unwrap();
+    store.rename_speaker(alice.id, "Alice", None).unwrap();
+
+    let job = punct_job(
+        dir.path(),
+        &m,
+        live,
+        false,
+        fixture(&[("hello", Mark::Period)]),
+    );
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    assert!(report.promoted_live);
+    assert_ne!(report.current_run, live);
+    assert!(file.jobs.lock().unwrap().is_empty(), "nothing transcribed");
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!((run.kind, run.status), (RunKind::PostPass, RunStatus::Done));
+    assert_eq!(run.engine_info["promoted_live"].as_i64(), Some(live.0));
+    assert_eq!(run.engine_info["live_run"].as_i64(), Some(live.0));
+    assert_eq!(run.engine_info["runtime"], "fake live");
+    assert_eq!(run.engine_info["echo"]["dropped"], 1);
+    assert_eq!(run.engine_info["punctuation"]["applied"], true);
+    assert_eq!(store.echo_dropped(run.id).unwrap().unwrap(), dropped);
+    assert_eq!(
+        word_texts(&*store, m.id),
+        [("Hello.".to_owned(), Some("hello".to_owned()))]
+    );
+    assert!(report
+        .speakers
+        .contains(&(Channel::Loopback, "spk_0".into(), Some("Alice".into()))));
+    let d = store.get_meeting(m.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert_eq!(d.current_run.unwrap().id, run.id);
+    // It replaced the live run, as a transcribing post-pass does.
+    assert!(report.live_run_deleted);
+    assert!(store.get_run(live).is_err());
+    // Crash recovery sees a finished post-pass.
+    store
+        .set_meeting_status(m.id, MeetingStatus::Processing)
+        .unwrap();
+    let rec = recover(&ctx).unwrap();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].action, RecoveryAction::Finished);
+    assert_eq!(
+        store.get_meeting(m.id).unwrap().current_run.unwrap().id,
+        run.id
+    );
+
+    // Without a punctuator the live run is promoted as before.
+    let (m2, live2) = interrupted_meeting(&store, dir.path(), "Plain", true);
+    let job = punct_job(
+        dir.path(),
+        &m2,
+        live2,
+        false,
+        crate::punct::PunctSource::None,
+    );
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    assert_eq!(report.current_run, live2);
+    assert!(!report.live_run_deleted);
+    assert_eq!(
+        store.get_meeting(m2.id).unwrap().current_run.unwrap().kind,
+        RunKind::Live
+    );
+    assert_eq!(word_texts(&*store, m2.id), [("hello".to_owned(), None)]);
+}
+
+#[test]
+fn rebuilt_copies_are_not_the_live_run_and_their_names_survive_a_re_run() {
+    use crate::punct::{rebuild_run, Mark, RebuildWhy};
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store, file) = context(dir.path(), None);
+    // A post-pass that failed: the live run is current, the WAVs are there.
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Copy", true);
+    store
+        .set_meeting_status(m.id, MeetingStatus::Failed)
+        .unwrap();
+    // "Add punctuation": a copy of kind live, current, never the live run.
+    let r = rebuild_run(
+        &*store,
+        &fixture(&[("hello", Mark::Period)]),
+        m.id,
+        RebuildWhy::Add,
+        &|| false,
+    )
+    .unwrap();
+    let copy = r.run.unwrap();
+    assert_eq!(store.get_run(copy).unwrap().kind, RunKind::Live);
+    assert_eq!(
+        live_run_of(&store.list_runs(m.id).unwrap()).map(|r| r.id),
+        Some(live)
+    );
+    // The snapshot is the live run's utterances.
+    assert!(snapshot(&*store, m.id)
+        .unwrap()
+        .iter()
+        .all(|u| u.run_id == live));
+    // A name given on the copy survives the re-run of the post-pass.
+    let spk = store
+        .run_speakers(copy)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == "spk_0")
+        .unwrap();
+    store.rename_speaker(spk.id, "Alice", None).unwrap();
+    let report = rerun_post_pass(&ctx, m.id)
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!(run.kind, RunKind::PostPass);
+    assert_eq!(run.engine_info["live_run"].as_i64(), Some(live.0));
+    assert!(
+        report
+            .speakers
+            .contains(&(Channel::Loopback, "spk_0".into(), Some("Alice".into()))),
+        "{:?}",
+        report.speakers
+    );
+    assert_eq!(file.jobs.lock().unwrap().len(), 2);
+    assert!(store.get_run(copy).is_ok(), "the copy is kept");
+
+    // Crash recovery picks the live run, not a rebuilt copy.
+    let (m2, live2) = interrupted_meeting(&store, dir.path(), "Copy 2", true);
+    store
+        .set_meeting_status(m2.id, MeetingStatus::Done)
+        .unwrap();
+    let r2 = rebuild_run(
+        &*store,
+        &fixture(&[("hello", Mark::Period)]),
+        m2.id,
+        RebuildWhy::Add,
+        &|| false,
+    )
+    .unwrap();
+    let copy2 = r2.run.unwrap();
+    let spk = store
+        .run_speakers(copy2)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == "spk_0")
+        .unwrap();
+    store.rename_speaker(spk.id, "Cara", None).unwrap();
+    store
+        .set_meeting_status(m2.id, MeetingStatus::Processing)
+        .unwrap();
+    let rec = recover(&ctx).unwrap();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].live_run, Some(live2));
+    let report = rec[0]
+        .post_pass
+        .as_ref()
+        .unwrap()
+        .wait(Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.get_run(report.current_run).unwrap().engine_info["live_run"].as_i64(),
+        Some(live2.0)
+    );
+    // The copy stayed current while the post-pass waited: its name carried.
+    assert!(report
+        .speakers
+        .contains(&(Channel::Loopback, "spk_0".into(), Some("Cara".into()))));
+    assert!(store.get_run(copy2).is_ok());
 }

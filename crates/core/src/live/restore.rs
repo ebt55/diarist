@@ -4,27 +4,28 @@
 //! [`restore_echo_dropped`] rebuilds the meeting's current run from its
 //! stored words plus the run's `echo_dropped` list (on the mic, as `me`).
 //! Every stored word keeps the label the engine gave it (`raw_label`; an
-//! undiarized mic is `me`), each channel is segmented on its own with the
-//! run's segment options (`engine_info.segmentation`, else the defaults)
-//! and the segments are ordered by start time as the post-pass does
+//! undiarized mic is `me`) and goes back to the ASR's text (`raw_text`,
+//! else `text`); the channels are punctuated again with the restored words
+//! in place (plan 16 section 3.2: they change the context and the sentence
+//! starts), each channel is segmented on its own with the run's segment
+//! options (`engine_info.segmentation`, else the defaults) and the segments
+//! are ordered by start time as the post-pass does
 //! ([`build_transcript_channels`]). The result is a new run of the same kind
 //! with `engine_info.echo.restored: true` (with `restored_from`,
-//! `restored_words` and `dropped: 0`) and an empty `echo_dropped`; names,
-//! colours and reassignments carry over from the old run as after a
-//! post-pass ([`RunStore::carry_over`]), the old run's merges are made again
-//! (both runs have the same speaker labels), and the new run becomes
-//! current. The old run stays: [`remove_restored_echo`] ("Remove echo words
-//! again") makes it current again, and restoring it once more replaces the
-//! earlier restored run.
-
-use std::collections::{BTreeMap, HashMap};
+//! `restored_words` and `dropped: 0`), `engine_info.punctuation` replaced
+//! and an empty `echo_dropped`; speakers carry over by identity
+//! ([`RunStore::carry_over_identity`]: names, colours, merges, anchors,
+//! then the reassignments), and the new run becomes current. The old run
+//! stays: [`remove_restored_echo`] ("Remove echo words again") makes it
+//! current again, and restoring it once more replaces the earlier restored
+//! run.
 
 use crate::error::{CoreError, Result};
+use crate::punct::rebuild::{current_channels, run_language};
+use crate::punct::{punctuate_loaded, PunctSource};
 use crate::store::{CarryOverReport, RunStore, StoreError};
-use crate::transcript::{
-    build_transcript_channels, SegmentOptions, TranscriptWord, ME_LABEL, UNKNOWN_LABEL,
-};
-use crate::types::{Channel, MeetingId, MeetingStatus, RunId, RunStatus, SegmentId, SpeakerId};
+use crate::transcript::{build_transcript_channels, SegmentOptions, TranscriptWord, ME_LABEL};
+use crate::types::{Channel, MeetingId, MeetingStatus, RunId, RunStatus};
 
 /// What [`restore_echo_dropped`] did.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +45,7 @@ fn invalid(message: &str) -> CoreError {
 }
 
 /// Nothing may rebuild a meeting that records or is being finalized.
-fn check_idle(status: MeetingStatus) -> Result<()> {
+pub(crate) fn check_idle(status: MeetingStatus) -> Result<()> {
     match status {
         MeetingStatus::Recording => {
             Err(StoreError::Conflict("This meeting is still recording.".into()).into())
@@ -59,7 +60,7 @@ fn check_idle(status: MeetingStatus) -> Result<()> {
 
 /// The segment options a run was built with (`engine_info.segmentation`,
 /// written by the post-pass), else the defaults (live runs).
-fn segment_options(info: &serde_json::Value) -> SegmentOptions {
+pub(crate) fn segment_options(info: &serde_json::Value) -> SegmentOptions {
     let d = SegmentOptions::default();
     let s = &info["segmentation"];
     SegmentOptions {
@@ -69,39 +70,17 @@ fn segment_options(info: &serde_json::Value) -> SegmentOptions {
     }
 }
 
-/// The merges of `from` made again on `to` (the same speakers by channel
-/// and engine label).
-fn remerge(store: &dyn RunStore, from: RunId, to: RunId) -> Result<()> {
-    let old = store.run_speakers(from)?;
-    let new: HashMap<(Channel, String), SpeakerId> = store
-        .run_speakers(to)?
-        .into_iter()
-        .map(|s| ((s.channel, s.engine_label), s.id))
-        .collect();
-    let key: HashMap<SpeakerId, (Channel, String)> = old
-        .iter()
-        .map(|s| (s.id, (s.channel, s.engine_label.clone())))
-        .collect();
-    for s in &old {
-        let Some(root) = s.merged_into else {
-            continue;
-        };
-        let a = new.get(&(s.channel, s.engine_label.clone()));
-        let b = key.get(&root).and_then(|k| new.get(k));
-        if let (Some(&a), Some(&b)) = (a, b) {
-            if a != b {
-                store.merge_speakers(a, b)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Puts the words the echo gate removed from `run` back into "me" as a new
-/// current run (see the module docs). `run` must be its meeting's current
-/// run, with words in `echo_dropped`, and the meeting neither recording nor
-/// being finalized.
-pub fn restore_echo_dropped(store: &dyn RunStore, run: RunId) -> Result<EchoRestore> {
+/// current run (see the module docs), punctuated with the punctuator of
+/// `punct` (the app's and the CLI's data paths; [`PunctSource::None`]
+/// leaves the ASR's text). `run` must be its meeting's current run, with
+/// words in `echo_dropped`, and the meeting neither recording nor being
+/// finalized.
+pub fn restore_echo_dropped(
+    store: &dyn RunStore,
+    punct: &PunctSource,
+    run: RunId,
+) -> Result<EchoRestore> {
     let old = store.get_run(run)?;
     let meeting = old.meeting_id;
     let detail = store.get_meeting(meeting)?;
@@ -130,38 +109,15 @@ pub fn restore_echo_dropped(store: &dyn RunStore, run: RunId) -> Result<EchoRest
         }
     }
 
-    // The stored words by channel, with the engine's labels.
-    let channel_of: HashMap<SegmentId, Channel> = store
-        .get_segments(meeting, 0, u32::MAX)?
-        .into_iter()
-        .map(|s| (s.id, s.channel))
-        .collect();
-    let undiarized_mic = !detail.meeting.diarize_mic;
-    let mut by_channel: BTreeMap<Channel, Vec<TranscriptWord>> = BTreeMap::new();
-    for w in store.get_words(meeting, i64::MIN, i64::MAX)? {
-        let Some(&channel) = channel_of.get(&w.segment_id) else {
-            continue;
-        };
-        let speaker = match (channel, &w.raw_label) {
-            (Channel::Mic, _) if undiarized_mic => ME_LABEL.to_owned(),
-            (_, Some(label)) => label.clone(),
-            (Channel::Mic, None) => ME_LABEL.to_owned(),
-            (_, None) => UNKNOWN_LABEL.to_owned(),
-        };
-        by_channel.entry(channel).or_default().push(TranscriptWord {
-            channel,
-            start_ms: w.start_ms,
-            end_ms: w.end_ms,
-            text: w.text,
-            confidence: w.confidence,
-            speaker,
-            raw_label: w.raw_label,
-        });
+    // The stored words by channel, with the engine's labels (mic first, as
+    // the post-pass), and the removed words back on the mic.
+    let mut channels = current_channels(store, meeting)?;
+    if channels.first().map(|c| c.0) != Some(Channel::Mic) {
+        channels.insert(0, (Channel::Mic, Vec::new()));
     }
     let restored = dropped.len();
-    by_channel
-        .entry(Channel::Mic)
-        .or_default()
+    channels[0]
+        .1
         .extend(dropped.into_iter().map(|d| TranscriptWord {
             channel: Channel::Mic,
             start_ms: d.start_ms,
@@ -170,14 +126,19 @@ pub fn restore_echo_dropped(store: &dyn RunStore, run: RunId) -> Result<EchoRest
             confidence: None,
             speaker: ME_LABEL.to_owned(),
             raw_label: None,
+            raw_text: None,
         }));
-    // Mic first on equal start times, as the post-pass.
-    let mut channels: Vec<(Channel, Vec<TranscriptWord>)> = Vec::new();
-    if let Some(mic) = by_channel.remove(&Channel::Mic) {
-        channels.push((Channel::Mic, mic));
+    for (_, words) in channels.iter_mut() {
+        words.sort_by_key(|w| w.start_ms);
     }
-    channels.extend(by_channel);
-    let transcript = build_transcript_channels(channels, &segment_options(&old.engine_info));
+    // Punctuated again from the ASR's text, the restored words in place.
+    let segment = segment_options(&old.engine_info);
+    let lang = run_language(&detail.meeting.language, &old.engine_info);
+    let punctuation = {
+        let mut loaded = punct.load(store);
+        punctuate_loaded(&mut loaded, &mut channels, &segment, &lang, &|| false)
+    };
+    let transcript = build_transcript_channels(channels, &segment);
 
     let mut info = old.engine_info.clone();
     if !info.is_object() {
@@ -190,14 +151,14 @@ pub fn restore_echo_dropped(store: &dyn RunStore, run: RunId) -> Result<EchoRest
     info["echo"]["restored_from"] = serde_json::json!(run.0);
     info["echo"]["restored_words"] = serde_json::json!(restored);
     info["echo"]["dropped"] = serde_json::json!(0);
+    // Replaced wholesale: the old run's block describes other words.
+    info["punctuation"] = punctuation.to_json();
     let new = store.create_run(meeting, old.kind, info)?;
     let built = (|| -> Result<CarryOverReport> {
         store.set_echo_dropped(new.id, &[])?;
         store.insert_transcript(new.id, &transcript)?;
         store.finish_run(new.id, RunStatus::Done)?;
-        let report = store.carry_over(run, new.id)?;
-        remerge(store, run, new.id)?;
-        Ok(report)
+        Ok(store.carry_over_identity(run, new.id)?)
     })();
     let report = match built {
         Ok(r) => r,
@@ -259,8 +220,10 @@ pub fn remove_restored_echo(store: &dyn RunStore, run: RunId) -> Result<RunId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::punct::fixture::FixturePunctuator;
+    use crate::punct::{rebuild_run, Mark, PunctReason, RebuildWhy};
     use crate::store::{MemoryStore, NewMeeting, SqliteStore, Store};
-    use crate::types::{EchoDroppedWord, RunKind, Source};
+    use crate::types::{EchoDroppedWord, RunKind, SegmentId, Source};
 
     fn word(channel: Channel, start: i64, text: &str, spk: Option<&str>) -> TranscriptWord {
         TranscriptWord {
@@ -271,6 +234,7 @@ mod tests {
             confidence: Some(0.9),
             speaker: spk.unwrap_or(ME_LABEL).into(),
             raw_label: spk.map(str::to_owned),
+            raw_text: None,
         }
     }
 
@@ -375,7 +339,7 @@ mod tests {
         store.rename_speaker(id("me"), "Bob", None).unwrap();
         store.merge_speakers(id("spk_1"), id("spk_0")).unwrap();
 
-        let r = restore_echo_dropped(store, run).unwrap();
+        let r = restore_echo_dropped(store, &PunctSource::None, run).unwrap();
         assert_eq!((r.meeting, r.from_run, r.restored), (m, run, 2));
         let d = store.get_meeting(m).unwrap();
         let cur = d.current_run.unwrap();
@@ -415,7 +379,7 @@ mod tests {
         // The old run is kept; a second Restore on the restored run is refused.
         assert!(store.get_run(run).is_ok());
         assert!(matches!(
-            restore_echo_dropped(store, r.run),
+            restore_echo_dropped(store, &PunctSource::None, r.run),
             Err(CoreError::Store(StoreError::Invalid(_)))
         ));
         // Remove echo words again: the old run is current, nothing deleted.
@@ -426,7 +390,7 @@ mod tests {
         // Not current any more: both refuse.
         assert!(remove_restored_echo(store, r.run).is_err());
         // Restore again replaces the earlier restored run.
-        let again = restore_echo_dropped(store, run).unwrap();
+        let again = restore_echo_dropped(store, &PunctSource::None, run).unwrap();
         assert!(store.get_run(r.run).is_err());
         assert_eq!(store.list_runs(m).unwrap().len(), 2);
         assert_eq!(
@@ -435,7 +399,7 @@ mod tests {
         );
         // A run that is not current is refused, and so is a meeting being finalized.
         assert!(matches!(
-            restore_echo_dropped(store, run),
+            restore_echo_dropped(store, &PunctSource::None, run),
             Err(CoreError::Store(StoreError::Invalid(_)))
         ));
         store.set_current_run(m, run).unwrap();
@@ -443,7 +407,7 @@ mod tests {
             .set_meeting_status(m, MeetingStatus::Processing)
             .unwrap();
         assert!(matches!(
-            restore_echo_dropped(store, run),
+            restore_echo_dropped(store, &PunctSource::None, run),
             Err(CoreError::Store(StoreError::Conflict(_)))
         ));
     }
@@ -460,7 +424,7 @@ mod tests {
         let (m, run) = meeting(&store);
         store.set_echo_dropped(run, &[]).unwrap();
         assert!(matches!(
-            restore_echo_dropped(&store, run),
+            restore_echo_dropped(&store, &PunctSource::None, run),
             Err(CoreError::Store(StoreError::Invalid(_)))
         ));
         assert!(matches!(
@@ -468,5 +432,85 @@ mod tests {
             Err(CoreError::Store(StoreError::Invalid(_)))
         ));
         assert_eq!(store.get_meeting(m).unwrap().current_run.unwrap().id, run);
+    }
+
+    fn punct() -> PunctSource {
+        PunctSource::factory(|| {
+            FixturePunctuator::marks(&[
+                ("two", Mark::Period),
+                ("bye", Mark::Period),
+                ("three", Mark::Question),
+            ])
+        })
+    }
+
+    fn texts(store: &dyn RunStore, m: MeetingId) -> Vec<String> {
+        store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.text)
+            .collect()
+    }
+
+    fn restore_punctuated(store: &dyn RunStore) {
+        // Restore with punctuation on a run without any.
+        let (m1, run1) = meeting(store);
+        let r1 = restore_echo_dropped(store, &punct(), run1).unwrap();
+        let plain = texts(store, m1);
+        assert_eq!(
+            plain,
+            ["Hello", "One", "one", "two.", "two.", "Three?", "Bye."]
+        );
+        // The same meeting punctuated first ("Add punctuation"), then
+        // restored: the rebuilt run kept `echo_dropped` and the echo summary,
+        // and Restore starts from the ASR's text, so the words come out the
+        // same.
+        let (m2, _) = meeting(store);
+        let added = rebuild_run(store, &punct(), m2, RebuildWhy::Add, &|| false).unwrap();
+        let added_run = added.run.unwrap();
+        assert_eq!(texts(store, m2), ["Hello", "One", "two.", "Three?", "Bye."]);
+        let r2 = restore_echo_dropped(store, &punct(), added_run).unwrap();
+        assert_eq!(texts(store, m2), plain);
+        // Restore without a punctuator: the same words with the ASR's text.
+        let (m3, run3) = meeting(store);
+        let r3 = restore_echo_dropped(store, &PunctSource::None, run3).unwrap();
+        let none = texts(store, m3);
+        assert_eq!(none, ["hello", "one", "one", "two", "two", "three", "bye"]);
+        for (a, b) in none.iter().zip(&plain) {
+            assert_eq!(
+                crate::audio::echo::text::norm(a),
+                crate::audio::echo::text::norm(b)
+            );
+        }
+        // Every restored run keeps `echo_dropped` as [] and the echo
+        // summary; its punctuation block is its own.
+        for r in [r1.run, r2.run, r3.run] {
+            assert_eq!(store.echo_dropped(r).unwrap(), Some(Vec::new()));
+            let info = store.get_run(r).unwrap().engine_info;
+            assert_eq!(info["echo"]["coupling"].as_f64(), Some(0.72));
+            assert_eq!(info["echo"]["restored"], true);
+            assert!(info["punctuation"]["rebuilt_from"].is_null(), "{info}");
+        }
+        let p = |r: RunId| {
+            crate::punct::PunctReport::of_engine_info(&store.get_run(r).unwrap().engine_info)
+                .unwrap()
+        };
+        assert!(p(r1.run).applied && p(r2.run).applied);
+        assert_eq!(p(r3.run).reason, PunctReason::NoModel);
+        assert_eq!(
+            store.get_run(r3.run).unwrap().engine_info["punctuation"],
+            serde_json::json!({"applied": false, "reason": "no_model"})
+        );
+        // Restored words are raw text with raw_text where punctuated.
+        let w = store.get_words(m1, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(w[0].raw_text.as_deref(), Some("hello"));
+        assert_eq!(w[2].raw_text, None);
+    }
+
+    #[test]
+    fn restore_on_a_punctuated_run_is_restore_plus_punctuation() {
+        restore_punctuated(&SqliteStore::open_in_memory().unwrap());
+        restore_punctuated(&MemoryStore::new());
     }
 }
