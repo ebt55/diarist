@@ -1356,6 +1356,110 @@ mod tests {
         both(rebuild_collapses_loops);
     }
 
+    /// Plan 16 section 12.3 (review note 6): a rebuild reads each channel's
+    /// words in `(start_ms, id)` order, and the ids follow the order the
+    /// build stored them in: per channel the engine's order, kept by the
+    /// stable sorts of the post-pass and the segmenter and by
+    /// `interleave_segments` (equal starts keep the segment order of their
+    /// channel). So words with equal starts come back as the engine wrote
+    /// them, across segment boundaries, speaker changes and the other
+    /// channel's words at the same time, and the collapse of a rebuild keeps
+    /// the same word (the first one's confidence, label and text, the last
+    /// one's mark) as the post-pass's collapse of the engine's words.
+    fn ties_keep_the_engine_order(store: &dyn RunStore) {
+        fn at(
+            ch: Channel,
+            text: &str,
+            spk: &str,
+            conf: f32,
+            raw: Option<String>,
+        ) -> TranscriptWord {
+            let mut w = tw(ch, 1_000, text, spk, None);
+            w.confidence = Some(conf);
+            w.raw_label = raw;
+            w
+        }
+        // The loopback as the engine wrote it: a burst of five, another
+        // speaker's word and a burst of four, all on one start.
+        let mut lb = vec![tw(Channel::Loopback, 0, "so", "spk_0", Some("spk_0"))];
+        for (k, t) in ["The", "the", "the", "the", "the,"].into_iter().enumerate() {
+            let conf = 0.1 * (k + 1) as f32;
+            lb.push(at(
+                Channel::Loopback,
+                t,
+                "spk_0",
+                conf,
+                Some(format!("a{k}")),
+            ));
+        }
+        lb.push(at(Channel::Loopback, "x", "spk_1", 0.05, Some("b".into())));
+        for (k, t) in ["the", "the", "the", "the."].into_iter().enumerate() {
+            let conf = 0.6 + 0.1 * k as f32;
+            lb.push(at(
+                Channel::Loopback,
+                t,
+                "spk_0",
+                conf,
+                Some(format!("c{k}")),
+            ));
+        }
+        lb.push(tw(Channel::Loopback, 2_000, "end", "spk_0", Some("spk_0")));
+        let mut mic = vec![at(Channel::Mic, "ok", ME_LABEL, 0.3, None)];
+        for k in 0..4 {
+            let text = if k == 0 { "I" } else { "i" };
+            mic.push(at(
+                Channel::Mic,
+                text,
+                ME_LABEL,
+                0.2 + k as f32 / 10.0,
+                None,
+            ));
+        }
+        let engine = vec![(Channel::Mic, mic), (Channel::Loopback, lb)];
+        // Stored without the collapse (an older run), three words a segment
+        // so that equal starts cross segment boundaries.
+        let small = SegmentOptions {
+            max_words: 3,
+            ..SegmentOptions::default()
+        };
+        let m = new_meeting(store, Source::Live, false);
+        let run = add_run(
+            store,
+            m,
+            RunKind::PostPass,
+            &build_transcript_channels(engine.clone(), &small),
+        );
+        let source = source_run(store, run).unwrap();
+        assert_eq!(source.channels, engine, "the stored order is the engine's");
+        // The collapse of the rebuild's words is the post-pass's.
+        let mut rebuilt = source.channels.clone();
+        let mut post_pass = engine;
+        let a = collapse_channels(&mut rebuilt, true);
+        let b = collapse_channels(&mut post_pass, true);
+        assert_eq!((a.clone(), &rebuilt), (b, &post_pass));
+        assert_eq!((a.runs, a.words_removed), (3, 10));
+        let lb = &rebuilt[1].1;
+        assert_eq!(
+            lb.iter()
+                .map(|w| (w.text.as_str(), w.raw_label.as_deref().unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                ("so", "spk_0"),
+                ("The,", "a0"),
+                ("x", "b"),
+                ("the.", "c0"),
+                ("end", "spk_0")
+            ]
+        );
+        assert_eq!(lb[1].confidence, Some(0.1));
+        assert_eq!(rebuilt[0].1[1].text, "I");
+    }
+
+    #[test]
+    fn ties_come_back_in_the_engine_order_so_a_rebuild_collapses_as_the_post_pass() {
+        both(ties_keep_the_engine_order);
+    }
+
     #[test]
     fn roots_and_descent_follow_rebuilds_and_restores() {
         let store = MemoryStore::new();
