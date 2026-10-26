@@ -905,9 +905,23 @@ fn recovers_interrupted_post_passes() {
         .id;
     store.finish_run(d_post, RunStatus::Done).unwrap();
     store.set_current_run(d_meeting.id, d_post).unwrap();
+    // E: as C, but a promoted live run whose loop collapse removed words
+    // (plan 16 section 12.3), which only the live run still has.
+    let (e_meeting, e_live) = interrupted_meeting(&store, dir.path(), "E", false);
+    let e_post = store
+        .create_run(
+            e_meeting.id,
+            RunKind::PostPass,
+            serde_json::json!({"promoted_live": e_live.0, "unplaced_names": 0,
+                               "loops": {"applied": true, "runs": 1, "words_removed": 3}}),
+        )
+        .unwrap()
+        .id;
+    store.finish_run(e_post, RunStatus::Done).unwrap();
+    store.set_current_run(e_meeting.id, e_post).unwrap();
 
     let recovered = recover(&ctx).unwrap();
-    assert_eq!(recovered.len(), 4);
+    assert_eq!(recovered.len(), 5);
     let of = |id: MeetingId| recovered.iter().find(|r| r.meeting_id == id).unwrap();
     assert!(recovered.iter().all(|r| r.was == MeetingStatus::Processing));
 
@@ -959,6 +973,12 @@ fn recovers_interrupted_post_passes() {
     assert_eq!(d.meeting.status, MeetingStatus::Done);
     assert_eq!(d.current_run.unwrap().id, d_post);
     assert!(store.get_run(d_live).is_ok());
+
+    // E: finished, and the live run with the collapsed words stays.
+    assert_eq!(of(e_meeting.id).action, RecoveryAction::Finished);
+    let d = store.get_meeting(e_meeting.id).unwrap();
+    assert_eq!(d.current_run.unwrap().id, e_post);
+    assert!(store.get_run(e_live).is_ok());
 
     // Nothing left to recover.
     assert!(recover(&ctx).unwrap().is_empty());

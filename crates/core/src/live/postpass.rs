@@ -11,7 +11,8 @@
 //! WAVs deleted, and the live run deleted unless `keep_live_runs` or a
 //! display name of the live run reached nobody in the new run (counted in
 //! the new run's `engine_info.unplaced_names`, and logged with the rest of
-//! the carry-over's counts). With
+//! the carry-over's counts) or, for a promoted live run, the loop collapse
+//! removed a word (below). With
 //! `transcribe = false` (`post_pass_mode = on_issues` and a clean
 //! recording) the live run is promoted instead and only the audio work runs.
 //! Words that come back mostly unknown-token markers fail the post-pass
@@ -38,9 +39,14 @@
 //! Repeated-token loops (plan 16 section 12.3, [`loops`]): both channels
 //! are collapsed after the echo step and the unknown-token check (which see
 //! the raw words) and before punctuation, behind `transcript.collapse_loops`;
-//! the counts are the run's `engine_info.loops`. The promoted live run is
-//! collapsed too: a loop it holds builds the inline `post_pass` run above
-//! even without a punctuator.
+//! the counts are the run's `engine_info.loops`. The removed words of a
+//! transcribing post-pass survive in the file engine's words JSON in the
+//! meeting folder. The promoted live run is collapsed too: a loop it holds
+//! builds the inline `post_pass` run above even without a punctuator, and
+//! then the live run stays, whatever `keep_live_runs` says, because it is
+//! the only place the removed words survive (the live engine writes no
+//! words JSON; a re-run needs it too). Crash recovery keeps it as well
+//! ([`promotion_collapsed`]).
 //!
 //! Echo (plan 15; nothing with `echo.mode = off`), on a thread of its own
 //! while the loopback is transcribed ([`prepare_echo`]):
@@ -317,20 +323,31 @@ fn carry_source(store: &dyn RunStore, meeting: MeetingId, live_run: RunId) -> Ru
     }
 }
 
+/// A promoted live run rebuilt by [`promote_punctuated`].
+struct Promoted {
+    run: RunId,
+    carry: CarryOverReport,
+    /// Display names of the live run no speaker of the new run received.
+    unplaced: usize,
+    /// Words the loop collapse removed. They exist only in the live run
+    /// (the live engine writes no words JSON), so it stays when this is
+    /// not 0.
+    collapsed: u64,
+}
+
 /// `transcribe = false`: a `post_pass` run built from the live run's words,
 /// each under the speaker row of its own segment, its repeated-token loops
 /// collapsed (`collapse`, plan 16 section 12.3) and punctuated with
 /// `loaded`, made current. `Ok(None)` when the collapse removed no word and
 /// no word's text changed (no punctuator, the model did not run, or it
 /// marked nothing): nothing is made and the live run is promoted as it is.
-/// Returns the run, its carry-over and the unplaced names.
 fn promote_punctuated(
     store: &dyn RunStore,
     job: &PostPassJob,
     loaded: &mut crate::punct::Loaded,
     collapse: bool,
     cancel: &CancelToken,
-) -> Result<Option<(RunId, CarryOverReport, usize)>> {
+) -> Result<Option<Promoted>> {
     if loaded.is_err() && !collapse {
         return Ok(None);
     }
@@ -412,7 +429,21 @@ fn promote_punctuated(
         report.named.len(),
         unplaced
     );
-    Ok(Some((run.id, report, unplaced)))
+    Ok(Some(Promoted {
+        run: run.id,
+        carry: report,
+        unplaced,
+        collapsed: loops.words_removed,
+    }))
+}
+
+/// Whether the live run must stay because the promoted run `info` (its
+/// `engine_info`) collapsed repeated-token loops: the removed words exist
+/// nowhere else (the live engine writes no words JSON, and a re-run needs
+/// the live run). Crash recovery asks the same.
+pub(super) fn promotion_collapsed(info: &serde_json::Value) -> bool {
+    info["promoted_live"].is_i64()
+        && loops::LoopReport::of_engine_info(info).is_some_and(|l| l.words_removed > 0)
 }
 
 /// Maps a channel's words from channel time to meeting time and clamps
@@ -1084,8 +1115,11 @@ pub fn run_post_pass(
     let mut unplaced = 0;
     let mut live_deleted = false;
     // A post-pass run replaced the live run (transcribed, or promoted with
-    // punctuation).
+    // punctuation or the loop collapse).
     let mut replaced_live = job.transcribe;
+    // The promoted run's loop collapse removed words, which only the live
+    // run still has.
+    let mut kept_for_loops = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
         // One channel through the file engine, on meeting time; `part`:
@@ -1328,11 +1362,12 @@ pub fn run_post_pass(
         // or the loop collapse removes one (plan 16 sections 3.2 and 12.3).
         let mut loaded = job.punct.load(store);
         match promote_punctuated(store, job, &mut loaded, loops::enabled(store), cancel)? {
-            Some((run, report, n)) => {
-                carry = Some(report);
-                unplaced = n;
+            Some(p) => {
+                carry = Some(p.carry);
+                unplaced = p.unplaced;
                 replaced_live = true;
-                run
+                kept_for_loops = p.collapsed > 0;
+                p.run
             }
             // No punctuator (or `off`) and no loop, or no word changed:
             // the live run is the final one.
@@ -1376,8 +1411,17 @@ pub fn run_post_pass(
     let _ = std::fs::remove_file(job.mic_aec_wav());
 
     // A live run with a name nobody in the new run received stays, as if
-    // `keep_live_runs` were on for this meeting.
-    if replaced_live && !job.keep_live_runs && unplaced == 0 {
+    // `keep_live_runs` were on for this meeting; so does a promoted one
+    // whose words the loop collapse shortened (they exist only there).
+    if kept_for_loops {
+        log::info!(
+            "post-pass meeting {}: live run {} kept: it holds the words the loop collapse removed from run {}",
+            job.meeting,
+            job.live_run,
+            current_run
+        );
+    }
+    if replaced_live && !job.keep_live_runs && unplaced == 0 && !kept_for_loops {
         store.delete_run(job.live_run)?;
         live_deleted = true;
     }
@@ -1643,7 +1687,12 @@ mod loop_tests {
                 (Channel::Loopback, "go".into())
             ]
         );
-        assert!(report.live_run_deleted);
+        // The live run stays with every word (keep_live_runs is off): the
+        // three removed words exist nowhere else.
+        assert!(!report.live_run_deleted);
+        assert_eq!(store.get_run(live_run).unwrap().status, RunStatus::Done);
+        assert_eq!(store.run_words(live_run).unwrap().len(), 5);
+        assert!(promotion_collapsed(&run.engine_info));
         // With the collapse off (as without a loop) the live run is
         // promoted as it is.
         store

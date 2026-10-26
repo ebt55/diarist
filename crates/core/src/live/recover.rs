@@ -10,7 +10,8 @@
 //!   discarded and the post-pass queued again. Without them (the post-pass
 //!   got as far as deleting the WAVs), a finished `post_pass` run that is
 //!   current is kept and the meeting finished (the live run goes unless
-//!   `keep_live_runs` or the post-pass recorded `unplaced_names`);
+//!   `keep_live_runs`, the post-pass recorded `unplaced_names`, or it is a
+//!   promoted run whose loop collapse removed words);
 //!   otherwise the materialised live run becomes current with a note in its
 //!   `engine_info`.
 
@@ -216,14 +217,22 @@ fn recover_processing(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeeti
         {
             // The post-pass wrote its run and deleted the WAVs; only the
             // bookkeeping after that was lost. A live run with names the
-            // carry-over could not place stays, as after a normal post-pass.
+            // carry-over could not place stays, as after a normal post-pass,
+            // and so does one whose promoted run collapsed loops (the
+            // removed words exist only in the live run).
             let stored = settings::effective(store)?;
             let unplaced = current
                 .as_ref()
                 .and_then(|c| c.engine_info["unplaced_names"].as_u64())
                 .unwrap_or(0);
+            let collapsed = current
+                .as_ref()
+                .is_some_and(|c| super::postpass::promotion_collapsed(&c.engine_info));
             if let Some(run) = live {
-                if !settings::get_bool(&stored, settings::KEEP_LIVE_RUNS) && unplaced == 0 {
+                if !settings::get_bool(&stored, settings::KEEP_LIVE_RUNS)
+                    && unplaced == 0
+                    && !collapsed
+                {
                     store.delete_run(run)?;
                 }
             }
