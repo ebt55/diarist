@@ -21,7 +21,10 @@
 //!    its dependencies resolve only from its own folder or System32 (never
 //!    the current directory or `PATH`); `ort::init_from(<absolute path>)`
 //!    then loads the same full path, which reuses that module (`api-31`: an
-//!    older library makes the load fail with ort's own message).
+//!    older library makes the load fail with ort's own message). A long
+//!    path (a deep data folder) goes to both loads in the extended form
+//!    (`\\?\`, `process::path_arg`); the loader refuses the plain form past
+//!    about 250 characters.
 //! 4. Module identity: the module that holds the API's functions must be
 //!    the file we loaded (`GetModuleHandleExW` from a function address,
 //!    then `GetModuleFileNameW`), and its version must have the major and
@@ -225,8 +228,14 @@ fn ensure_runtime_with(
         None => {}
     }
     before_load(&dll, want.sha256.as_deref(), probe)?;
-    let preloaded = preload(&dll)?;
-    let init = ort::init_from(&dll);
+    // The loader refuses a library path of more than about 250 characters
+    // in the plain form (chunk D measured 251 failing): both loads get the
+    // extended form (`\\?\`) of a long path, the same string, so ort's load
+    // finds the preloaded module. `dll` stays plain in what is recorded
+    // and shown, and the identity check compares files, not spellings.
+    let load_path = PathBuf::from(crate::engine::process::path_arg(&dll));
+    let preloaded = preload(&load_path, &dll)?;
+    let init = ort::init_from(&load_path);
     // ort's load of the same full path took its own reference to the
     // preloaded module; after a failed init this unloads it, so a later
     // call may retry.
@@ -234,6 +243,9 @@ fn ensure_runtime_with(
     let builder = match init {
         Ok(b) => b,
         Err(e) => {
+            let e = e
+                .to_string()
+                .replace(&load_path.display().to_string(), &dll.display().to_string());
             let u = Unavailable::runtime(format!("cannot load {}: {e}", dll.display()));
             log::error!("punctuation: {}", u.message);
             return Err(u);
@@ -413,15 +425,23 @@ pub fn check_version(
     }
 }
 
+/// Whether `a` and `b` name the same file: both canonicalised when they
+/// exist, else their absolute forms; either way without the extended-length
+/// prefix (`\\?\C:\x` is `C:\x`, `\\?\UNC\s\x` is `\\s\x`), since a module
+/// loaded by its long path reports that form.
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&y.to_string_lossy()),
-        _ => absolute(a)
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&absolute(b).to_string_lossy()),
-    }
+    let plain = |p: PathBuf| {
+        let s = p.to_string_lossy().into_owned();
+        match s.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s),
+        }
+    };
+    let (x, y) = match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => (x, y),
+        _ => (absolute(a), absolute(b)),
+    };
+    plain(x).eq_ignore_ascii_case(&plain(y))
 }
 
 /// The first of [`RUNTIME_DEPENDENCIES`] that is neither in System32 nor
@@ -473,11 +493,12 @@ impl Drop for Preloaded {
     }
 }
 
-/// `LoadLibraryExW(dll, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-/// LOAD_LIBRARY_SEARCH_SYSTEM32)` (`dll` absolute), with the system's error
-/// boxes off for the call.
+/// `LoadLibraryExW(load, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+/// LOAD_LIBRARY_SEARCH_SYSTEM32)` (`load` absolute: `dll`, in the extended
+/// form when long), with the system's error boxes off for the call; a
+/// failure names `dll`.
 #[cfg(windows)]
-fn preload(dll: &Path) -> std::result::Result<Preloaded, Unavailable> {
+fn preload(load: &Path, dll: &Path) -> std::result::Result<Preloaded, Unavailable> {
     use windows::core::HSTRING;
     use windows::Win32::System::Diagnostics::Debug::{
         SetThreadErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
@@ -491,7 +512,7 @@ fn preload(dll: &Path) -> std::result::Result<Preloaded, Unavailable> {
     let loaded = unsafe {
         let _ = SetThreadErrorMode(SEM_FAILCRITICALERRORS, Some(&mut old));
         let r = LoadLibraryExW(
-            &HSTRING::from(dll.as_os_str()),
+            &HSTRING::from(load.as_os_str()),
             None,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
         );
@@ -508,7 +529,7 @@ fn preload(dll: &Path) -> std::result::Result<Preloaded, Unavailable> {
 }
 
 #[cfg(not(windows))]
-fn preload(_dll: &Path) -> std::result::Result<(), Unavailable> {
+fn preload(_load: &Path, _dll: &Path) -> std::result::Result<(), Unavailable> {
     Ok(())
 }
 
@@ -903,6 +924,10 @@ impl OnnxPunctuator {
         let threads = threads.max(1);
         let opt_err =
             |e: ort::Error<ort::session::builder::SessionBuilder>| model_err("session options", e);
+        // ONNX Runtime opens the model itself and, like the loader, refuses
+        // the plain form of a long path: the extended form when long, the
+        // plain one in messages.
+        let load_model = PathBuf::from(crate::engine::process::path_arg(model));
         let session = Session::builder(&env)
             .map_err(|e| model_err("session", e))?
             .with_optimization_level(GraphOptimizationLevel::All)
@@ -911,8 +936,14 @@ impl OnnxPunctuator {
             .map_err(opt_err)?
             .with_inter_threads(1)
             .map_err(opt_err)?
-            .commit_from_file(model)
-            .map_err(|e| model_err(&model.display().to_string(), e))?;
+            .commit_from_file(&load_model)
+            .map_err(|e| {
+                let plain = model.display().to_string();
+                let e = e
+                    .to_string()
+                    .replace(&load_model.display().to_string(), &plain);
+                model_err(&plain, e)
+            })?;
         let has_input = |n: &str| session.inputs().iter().any(|i| i.name() == n);
         let has_output = |n: &str| session.outputs().iter().any(|o| o.name() == n);
         for name in std::iter::once(&spec.inputs.ids).chain(spec.inputs.mask.as_ref()) {
@@ -2147,6 +2178,77 @@ mod tests {
     }
 
     const RUNTIME_DLL_NAME: &str = super::super::spec::RUNTIME_DLL;
+
+    /// The runtime from a model folder whose library path is past
+    /// `MAX_PATH` (chunk D found 251 characters failing): a junction to
+    /// `DIARIST_PUNCT_MODEL` under a 300-character folder. The library
+    /// loads, the identity check passes, the recorded path is the plain
+    /// form (no `\\?\`), and the model labels. ort's environment is
+    /// process-wide, so run it alone, in its own process:
+    /// `cargo test -p diarist-core --lib punct::onnx::tests::real_model_from_a_long_path -- --ignored --exact`.
+    #[test]
+    #[ignore = "needs DIARIST_PUNCT_MODEL; run alone"]
+    #[cfg(windows)]
+    fn real_model_from_a_long_path() {
+        let Some(folder) = std::env::var_os("DIARIST_PUNCT_MODEL").map(PathBuf::from) else {
+            eprintln!("skipped: DIARIST_PUNCT_MODEL is not set");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let long = crate::engine::process::long_test_dir(tmp.path(), 300);
+        let link = long.join("m");
+        let made = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(crate::engine::process::path_arg(&link))
+            .arg(&folder)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let result = std::panic::catch_unwind(|| {
+            let model = link.join("onnx").join("model_quantized.onnx");
+            let dll = link.join(RUNTIME_DLL_NAME);
+            assert!(dll.as_os_str().len() > 300, "{}", dll.display());
+            let sidecar = crate::models::Sidecar::read(&model).unwrap().unwrap();
+            let spec = sidecar.punctuation.expect("a punctuation block");
+            let paths = DataPaths::at(tmp.path()).with_models_dir(&link);
+            let mut p = OnnxPunctuator::open(
+                &model,
+                spec,
+                PunctModelInfo {
+                    name: "test".into(),
+                    languages: vec!["*".into()],
+                    ..PunctModelInfo::default()
+                },
+                &paths,
+                None,
+                4,
+            )
+            .unwrap_or_else(|e| panic!("{}: {}", dll.display(), e.message));
+            let rt = loaded_runtime().unwrap();
+            assert!(!rt.path.to_string_lossy().starts_with(r"\\?\"), "{rt:?}");
+            assert!(same_file(&rt.path, &dll), "{rt:?}");
+            assert!(rt.version.starts_with("1.31"), "{}", rt.version);
+            let words: Vec<&str> = FIXTURE.split_whitespace().collect();
+            let hint = LangHint {
+                language: Some("en".into()),
+                script: Script::Latin,
+            };
+            let labels = p.label_stream(&words, &hint, &|| false).unwrap();
+            assert_eq!(labels.len(), words.len());
+            assert!(labels.iter().any(|l| l.post.is_some()), "{labels:?}");
+            // The module's own name is the extended form; the check
+            // compares the files, not the spelling.
+            identity_check(&rt.path, &PathBuf::from(format!(r"\\?\{}", dll.display()))).unwrap();
+        });
+        // Remove the junction itself, never what it points to.
+        std::fs::remove_dir(&link).unwrap();
+        assert!(folder.join(RUNTIME_DLL_NAME).is_file());
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
 
     /// Chunk B's CLI check, step 1 (plan 16 section 7.2 B): a scratch data
     /// root (`DIARIST_PUNCT_CHECK_ROOT`) with one meeting imported through
