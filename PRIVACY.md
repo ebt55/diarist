@@ -30,7 +30,7 @@ Only when you ask it to, and only to fetch files or version lists:
 | You press | Connects to | What is sent |
 |---|---|---|
 | Install engine, or a runtime in Check for newer runtime | `github.com` and GitHub's download servers | an ordinary file download request |
-| Install or Download a model | `huggingface.co` and its download servers (through Windows' `curl.exe`) | an ordinary file download request |
+| Install or Download a model | `huggingface.co` and its download servers (up to 0.1.0-beta.4 through Windows' `curl.exe`, since 0.1.0-beta.5 by Diarist itself) | an ordinary file download request, with the user agent `diarist/<version>` |
 | Add from URL | the address you typed | an ordinary file download request |
 | Check for newer runtime | `api.github.com` | a request for the NeMo-Speech.cpp release list, with the user agent `diarist/<version>` |
 | Check for updates | `raw.githubusercontent.com` (the file `ebt55/diarist/main/updater/latest.json`) | an ordinary file request |

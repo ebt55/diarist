@@ -281,7 +281,7 @@
             class="btn btn-primary"
             onclick={() => install(engine && !engineInstalled ? [engine, ...models] : models)}
             disabled={downloads.busy}
-            title={engine && !engineInstalled ? "Installs the engine first: it fetches the models" : ""}
+            title={engine && !engineInstalled ? "Installs the engine first, then the models" : ""}
           >
             <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: diarizer and {english
               ? "the EN model"
