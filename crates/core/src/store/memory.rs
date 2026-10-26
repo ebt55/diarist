@@ -1388,6 +1388,58 @@ impl RunStore for MemoryStore {
         carry_over_identity(&mut *st, from_run, to_run)
     }
 
+    fn run_segments(&self, run: RunId) -> StoreResult<Vec<Segment>> {
+        let st = self.lock()?;
+        st.run(run)?;
+        Ok(st
+            .run_segments
+            .get(&run)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|sid| st.segments.get(sid))
+            .map(|row| row.seg.clone())
+            .collect())
+    }
+
+    fn run_words(&self, run: RunId) -> StoreResult<Vec<Word>> {
+        let st = self.lock()?;
+        st.run(run)?;
+        let mut words: Vec<Word> = st
+            .run_segments
+            .get(&run)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|sid| st.segments.get(sid))
+            .flat_map(|row| st.words_of(row))
+            .collect();
+        words.sort_by_key(|w| (w.start_ms, w.id));
+        Ok(words)
+    }
+
+    fn set_current_run_if(
+        &self,
+        meeting: MeetingId,
+        expected: RunId,
+        run: RunId,
+    ) -> StoreResult<bool> {
+        let mut st = self.lock()?;
+        if st.run(run)?.meeting_id != meeting {
+            return Err(StoreError::Invalid(format!(
+                "run {run} does not belong to meeting {meeting}"
+            )));
+        }
+        let m = st.meeting_mut(meeting)?;
+        let idle = matches!(m.status, MeetingStatus::Done | MeetingStatus::Failed);
+        if m.current_run_id != Some(expected) || !idle {
+            return Ok(false);
+        }
+        m.current_run_id = Some(run);
+        m.updated_at = now_ms();
+        Ok(true)
+    }
+
     fn append_live_utterance(
         &self,
         run: RunId,
@@ -1620,5 +1672,77 @@ mod tests {
         assert_eq!(words[0].start_ms, 1_000);
         assert_eq!(words[3].end_ms, 2_000);
         assert_eq!(words[2].id, WordId(102));
+    }
+
+    /// A cross-meeting identity (`global_id`) is copied by a rebuild like
+    /// the other speaker fields (the store API cannot set one yet).
+    #[test]
+    fn a_rebuild_keeps_a_speakers_global_id() {
+        use crate::punct::{fixture::FixturePunctuator, Mark, PunctSource, RebuildWhy, WordLabel};
+        use crate::store::{NewSegment, NewSpeaker, NewWord};
+        use crate::types::Source;
+        let store = MemoryStore::new();
+        let m = store
+            .create_meeting(NewMeeting {
+                title: "Global".into(),
+                source: Source::File,
+                source_path: None,
+                language: "en".into(),
+                diarize_mic: false,
+                started_at: 1,
+                status: MeetingStatus::Done,
+            })
+            .unwrap();
+        let run = store
+            .create_run(m.id, RunKind::File, serde_json::json!({}))
+            .unwrap();
+        let t = NewTranscript {
+            speakers: vec![NewSpeaker {
+                channel: Channel::Source,
+                engine_label: "spk_0".into(),
+                display_name: None,
+                color: None,
+                needs_review: false,
+            }],
+            segments: vec![NewSegment {
+                speaker: 0,
+                start_ms: 0,
+                end_ms: 700,
+                text: "hi there".into(),
+            }],
+            words: ["hi", "there"]
+                .iter()
+                .enumerate()
+                .map(|(i, w)| NewWord {
+                    segment: 0,
+                    start_ms: i as i64 * 400,
+                    end_ms: i as i64 * 400 + 300,
+                    text: (*w).into(),
+                    confidence: None,
+                    raw_label: Some("spk_0".into()),
+                    margin: None,
+                    overlap: false,
+                    raw_text: None,
+                })
+                .collect(),
+        };
+        store.insert_transcript(run.id, &t).unwrap();
+        store.finish_run(run.id, RunStatus::Done).unwrap();
+        store.set_current_run(m.id, run.id).unwrap();
+        let spk = store.run_speakers(run.id).unwrap()[0].id;
+        store
+            .lock()
+            .unwrap()
+            .speakers
+            .get_mut(&spk)
+            .unwrap()
+            .global_id = Some(7);
+        let source =
+            PunctSource::factory(|| FixturePunctuator::per_word(|_| WordLabel::post(Mark::Period)));
+        let r =
+            crate::punct::rebuild_run(&store, &source, m.id, RebuildWhy::Add, &|| false).unwrap();
+        let new = store.run_speakers(r.run.unwrap()).unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].global_id, Some(7));
     }
 }

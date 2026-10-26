@@ -42,7 +42,8 @@ use crate::transcript::SegmentOptions;
 use crate::types::{
     new_id, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, EditKind, LiveUtterance,
     Meeting, MeetingId, MeetingStatus, ModelCapabilities, ModelFile, ModelFileId, ReassignTarget,
-    RunId, RunKind, RunStatus, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
+    RunId, RunKind, RunStatus, Segment, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun,
+    Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -238,6 +239,68 @@ impl RunStore for SqliteStore {
         let report = carry_over_identity(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
         tx.commit()?;
         Ok(report)
+    }
+
+    fn run_segments(&self, run: RunId) -> StoreResult<Vec<Segment>> {
+        let conn = self.lock()?;
+        get_run(&conn, run)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, meeting_id, speaker_id, start_ms, end_ms, text, seq
+             FROM segments WHERE run_id = ?1 ORDER BY seq, id",
+        )?;
+        let rows = stmt
+            .query_map([run.0], |r| {
+                Ok(Segment {
+                    id: SegmentId(r.get(0)?),
+                    run_id: RunId(r.get(1)?),
+                    meeting_id: MeetingId(r.get(2)?),
+                    speaker_id: SpeakerId(r.get(3)?),
+                    start_ms: r.get(4)?,
+                    end_ms: r.get(5)?,
+                    text: r.get(6)?,
+                    seq: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn run_words(&self, run: RunId) -> StoreResult<Vec<Word>> {
+        let conn = self.lock()?;
+        get_run(&conn, run)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WORD_COLS}
+             FROM words w JOIN segments s ON s.id = w.segment_id
+             WHERE s.run_id = ?1 ORDER BY w.start_ms, w.id"
+        ))?;
+        let rows = stmt
+            .query_map([run.0], word_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_current_run_if(
+        &self,
+        meeting: MeetingId,
+        expected: RunId,
+        run: RunId,
+    ) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        if get_run(&conn, run)?.meeting_id != meeting {
+            return Err(StoreError::Invalid(format!(
+                "run {run} does not belong to meeting {meeting}"
+            )));
+        }
+        // One statement: atomic against any other connection too.
+        let n = conn.execute(
+            "UPDATE meetings SET current_run_id = ?2, updated_at = ?4
+             WHERE id = ?1 AND current_run_id = ?3 AND status IN ('done', 'failed')",
+            params![meeting.0, run.0, expected.0, now_ms()],
+        )?;
+        if n == 0 {
+            meeting_exists(&conn, meeting)?;
+        }
+        Ok(n == 1)
     }
 
     fn append_live_utterance(
@@ -2180,5 +2243,35 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].payload.to_engine_label.as_deref(), Some("spk_0"));
         assert_eq!(edits[0].channel, Channel::Source);
+    }
+
+    /// A cross-meeting identity (`global_id`) is copied by a rebuild like
+    /// the other speaker fields (the store API cannot set one yet, so the
+    /// conformance suite only sees `None`).
+    #[test]
+    fn a_rebuild_keeps_a_speakers_global_id() {
+        use crate::punct::{fixture::FixturePunctuator, Mark, PunctSource, RebuildWhy, WordLabel};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let m = meeting(&store, "Global");
+        let run = current(&store, m.id, &["bonjour tout le monde"]);
+        store.finish_run(run, RunStatus::Done).unwrap();
+        let spk = store.run_speakers(run).unwrap()[0].id;
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO global_speakers (id, name, created_at) VALUES (7, 'Alice', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE speakers SET global_id = 7 WHERE id = ?1", [spk.0])
+                .unwrap();
+        }
+        let source =
+            PunctSource::factory(|| FixturePunctuator::per_word(|_| WordLabel::post(Mark::Period)));
+        let r =
+            crate::punct::rebuild_run(&store, &source, m.id, RebuildWhy::Add, &|| false).unwrap();
+        let new = store.run_speakers(r.run.unwrap()).unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].global_id, Some(7));
     }
 }
