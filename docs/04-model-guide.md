@@ -1,10 +1,10 @@
 # Model and hardware guide
 
-Status: v0.3, 16 Oct 2026, for 0.1.0-beta.4. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03, 08 and 12 and docs/eval on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
+Status: v0.3, 16 Oct 2026, for 0.1.0-beta.4; punctuation (sections 1, 5 and 8) added 26 Oct 2026 for 0.1.0-beta.5. Source for the README section "Choosing your package and models" (Phase 5). Numbers marked **measured** come from docs/research/03, 08 and 12 and docs/eval on an RTX 3080 10 GB; numbers marked *published* come from model cards and leaderboards cited in docs/research/01, 02 and 04; anything else is an estimate and says so. The Vulkan and CPU packages were measured on 16 Oct 2026 on the development PC's NVIDIA card and CPU only (section 4).
 
 ## 1. What runs inside Diarist
 
-Three neural models and one runtime. Nothing else. No Python, no PyTorch, no CUDA toolkit on the user's machine.
+The speech runtime with its models, and since 0.1.0-beta.5 a small punctuation model with its own runtime. Nothing else. No Python, no PyTorch, no CUDA toolkit on the user's machine.
 
 | Component | What it does | Size on disk | Licence |
 |---|---|---|---|
@@ -13,8 +13,10 @@ Three neural models and one runtime. Nothing else. No Python, no PyTorch, no CUD
 | Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text for live and file mode, default for English | 668 MB | NVIDIA Open Model Licence |
 | Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Recommended for non-English or mixed meetings: 40+ locales with automatic detection, 30 percent less VRAM | 742 MB | OpenMDW-1.1 |
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only, off by default: better punctuation but drops speech (see section 3) | 681 MB | CC-BY-4.0 |
+| Horizon-Labs punctuation-restoration-small, its int8-embedding ONNX file and tokenizer | Adds `.` `,` `?` and sentence capitals to the finished words after Stop and on imports, on the CPU (section 8) | 256 MB plus a 33 MB tokenizer | Apache-2.0 (declared in its model card); base model MIT |
+| ONNX Runtime 1.31.0 (Microsoft), CPU build, installed beside the punctuation model as `diarist-onnxruntime.dll` | Runs the punctuation model inside Diarist's own process | 16 MB | MIT |
 
-First-run download with the defaults: engine plus diarizer plus the EN model, about 870 MB. With every optional model: 2.3 GB.
+First-run download with the defaults: engine plus diarizer plus the EN model plus the punctuation model (306 MB with its tokenizer, ONNX Runtime and licence files), about 1.2 GB. With every optional model: 2.6 GB.
 
 ## 2. Speaker diarization: why Nemotron 3
 
@@ -82,7 +84,7 @@ The EN model drops quiet speech (**measured**, docs/eval/2026-10-16-fleurs.md): 
 
 - **Default for English: the EN model.** It keeps more of what was said, and the difference is real after fillers are discounted on both sides.
 - **Recommended for other or mixed languages: Nemotron 3.5.** It is also the better choice on a 4 GB card.
-- Neither model punctuates much (0.2 and 2.5 percent of words); the app's segmenting at pauses supplies the structure, and punctuation restoration is planned as a CPU post-step.
+- Neither model punctuates much (0.2 and 2.5 percent of words). Since 0.1.0-beta.5 a punctuation model adds marks and sentence capitals after Stop and on imports, on the CPU, without touching the words (section 8).
 
 Imports and the post-pass after Stop run both models at their full decoder lookahead, 13 frames (1.12 s, `--asr.streaming.rnnt_right_context 13`); live recording keeps the runtime's low-latency default of 1 (**measured**, 16 Oct 2026, full set; docs/research/12 section 1). Against the 0.1.0-beta.1 setting (lookahead 1, streaming diarizer; docs/eval/2026-10-16-nemotron_en.md and -nemotron35.md) cpWER on AMI goes from 19.8 to 18.0 with the EN model and from 23.0 to 20.7 with Nemotron 3.5, and every Zoom meeting improves: EN 10.3, 8.5, 5.1 and 7.8 to 9.5, 8.1, 4.7 and 7.2; 3.5 12.0, 9.2, 5.4 and 7.9 to 10.3, 8.4, 5.1 and 7.5. The speech pass runs 2.6 times faster (Nemotron 3.5 over the whole set: 663 to 249 s) with peak VRAM unchanged within the run-to-run noise. The value is set per model in the manifest (`file_right_context`), because the runtime's `-1` (the value in the model file) means 13 for the EN model but only 3 for the pinned Nemotron 3.5. With `post_pass_mode = on_issues` a clean recording keeps its live transcript and so the low-latency setting.
 
@@ -212,10 +214,32 @@ At the live setting (160 ms) the same slices score 0.1 to 9.7 points worse with 
 - Set the meeting's language when you know it: automatic detection loses about a second of the first utterance and costs 0.1 to 3 WER points against a given language, most for Hindi, Russian, Ukrainian, Polish, Bulgarian, Croatian and Romanian. It is never the default. The first-run screen sets the default language once from the Windows display language.
 - Live: the start sheet's language decides which model the live server runs; changing it while the sheet is open restarts an idle server with the right model (3 to 6 s), and a recording in progress keeps its language.
 - Search ignores accents (Unicode tokenizer with diacritics removed) and does not stem, so it behaves the same in every language that separates words with spaces. Chinese and Japanese are not segmented yet (docs/KNOWN-ISSUES.md).
+- Punctuation covers every language in these lists except Thai, with fewer marks for Hindi, Japanese and Chinese (section 8).
 
 ## 7. Honest caveats
 
 - Speaker labels in the live view are provisional; the runtime never revises them. The post-pass after Stop produces the stored transcript.
 - Word confidence is not available from the runtime (always 1.0), so the UI cannot flag uncertain words yet.
 - Meetings with more than 8 speakers, strong overlap or far-field audio will degrade; the eval harness reports how much on real recordings.
+- Punctuation is a second model's guess over the finished words: about a third of its question marks and periods are not where a person would put them (section 8). It never changes a word.
 - Everything here is a snapshot of October 2026. The runtime is three months old and improving quickly; the manifests pin exact versions and hashes so an update is a deliberate step.
+
+## 8. Punctuation
+
+Since 0.1.0-beta.5 (**measured** in docs/eval/2026-10-26-punctuation.md, decided in docs/plans/16 section 3.13).
+
+**What it does.** After Stop, on both channels, and on every import, a small token classifier reads the finished words and labels each one: a mark after it (`.` `,` `?`, written in the script's own forms: `।` for Hindi, `。` `？` for Japanese and Chinese, `،` `؟` for Arabic, `;` for the Greek question mark) or nothing. Diarist then raises the first letter of each turn and of every word after a sentence end, in scripts with capitals. Lines of the transcript end at a sentence end where the pause allows, so a meeting reads as sentences. A turn is a speaker's run of words up to a speaker change or a pause of more than 1.5 s; each is lowercased and labelled in windows of up to 512 tokens. A mark the speech model wrote itself stays, because the speech model heard the voice. A channel whose speech model already punctuates 12 or more words in 100 gets only the capitals.
+
+**What it never does.** It never changes, adds, drops or moves a word, never changes a word's times or speaker, never lowers a capital the speech model wrote, and never touches the live view (no live punctuation in this release). Diarist applies the labels itself and checks every word; a word that would break any of this keeps the speech model's text. The speech model's text stays stored with each changed word, so "Remove punctuation" goes back to it exactly. Search, which ignores punctuation and case, finds the same lines either way. Word accuracy and speaker accuracy are therefore unchanged: on the evaluation set and the seven talks, through the app's own import and export, cpWER, tcpWER and WDER are identical with and without punctuation (**measured**, 14 sessions). What does change is the line breaks: transcript lines end at sentence ends, which is why exported RTTM spans are shorter (DER and JER against continuous references rise by 2 to 6 points of "missed" pauses; the eval harness runs with punctuation off for that reason).
+
+**The model.** `Horizon-Labs/punctuation-restoration-small` at revision `ee31fdf`, its own int8-embedding file `onnx/model_quantized.onnx` (256 MB, used as published) with `tokenizer.json` (33 MB), from Hugging Face. It runs on ONNX Runtime 1.31.0, Microsoft's official CPU build, installed in the model's folder as `diarist-onnxruntime.dll` (16 MB) and loaded by its full path. The runtime, its licence and notices, and the model's licence and notice files come from the project's own models release on GitHub. The model is a required download (306 MB in all, `models\horizon-labs\punctuation-restoration-small\`); Import and Record never wait for it, and without it transcripts are simply unpunctuated. Of the three candidates measured, it finds sentence ends best on every one of 14 sessions (sentence-boundary F1 0.725 against 0.671 and 0.655 on the six Zoom meetings plus AMI), ties the others on punctuation F1 over `.` `,` `?` there (0.597, 0.600 and 0.598), leads on the hand-annotated AMI meeting (0.55 against 0.52), gives the best capitals with its sentence-start rule (upper-case F1 0.75 on AMI against 0.70 to 0.71 for the true-casing models), and covers 35 of Diarist's 36 languages; the others were a 47-language model, which Diarist would have had to quantise itself, and an English-only one.
+
+**Licence and provenance.** The model card declares Apache-2.0; the repository has no licence file at this revision, so Diarist installs the Apache License 2.0 text beside it (`LICENSE-Apache-2.0.txt`), with `NOTICE-punctuation.txt` recording the revision, the files' SHA-256 and where the model came from. The base model is jhu-clsp/mmBERT-small (MIT). Per its card, the model was trained on text windows in 88 languages from FineWeb-2 and FineWeb (ODC-BY), plus 49,144 windows of synthetic transcripts of everyday speech that a language model wrote for it. The publisher's organisation was a few weeks old when the model was chosen (October 2026). ONNX Runtime is MIT; its licence and third-party notices travel beside it. To switch the model off for every new install, set `required` to `false` in `manifests/models.json`; to switch punctuation off, set `transcript.punctuation` to `off`.
+
+**Languages.** Every language Diarist offers except Thai, which writes no sentence marks and which the model does not cover (the meeting's details say punctuation is not available). Commas are left out for Hindi (precision 0.53 on a FLEURS slice), Japanese and Chinese (the speech model returns each utterance as one or a few word units, so a comma has nowhere to go; marks go only at the ends of those units). French and Italian keep commas although their 10-minute FLEURS slices measured just under Diarist's 0.75 precision bar (0.74 and 0.69), pending a larger sample. Colons and dashes are never written. Spanish gets `?` without `¿`.
+
+**Cost.** About 4 to 5 seconds of CPU per hour of audio at 4 threads, 0.65 GB of RAM while it runs (the model is unloaded after each job), no VRAM (**measured**; Diarist's own build took 2.3 to 2.7 s for a 21-minute meeting, 0.5 GB). Each job also loads the model and its tokenizer first, about 2 s (1.9 s measured in the spike).
+
+**How good it is.** Against Zoom's own transcripts of the author's meetings, about two in three of its periods and question marks are where Zoom put one (precision 0.65 and 0.70; on the far-field four-person AMI meeting its question marks are right 0.39 of the time), and about four in five of its commas (0.8), but it writes about one comma per sentence where Zoom writes about two, so it misses more than half of Zoom's commas. On read-speech imports (an audiobook, a talk read from a script) the speech model punctuates by itself (5 to 10 marks per 100 words) and its marks are kept; comma precision there is lower (en 0.70, es 0.75). docs/KNOWN-ISSUES.md lists what this means in use.
+
+**Older meetings** are not changed automatically: "Add punctuation" on a meeting, Settings' "Add punctuation to N older meetings", or `diarist-cli punctuate <meeting>` / `--all-missing` builds a punctuated copy and keeps the earlier run. Adding your own punctuation model is in section 5.
