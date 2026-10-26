@@ -956,7 +956,7 @@
         {#if files.length > 0 || role === "asr" || role === "diarizer" || role === "punctuation"}
           <fieldset class="group" class:punct-group={role === "punctuation"} id={role === "punctuation" ? "set-punctuation" : undefined}>
             <legend><span class="group-title">{label}</span> <span class="help inline">{help}</span></legend>
-            {#if files.length === 0}
+            {#if files.length === 0 && role !== "punctuation"}
               <p class="help">No file for this role yet.</p>
             {/if}
             {#each files as f (f.id)}

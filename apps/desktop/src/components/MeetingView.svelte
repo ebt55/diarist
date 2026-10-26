@@ -141,7 +141,7 @@
    */
   let modelFiles = $state.raw<ModelFile[]>([]);
   const punct = $derived(
-    isLive || finalizing || !meeting
+    isLive || finalizing || !meeting || !detail?.current_run
       ? null
       : punctLine(punctReport(detail?.current_run?.engine_info), {
           model: punctModel(modelFiles, app.setting("selected_model.punctuation")),

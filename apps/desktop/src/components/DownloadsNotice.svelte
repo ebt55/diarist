@@ -14,15 +14,18 @@
   import Icon from "./Icon.svelte";
 
   let notice = $state.raw<DownloadsNotice | null>(null);
-  let asked = false;
+  let decided = false;
   let busy = $state(false);
   let failed = $state(false);
 
-  // After the first-run check: not on a first run (the setup screen offers
-  // everything) and not while the move of a pre-rename data root is offered.
+  // Once the first-run check is in: not on a first run, even after the setup
+  // screen finished it in this session (it offered everything), and not
+  // while the move of a pre-rename data root is offered.
   $effect(() => {
-    if (app.setupNeeded !== false || asked || app.startup?.legacy_root) return;
-    asked = true;
+    const needed = app.setupNeeded;
+    if (needed === null || decided) return;
+    decided = true;
+    if (needed || app.startup?.legacy_root) return;
     punctApi
       .downloadsNotice()
       .then((n) => (notice = n))
