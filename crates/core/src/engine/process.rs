@@ -1,7 +1,9 @@
 //! Spawning `nemo-speech` the way research/08 section 0 requires: the
 //! engine's own `bin` first on a reduced `PATH` (so no installed CUDA
 //! toolkit's DLLs are picked up), `NEMO_SPEECH_MODEL_DIR` set to our models
-//! folder (so nothing lands in the user cache), no console window.
+//! folder (so nothing lands in the user cache), no console window, and the
+//! executable in the extended-length form when its path is long, so a deep
+//! data folder still starts the engine ([`exe_arg`]).
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -84,11 +86,24 @@ pub fn reduced_path(engine_dir: &Path) -> OsString {
     std::env::join_paths(parts).unwrap_or_default()
 }
 
+/// The executable as `Command` gets it. `CreateProcessW` refuses an
+/// application name of `MAX_PATH` (260) characters or more in the plain
+/// form ("the system cannot find the path specified", os error 3, even with
+/// `LongPathsEnabled` set) but starts the extended-length form at any
+/// length, and std passes a path with a separator as the application name
+/// unchanged. So a deep data folder gets `\\?\C:\...\bin\nemo-speech.exe`
+/// through [`path_arg`]; short paths are unchanged. Checked on Windows 11
+/// with a 329-character path (plan 16, chunk C).
+pub fn exe_arg(engine_dir: &Path) -> OsString {
+    path_arg(&exe_path(engine_dir))
+}
+
 /// A `Command` for the runtime with the reduced `PATH`, the model directory
 /// (when given), stdin closed and no console window. Global flags such as
-/// `--json` are the caller's business.
+/// `--json` are the caller's business. Starts at any path length
+/// ([`exe_arg`]).
 pub fn command(engine_dir: &Path, models_dir: Option<&Path>) -> Command {
-    let mut cmd = Command::new(exe_path(engine_dir));
+    let mut cmd = Command::new(exe_arg(engine_dir));
     cmd.env("PATH", reduced_path(engine_dir));
     if let Some(dir) = models_dir {
         cmd.env("NEMO_SPEECH_MODEL_DIR", dir);
@@ -205,6 +220,94 @@ mod tests {
             assert!(arg.ends_with(r"\model.gguf") && !arg.contains('/'), "{arg}");
             assert!(!arg.contains(r"\x\"), "{arg}");
         }
+    }
+
+    /// A folder under `base` whose path is `len` characters long, made of
+    /// nested 40-character segments (the KNOWN-ISSUES repro used 264).
+    #[cfg(windows)]
+    fn long_dir(base: &Path, len: usize) -> PathBuf {
+        let mut dir = std::path::absolute(base).unwrap();
+        let mut i = 0;
+        while dir.as_os_str().len() < len {
+            let left = len - dir.as_os_str().len() - 1;
+            let seg: String = format!("d{i}{}", "x".repeat(60))
+                .chars()
+                .take(left.clamp(1, 40))
+                .collect();
+            dir.push(seg);
+            i += 1;
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(dir.as_os_str().len(), len, "{}", dir.display());
+        dir
+    }
+
+    /// `engine\<name>` under a 264-character data root, linked to the real
+    /// engine folder with a junction (`mklink /J` takes the `\\?\` form of a
+    /// long link path). `None` when the link cannot be made.
+    #[cfg(windows)]
+    fn link_engine_under_long_root(base: &Path, engine: &Path) -> Option<PathBuf> {
+        let root = long_dir(base, 264);
+        std::fs::create_dir_all(root.join("engine")).unwrap();
+        let name = engine.file_name()?;
+        let link = root.join("engine").join(name);
+        let made = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(path_arg(&link))
+            .arg(engine)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        (made && is_engine_dir(&link)).then_some(link)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn starts_an_engine_whose_path_is_longer_than_max_path() {
+        // A stand-in runtime: this test binary copied to
+        // `<264-character root>\engine\fake\bin\nemo-speech.exe` (331
+        // characters), which plain `Command::new` cannot start (os error 3).
+        // Asked to list one test, it prints that test's name. (Copies of
+        // System32 tools are refused on some machines, os error 5.)
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = long_dir(tmp.path(), 264).join("engine").join("fake");
+        std::fs::create_dir_all(engine.join("bin")).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), exe_path(&engine)).unwrap();
+        assert!(exe_path(&engine).as_os_str().len() > 260);
+        assert!(exe_arg(&engine).to_string_lossy().starts_with(r"\\?\"));
+        let name = "engine::process::tests::tail_respects_char_boundaries";
+        let mut cmd = command(&engine, Some(tmp.path()));
+        cmd.args(["--list", "--exact", name]);
+        let out = run_with_timeout(cmd, Duration::from_secs(60)).unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(name),
+            "{out:?}"
+        );
+        // Short paths are passed as they are.
+        let short = Path::new(r"C:\e\x");
+        assert_eq!(exe_arg(short), exe_path(short).as_os_str());
+    }
+
+    /// The real runtime's `doctor` from a 264-character data root, when
+    /// `DIARIST_ENGINE_DIR` names an extracted runtime (it touches the GPU,
+    /// so it is not run by default).
+    #[cfg(windows)]
+    #[test]
+    fn real_doctor_from_a_long_data_root_when_available() {
+        let Some(engine) = std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let link = link_engine_under_long_root(tmp.path(), &engine)
+            .expect("mklink /J under the long root");
+        assert!(exe_path(&link).as_os_str().len() > 300);
+        let report = crate::models::doctor(&link).unwrap();
+        assert!(!report.version.is_empty(), "{report:?}");
+        // Remove the junction itself, never what it points to.
+        std::fs::remove_dir(&link).unwrap();
+        assert!(is_engine_dir(&engine));
     }
 
     #[test]

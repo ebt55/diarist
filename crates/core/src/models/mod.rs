@@ -10,9 +10,11 @@
 //!   the per-role selections (settings `selected_model.*`, `selected_engine`)
 //!   pointing at present files.
 //! - [`manifest`]: the recommended lists in `manifests/`.
-//! - [`download`]: engine zip download (resume, SHA-256, atomic rename) and
-//!   extraction; [`pull`]: `nemo-speech pull` for models, verified against
-//!   the manifest; [`doctor`]: runtime version and GPU.
+//! - [`download`]: our downloader (resume, SHA-256, atomic rename) for the
+//!   engine zip and its extraction, and for every manifest model
+//!   ([`download_model`]); [`pull`]: the old `nemo-speech pull` path, kept
+//!   for one release behind `diarist-cli models pull --via-runtime`;
+//!   [`doctor`]: runtime version and GPU.
 //! - [`add`]: "Add from URL" and "Add from file" for models no manifest lists.
 //! - [`releases`]: newer runtimes from the NeMo-Speech.cpp GitHub releases.
 //! - [`setup`]: the first-run check (engine, models, GPU, disk) and the
@@ -55,7 +57,9 @@ pub use device::{
     AUTO_DEVICE, CPU_SLOW_NOTICE,
 };
 pub use doctor::{doctor, DoctorReport};
-pub use download::{download_file, install_engine, sha256_file, verify_file};
+pub use download::{
+    download_file, download_model, install_engine, model_dest, sha256_file, verify_file,
+};
 pub use gguf::{read_header, GgufHeader, GgufValue};
 pub use manifest::{EngineEntry, Manifest, ModelEntry, TESTED_ENGINE_VERSIONS};
 pub use paths::{free_disk_bytes, DataPaths, DataRootSource};

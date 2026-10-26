@@ -821,10 +821,12 @@ fn recommended_backend_now() -> &'static str {
     gpu::recommended_backend(gpu::gpu_info(0).as_ref(), &gpu::adapters())
 }
 
-/// Fetches a manifest model and verifies it, then rescans. Shipped models go
-/// through the selected runtime's `nemo-speech pull` (its downloader is
-/// System32 `curl.exe`); `models.user.json` entries are downloaded from their
-/// URL directly. Returns the file.
+/// Fetches a manifest model and verifies it, then rescans. Every entry goes
+/// through our own downloader (`models::download_model`: resume, size and
+/// SHA-256, the `.sha256` cache) into the manifest's layout
+/// (`<repo>\<revision>\<file>`, where `nemo-speech pull` put files before
+/// 0.1.0-beta.5, so those are found; `user\` for `models.user.json`
+/// entries). No engine is needed. Returns the file.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn pull_model(
     app: AppHandle,
@@ -856,42 +858,14 @@ pub async fn pull_model(
             )
         };
         progress(0, false, None);
-        let mut last_done = u64::MAX;
-        let mut tick = |done: u64| {
-            if done != last_done {
-                last_done = done;
+        // The downloader reports every 256 KiB; the UI needs four a second.
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let result = models::download_model(&entry, &data_paths.models(), &mut |done, _| {
+            if last.elapsed() >= Duration::from_millis(250) {
+                last = Instant::now();
                 progress(done, false, None);
             }
-        };
-        let (process, result) = if entry.direct {
-            let dest = entry.dest_dir(&data_paths.models()).join(&entry.file);
-            let r =
-                models::download_file(&entry.url, &dest, &entry.sha256, total, &mut |d, _| tick(d))
-                    .map(|()| dest);
-            ("diarist.exe", r)
-        } else {
-            let engine = match models::selected_file(s, ModelRole::Engine)? {
-                Some(e) => e,
-                None => {
-                    models::scan(&data_paths, s, &manifest)?;
-                    models::selected_file(s, ModelRole::Engine)?.ok_or_else(|| {
-                        CoreError::Models(
-                            "the models are fetched by the speech engine, which is not installed; \
-                             install the engine first"
-                                .into(),
-                        )
-                    })?
-                }
-            };
-            let r = models::pull_with_progress(
-                &data_paths.absolute(&engine.path),
-                &data_paths.models(),
-                &entry,
-                &mut tick,
-            )
-            .map(|p| p.path);
-            ("curl.exe (started by nemo-speech.exe)", r)
-        };
+        });
         let result = result.and_then(|p| {
             models::scan(&data_paths, s, &manifest)?;
             Ok(p)
@@ -909,7 +883,7 @@ pub async fn pull_model(
         note_download(
             &app,
             &entry.name,
-            process,
+            "diarist.exe",
             &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
         );
         result.map(|p| p.display().to_string())
@@ -1755,14 +1729,12 @@ pub async fn startup_report(startup: State<'_, Startup>) -> CmdResult<StartupRep
 
 // ---- "Why isn't it working?" ------------------------------------------------------------
 
-/// The download hosts a firewall must allow, by the process that connects.
-fn hosts_for(process: &str) -> &'static str {
-    if process.starts_with("curl") {
-        "huggingface.co and its download servers (*.hf.co, for example us.aws.cdn.hf.co)"
-    } else {
-        "github.com, objects.githubusercontent.com and huggingface.co"
-    }
-}
+/// The download hosts a firewall must allow. Since 0.1.0-beta.5 every
+/// download is `diarist.exe`'s own (the runtime's `curl.exe` no longer
+/// fetches models).
+const DOWNLOAD_HOSTS: &str = "github.com and its download servers \
+     (objects.githubusercontent.com, release-assets.githubusercontent.com), huggingface.co \
+     and its download servers (*.hf.co)";
 
 /// An error that looks like the network, a firewall or a proxy, not the file.
 fn connection_error(e: &str) -> bool {
@@ -2063,7 +2035,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
                 "Downloading {what} failed: {err}. If a firewall such as simplewall asked about \
                  {process}, allow it (it connects to {}) and press Retry; or use Copy link to \
                  fetch the file with a browser and put it into the folder Open folder shows.",
-                hosts_for(&process)
+                DOWNLOAD_HOSTS
             ),
         )
         .fix("setup", "Open downloads"),
