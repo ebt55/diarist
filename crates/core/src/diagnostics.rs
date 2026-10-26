@@ -762,58 +762,82 @@ pub fn punctuation_check(paths: &DataPaths, store: &dyn Store) -> HealthCheck {
         .fix("rescan", "Refresh");
     };
     let model = paths.absolute(&file.path);
-    let dll = match spec
-        .model_root(&model, &paths.models())
-        .map_err(|e| e.to_string())
-        .and_then(|root| onnx::find_runtime(&root, &spec, paths).map_err(|u| u.message))
-    {
+    let manifest = crate::models::Manifest::load(&paths.root)
+        .unwrap_or_else(|_| crate::models::Manifest::builtin());
+    let entry = file
+        .manifest_name
+        .as_deref()
+        .and_then(|n| manifest.model(n));
+    let plan = match onnx::plan_runtime(&model, &spec, paths, entry) {
         Ok(p) => p,
-        Err(e) => {
+        Err(u) => {
             return fail(format!(
-                "{e}. Download the punctuation model again, or put the library into its folder."
+                "{}. Download the punctuation model again, or put the library into its folder.",
+                u.message
             ))
             .fix("open_models", "Open models folder")
         }
     };
-    if let Some(d) = onnx::missing_dependency() {
-        return fail(format!(
-            "{d} is missing: ONNX Runtime needs the Microsoft Visual C++ Redistributable (x64). \
-             Install it from {}, then restart Diarist.",
-            onnx::VC_REDIST_URL
-        ));
+    let rel = onnx::recorded_path(paths, &plan.dll);
+    let status = onnx::runtime_status();
+    // What a load would check first: the Visual C++ runtime and, for a
+    // manifest model, the library's hash. Not again once it is loaded.
+    if !matches!(&status, RuntimeStatus::Ready(rt) if same_path(&rt.path, &plan.dll)) {
+        if let Err(u) = onnx::before_load(
+            &plan.dll,
+            plan.want.sha256.as_deref(),
+            &onnx::missing_dependency,
+        ) {
+            return fail(format!("{}.", u.message));
+        }
     }
-    let rel = paths.relative(&dll);
-    match onnx::runtime_status() {
+    match status {
         RuntimeStatus::NotLoaded => HealthCheck::new(
             id,
             label,
             "pass",
             format!("ONNX Runtime at {rel}; it loads at the first punctuated transcript."),
         ),
-        RuntimeStatus::Ready(rt) if same_path(&rt.path, &dll) => HealthCheck::new(
+        RuntimeStatus::Ready(rt) if same_path(&rt.path, &plan.dll) => HealthCheck::new(
             id,
             label,
             "pass",
             format!(
                 "ONNX Runtime {} loaded from {} (CPU).",
                 rt.version,
-                paths.relative(&rt.path)
+                onnx::recorded_path(paths, &rt.path)
             ),
         ),
+        // Another folder's copy of the same release: the loaded one serves it.
+        RuntimeStatus::Ready(rt)
+            if onnx::version_matches(&rt.version, plan.want.version.as_deref()) =>
+        {
+            HealthCheck::new(
+                id,
+                label,
+                "pass",
+                format!(
+                    "ONNX Runtime {} loaded from {} (CPU); this model uses it instead of {rel}.",
+                    rt.version,
+                    onnx::recorded_path(paths, &rt.path)
+                ),
+            )
+        }
         RuntimeStatus::Ready(rt) => HealthCheck::new(
             id,
             label,
             "warn",
             format!(
-                "ONNX Runtime {} is loaded from {}; restart Diarist to use {rel}.",
+                "ONNX Runtime {} is loaded from {}; this model needs {}: restart Diarist to use {rel}.",
                 rt.version,
-                paths.relative(&rt.path)
+                onnx::recorded_path(paths, &rt.path),
+                plan.want.version.as_deref().unwrap_or("another release")
             ),
         ),
         RuntimeStatus::Broken { path, message } => fail(format!(
             "{} ({}). Restart Diarist after fixing it.",
             message,
-            paths.relative(&path)
+            onnx::recorded_path(paths, &path)
         )),
     }
 }
@@ -1213,7 +1237,7 @@ mod tests {
         // With a library file there (not loaded in this test process).
         std::fs::write(root.join("diarist-onnxruntime.dll"), b"MZ").unwrap();
         let c = punctuation_check(&paths, &store);
-        if crate::punct::onnx::missing_dependency().is_none()
+        if crate::punct::onnx::missing_dependency(&root.join("diarist-onnxruntime.dll")).is_none()
             && crate::punct::onnx::runtime_status() == crate::punct::onnx::RuntimeStatus::NotLoaded
         {
             assert_eq!(c.status, "pass", "{}", c.detail);

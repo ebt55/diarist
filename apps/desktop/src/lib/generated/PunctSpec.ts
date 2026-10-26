@@ -73,10 +73,12 @@ unit?: PunctUnit,
 policy?: MarkPolicy, 
 /**
  * The ONNX Runtime library, relative to the model's folder (default
- * [`RUNTIME_DLL`]).
+ * [`RUNTIME_DLL`]; never named `onnxruntime.dll`).
  */
 runtime?: string, 
 /**
- * The loaded library's version must start with this (`1.31.0`).
+ * The ONNX Runtime release the model needs, by major and minor version:
+ * `1.31.0` and `1.31` both accept any 1.31.x (the C API version and the
+ * ABI change with the minor version; the patch is free).
  */
 runtime_version?: string, };
