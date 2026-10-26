@@ -2227,6 +2227,9 @@ pub struct BackfillOutcome {
     /// No punctuator could be loaded (no model, the setting off, ONNX
     /// Runtime missing, a broken model): nothing was done.
     pub unavailable: Option<PunctReport>,
+    /// The model failed beyond use part way (the session is gone): the
+    /// meetings after the last outcome were left as they were.
+    pub stopped: Option<PunctReport>,
     pub cancelled: bool,
 }
 
@@ -2386,6 +2389,16 @@ pub async fn punctuation_backfill(
                 }
             }
             emit_punct_progress(&a, &id, i + 1, total);
+            // The model failed beyond use (a panic drops the session): the
+            // rest would only say so one by one.
+            if let Err(report) = &loaded {
+                log::warn!(
+                    "punctuation for older meetings stopped: {}",
+                    report.message.as_deref().unwrap_or(report.reason.as_str())
+                );
+                out.stopped = Some((**report).clone());
+                break;
+            }
         }
         log::info!(
             "punctuation for older meetings: {} of {total} got a new run in {:.1} s{}",

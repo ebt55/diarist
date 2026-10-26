@@ -253,6 +253,7 @@ describe("the bulk action", () => {
     total: 0,
     outcomes: [],
     unavailable: null,
+    stopped: null,
     cancelled: false,
     ...patch,
   });
@@ -295,6 +296,22 @@ describe("the bulk action", () => {
     expect(backfillDoneText(done({ total: 4, cancelled: true })).text).toBe(
       "Adding punctuation to older meetings was cancelled; nothing changed.",
     );
+  });
+
+  test("a model that failed: the meeting is a failure, and the rest stopped", () => {
+    const panicked = report({ reason: "error", message: "punctuation panicked: index out of bounds" });
+    const t = backfillDoneText(
+      done({ total: 5, outcomes: [o(1, {}), o(2, { run: null, punctuation: panicked })], stopped: panicked }),
+    );
+    expect(t).toEqual({
+      kind: "info",
+      text:
+        "Punctuation added to 1 of 5 meetings; the earlier versions stay. 1 meeting could not be changed now " +
+        "(punctuation panicked: index out of bounds); try again later. Stopped there: the punctuation model failed " +
+        "(punctuation panicked: index out of bounds); the remaining meetings were left as they were.",
+    });
+    const noModel = backfillDoneText(done({ total: 2, outcomes: [o(1, { run: null, punctuation: report({ reason: "invariant" }) })] }));
+    expect(noModel.text).toContain("1 meeting could not be changed now (the model's labels did not fit the words)");
   });
 
   test("nothing to do, or nothing to do it with", () => {

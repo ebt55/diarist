@@ -33,6 +33,8 @@ export interface BackfillOutcome {
   outcomes: PunctOutcome[];
   /** Nothing could punctuate (no model, off, ONNX Runtime missing): nothing was done. */
   unavailable: PunctReport | null;
+  /** The model failed beyond use part way: the meetings after the last outcome were left as they were. */
+  stopped: PunctReport | null;
   cancelled: boolean;
 }
 
@@ -322,6 +324,9 @@ export function backfillConfirm(n: number): { title: string; message: string; co
   };
 }
 
+/** Reasons a meeting got no new run that are failures, not a settled answer. */
+const FAILED: PunctReason[] = ["error", "runtime", "invariant", "no_model", "off"];
+
 /** Why nothing could punctuate, for the bulk report. */
 function unavailableText(r: PunctReport): string {
   switch (r.reason) {
@@ -336,6 +341,12 @@ function unavailableText(r: PunctReport): string {
   }
 }
 
+/** Why one meeting of the bulk action got no punctuation, short. */
+function failureText(r: PunctReport): string {
+  if (r.message) return r.message;
+  return r.reason === "invariant" ? "the model's labels did not fit the words" : unavailableText(r);
+}
+
 /** The report when the bulk action is done. */
 export function backfillDoneText(o: BackfillOutcome): Notice {
   if (o.unavailable) return { kind: "info", text: `No punctuation was added: ${unavailableText(o.unavailable)}.` };
@@ -346,8 +357,15 @@ export function backfillDoneText(o: BackfillOutcome): Notice {
     return { kind: "info", text: "Every finished meeting has punctuation already, or needs none." };
   }
   const added = o.outcomes.filter((x) => x.run !== null && x.punctuation?.applied).length;
-  const same = o.outcomes.filter((x) => x.run === null && x.error === null && !x.cancelled).length;
-  const failed = o.outcomes.filter((x) => x.error !== null);
+  // No new run: settled (a language the model does not cover, the speech
+  // model punctuates) or failed (the model, the runtime, the meeting).
+  const why = (x: PunctOutcome): string | null =>
+    x.error ??
+    (x.run === null && x.punctuation && !x.punctuation.applied && FAILED.includes(x.punctuation.reason)
+      ? failureText(x.punctuation)
+      : null);
+  const failed = o.outcomes.filter((x) => !x.cancelled && why(x) !== null);
+  const same = o.outcomes.filter((x) => x.run === null && !x.cancelled && why(x) === null).length;
   const parts = [
     o.cancelled
       ? `Stopped: punctuation added to ${added} of ${count(o.total, "meeting", "meetings")}`
@@ -362,11 +380,17 @@ export function backfillDoneText(o: BackfillOutcome): Notice {
   }
   if (failed.length > 0) {
     parts.push(
-      `${count(failed.length, "meeting", "meetings")} could not be changed now (${failed[0]!.error?.replace(/\.$/, "")}); ` +
+      `${count(failed.length, "meeting", "meetings")} could not be changed now (${why(failed[0]!)?.replace(/\.$/, "")}); ` +
         `try again later`,
     );
   }
-  return { kind: failed.length > 0 || o.cancelled ? "info" : "success", text: `${parts.join(". ")}.` };
+  if (o.stopped) {
+    parts.push(
+      `Stopped there: the punctuation model failed${message(o.stopped)}; the remaining meetings were left as they were`,
+    );
+  }
+  const quiet = failed.length > 0 || o.cancelled || o.stopped !== null;
+  return { kind: quiet ? "info" : "success", text: `${parts.join(". ")}.` };
 }
 
 // ---- Settings -----------------------------------------------------------------------
