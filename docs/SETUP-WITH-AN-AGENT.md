@@ -80,7 +80,8 @@ How to run the commands:
 - Downloads use Windows' own `C:\Windows\System32\curl.exe`, called by its
   full path. Plain `curl` in Windows PowerShell is an alias for
   `Invoke-WebRequest`, and another `curl.exe` earlier on the PATH would
-  trigger a different firewall prompt than the one the app's downloads use.
+  trigger a different firewall prompt than the one these blocks expect (the
+  app itself downloads with `diarist.exe` since 0.1.0-beta.5).
 - The model downloads are 100 to 750 MB each. Give those commands a long
   timeout (10 minutes or more), or run them in the background and wait.
 

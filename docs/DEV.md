@@ -546,22 +546,33 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   recommended runtime package (`cuda`, `vulkan`, `cpu`), free disk and every
   download with URL, SHA-256, size and folder. The first launch opens the
   setup screen until the user picks "Set up later" (`setup.later`).
-- Engine zips: `download_file` (ureq, platform verifier) resumes
-  `<zip>.part` with Range requests; each request runs at most two minutes,
-  three requests in a row without data end it as stalled.
-- Models: `nemo-speech pull` downloads with System32 `curl.exe` into
-  `<file>.partial` in the model's folder; `pull_with_progress` polls that
-  folder (opening each file, since a directory listing keeps the old size of
-  a file being written) and stops a pull after two minutes without new bytes.
-  `models.user.json` entries (`"direct": true` by default) are fetched by our
-  own downloader into `models\user\`.
-- Hand-placed manifest models without the runtime's `.verified` sidecar are
-  hashed once on scan and cached in `<file>.sha256`; a mismatch is reported
-  and the file is not treated as the manifest model. Linked folders under
-  `models\` are scanned.
+- Engine zips and models: `download_file` (ureq, platform verifier,
+  redirects followed, User-Agent `diarist/<version>`) resumes `<file>.part`
+  with Range requests, each from the original URL so a resumed download
+  gets a fresh redirect; each request runs at most two minutes, three
+  requests in a row without data end it as stalled. Since 0.1.0-beta.5
+  `download_model` fetches every manifest model from its `url` into
+  `ModelEntry::dest_dir` (`<repo>\<revision>\` for shipped models, the
+  layout `nemo-speech pull` used, so earlier pulls are found; `models\user\`
+  for direct entries) and writes `<file>.sha256`. `nemo-speech pull`
+  (System32 `curl.exe`, which fails where revocation checks are blocked) is
+  kept for one release behind `diarist-cli models pull --via-runtime`.
+- Manifest models without the runtime's `.verified` sidecar (hand-placed or
+  downloaded by us) are hashed once on scan and cached in `<file>.sha256`
+  (a download writes it directly); a mismatch is reported and the file is
+  not treated as the manifest model. Linked folders under `models\` are
+  scanned.
 - Observed connections: the engine zip from `diarist.exe` (github.com,
-  then GitHub's download CDN on 185.199.108-111.133); model pulls only from
-  `C:\Windows\System32\curl.exe` (huggingface.co, us.aws.cdn.hf.co).
+  then GitHub's download CDN on 185.199.108-111.133); up to 0.1.0-beta.4,
+  model pulls only from `C:\Windows\System32\curl.exe` (huggingface.co,
+  us.aws.cdn.hf.co). Since 0.1.0-beta.5 models come from `diarist.exe`
+  (`diarist-cli.exe` for the CLI) too.
+- Long paths: `process::command` passes the runtime as `\\?\C:\...` from
+  240 characters (`process::exe_arg`); `CreateProcessW` refuses the plain
+  form at 260 or more with os error 3. Model, audio and output paths get the
+  same form as arguments (`process::path_arg`), and so does the database
+  (`DataPaths::db`: SQLite opens the plain form only below 260). Rust's own
+  file calls handle long paths themselves.
 - Move data folder: `move_data_root` copies (database through the backup
   API, then audio, engine, models, manifests; logs, window state and the
   pre-upgrade `diarist.db.bak-*` as they are), verifies sizes, writes the registry key (cleared when the target is

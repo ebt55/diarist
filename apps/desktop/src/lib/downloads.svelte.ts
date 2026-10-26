@@ -1,5 +1,6 @@
 // Engine and model downloads, shared by the first-run screen and Settings:
-// one item at a time (the engine first: model pulls run its downloader),
+// one item at a time (the engine first, then the models, all through
+// Diarist's own downloader),
 // with per-item progress from `models:progress`. The backend resumes a
 // partial download and checks every file's SHA-256 before it is used.
 import { api, errorText, onEvent } from "./api";
