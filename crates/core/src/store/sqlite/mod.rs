@@ -2154,11 +2154,14 @@ mod tests {
         // Back to schema 3, as 0.1.0-beta.4 left it.
         {
             let conn = Connection::open(&db).unwrap();
-            conn.execute_batch("ALTER TABLE words DROP COLUMN raw_text; PRAGMA user_version = 3;")
-                .unwrap();
+            conn.execute_batch(
+                "ALTER TABLE words DROP COLUMN raw_text;
+                 ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 3;",
+            )
+            .unwrap();
         }
         let store = SqliteStore::open(&db).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
         let bak = dir.path().join("diarist.db.bak-3");
         assert_eq!(store.migration_backup(), Some(bak.as_path()));
         // The copy is the beta.4 database: schema 3, no raw_text.
