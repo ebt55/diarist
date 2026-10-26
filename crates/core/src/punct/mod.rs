@@ -24,8 +24,9 @@ use crate::settings;
 use crate::store::{Store, StoreError};
 use crate::types::RunId;
 
-// The ONNX runner (chunk B): the description block, the tokenizer and
-// generic windowing.
+// The ONNX runner (chunk B): the description block, the tokenizer, generic
+// windowing and the `ort` session.
+pub mod onnx;
 pub mod spec;
 pub mod tokenize;
 pub mod windows;
@@ -694,11 +695,9 @@ pub fn current(
     paths: &DataPaths,
     store: &dyn Store,
 ) -> std::result::Result<Option<Box<dyn Punctuator>>, Unavailable> {
-    // chunk B: the ONNX runner (onnx.rs) for the selected file, with the
-    // runtime checks of plan 16 section 3.7 and `threads(store)` intra-op
-    // threads.
-    let _ = (paths, store);
-    Ok(None)
+    // The ONNX runner (onnx.rs) for the selected file, with the runtime
+    // checks of plan 16 section 3.7 and `threads(store)` intra-op threads.
+    onnx::current(paths, store)
 }
 
 /// The punctuator to use for a build, or the report to write when there is
