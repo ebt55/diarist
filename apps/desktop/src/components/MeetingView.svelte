@@ -176,6 +176,22 @@
     }
   }
 
+  /**
+   * The loop line of the details (plan 16 section 12.3): how many of the
+   * decoder's repeated-token loops the current run collapsed
+   * (`engine_info.loops`, a `LoopReport`); nothing when it collapsed none.
+   */
+  const loopsLine = $derived.by(() => {
+    if (isLive || finalizing) return null;
+    const info = detail?.current_run?.engine_info;
+    if (typeof info !== "object" || info === null || Array.isArray(info)) return null;
+    const l = (info as Record<string, unknown>).loops;
+    if (typeof l !== "object" || l === null || Array.isArray(l)) return null;
+    const { runs, words_removed: words } = l as Record<string, unknown>;
+    if (typeof runs !== "number" || typeof words !== "number" || runs < 1) return null;
+    return `${runs} repeated-token loop${runs === 1 ? "" : "s"} collapsed (${words} word${words === 1 ? "" : "s"})`;
+  });
+
   /** Why an imported file failed (this session): unknown tokens, an engine error. */
   const importError = $derived(
     meeting?.source === "file" && meeting.status === "failed" ? (app.postPassErrors.get(meetingId) ?? null) : null,
@@ -728,6 +744,11 @@
           {#if punct.link}
             <button type="button" class="link" onclick={punctLink}>{punct.linkLabel}</button>
           {/if}
+        </div>
+      {/if}
+      {#if loopsLine}
+        <div class="echo-line loops-line">
+          <span title="The speech model sometimes repeats one word many times in a fraction of a second; each burst is kept as one word">{loopsLine}</span>
         </div>
       {/if}
     </header>
