@@ -264,7 +264,10 @@ enum ModelsCommand {
         /// Manifest names (nemotron-3.5, nemotron-3-diarization, nemotron-en, parakeet-tdt).
         names: Vec<String>,
         /// Fetch with the runtime's `nemo-speech pull` (System32 curl.exe)
-        /// as before 0.1.0-beta.5; kept for one release.
+        /// as before 0.1.0-beta.5; kept for one release. Not for a deep data
+        /// folder: the runtime builds the model paths itself, and paths of
+        /// 260 characters or more are not supported there (without this
+        /// flag any length works).
         #[arg(long)]
         via_runtime: bool,
     },
@@ -1187,6 +1190,15 @@ fn models_pull_via_runtime(
             eprintln!("note: {} is experimental", e.name);
         }
         eprintln!("pulling {} ({} MB)...", e.name, e.size_bytes >> 20);
+        let dest = models::pull_dir(&ctx.paths.models(), e).join(&e.file);
+        if diarist_core::engine::process::path_arg(&dest) != dest.as_os_str() {
+            eprintln!(
+                "note: {} is {} characters long; --via-runtime does not support paths this \
+                 long (docs/KNOWN-ISSUES.md), `models pull` without it does",
+                dest.display(),
+                dest.as_os_str().len()
+            );
+        }
         let p = match models::pull(&engine_dir, &ctx.paths.models(), e) {
             Ok(p) => p,
             Err(err) => {
