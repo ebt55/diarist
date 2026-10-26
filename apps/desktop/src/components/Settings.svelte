@@ -390,11 +390,14 @@
   }
 
   // A checklist fix asked for one field (Diagnostics, `settings:<name>`).
+  // The model groups (`set-punctuation`) render once the engine status is in.
   $effect(() => {
     const anchor = app.settingsAnchor;
+    const loaded = status !== null || statusError !== null;
     if (!anchor) return;
     void tick().then(() => {
       const el = document.getElementById(`set-${anchor}`);
+      if (!el && !loaded) return;
       el?.scrollIntoView({ block: "start" });
       el?.querySelector<HTMLInputElement>("input:checked, input")?.focus({ preventScroll: true });
       app.settingsAnchor = null;
@@ -977,10 +980,15 @@
                 <span class="facts">
                   <span class="cell q mono">{f.quant ?? "–"}</span>
                   <span class="cell s mono">{formatBytes(f.size_bytes)}</span>
-                  <span class="cell v" title={v ? (v.measured ? "Measured on the reference GPU" : "Estimated from file size") : ""}>
-                    {#if v}<span class="mono">{formatVram(v.mb)}</span> <span class="help inline">{v.measured ? "measured" : "est."}</span>{:else}–{/if}
-                  </span>
-                  <span class="fit {ft.cls}" title={ft.text}><span aria-hidden="true">{ft.mark}</span><span class="sr-only">{ft.text}</span></span>
+                  {#if role === "punctuation"}
+                    <!-- Runs on the CPU after the transcription: no VRAM to fit. -->
+                    <span class="cell v help inline">CPU</span>
+                  {:else}
+                    <span class="cell v" title={v ? (v.measured ? "Measured on the reference GPU" : "Estimated from file size") : ""}>
+                      {#if v}<span class="mono">{formatVram(v.mb)}</span> <span class="help inline">{v.measured ? "measured" : "est."}</span>{:else}–{/if}
+                    </span>
+                    <span class="fit {ft.cls}" title={ft.text}><span aria-hidden="true">{ft.mark}</span><span class="sr-only">{ft.text}</span></span>
+                  {/if}
                   <span class="chip source-{f.source}">{SOURCES[f.source]}</span>
                   {#if f.missing}<span class="chip warn">missing</span>{/if}
                 </span>
@@ -1094,15 +1102,15 @@
 
 {#snippet punctuationExtras(installed: boolean)}
   <div class="punct-extra">
-    {#if !installed}<p class="help">{PUNCT_NONE_HELP}</p>{/if}
-    <p class="help">{PUNCT_RESTART_NOTE}</p>
+    {#if installed}<p class="help">{PUNCT_RESTART_NOTE}</p>{:else}<p class="help">{PUNCT_NONE_HELP}</p>{/if}
     {#if punct && (punct.check.status === "warn" || punct.check.status === "fail")}
       <p class="help" class:error={punct.check.status === "fail"}>
         {punct.check.label}: <LinkText text={punct.check.detail} />
         <button type="button" class="link" onclick={() => (app.route = "diagnostics")}>Diagnostics</button>
       </p>
     {/if}
-    <div class="row radios" role="radiogroup" aria-label="Add punctuation to new transcripts">
+    <div class="row radios" role="radiogroup" aria-label="Punctuation for new transcripts">
+      <span>New transcripts:</span>
       {#each PUNCT_MODES as [value, label] (value)}
         <label class="radio">
           <input

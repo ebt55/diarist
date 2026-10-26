@@ -132,7 +132,7 @@
       {#each files as f (f.path)}
         <li class="fetch file">
           <span class="label">File</span>
-          <span class="val"><code class="sel">{f.path}</code>{#if f.present} <span class="ok">✓ there</span>{/if}</span>
+          <span class="val"><code class="sel">{f.path}</code>{#if f.present}{" "}<span class="ok">✓ there</span>{/if}</span>
           <span class="buttons">
             <button type="button" class="link" onclick={() => copyFileLink(f.url)} aria-label="Copy link of {f.path}">Copy link</button>
           </span>
