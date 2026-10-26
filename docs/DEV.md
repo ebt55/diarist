@@ -35,7 +35,7 @@ Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.4"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
-cargo run -p diarist-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
+cargo run -p diarist-cli -- models pull                 # required models, Diarist's own downloader, SHA-checked
 cargo run -p diarist-cli -- engine install              # runtime zip from manifests/engine.json
 cargo run -p diarist-cli -- retention [--apply]         # audio past audio_retention_days (dry run by default)
 cargo run --release -p diarist-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
@@ -112,7 +112,7 @@ Skipped unless the variables are set:
 |---|---|
 | `DIARIST_SAMPLES` (folders, `;`-separated) | `--test decode_samples`: every `*.m4a` decodes within 50 ms of ffprobe (run with `--release`) |
 | `DIARIST_MODELS_DIR` | real GGUF headers, scan, classification |
-| `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
+| `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor` (also from a 264-character root against the short folder), cached `pull` (the `--via-runtime` path) |
 | `DIARIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
 | `DIARIST_LONGFILE_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
 | engine + models | `-p diarist-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency, VRAM |
@@ -552,17 +552,31 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   recommended runtime package (`cuda`, `vulkan`, `cpu`), free disk and every
   download with URL, SHA-256, size and folder. The first launch opens the
   setup screen until the user picks "Set up later" (`setup.later`).
-- Engine zips and models: `download_file` (ureq, platform verifier,
-  redirects followed, User-Agent `diarist/<version>`) resumes `<file>.part`
-  with Range requests, each from the original URL so a resumed download
-  gets a fresh redirect; each request runs at most two minutes, three
-  requests in a row without data end it as stalled. Since 0.1.0-beta.5
-  `download_model` fetches every manifest model from its `url` into
+- Engine zips and models: `download_file` (ureq, platform verifier, https
+  only outside tests so no redirect to http is followed, redirects
+  followed, User-Agent `diarist/<version>`) resumes `<file>.part` with Range
+  requests, each from the original URL so a resumed download gets a fresh
+  redirect; each request runs at most two minutes, three requests in a row
+  without data end it as stalled. A 206 is appended only when its
+  `Content-Range` starts at the bytes on disk, else the file restarts from
+  byte 0. `<file>.part.json` records the URL and SHA-256 a `.part` belongs
+  to; another URL or hash, or no record, starts from byte 0.
+  `<file>.part.lock` (an OS file lock, gone with a crashed process) is held
+  while the `.part` is written, so a second download of the same file (the
+  CLI during an app install) fails at once with "already downloading".
+- Models: since 0.1.0-beta.5 the app and `diarist-cli models pull` fetch
+  every manifest model with `download_model`, from its `url` into
   `ModelEntry::dest_dir` (`<repo>\<revision>\` for shipped models, the
   layout `nemo-speech pull` used, so earlier pulls are found; `models\user\`
-  for direct entries) and writes `<file>.sha256`. `nemo-speech pull`
-  (System32 `curl.exe`, which fails where revocation checks are blocked) is
-  kept for one release behind `diarist-cli models pull --via-runtime`.
+  for direct entries), and write `<file>.sha256`; no engine is needed. A
+  `<file>.partial` an interrupted `nemo-speech pull` left there is deleted
+  once the model is in place. `nemo-speech pull` (System32 `curl.exe`,
+  which fails where revocation checks are blocked; model paths it builds
+  itself, so no long data folders) is kept for one release behind
+  `diarist-cli models pull --via-runtime`.
+- Engine names in `manifests\engine.json` (and from the release list)
+  become `engine\<name>`, so `check_engine_name` accepts one plain folder
+  name only, at load and before an install.
 - Manifest models without the runtime's `.verified` sidecar (hand-placed or
   downloaded by us) are hashed once on scan and cached in `<file>.sha256`
   (a download writes it directly); a mismatch is reported and the file is
@@ -573,12 +587,17 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   model pulls only from `C:\Windows\System32\curl.exe` (huggingface.co,
   us.aws.cdn.hf.co). Since 0.1.0-beta.5 models come from `diarist.exe`
   (`diarist-cli.exe` for the CLI) too.
-- Long paths: `process::command` passes the runtime as `\\?\C:\...` from
-  240 characters (`process::exe_arg`); `CreateProcessW` refuses the plain
-  form at 260 or more with os error 3. Model, audio and output paths get the
-  same form as arguments (`process::path_arg`), and so does the database
-  (`DataPaths::db`: SQLite opens the plain form only below 260). Rust's own
-  file calls handle long paths themselves.
+- Long paths: `process::command` passes the runtime as `\\?\C:\...` when
+  its absolute path is 240 characters or more (`process::exe_arg`);
+  `CreateProcessW` refuses the plain form at 260 or more with os error 3.
+  Model, audio and output paths get the same form as arguments
+  (`process::path_arg`; `\\server\share\...` becomes
+  `\\?\UNC\server\share\...`), and so does every path handed to SQLite
+  (`SqliteStore::open`, its backups, the pre-migration copy, the pre-rename
+  copy in `legacy`: SQLite opens the plain form only below 260).
+  `DataPaths::db` and everything stored, logged or shown stay plain;
+  `process::plain_paths` turns the runtime's echoed `\\?\` paths back for
+  messages. Rust's own file calls handle long paths themselves.
 - Move data folder: `move_data_root` copies (database through the backup
   API, then audio, engine, models, manifests; logs, window state and the
   pre-upgrade `diarist.db.bak-*` as they are), verifies sizes, writes the registry key (cleared when the target is

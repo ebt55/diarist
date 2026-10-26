@@ -333,6 +333,48 @@ pub struct EngineEntry {
     pub tested: bool,
 }
 
+/// Checks that an engine `name` is one plain folder name, since it becomes
+/// `engine\<name>` (and `engine\downloads\<name>.zip`) and
+/// `manifests\engine.json` in the data root can be edited: not empty, not
+/// `.` or `..`, no separator, drive or `:`, none of `<>"|?*` or control
+/// characters, no trailing dot or space, and not a DOS device name (`CON`,
+/// `NUL`, `COM1`, ... also with an extension).
+pub fn check_engine_name(name: &str) -> Result<()> {
+    const DEVICES: &[&str] = &["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    let bad = |why: &str| {
+        Err(CoreError::Models(format!(
+            "manifests/engine.json: the engine name {name:?} {why}; it becomes a folder name \
+             under engine\\, so it must be one plain name such as \
+             nemo-speech-0.2.0-windows-x86_64-cuda"
+        )))
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return bad("is not a folder name");
+    }
+    if let Some(c) = name.chars().find(|c| {
+        matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || c.is_control()
+    }) {
+        return bad(&format!("contains {c:?}"));
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return bad("ends with a dot or a space");
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    let numbered = |p: &str| {
+        upper.strip_prefix(p).is_some_and(|n| {
+            matches!(
+                n,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    };
+    if DEVICES.contains(&upper.as_str()) || numbered("COM") || numbered("LPT") {
+        return bad("is a reserved device name");
+    }
+    Ok(())
+}
+
 /// Both lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -367,6 +409,9 @@ impl Manifest {
         if let Ok(text) = std::fs::read_to_string(dir.join("engine.json")) {
             m.engines = serde_json::from_str(strip_bom(&text))
                 .map_err(|e| CoreError::Models(format!("manifests/engine.json: {e}")))?;
+            for e in &m.engines {
+                check_engine_name(&e.name)?;
+            }
         }
         if let Ok(text) = std::fs::read_to_string(data_root.join(USER_MODELS)) {
             let raw: Vec<serde_json::Value> =
@@ -901,5 +946,54 @@ mod tests {
         assert!(Manifest::load(dir.path()).unwrap().engines.is_empty());
         std::fs::write(dir.path().join("manifests/models.json"), "{").unwrap();
         assert!(Manifest::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn engine_names_are_one_plain_folder_name() {
+        for e in Manifest::builtin().engines {
+            check_engine_name(&e.name).unwrap();
+        }
+        check_engine_name("nemo-speech-0.3.0-rc.1-windows-x86_64-cuda").unwrap();
+        check_engine_name("console").unwrap();
+        for bad in [
+            "",
+            ".",
+            "..",
+            r"..\..\Windows",
+            "../x",
+            "a/b",
+            r"a\b",
+            "C:x",
+            r"C:\engine",
+            r"\\server\share",
+            "x<y",
+            "x|y",
+            "x?",
+            "x*",
+            "x\"y",
+            "x\ty",
+            "x.",
+            "x ",
+            "CON",
+            "nul",
+            "Aux.zip",
+            "com1",
+            "LPT9.txt",
+            "CONOUT$",
+        ] {
+            assert!(check_engine_name(bad).is_err(), "{bad:?}");
+        }
+        // An edited `manifests\engine.json` with such a name does not load.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("manifests")).unwrap();
+        let mut entry = serde_json::to_value(&Manifest::builtin().engines[0]).unwrap();
+        entry["name"] = r"..\..\escape".into();
+        std::fs::write(
+            dir.path().join("manifests/engine.json"),
+            serde_json::to_string(&[entry]).unwrap(),
+        )
+        .unwrap();
+        let err = Manifest::load(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("one plain name"), "{err}");
     }
 }

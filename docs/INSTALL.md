@@ -71,7 +71,7 @@ engine; since 0.1.0-beta.5 Diarist fetches them itself):
 | Speech engine (runtime zip) | `diarist.exe` | `github.com`, then GitHub's download servers (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`) |
 | Models | `diarist.exe` | `huggingface.co`, then its download servers (`*.hf.co`, for example `us.aws.cdn.hf.co`); for files Diarist hosts on its own releases page, `github.com` and GitHub's download servers as above |
 | Check for newer runtime | `diarist.exe` | `api.github.com` |
-| Check for updates | `diarist.exe` | `github.com` |
+| Check for updates | `diarist.exe` | `raw.githubusercontent.com` (the file `ebt55/diarist/main/updater/latest.json`); installing the update then fetches the installer from `github.com` and GitHub's download servers |
 
 If the firewall prompt was missed or denied, allow `diarist.exe` and press
 Retry; a partial download resumes. Or fetch the files by hand as above.
@@ -80,10 +80,13 @@ download failed for a network reason.
 
 Some networks block certificate revocation checks. Up to 0.1.0-beta.4,
 Windows' `curl.exe` then refused the model downloads
-(`CRYPT_E_REVOCATION_OFFLINE`). Diarist's own downloader checks each server's
-certificate against the Windows certificate store and still refuses a
-revoked one, but a revocation server it cannot reach no longer stops the
-download. Fetching a file by hand always works.
+(`CRYPT_E_REVOCATION_OFFLINE`). Diarist's own downloader checks each
+server's certificate against the Windows certificate store: it refuses a
+server certificate that Windows knows to be revoked; a revocation server
+that cannot be reached no longer stops a download. Only the server's own
+certificate is checked for revocation, not the certificates that issued it.
+Every download is https only, redirects included. Fetching a file by hand
+always works.
 
 ### Offline machines
 

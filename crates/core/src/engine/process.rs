@@ -33,41 +33,88 @@ pub fn is_engine_dir(dir: &Path) -> bool {
 /// Paths at least this long get the `\\?\` prefix in [`path_arg`].
 const LONG_PATH: usize = 240;
 
-/// A file path as a runtime argument. nemo-speech 0.2.0 cannot open paths of
-/// `MAX_PATH` (260) characters or more ("model file does not exist"), but
-/// accepts the extended-length form, so long absolute paths are passed as
-/// `\\?\C:\...` (normalised: backslashes, no `.` or `..`). Short paths, UNC
-/// paths and other platforms pass through unchanged.
+/// A file path as a runtime argument, and as SQLite gets the database.
+/// nemo-speech 0.2.0 cannot open paths of `MAX_PATH` (260) characters or
+/// more ("model file does not exist"), nor can SQLite's Windows layer
+/// ("unable to open database file"), but both accept the extended-length
+/// form. So a path whose absolute form is long (a short relative path can
+/// resolve long) is passed as `\\?\C:\...`, a network path as
+/// `\\?\UNC\server\share\...` (normalised: backslashes, no `.` or `..`).
+/// Short paths, paths already in the extended form, device paths and other
+/// platforms pass through unchanged. Only for handing a path to another
+/// program or library: nothing stored or shown gets this form.
 pub fn path_arg(path: &Path) -> OsString {
     #[cfg(windows)]
-    {
-        use std::path::{Component, Prefix};
-        if path.as_os_str().len() >= LONG_PATH {
-            if let Ok(abs) = std::path::absolute(path) {
-                let mut comps = abs.components();
-                if let Some(Component::Prefix(p)) = comps.next() {
-                    if matches!(p.kind(), Prefix::Disk(_)) {
-                        let mut out = OsString::from(r"\\?\");
-                        out.push(p.as_os_str());
-                        for c in comps {
-                            match c {
-                                Component::Normal(n) => {
-                                    out.push("\\");
-                                    out.push(n);
-                                }
-                                Component::RootDir | Component::CurDir => {}
-                                Component::ParentDir | Component::Prefix(_) => {
-                                    return path.as_os_str().to_owned()
-                                }
-                            }
-                        }
-                        return out;
-                    }
-                }
-            }
-        }
+    if let Some(long) = extended(path) {
+        return long;
     }
     path.as_os_str().to_owned()
+}
+
+/// The extended-length form of `path` when its absolute form is
+/// [`LONG_PATH`] or longer, for [`path_arg`].
+#[cfg(windows)]
+fn extended(path: &Path) -> Option<OsString> {
+    use std::path::{Component, Prefix};
+    let abs = std::path::absolute(path).ok()?;
+    if abs.as_os_str().len() < LONG_PATH {
+        return None;
+    }
+    let mut comps = abs.components();
+    let Some(Component::Prefix(p)) = comps.next() else {
+        return None;
+    };
+    let mut out = match p.kind() {
+        Prefix::Disk(_) => {
+            let mut o = OsString::from(r"\\?\");
+            o.push(p.as_os_str());
+            o
+        }
+        Prefix::UNC(server, share) => {
+            let mut o = OsString::from(r"\\?\UNC\");
+            o.push(server);
+            o.push("\\");
+            o.push(share);
+            o
+        }
+        // Already `\\?\...`, or a device path (`\\.\`).
+        _ => return None,
+    };
+    for c in comps {
+        match c {
+            Component::Normal(n) => {
+                out.push("\\");
+                out.push(n);
+            }
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A folder under `base` whose absolute path is `len` characters long, made
+/// of nested segments of up to 40 characters (the KNOWN-ISSUES repro used
+/// 264). Created. For the long-path tests across the crate.
+#[cfg(all(test, windows))]
+pub(crate) fn long_test_dir(base: &Path, len: usize) -> PathBuf {
+    let mut dir = std::path::absolute(base).unwrap();
+    let mut i = 0;
+    while dir.as_os_str().len() < len {
+        // Characters left after the separator; never leave exactly one
+        // short (a separator with no room for a name).
+        let left = len - dir.as_os_str().len() - 1;
+        let take = if left <= 40 { left } else { 40.min(left - 2) };
+        let seg: String = format!("d{i}{}", "x".repeat(60))
+            .chars()
+            .take(take.max(1))
+            .collect();
+        dir.push(seg);
+        i += 1;
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(dir.as_os_str().len(), len, "{}", dir.display());
+    dir
 }
 
 /// `<engine>\bin;%SystemRoot%\System32;%SystemRoot%`.
@@ -96,6 +143,18 @@ pub fn reduced_path(engine_dir: &Path) -> OsString {
 /// with a 329-character path (plan 16, chunk C).
 pub fn exe_arg(engine_dir: &Path) -> OsString {
     path_arg(&exe_path(engine_dir))
+}
+
+/// `text` with extended-length paths in the plain form (`\\?\C:\x` as
+/// `C:\x`, `\\?\UNC\server\share\x` as `\\server\share\x`), for messages that
+/// are shown or stored: [`path_arg`]'s form is only for other programs.
+pub fn plain_paths(text: &str) -> String {
+    text.replace(r"\\?\UNC\", r"\\").replace(r"\\?\", "")
+}
+
+/// The program `cmd` runs, quoted and in the plain form, for messages.
+pub fn program_shown(cmd: &Command) -> String {
+    format!("\"{}\"", plain_paths(&cmd.get_program().to_string_lossy()))
 }
 
 /// A `Command` for the runtime with the reduced `PATH`, the model directory
@@ -135,7 +194,7 @@ pub fn run_with_timeout_ticking(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
-        .map_err(|e| CoreError::Engine(format!("spawn {:?}: {e}", cmd.get_program())))?;
+        .map_err(|e| CoreError::Engine(format!("spawn {}: {e}", program_shown(&cmd))))?;
     let stdout = drain(&mut child, true);
     let stderr = drain(&mut child, false);
     let start = Instant::now();
@@ -156,8 +215,8 @@ pub fn run_with_timeout_ticking(
             let _ = child.kill();
             let _ = child.wait();
             return Err(CoreError::Engine(format!(
-                "{:?} timed out after {} s",
-                cmd.get_program(),
+                "{} timed out after {} s",
+                program_shown(&cmd),
                 timeout.as_secs()
             )));
         }
@@ -219,27 +278,58 @@ mod tests {
             assert!(arg.starts_with(r"\\?\C:\data\"), "{arg}");
             assert!(arg.ends_with(r"\model.gguf") && !arg.contains('/'), "{arg}");
             assert!(!arg.contains(r"\x\"), "{arg}");
+            // Already extended, or a device path: unchanged.
+            let verbatim = format!(r"\\?\C:\data\{}\model.gguf", "d".repeat(250));
+            assert_eq!(path_arg(Path::new(&verbatim)), OsString::from(&verbatim));
+            let device = format!(r"\\.\C:\data\{}\model.gguf", "d".repeat(250));
+            assert_eq!(path_arg(Path::new(&device)), OsString::from(&device));
         }
     }
 
-    /// A folder under `base` whose path is `len` characters long, made of
-    /// nested 40-character segments (the KNOWN-ISSUES repro used 264).
+    #[test]
+    fn messages_show_the_plain_form() {
+        assert_eq!(
+            plain_paths(r#"model file \\?\C:\d\m.gguf and \\?\UNC\srv\sh\x.wav"#),
+            r#"model file C:\d\m.gguf and \\srv\sh\x.wav"#
+        );
+        let cmd = Command::new(r"\\?\C:\e\bin\nemo-speech.exe");
+        assert_eq!(program_shown(&cmd), r#""C:\e\bin\nemo-speech.exe""#);
+    }
+
     #[cfg(windows)]
-    fn long_dir(base: &Path, len: usize) -> PathBuf {
-        let mut dir = std::path::absolute(base).unwrap();
-        let mut i = 0;
-        while dir.as_os_str().len() < len {
-            let left = len - dir.as_os_str().len() - 1;
-            let seg: String = format!("d{i}{}", "x".repeat(60))
-                .chars()
-                .take(left.clamp(1, 40))
-                .collect();
-            dir.push(seg);
-            i += 1;
-        }
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(dir.as_os_str().len(), len, "{}", dir.display());
-        dir
+    #[test]
+    fn long_network_paths_get_the_unc_form() {
+        let short = Path::new(r"\\server\share\models\a.gguf");
+        assert_eq!(path_arg(short), short.as_os_str());
+        let long = format!(r"\\server\share/{}\x\..\model.gguf", "d".repeat(250));
+        let arg = path_arg(Path::new(&long)).to_string_lossy().into_owned();
+        assert_eq!(
+            arg,
+            format!(r"\\?\UNC\server\share\{}\model.gguf", "d".repeat(250))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_short_relative_path_that_resolves_long_is_converted() {
+        // Relative to the test's working directory (the crate folder).
+        let cwd = std::env::current_dir().unwrap();
+        let need = (LONG_PATH + 10).saturating_sub(cwd.as_os_str().len() + 1);
+        assert!(need < LONG_PATH, "working directory too short: {cwd:?}");
+        let rel = format!(r"{}\model.gguf", "r".repeat(need.max(12) - 11));
+        assert!(rel.len() < LONG_PATH);
+        let arg = path_arg(Path::new(&rel)).to_string_lossy().into_owned();
+        assert!(arg.starts_with(r"\\?\"), "{arg}");
+        assert_eq!(
+            Path::new(&arg[4..]),
+            cwd.join(&rel),
+            "the relative path resolved against the working directory"
+        );
+        // A short relative path that stays short is passed as it is.
+        assert_eq!(
+            path_arg(Path::new(r"m\a.gguf")),
+            OsString::from(r"m\a.gguf")
+        );
     }
 
     /// `engine\<name>` under a 264-character data root, linked to the real
@@ -247,7 +337,7 @@ mod tests {
     /// long link path). `None` when the link cannot be made.
     #[cfg(windows)]
     fn link_engine_under_long_root(base: &Path, engine: &Path) -> Option<PathBuf> {
-        let root = long_dir(base, 264);
+        let root = long_test_dir(base, 264);
         std::fs::create_dir_all(root.join("engine")).unwrap();
         let name = engine.file_name()?;
         let link = root.join("engine").join(name);
@@ -271,7 +361,7 @@ mod tests {
         // Asked to list one test, it prints that test's name. (Copies of
         // System32 tools are refused on some machines, os error 5.)
         let tmp = tempfile::tempdir().unwrap();
-        let engine = long_dir(tmp.path(), 264).join("engine").join("fake");
+        let engine = long_test_dir(tmp.path(), 264).join("engine").join("fake");
         std::fs::create_dir_all(engine.join("bin")).unwrap();
         std::fs::copy(std::env::current_exe().unwrap(), exe_path(&engine)).unwrap();
         assert!(exe_path(&engine).as_os_str().len() > 260);
@@ -290,7 +380,10 @@ mod tests {
         assert_eq!(exe_arg(short), exe_path(short).as_os_str());
     }
 
-    /// The real runtime's `doctor` from a 264-character data root, when
+    /// The real runtime's `doctor` from a 264-character data root sees what
+    /// it sees from its own short folder: the same accelerator and the same
+    /// devices, so a GPU backend DLL that does not load from a long folder
+    /// (the runtime would then fall back to the CPU) fails here. Runs when
     /// `DIARIST_ENGINE_DIR` names an extracted runtime (it touches the GPU,
     /// so it is not run by default).
     #[cfg(windows)]
@@ -299,15 +392,43 @@ mod tests {
         let Some(engine) = std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from) else {
             return;
         };
+        let short = crate::models::doctor(&engine).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let link = link_engine_under_long_root(tmp.path(), &engine)
             .expect("mklink /J under the long root");
         assert!(exe_path(&link).as_os_str().len() > 300);
-        let report = crate::models::doctor(&link).unwrap();
-        assert!(!report.version.is_empty(), "{report:?}");
+        let long = crate::models::doctor(&link);
         // Remove the junction itself, never what it points to.
         std::fs::remove_dir(&link).unwrap();
         assert!(is_engine_dir(&engine));
+        let long = long.unwrap();
+        assert_eq!(long.version, short.version);
+        assert_eq!(
+            long.accelerator_available, short.accelerator_available,
+            "long: {long:?}\nshort: {short:?}"
+        );
+        assert_eq!(long.features, short.features, "{long:?}");
+        // Free memory moves between runs; the devices themselves must not.
+        let devices = |r: &crate::models::DoctorReport| {
+            r.devices
+                .iter()
+                .map(|d| {
+                    (
+                        d.index,
+                        d.name.clone(),
+                        d.description.clone(),
+                        d.kind.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(devices(&long), devices(&short), "{long:?}");
+        assert_eq!(long.runtime_warnings, short.runtime_warnings);
+        eprintln!(
+            "doctor from the long root: accelerator {}, devices {:?}",
+            long.accelerator_available,
+            devices(&long)
+        );
     }
 
     #[test]

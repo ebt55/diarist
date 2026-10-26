@@ -295,11 +295,12 @@ fn copy_link(src: &Path, dest: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         if is_dir {
+            // `mklink` takes a long link path only in the `\\?\` form.
             let out = std::process::Command::new("cmd")
                 .arg("/c")
                 .arg("mklink")
                 .arg("/J")
-                .arg(dest)
+                .arg(crate::engine::process::path_arg(dest))
                 .arg(&target)
                 .output()?;
             if !out.status.success() {
@@ -817,6 +818,62 @@ mod tests {
         assert!(shared.join("big.gguf").is_file());
         remove_item(&new.join("models")).unwrap();
         assert!(shared.join("big.gguf").is_file());
+    }
+
+    /// A move into a folder longer than `MAX_PATH`, with the database
+    /// copied as the app does it (`move_data_root`: the store's backup, then
+    /// a check that the copy opens with the same meetings) and a linked
+    /// `engine` folder recreated there.
+    #[cfg(windows)]
+    #[test]
+    fn moves_into_a_folder_longer_than_max_path() {
+        use crate::store::{NewMeeting, RunStore, SqliteStore, Store};
+        use crate::types::{MeetingStatus, Source};
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old");
+        let new = crate::engine::process::long_test_dir(&dir.path().join("new"), 264);
+        fs::remove_dir(&new).unwrap(); // a new folder, as Move data folder makes it
+        let store = SqliteStore::open(old.join(DB_FILE)).unwrap();
+        store
+            .create_meeting(NewMeeting {
+                title: "Moved".into(),
+                source: Source::File,
+                source_path: None,
+                language: "en".into(),
+                diarize_mic: false,
+                started_at: 1_700_000_000_000,
+                status: MeetingStatus::Done,
+            })
+            .unwrap();
+        write(&old.join("audio/01ABC/playback.flac"), &[7u8; 5000]);
+        let shared = dir.path().join("shared-engine");
+        write(&shared.join("bin/nemo-speech.exe"), b"MZ");
+        if copy_link_for_test(&shared, &old.join("engine")).is_err() {
+            return; // no way to create a link here
+        }
+        let plan = plan_move(&old, &new).unwrap();
+        let backup = |dest: &Path| -> Result<()> {
+            store.backup(dest)?;
+            let copy = SqliteStore::open(dest)?;
+            assert_eq!(copy.list_meetings()?.len(), store.list_meetings()?.len());
+            Ok(())
+        };
+        let report = copy_data(&plan, &backup, &mut |_, _| {}).unwrap();
+        assert_eq!(report.links, 1);
+        let copy = SqliteStore::open(new.join(DB_FILE)).unwrap();
+        assert_eq!(copy.list_meetings().unwrap()[0].title, "Moved");
+        assert_eq!(
+            fs::read(new.join("audio/01ABC/playback.flac"))
+                .unwrap()
+                .len(),
+            5000
+        );
+        assert!(is_link(&new.join("engine")));
+        assert!(new.join("engine/bin/nemo-speech.exe").is_file());
+        assert!(new.join(MOVE_MARKER).is_file());
+        // Remove the link itself, never what it points to.
+        remove_item(&new.join("engine")).unwrap();
+        assert!(shared.join("bin/nemo-speech.exe").is_file());
     }
 
     fn copy_link_for_test(target: &Path, link: &Path) -> std::io::Result<()> {

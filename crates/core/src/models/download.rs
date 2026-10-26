@@ -2,15 +2,19 @@
 //! install and the model downloads (`docs/01`, "Install model").
 //!
 //! - ureq with rustls and the platform verifier (Windows certificate store),
-//!   proxies from the environment, redirects followed (GitHub release assets
-//!   and Hugging Face files both redirect to a download host), User-Agent
-//!   `diarist/<version>` and nothing else about the user.
+//!   proxies from the environment, https only, redirects followed (GitHub
+//!   release assets and Hugging Face files both redirect to a download host;
+//!   a redirect to plain http is refused), User-Agent `diarist/<version>`
+//!   and nothing else about the user.
 //! - Partial data lives in `<dest>.part`; a later call resumes with a Range
-//!   request (a server that ignores it restarts the file). Each request
-//!   runs at most two minutes and the download continues with another Range
-//!   request, so a dead connection ends as "stalled" instead of hanging.
-//!   Every request starts from the original URL, so a resumed download gets
-//!   a fresh redirect (signed asset links expire).
+//!   request (a server that ignores it, or answers from another offset,
+//!   restarts the file). `<dest>.part.json` records the URL and hash it
+//!   belongs to; a `.part` from another URL or hash is not resumed.
+//!   `<dest>.part.lock` keeps two programs from writing the same `.part`.
+//!   Each request runs at most two minutes and the download continues with
+//!   another Range request, so a dead connection ends as "stalled" instead
+//!   of hanging. Every request starts from the original URL, so a resumed
+//!   download gets a fresh redirect (signed asset links expire).
 //! - The whole file is hashed before it is renamed into place; a mismatch
 //!   deletes the partial file.
 //! - The engine zip is extracted into `engine\<name>.tmp` and renamed to
@@ -27,7 +31,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{EngineEntry, Manifest, ModelEntry};
+use super::manifest::{check_engine_name, EngineEntry, Manifest, ModelEntry};
 use super::paths::DataPaths;
 use crate::engine::process;
 use crate::error::{CoreError, Result};
@@ -44,6 +48,23 @@ pub(crate) fn user_agent() -> String {
     format!("diarist/{}", crate::VERSION)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The tests' fake servers speak plain http on 127.0.0.1, so tests allow
+    /// it unless a test turns this off to check the https-only rule. (Each
+    /// test runs on its own thread, and downloads run on the caller's.)
+    static TEST_ALLOW_HTTP: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Every request, and every redirect it follows, must be https: a redirect
+/// to plain http is refused instead of followed. Off only in tests.
+fn https_only() -> bool {
+    #[cfg(test)]
+    return !TEST_ALLOW_HTTP.with(|a| a.get());
+    #[cfg(not(test))]
+    true
+}
+
 /// An HTTPS client; `limit` caps each request (connect to last byte).
 pub(crate) fn agent(limit: Option<Duration>) -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
@@ -51,6 +72,7 @@ pub(crate) fn agent(limit: Option<Duration>) -> ureq::Agent {
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
+        .https_only(https_only())
         .user_agent(user_agent())
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
@@ -101,10 +123,110 @@ pub fn verify_file(path: &Path, size: Option<u64>, sha256: &str) -> Result<()> {
     Ok(())
 }
 
-fn part_path(dest: &Path) -> PathBuf {
+/// `dest` with `suffix` appended to its file name.
+fn suffixed(dest: &Path, suffix: &str) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
-    s.push(".part");
+    s.push(suffix);
     PathBuf::from(s)
+}
+
+fn part_path(dest: &Path) -> PathBuf {
+    suffixed(dest, ".part")
+}
+
+/// `<dest>.part.json`: where the bytes in `<dest>.part` came from.
+fn part_source_path(dest: &Path) -> PathBuf {
+    suffixed(dest, ".part.json")
+}
+
+/// The download a `.part` belongs to. A `.part` is resumed only by a
+/// download of the same address for the same expected file; anything else
+/// (another URL or hash, or no record: a `.part` from before 0.1.0-beta.5)
+/// starts from byte 0.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PartSource {
+    url: String,
+    sha256: String,
+}
+
+impl PartSource {
+    fn new(url: &str, sha256: &str) -> Self {
+        Self {
+            url: url.to_owned(),
+            sha256: sha256.trim().to_ascii_lowercase(),
+        }
+    }
+
+    /// True when `<dest>.part.json` records this download.
+    fn wrote(&self, dest: &Path) -> bool {
+        std::fs::read(part_source_path(dest))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PartSource>(&b).ok())
+            .is_some_and(|s| s == *self)
+    }
+
+    fn record(&self, dest: &Path) -> Result<()> {
+        let json = serde_json::to_vec(self).map_err(|e| dl_err(e.to_string()))?;
+        std::fs::write(part_source_path(dest), json)?;
+        Ok(())
+    }
+}
+
+/// `<dest>.part.lock`, locked while one download writes `<dest>.part`, so
+/// two programs (the app and `diarist-cli models pull`) never write the
+/// same partial file. The lock is the operating system's, so it goes away
+/// with a program that crashed. The file is removed when the download ends.
+struct PartLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl PartLock {
+    fn acquire(dest: &Path) -> Result<Self> {
+        let path = suffixed(dest, ".part.lock");
+        let name = dest.file_name().map_or_else(
+            || dest.display().to_string(),
+            |n| n.to_string_lossy().into(),
+        );
+        let busy = || {
+            dl_err(format!(
+                "{name} is already downloading in another Diarist program (the app or \
+                 diarist-cli); wait for it to finish, then try again"
+            ))
+        };
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| match e.kind() {
+                // A lock file another download is removing right now.
+                std::io::ErrorKind::PermissionDenied => busy(),
+                _ => dl_err(format!("open {}: {e}", path.display())),
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { file, path }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(busy()),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(dl_err(format!("lock {}: {e}", path.display())))
+            }
+        }
+    }
+}
+
+impl Drop for PartLock {
+    fn drop(&mut self) {
+        // Removed while still locked: a program that opened it meanwhile
+        // finds it locked, one that comes later makes a new one.
+        let _ = std::fs::remove_file(&self.path);
+        let _ = self.file.unlock();
+    }
+}
+
+/// The first byte of a `Content-Range: bytes <first>-<last>/<total>` value.
+fn range_start(value: &str) -> Option<u64> {
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    rest.split('-').next()?.trim().parse().ok()
 }
 
 /// How long one request may run. A download that takes longer continues
@@ -122,6 +244,9 @@ enum Attempt {
     Interrupted(String),
     /// The server ignores Range: the next request must not have a deadline.
     NoRange,
+    /// The server answered a Range request with bytes from another offset:
+    /// the partial file was emptied and the next request starts at byte 0.
+    Restart,
 }
 
 /// One GET from `*have` (appending to `part`), reporting progress.
@@ -140,7 +265,26 @@ fn attempt(
     let mut resp = req.call().map_err(|e| dl_err(format!("GET {url}: {e}")))?;
     let status = resp.status().as_u16();
     let append = match status {
-        206 => true,
+        // Appended only when the range starts at the bytes on disk.
+        206 => {
+            let start = resp
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(range_start);
+            if start != Some(*have) {
+                if *have == 0 {
+                    let from = start.map_or("an unknown byte".into(), |s| format!("byte {s}"));
+                    return Err(dl_err(format!(
+                        "GET {url}: HTTP 206 from {from} for a request of the whole file"
+                    )));
+                }
+                OpenOptions::new().write(true).truncate(true).open(part)?;
+                *have = 0;
+                return Ok(Attempt::Restart);
+            }
+            true
+        }
         200 => false,
         416 if *have > 0 => return Ok(Attempt::Complete), // already complete
         _ => return Err(dl_err(format!("GET {url}: HTTP {status}"))),
@@ -191,7 +335,12 @@ fn attempt(
 /// with the right hash is kept as is. Each request is limited to two
 /// minutes and continues with a Range request; three requests in a row that
 /// bring no data end the download as stalled (the partial file stays, so
-/// calling it again resumes).
+/// calling it again resumes). A `.part` is resumed only by a download of
+/// the same URL and hash (`<dest>.part.json`, [`PartSource`]) and a range
+/// is appended only when it starts at the bytes on disk; otherwise the
+/// download starts from byte 0. While it runs, `<dest>.part.lock` is held
+/// ([`PartLock`]): a second download of the same file fails at once with
+/// "already downloading".
 pub fn download_file(
     url: &str,
     dest: &Path,
@@ -214,45 +363,66 @@ pub fn download_file(
             verify_file(p, size, sha256)
         }
     };
-    if dest.is_file() && check(dest).is_ok() {
+    let existed = dest.is_file();
+    if existed && check(dest).is_ok() {
         return Ok(());
     }
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let _lock = PartLock::acquire(dest)?;
+    // Another program may have finished it while this one waited to start.
+    if !existed && dest.is_file() && check(dest).is_ok() {
+        return Ok(());
+    }
     let part = part_path(dest);
+    let source = PartSource::new(url, sha256);
     let mut have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    if size.is_some_and(|s| have > s) {
+    if have > 0 && (!source.wrote(dest) || size.is_some_and(|s| have > s)) {
         std::fs::remove_file(&part)?;
         have = 0;
     }
+    source.record(dest)?;
+    let source_path = part_source_path(dest);
     if size != Some(have) || have == 0 {
         // Show what a resumed download already has while the connection opens.
         progress(have, size);
         let mut agent = agent(Some(ATTEMPT_LIMIT));
         let mut idle = 0;
-        loop {
+        let fetched = loop {
             let before = have;
-            match attempt(&agent, url, &part, &mut have, size, progress)? {
-                Attempt::Complete => break,
-                Attempt::NoRange => agent = self::agent(None),
-                Attempt::Interrupted(why) => {
+            match attempt(&agent, url, &part, &mut have, size, progress) {
+                Err(e) => break Err(e),
+                Ok(Attempt::Complete) => break Ok(()),
+                Ok(Attempt::NoRange) => agent = self::agent(None),
+                Ok(Attempt::Restart) => {}
+                Ok(Attempt::Interrupted(why)) => {
                     idle = if have > before { 0 } else { idle + 1 };
                     if idle >= MAX_IDLE_ATTEMPTS {
-                        return Err(dl_err(format!(
+                        break Err(dl_err(format!(
                             "download {url} stalled at {have} bytes ({why}); retrying resumes from there"
                         )));
                     }
                 }
             }
+        };
+        if let Err(e) = fetched {
+            // Nothing to resume: leave no empty `.part` or record behind.
+            if have == 0 {
+                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&source_path);
+            }
+            return Err(e);
         }
     }
     if let Err(e) = check(&part) {
         let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&source_path);
         return Err(e);
     }
     std::fs::rename(&part, dest)
         .map_err(|e| dl_err(format!("rename to {}: {e}", dest.display())))?;
+    let _ = std::fs::remove_file(&source_path);
     Ok(())
 }
 
@@ -282,7 +452,9 @@ pub fn model_dest(entry: &ModelEntry, models_dir: &Path) -> PathBuf {
 /// Downloads a manifest model from its `url` with [`download_file`] (resume,
 /// size and SHA-256 against the manifest) to [`model_dest`], and records the
 /// verified hash in `<file>.sha256`. A file already there with the right
-/// hash is kept. Returns the file.
+/// hash is kept. The `<file>.partial` an interrupted `nemo-speech pull`
+/// (up to 0.1.0-beta.4) left next to it is deleted once the model is in
+/// place; this downloader never resumes it. Returns the file.
 pub fn download_model(
     entry: &ModelEntry,
     models_dir: &Path,
@@ -305,6 +477,7 @@ pub fn download_model(
         entry.sha256.clone()
     };
     record_sha256(&dest, &sha);
+    let _ = std::fs::remove_file(suffixed(&dest, ".partial"));
     Ok(dest)
 }
 
@@ -370,6 +543,9 @@ pub fn install_engine(
     paths: &DataPaths,
     progress: Progress<'_>,
 ) -> Result<PathBuf> {
+    // Checked at load for the manifests; this covers entries made from the
+    // GitHub release list too, before the name becomes a folder.
+    check_engine_name(&entry.name)?;
     let engine_root = paths.engine();
     let target = engine_root.join(&entry.name);
     if process::is_engine_dir(&target) {
@@ -557,6 +733,34 @@ mod tests {
         )
     }
 
+    /// A server that answers every Range request with `206` and the whole
+    /// file from byte 0 (`Content-Range: bytes 0-...`), whatever was asked,
+    /// and a request without Range with `200`. Records Range headers.
+    fn serve_wrong_range(body: Vec<u8>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&ranges);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let range = header(&req, "Range");
+                seen.lock().unwrap().push(range.clone());
+                let resp = tiny_http::Response::from_data(body.clone());
+                let resp = if range.is_empty() {
+                    resp
+                } else {
+                    let cr = format!("bytes 0-{}/{}", body.len() - 1, body.len());
+                    resp.with_status_code(206).with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Range"[..], cr.as_bytes())
+                            .unwrap(),
+                    )
+                };
+                let _ = req.respond(resp);
+            }
+        });
+        (format!("http://127.0.0.1:{port}/file.bin"), ranges)
+    }
+
     fn payload() -> Vec<u8> {
         (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect()
     }
@@ -565,13 +769,39 @@ mod tests {
         hex(&Sha256::digest(bytes))
     }
 
+    /// A `.part` holding `bytes`, recorded as written by a download of `url`
+    /// for `sha256` (what an interrupted [`download_file`] leaves).
+    fn seed_part(dest: &Path, bytes: &[u8], url: &str, sha256: &str) {
+        std::fs::write(part_path(dest), bytes).unwrap();
+        PartSource::new(url, sha256).record(dest).unwrap();
+    }
+
+    /// Neither the `.part`, its source record nor its lock is left.
+    fn assert_no_leftovers(dest: &Path) {
+        for p in [
+            part_path(dest),
+            part_source_path(dest),
+            suffixed(dest, ".part.lock"),
+        ] {
+            assert!(!p.exists(), "{} is left", p.display());
+        }
+    }
+
+    #[test]
+    fn range_start_reads_the_first_byte() {
+        assert_eq!(range_start("bytes 100000-299999/300000"), Some(100_000));
+        assert_eq!(range_start(" bytes 0-0/1"), Some(0));
+        assert_eq!(range_start("bytes */300000"), None);
+        assert_eq!(range_start("items 1-2/3"), None);
+    }
+
     #[test]
     fn resumes_a_partial_download() {
         let body = payload();
         let (url, ranges) = serve(body.clone(), true);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        std::fs::write(part_path(&dest), &body[..100_000]).unwrap();
+        seed_part(&dest, &body[..100_000], &url, &sha(&body).to_uppercase());
         let mut last = 0;
         download_file(
             &url,
@@ -582,7 +812,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
-        assert!(!part_path(&dest).exists());
+        assert_no_leftovers(&dest);
         assert_eq!(last, body.len() as u64);
         assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=100000-"]);
         // A second call finds the verified file and does nothing.
@@ -600,12 +830,121 @@ mod tests {
     #[test]
     fn restarts_when_the_server_ignores_range() {
         let body = payload();
-        let (url, _) = serve(body.clone(), false);
+        let (url, ranges) = serve(body.clone(), false);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        std::fs::write(part_path(&dest), b"garbage that is not a prefix").unwrap();
+        seed_part(&dest, b"garbage that is not a prefix", &url, &sha(&body));
         download_file(&url, &dest, &sha(&body), None, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=28-"]);
+        assert_no_leftovers(&dest);
+    }
+
+    #[test]
+    fn a_range_from_another_offset_restarts_the_file() {
+        let body = payload();
+        let (url, ranges) = serve_wrong_range(body.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        // Appending the 206 to these bytes would make a file of 400 kB.
+        seed_part(&dest, &[0xAA; 100_000], &url, &sha(&body));
+        download_file(
+            &url,
+            &dest,
+            &sha(&body),
+            Some(body.len() as u64),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        // The 206 from byte 0 was not appended: the next request asked for
+        // the whole file.
+        assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=100000-", ""]);
+        assert_no_leftovers(&dest);
+    }
+
+    #[test]
+    fn a_part_from_another_url_or_hash_or_of_unknown_origin_restarts() {
+        let body = payload();
+        let (url, ranges) = serve(body.clone(), true);
+        let dir = tempfile::tempdir().unwrap();
+        let fetch = |dest: &Path| {
+            download_file(
+                &url,
+                dest,
+                &sha(&body),
+                Some(body.len() as u64),
+                &mut |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(dest).unwrap(), body);
+            assert_no_leftovers(dest);
+        };
+        // Bytes of another file, from another address.
+        let other_url = dir.path().join("other-url.bin");
+        seed_part(
+            &other_url,
+            &[0x55; 100_000],
+            "https://elsewhere.example/file.bin",
+            &sha(&body),
+        );
+        fetch(&other_url);
+        // The same address, but written for another expected file.
+        let other_hash = dir.path().join("other-hash.bin");
+        seed_part(&other_hash, &[0x55; 100_000], &url, &"1".repeat(64));
+        fetch(&other_hash);
+        // No record at all (a `.part` left by 0.1.0-beta.4).
+        let unknown = dir.path().join("unknown.bin");
+        std::fs::write(part_path(&unknown), &body[..100_000]).unwrap();
+        fetch(&unknown);
+        // Every one started from byte 0.
+        assert_eq!(ranges.lock().unwrap().as_slice(), ["", "", ""]);
+    }
+
+    #[test]
+    fn a_second_download_of_the_same_file_says_it_is_already_downloading() {
+        let body = payload();
+        let (url, ranges) = serve(body.clone(), true);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        seed_part(&dest, &body[..1000], &url, &sha(&body));
+        let fetch = || {
+            download_file(
+                &url,
+                &dest,
+                &sha(&body),
+                Some(body.len() as u64),
+                &mut |_, _| {},
+            )
+        };
+        // Another program (the app, or `diarist-cli models pull`) holds it.
+        let held = PartLock::acquire(&dest).unwrap();
+        let err = fetch().unwrap_err().to_string();
+        assert!(err.contains("out.bin is already downloading"), "{err}");
+        assert!(ranges.lock().unwrap().is_empty());
+        assert_eq!(std::fs::metadata(part_path(&dest)).unwrap().len(), 1000);
+        drop(held);
+        fetch().unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=1000-"]);
+        assert_no_leftovers(&dest);
+    }
+
+    #[test]
+    fn plain_http_is_refused_outside_the_tests() {
+        let body = payload();
+        let (url, ranges) = serve(body.clone(), true);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        TEST_ALLOW_HTTP.with(|a| a.set(false));
+        let err = download_file(&url, &dest, &sha(&body), None, &mut |_, _| {});
+        TEST_ALLOW_HTTP.with(|a| a.set(true));
+        // ureq checks every hop, so a redirect to http ends the same way.
+        let err = err.unwrap_err().to_string();
+        assert!(err.contains("https only"), "{err}");
+        assert!(ranges.lock().unwrap().is_empty());
+        assert!(!dest.exists());
+        assert_no_leftovers(&dest);
     }
 
     #[test]
@@ -632,7 +971,7 @@ mod tests {
         // and the partial file stays for the next try.
         let (url, _) = serve_with(body.clone(), true, Some(0));
         let dest = dir.path().join("stalled.bin");
-        std::fs::write(part_path(&dest), &body[..1000]).unwrap();
+        seed_part(&dest, &body[..1000], &url, &sha(&body));
         let err = download_file(
             &url,
             &dest,
@@ -644,6 +983,9 @@ mod tests {
         .to_string();
         assert!(err.contains("stalled at 1000 bytes"), "{err}");
         assert_eq!(std::fs::metadata(part_path(&dest)).unwrap().len(), 1000);
+        // The record stays with it, so the next try resumes; the lock goes.
+        assert!(PartSource::new(&url, &sha(&body)).wrote(&dest));
+        assert!(!suffixed(&dest, ".part.lock").exists());
     }
 
     #[test]
@@ -701,7 +1043,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("SHA-256"), "{err}");
-        assert!(!dest.exists() && !part_path(&dest).exists());
+        assert!(!dest.exists());
+        assert_no_leftovers(&dest);
     }
 
     #[test]
@@ -713,7 +1056,7 @@ mod tests {
         let (url, redirects) = serve_redirect(format!("{asset}?signature=abc"));
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        std::fs::write(part_path(&dest), &body[..100_000]).unwrap();
+        seed_part(&dest, &body[..100_000], &url, &sha(&body));
         download_file(
             &url,
             &dest,
@@ -796,15 +1139,20 @@ mod tests {
                 .join("0123456789abcdef0123456789abcdef01234567")
                 .join("test-asr.q8_0.gguf")
         );
-        // An interrupted earlier download resumes.
+        // An interrupted earlier download resumes. The `.partial` an
+        // interrupted `nemo-speech pull` left goes once the model is there.
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        std::fs::write(part_path(&dest), &body[..50_000]).unwrap();
+        seed_part(&dest, &body[..50_000], &entry.url, &entry.sha256);
+        let curl_partial = suffixed(&dest, ".partial");
+        std::fs::write(&curl_partial, &body[..20_000]).unwrap();
         let mut last = 0;
         let got = download_model(&entry, &paths.models(), &mut |n, _| last = n).unwrap();
         assert_eq!(got, dest);
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         assert_eq!(last, body.len() as u64);
         assert_eq!(ranges.lock().unwrap().as_slice(), ["bytes=50000-"]);
+        assert_no_leftovers(&dest);
+        assert!(!curl_partial.exists());
         let mut side = dest.as_os_str().to_owned();
         side.push(".sha256");
         let cached = std::fs::read_to_string(PathBuf::from(side)).unwrap();
@@ -850,7 +1198,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not match the expected"), "{err}");
-        assert!(!dest.exists() && !part_path(&dest).exists());
+        assert!(!dest.exists());
+        assert_no_leftovers(&dest);
         let mut side = dest.as_os_str().to_owned();
         side.push(".sha256");
         assert!(!PathBuf::from(side).exists());
