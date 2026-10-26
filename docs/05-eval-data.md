@@ -1,13 +1,17 @@
 # Eval data
 
-Status: v0.1, 15 Oct 2026.
+Status: v0.2, 26 Oct 2026 (folders C and D, the broad and talks groups, the duplicate check); v0.1, 15 Oct 2026.
 
-## Sources (the owner's own recordings, never committed to the repo; local paths live in tools/eval/sessions.toml, which is gitignored)
+## Sources (the owner's own recordings, never committed to the repo or uploaded anywhere, because the owner has no right to distribute them; local paths live in tools/eval/sessions.toml, which is gitignored; committed results carry numbers per shorthand label only)
 
 | Folder | Count | Content |
 |---|---|---|
 | Folder A (private, Aug 2026 archive) | 15 sessions | Zoom recordings, Aug 2026: talks with host intro and Q&A; one in-room multi-speaker session; one logistics presentation with Q&A |
 | Folder B (private, Sep 2026) | 8 sessions | Zoom recordings, Sep 2026: same shape, one logistics presentation |
+| Folder C (private, Jul 2026) | 5 sessions, 224 min | Zoom recordings, Jul 2026: hackathon sessions, 2 or 3 Zoom labels, 37 to 56 speaker changes each. Given on the first days with A and B but left out of the v0.1 survey; added 26 Oct 2026 |
+| Folder D (private, Oct 2026) | 7 sessions, 356 min | Zoom recordings, Oct 2026: research talks with a host introduction and Q&A, 2 to 5 Zoom labels, 36 to 68 speaker changes each; added 26 Oct 2026 |
+
+In all: 35 recordings, 1,676 minutes (A 748, B 348, C 224, D 356).
 
 Each session has: `*.m4a` audio (use this), `*_WxH.mp4` video (ignore), `*.transcript.vtt` (Zoom transcript with speaker names per cue), `*.cc.vtt` (closed captions without speakers), `*newChat.txt`.
 
@@ -52,3 +56,15 @@ Caveat: in the Aug 14 session two labels are shared room devices, so one Zoom la
 `tools/eval` (Python, dev-only): parse transcript.vtt to SegLST and RTTM, run the app's `diarist-cli transcribe` on the m4a, export per-word JSON and RTTM, compute DER (collar 0.25 and 0), JER, speaker-count error, WDER overall and within 1 s of a reference speaker change, cpWER and tcpWER via meeteval. Results table committed to `docs/eval/`.
 
 First configs to compare: Nemotron 3.5 (default) versus Nemotron EN on word coverage and cpWER. The runtime's `--verbatim` flag does not bring the dropped fillers back: in nemo-speech 0.2.0 it only skips inverse text normalisation, and with no ITN grammars configured its output is identical to the default on AMI, Aug 2 and Sep 5 (`docs/research/12-accuracy-levers.md` section 6). The Zoom captions are machine output, so word accuracy is judged only on AMI ES2002a; the Zoom set judges speaker attribution.
+
+## Groups (26 Oct 2026)
+
+| Group | Sessions | Minutes | Use |
+|---|---|---|---|
+| Gate (`tuning`, `heldout`, `control`, `stress`, `overlap`) | Aug 2, Aug 9, Sep 5, Sep 7, Sep Logistics, Aug 14, AMI ES2002a | about 324 | Every change, every release; unchanged since v0.1, so results compare across releases |
+| `broad` | the other 12 of A, 5 of B and all 5 of C (labels "Aug N", "Sep N", "Jul N" by recording date) | about 1,014 | Rare events that a small set cannot show (stretches of speech decoded as nothing, deletions), and the release confirmation run |
+| `talks` | the 7 of D ("Talk 1" to "Talk 7") | 356 | Held out from all tuning; reported separately |
+
+The beta.4 baseline, the shipped configuration on every group, is `docs/eval/2026-10-26-baseline-beta4.md`.
+
+Duplicate check, 26 Oct 2026, over all 35 recordings: no two `*.m4a` files have the same SHA-256, no Zoom recording ID (`GMT<date>-<time>`) appears twice, no two durations are within 1 s, and no pair of transcripts shares 2 percent or more of its 8-word runs (measured against the shorter transcript). Each recording counts once.

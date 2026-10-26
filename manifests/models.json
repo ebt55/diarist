@@ -78,5 +78,94 @@
     "languages": [],
     "vram_mb": 4640,
     "vram_note": "peak delta, 77-minute file without diarization, RTX 3080 (research/08 section 7). Experimental: silently drops spans (research/08 section 8)"
+  },
+  {
+    "name": "Punctuation (Horizon-Labs small)",
+    "label": "Horizon-Labs punctuation small: adds . , ? and sentence capitals after Stop, 35 languages, CPU",
+    "pull_name": "",
+    "role": "punctuation",
+    "required": true,
+    "direct": true,
+    "experimental": false,
+    "repo": "Horizon-Labs/punctuation-restoration-small",
+    "revision": "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1",
+    "file": "onnx/model_quantized.onnx",
+    "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1/onnx/model_quantized.onnx",
+    "size_bytes": 320389931,
+    "sha256": "5679870be92c7fa47c9be9b2872fac389ef28d43d2c33f35e1315b93a82f4ace",
+    "licence": "Apache-2.0 (declared in the model card; no LICENSE file in the repository at this revision); base model MIT",
+    "streaming": false,
+    "languages": ["en", "de", "fr", "es", "it", "pt", "hi", "ko", "ru", "tr", "vi", "nl", "ja", "ar", "uk", "pl", "nb", "nn", "fi", "zh", "cs", "bg", "sk", "sv", "hr", "ro", "et", "da", "hu", "el", "lt", "lv", "mt", "sl", "he"],
+    "files": [
+      {
+        "path": "tokenizer.json",
+        "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1/tokenizer.json",
+        "size_bytes": 34363286,
+        "sha256": "f34b44a6dc8a0eef651bfa10e8325057530152606a69d9c3b6ae02efb1558f0a"
+      },
+      {
+        "path": "LICENSE-Apache-2.0.txt",
+        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/LICENSE-Apache-2.0.txt",
+        "size_bytes": 11358,
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "NOTICE-punctuation.txt",
+        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/NOTICE-punctuation.txt",
+        "size_bytes": 2179,
+        "sha256": "f9d70a3fe979fefacbb384d3bdec12fbdf14cfa11f0adbe6f7ac3d9a615ded92"
+      },
+      {
+        "path": "onnxruntime-LICENSE.txt",
+        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/onnxruntime-LICENSE.txt",
+        "size_bytes": 1094,
+        "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+      },
+      {
+        "path": "onnxruntime-ThirdPartyNotices.txt",
+        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/onnxruntime-ThirdPartyNotices.txt",
+        "size_bytes": 344457,
+        "sha256": "c53a76501ef60db6f865f20599f220761201ac4057683acefdab37d861b86622"
+      },
+      {
+        "path": "diarist-onnxruntime.dll",
+        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/diarist-onnxruntime.dll",
+        "size_bytes": 17253176,
+        "sha256": "0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c"
+      }
+    ],
+    "dir": "horizon-labs/punctuation-restoration-small",
+    "punctuation": {
+      "tokenizer": "tokenizer.json",
+      "tokenizer_kind": "hf_json",
+      "input_casing": "lower",
+      "max_tokens": 512,
+      "context_tokens": 48,
+      "batch": 8,
+      "bos_id": 2,
+      "eos_id": 1,
+      "pad_id": 0,
+      "inputs": { "ids": "input_ids", "mask": "attention_mask" },
+      "heads": [
+        {
+          "output": "logits",
+          "kind": "post",
+          "labels": ["none", ".", ",", "?", "-", ":"],
+          "position": "last_token",
+          "values": "logits"
+        }
+      ],
+      "casing": "none",
+      "marks_by_language": {
+        "*": ["period", "comma", "question"],
+        "hi": ["period", "question"],
+        "ja": ["period", "question"],
+        "zh": ["period", "question"]
+      },
+      "unit": "turn",
+      "policy": "keep_asr",
+      "runtime": "diarist-onnxruntime.dll",
+      "runtime_version": "1.31.0"
+    }
   }
 ]

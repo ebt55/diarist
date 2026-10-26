@@ -120,6 +120,42 @@ def cli(data: Path, *args: str, capture: bool = True) -> subprocess.CompletedPro
     return p
 
 
+def punctuation_of(cfg: dict) -> bool:
+    """configs.toml `punctuation = true`: the config's data root punctuates
+    (transcript.punctuation = auto); every other root runs with it off, so
+    the accuracy tables keep measuring the speech model and the diarizer
+    (docs/plans/16 section 3.5)."""
+    return bool(cfg.get("punctuation", False))
+
+
+def punctuation_model(cfg: dict) -> str:
+    """The punctuation model a `punctuation = true` config selects: its
+    `punctuation_model` key, else the manifest's required punctuation entry."""
+    if cfg.get("punctuation_model"):
+        return str(cfg["punctuation_model"])
+    manifest = json.loads((REPO / "manifests" / "models.json").read_text(encoding="utf-8"))
+    for m in manifest:
+        if m.get("role") == "punctuation" and m.get("required"):
+            return m["name"]
+    raise SystemExit("punctuation = true, but manifests/models.json has no required punctuation model")
+
+
+def set_setting(data: Path, key: str, value: str) -> None:
+    """Writes one setting into the data root's database, as the app's
+    Settings would (diarist-cli has no settings verb)."""
+    import sqlite3
+
+    con = sqlite3.connect(data / "diarist.db")
+    try:
+        con.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def prepare_data_root(config: str, cfg: dict) -> Path:
     data = WORK / "data" / config
     data.mkdir(parents=True, exist_ok=True)
@@ -127,6 +163,11 @@ def prepare_data_root(config: str, cfg: dict) -> Path:
         cli(data, "models", "scan")
     cli(data, "models", "select", "asr", cfg["asr"])
     cli(data, "models", "select", "diarizer", cfg["diarizer"])
+    if punctuation_of(cfg):
+        # Fails when the model is not in the models folder: a punctuation
+        # config must never silently run without punctuation.
+        cli(data, "models", "select", "punctuation", punctuation_model(cfg))
+    set_setting(data, "transcript.punctuation", "auto" if punctuation_of(cfg) else "off")
     return data
 
 
@@ -143,9 +184,11 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
         return None
     if meta.get("status") != "ok" or meta.get("schema") != RUN_SCHEMA or not (d / "transcript.json").is_file():
         return None
-    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")) or list(
-        meta.get("engine_args") or []
-    ) != list(cfg.get("engine_args") or []):
+    if (
+        any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language"))
+        or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+        or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
+    ):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
     if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
@@ -254,6 +297,7 @@ def transcribe(
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
         "engine_args": list(cfg.get("engine_args") or []),
+        "punctuation": punctuation_of(cfg),
         "engine_version": eng["engine"] if eng else None,
         "asr_file": eng["asr"] if eng else None,
         "diarizer_file": eng["diar"] if eng else None,
@@ -535,6 +579,14 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
         f" (local .verified matches: {diar.get('verified')}); preset {diar_preset_of(cfg, any_meta)}",
         f"- Decoder lookahead (`rnnt_right_context`): {lookahead_of(cfg, any_meta)}",
+        "- Punctuation: "
+        + (
+            f"on (`transcript.punctuation = auto`, model {punctuation_model(cfg)}); words, times and speakers are "
+            "unchanged by construction, so cpWER, tcpWER and WDER equal the unpunctuated run's, while segments end at "
+            "sentence ends, which moves DER, JER and ORC-WER"
+            if punctuation_of(cfg)
+            else "off (`transcript.punctuation = off` in the data root)"
+        ),
         f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
         + "".join(f" {a}" for a in engine_arg_flags(cfg))
         + "`, then `export --format rttm`",
@@ -747,6 +799,7 @@ def run_fleurs(config: str, cfg: dict, langs: list[str], mode: str, force: bool,
             if (
                 meta.get("status") != "ok" or meta.get("language") != tag or meta.get("asr") != cfg["asr"]
                 or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+                or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
             ):
                 meta = None
         except (OSError, ValueError):
