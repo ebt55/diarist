@@ -550,7 +550,9 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
 - Long paths: `process::command` passes the runtime as `\\?\C:\...` from
   240 characters (`process::exe_arg`); `CreateProcessW` refuses the plain
   form at 260 or more with os error 3. Model, audio and output paths get the
-  same form as arguments (`process::path_arg`).
+  same form as arguments (`process::path_arg`), and so does the database
+  (`DataPaths::db`: SQLite opens the plain form only below 260). Rust's own
+  file calls handle long paths themselves.
 - Move data folder: `move_data_root` copies (database through the backup
   API, then audio, engine, models, manifests; logs, window state and the
   pre-upgrade `diarist.db.bak-*` as they are), verifies sizes, writes the registry key (cleared when the target is
