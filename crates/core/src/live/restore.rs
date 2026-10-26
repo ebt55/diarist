@@ -11,9 +11,13 @@
 //! context and the sentence starts), each channel is segmented on its own
 //! with the run's segment options (`engine_info.segmentation`, else the
 //! defaults) and the segments are ordered by start time as the post-pass
-//! does. The result is a new run of the same kind with
+//! does. The removed words are the engine's raw words, so the channels'
+//! repeated-token loops are collapsed again before punctuation (plan 16
+//! section 12.3; a loop removed as echo comes back whole). The result is a
+//! new run of the same kind with
 //! `engine_info.echo.restored: true` (with `restored_from`,
-//! `restored_words` and `dropped: 0`), `engine_info.punctuation` replaced
+//! `restored_words` and `dropped: 0`), `engine_info.punctuation` and
+//! `engine_info.loops` replaced
 //! and an empty `echo_dropped`; speakers carry over by identity
 //! ([`RunStore::carry_over_identity`]), and the new run becomes current
 //! only while `run` still is ([`RunStore::set_current_run_if`]; otherwise
@@ -27,6 +31,7 @@ use crate::error::{CoreError, Result};
 use crate::punct::rebuild::{rebuild_transcript, run_language, source_run, store_rebuild};
 use crate::punct::{punctuate_loaded, PunctSource};
 use crate::store::{CarryOverReport, RunStore, StoreError};
+use crate::transcript::loops::{self, collapse_channels};
 use crate::transcript::{SegmentOptions, TranscriptWord, ME_LABEL};
 use crate::types::{Channel, MeetingId, MeetingStatus, RunId};
 
@@ -131,6 +136,10 @@ pub fn restore_echo_dropped(
     for (_, words) in channels.iter_mut() {
         words.sort_by_key(|w| w.start_ms);
     }
+    // The removed words are raw: a loop dropped as echo comes back whole and
+    // is collapsed again (plan 16 section 12.3); the counts include the old
+    // run's.
+    let loops = collapse_channels(&mut channels, loops::enabled(store)).on_top_of(&old.engine_info);
     // Punctuated again from the ASR's text, the restored words in place.
     let segment = segment_options(&old.engine_info);
     let lang = run_language(&detail.meeting.language, &old.engine_info);
@@ -153,6 +162,7 @@ pub fn restore_echo_dropped(
     info["echo"]["dropped"] = serde_json::json!(0);
     // Replaced wholesale: the old run's block describes other words.
     info["punctuation"] = punctuation.to_json();
+    info["loops"] = loops.to_json();
     let (new, report) = store_rebuild(store, meeting, run, old.kind, info, Some(&[]), &transcript)?;
     // Only now that the new run is current: an earlier restore of this run
     // is replaced. A punctuation copy of one is not a restore (it inherited
@@ -646,5 +656,80 @@ mod tests {
             SqliteStore::open_in_memory().unwrap(),
         ));
         restore_keeps_punctuation_copies(std::sync::Arc::new(MemoryStore::new()));
+    }
+
+    /// Plan 16 section 12.3: `echo_dropped` holds raw words, so a mic loop
+    /// the gate removed comes back whole and is collapsed again; the counts
+    /// add the old run's (its words were collapsed when it was built).
+    fn restore_collapses_a_dropped_loop(store: &dyn RunStore) {
+        let loop_words: Vec<EchoDroppedWord> = (0..4)
+            .map(|k| EchoDroppedWord {
+                start_ms: 2_080,
+                end_ms: 2_160 + k * 10,
+                text: if k == 3 { "one.".into() } else { "one".into() },
+                coefficient: 0.8,
+                reason: None,
+            })
+            .chain(std::iter::once(EchoDroppedWord {
+                start_ms: 2_470,
+                end_ms: 2_700,
+                text: "two".into(),
+                coefficient: 0.77,
+                reason: None,
+            }))
+            .collect();
+        let earlier = serde_json::json!({"applied": true, "runs": 1, "words_removed": 2,
+            "per_channel": {"loopback": {"runs": 1, "words_removed": 2}, "mic": {"runs": 0, "words_removed": 0}},
+            "rule": {"min_run": 4, "frame_ms": 80, "split_ms": 400}});
+        let setup = |store: &dyn RunStore| {
+            let (m, run) = meeting(store);
+            store.set_echo_dropped(run, &loop_words).unwrap();
+            let mut info = store.get_run(run).unwrap().engine_info;
+            info["loops"] = earlier.clone();
+            store.set_run_engine_info(run, info).unwrap();
+            (m, run)
+        };
+        let (m, run) = setup(store);
+        let r = restore_echo_dropped(store, &PunctSource::None, run).unwrap();
+        assert_eq!(mic_texts(store, m), ["hello", "one.", "two", "bye"]);
+        let kept = store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.text == "one.")
+            .unwrap();
+        assert_eq!((kept.start_ms, kept.end_ms), (2_080, 2_190));
+        assert_eq!(r.restored, 5, "every dropped word was put back");
+        let info = store.get_run(r.run).unwrap().engine_info;
+        let loops = crate::transcript::loops::LoopReport::of_engine_info(&info).unwrap();
+        assert_eq!(
+            (loops.applied, loops.runs, loops.words_removed),
+            (true, 2, 5)
+        );
+        assert_eq!(loops.per_channel["mic"].words_removed, 3);
+        assert_eq!(loops.per_channel["loopback"].words_removed, 2);
+        // With the collapse off the loop comes back as it was; the old run's
+        // counts stay (its words are still the collapsed ones).
+        store
+            .set_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let (m2, run2) = setup(store);
+        let r2 = restore_echo_dropped(store, &PunctSource::None, run2).unwrap();
+        assert_eq!(
+            mic_texts(store, m2),
+            ["hello", "one", "one", "one", "one.", "two", "bye"]
+        );
+        let info = store.get_run(r2.run).unwrap().engine_info;
+        assert_eq!(info["loops"]["applied"], false);
+        assert_eq!(info["loops"]["words_removed"], 2);
+        store
+            .remove_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS)
+            .unwrap();
+    }
+
+    #[test]
+    fn restore_collapses_a_loop_that_was_removed_as_echo() {
+        restore_collapses_a_dropped_loop(&SqliteStore::open_in_memory().unwrap());
+        restore_collapses_a_dropped_loop(&MemoryStore::new());
     }
 }
