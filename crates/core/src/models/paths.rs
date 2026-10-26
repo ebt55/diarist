@@ -154,9 +154,15 @@ impl DataPaths {
             .unwrap_or_else(|| self.root.join("engine"))
     }
 
-    /// The SQLite database.
+    /// The SQLite database. A long one in the extended-length form
+    /// (`\\?\C:\...`, from 240 characters, as the engine gets its paths):
+    /// SQLite's Windows layer opens the plain form only below `MAX_PATH`
+    /// ("unable to open database file" in a 264-character data folder) and
+    /// the extended form at any length. Short paths are unchanged.
     pub fn db(&self) -> PathBuf {
-        self.root.join("diarist.db")
+        PathBuf::from(crate::engine::process::path_arg(
+            &self.root.join("diarist.db"),
+        ))
     }
 
     /// `audio\`: `audio\<meeting uid>\...`.
@@ -398,6 +404,38 @@ mod tests {
             p.absolute(&p.relative(&p.models().join("a.gguf"))),
             p.models().join("a.gguf")
         );
+    }
+
+    /// A 264-character data folder (the KNOWN-ISSUES repro): the database
+    /// opens, migrates and answers.
+    #[cfg(windows)]
+    #[test]
+    fn the_database_opens_in_a_data_folder_longer_than_max_path() {
+        use crate::store::{SqliteStore, Store};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut root = std::path::absolute(tmp.path()).unwrap();
+        let mut i = 0;
+        while root.as_os_str().len() < 264 {
+            let left = 264 - root.as_os_str().len() - 1;
+            root.push(
+                format!("d{i}{}", "x".repeat(60))
+                    .chars()
+                    .take(left.clamp(1, 40))
+                    .collect::<String>(),
+            );
+            i += 1;
+        }
+        let p = DataPaths::at(&root);
+        assert_eq!(p.root.as_os_str().len(), 264);
+        assert!(
+            p.db().to_string_lossy().starts_with(r"\\?\"),
+            "{:?}",
+            p.db()
+        );
+        let store = SqliteStore::open(p.db()).unwrap();
+        assert!(store.list_meetings().unwrap().is_empty());
+        drop(store);
+        assert!(root.join("diarist.db").is_file());
     }
 
     #[test]
