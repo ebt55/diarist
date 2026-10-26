@@ -211,3 +211,8 @@ uv run python -I levers.py loops --configs shipped_en,shipped_n35 --sessions pre
 ```
 
 The replay and comparison scripts (`replay.sh <off|on|refined>`, `runinfo.py`, `compare.py`, `compare3.py`, `rust_vs_levers.py`, `configs.replay.toml`) lived in the gitignored `tools/eval/.work/chunk-k/` of the chunk's worktree and were deleted with the replay roots afterwards, since they held eval-session transcripts; `replay.sh` imports each session's cached words through chunk B's ignored `cli_check_root` test into a scratch data root with the setting under test and exports JSON and RTTM with a debug `diarist-cli`.
+
+## Decisions on the review fixes (orchestrator, 27 Oct 2026)
+
+- **The refined rule ships.** Against the plan's rule it keeps 83 more words, costs 0.021 points of the mean cpWER gain, and leaves no session worse than collapse off. The Zoom references penalise the kept words, but Zoom's own recognition tends to drop repeats. On the human-checked public sets, the kept copies are real speech in 7 of 12 loops. Removing a real word is the worse error, by the same principle as punctuation never changing words.
+- **The EN-only-insertion share is accepted as a bound.** It is 89.3 to 96.3 percent of the 215 words, against an expectation of 90 percent. The plan treated the share as a measurement to report, not a ship gate. The refined rule removes a subset of the plan rule's words, so it cannot remove more real speech.
