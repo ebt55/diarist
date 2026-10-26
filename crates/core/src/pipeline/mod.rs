@@ -36,10 +36,22 @@ pub struct ImportRequest {
 /// `processing` when the app starts (no import job can be running yet)
 /// become `failed`, so the library stops showing them as busy. Returns
 /// their ids and titles. Call it before the first import is queued.
+///
+/// Also deletes the runs an interrupted punctuation rebuild or Restore left
+/// half-built ([`crate::punct::rebuild::sweep_interrupted_rebuilds`]; only
+/// logged, nothing for the user to do), because this runs at every launch
+/// before any job or command can start one.
 pub fn recover_interrupted_imports(
-    store: &dyn crate::store::Store,
+    store: &dyn crate::store::RunStore,
 ) -> crate::Result<Vec<(crate::types::MeetingId, String)>> {
     use crate::types::{MeetingStatus, Source};
+    match crate::punct::rebuild::sweep_interrupted_rebuilds(store) {
+        Ok(gone) if !gone.is_empty() => {
+            log::warn!("deleted {} half-built rebuilt runs: {gone:?}", gone.len())
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("checking for half-built rebuilt runs failed: {e}"),
+    }
     let mut out = Vec::new();
     for m in store.list_meetings()? {
         if m.source == Source::File && m.status == MeetingStatus::Processing {

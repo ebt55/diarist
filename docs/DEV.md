@@ -502,6 +502,12 @@ meetings a crash left behind:
   run becomes current with `engine_info.recovery` explaining why, and the
   meeting is done.
 
+Before the first import can be queued, every launch also marks imports
+left in `processing` as failed and deletes the runs an interrupted
+punctuation rebuild or Restore left half-built (still `running`, not
+current, `punctuation.rebuilt_from` or `echo.restored_from` set, meeting
+`done` or `failed`): `pipeline::recover_interrupted_imports`.
+
 The app log says what it did (`recovered meeting 3 (was processing):
 PostPassQueued; ...`). To try it, end the app from Task Manager while it
 records (or while it shows "Finalizing") and start it again.

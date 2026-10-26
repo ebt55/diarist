@@ -37,8 +37,8 @@ use crate::transcript::SegmentOptions;
 use crate::types::{
     AudioFormat, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, LiveUtterance, Meeting,
     MeetingId, MeetingStatus, ModelCapabilities, ModelFile, ModelRole, ModelSource, RunId, RunKind,
-    RunStatus, SegmentId, Source, Speaker, SpeakerId, TrackChannel, TrackId, TranscriptRun, Word,
-    WordId,
+    RunStatus, Segment, SegmentId, Source, Speaker, SpeakerId, TrackChannel, TrackId,
+    TranscriptRun, Word, WordId,
 };
 use crate::views::{MeetingDetail, MeetingSummary, SearchHit, SegmentView, Settings};
 
@@ -341,12 +341,36 @@ pub trait RunStore: Store {
     fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport>;
 
     /// Carries speakers from `from_run` to `to_run` by identity: `to_run`
-    /// was rebuilt from `from_run`'s words with the same labels (punctuation
-    /// added or removed, echo words restored), so speaker rows match by
-    /// `(channel, engine_label)` and keep name, colour, global id, merge,
-    /// `needs_review` and name anchor; then the meeting's `reassign` edits
-    /// are replayed. Atomic; does not change the current run.
+    /// was rebuilt from `from_run`'s words, every word under the speaker row
+    /// of its own source segment, with every source speaker row present
+    /// (punctuation added or removed, echo words restored, the promoted live
+    /// run; `punct::rebuild`). Speaker rows match by `(channel,
+    /// engine_label)` and keep name, colour, global id, merge (mapped to the
+    /// new run's rows), `needs_review` and name anchor. No `reassign` edit is
+    /// replayed: the per-word speakers already carry them. Atomic; does not
+    /// change the current run.
     fn carry_over_identity(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport>;
+
+    /// The segments of a run, current or not, in `seq` order; `speaker_id`
+    /// is the segment's own speaker row, not the merge root a
+    /// [`SegmentView`] shows.
+    fn run_segments(&self, run: RunId) -> StoreResult<Vec<Segment>>;
+
+    /// The words of a run, current or not, by `(start_ms, id)`.
+    fn run_words(&self, run: RunId) -> StoreResult<Vec<Word>>;
+
+    /// Makes `run` (which must belong to `meeting`) current only while the
+    /// meeting's current run is still `expected` and the meeting is `done`
+    /// or `failed`, in one step: the compare-and-set a rebuild or Restore
+    /// ends with, so a slower one never hides the run a faster one made
+    /// current, and never switches a meeting that records or is being
+    /// finalized. `Ok(false)`: nothing changed.
+    fn set_current_run_if(
+        &self,
+        meeting: MeetingId,
+        expected: RunId,
+        run: RunId,
+    ) -> StoreResult<bool>;
 
     /// Appends one revision of a live utterance (append-only; a later `rev`
     /// of the same `(channel, utt)` supersedes earlier ones). Word times are

@@ -1608,6 +1608,8 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
         speaker: ME_LABEL.into(),
         raw_label: None,
         raw_text: None,
+        margin: None,
+        overlap: false,
     }];
     let gone = Path::new("does-not-exist");
     let (mic, lb) = (gone.join("mic.wav"), gone.join("loopback.wav"));
@@ -2389,6 +2391,180 @@ fn a_promoted_live_run_is_punctuated_as_a_post_pass_run() {
         RunKind::Live
     );
     assert_eq!(word_texts(&*store, m2.id), [("hello".to_owned(), None)]);
+
+    // A punctuator that changes no word (a language it does not cover, an
+    // error, a panic): the live run is promoted as before, nothing is made.
+    let unchanged = [
+        crate::punct::PunctSource::factory(|| {
+            crate::punct::fixture::FixturePunctuator::marks(&[("hello", Mark::Period)])
+                .languages(&["de"])
+        }),
+        crate::punct::PunctSource::factory(|| {
+            crate::punct::fixture::FixturePunctuator::new(|_, _| {
+                Err(crate::error::CoreError::Models("boom".into()))
+            })
+        }),
+        crate::punct::PunctSource::factory(|| {
+            crate::punct::fixture::FixturePunctuator::new(|_, _| panic!("the model blew up"))
+        }),
+    ];
+    for source in unchanged {
+        let (m3, live3) = interrupted_meeting(&store, dir.path(), "Unchanged", true);
+        let job = punct_job(dir.path(), &m3, live3, false, source);
+        let report = run_post_pass(
+            &*store,
+            &*file,
+            &job,
+            &crate::pipeline::CancelToken::default(),
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(report.current_run, live3);
+        assert!(!report.live_run_deleted);
+        assert_eq!(store.list_runs(m3.id).unwrap().len(), 1, "no post_pass run");
+        assert_eq!(word_texts(&*store, m3.id), [("hello".to_owned(), None)]);
+        assert_eq!(
+            store.get_meeting(m3.id).unwrap().meeting.status,
+            MeetingStatus::Done
+        );
+    }
+}
+
+#[test]
+fn a_promoted_live_run_keeps_every_speaker_row_and_word_speaker() {
+    use crate::punct::rebuild::testing::{rows, seen};
+    use crate::punct::Mark;
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    let (m, _) = interrupted_meeting(&store, dir.path(), "Rows", true);
+    // A second live run for the same WAVs: a provisional speaker renamed
+    // while recording that never got a word, two loopback speakers, an
+    // untagged mic word.
+    let live = store
+        .create_run(
+            m.id,
+            RunKind::Live,
+            serde_json::json!({"runtime": "fake live"}),
+        )
+        .unwrap()
+        .id;
+    let ghost = store
+        .live_speaker(live, Channel::Loopback, "spk_2")
+        .unwrap();
+    store
+        .rename_speaker_at(ghost.id, "Ghost", 100, 200)
+        .unwrap();
+    store.set_speaker_color(ghost.id, "#abcdef").unwrap();
+    let word = |t0: u64, text: &str, spk: Option<&str>| EngineWord {
+        t0_us: t0,
+        t1_us: t0 + 300_000,
+        text: text.into(),
+        conf: None,
+        spk: spk.map(str::to_owned),
+    };
+    store
+        .append_live_utterance(
+            live,
+            Channel::Loopback,
+            0,
+            0,
+            &[word(500_000, "hello", Some("spk_0"))],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(
+            live,
+            Channel::Loopback,
+            1,
+            0,
+            &[word(2_500_000, "there", Some("spk_1"))],
+        )
+        .unwrap();
+    store
+        .append_live_utterance(live, Channel::Mic, 0, 0, &[word(1_500_000, "yes", None)])
+        .unwrap();
+    store
+        .materialise_live_run(live, &SegmentOptions::default())
+        .unwrap();
+    store.finish_run(live, RunStatus::Done).unwrap();
+    store.set_current_run(m.id, live).unwrap();
+    let id = |label: &str| {
+        store
+            .run_speakers(live)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.engine_label == label)
+            .unwrap()
+            .id
+    };
+    store.rename_speaker(id("spk_0"), "Alice", None).unwrap();
+    store.merge_speakers(id("spk_1"), id("spk_0")).unwrap();
+    store.rename_speaker(id("me"), "Owner", None).unwrap();
+    let (rows_before, seen_before) = (rows(&*store, live), seen(&*store, live));
+    assert_eq!(rows_before.len(), 4, "{rows_before:?}");
+
+    let job = punct_job(
+        dir.path(),
+        &m,
+        live,
+        false,
+        fixture(&[("hello", Mark::Period)]),
+    );
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    assert_ne!(report.current_run, live);
+    assert_eq!(rows(&*store, report.current_run), rows_before);
+    assert_eq!(seen(&*store, report.current_run), seen_before);
+    assert_eq!(report.unplaced_names, 0);
+    assert!(report.live_run_deleted);
+    assert_eq!(
+        word_texts(&*store, m.id),
+        [
+            ("Hello.".to_owned(), Some("hello".to_owned())),
+            ("Yes".to_owned(), Some("yes".to_owned())),
+            ("There".to_owned(), Some("there".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn a_panicking_punctuator_never_leaves_the_post_pass_processing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    let (m, live) = interrupted_meeting(&store, dir.path(), "Panic", true);
+    let source = crate::punct::PunctSource::factory(|| {
+        crate::punct::fixture::FixturePunctuator::new(|_, _| panic!("the model blew up"))
+    });
+    let job = punct_job(dir.path(), &m, live, true, source);
+    let report = run_post_pass(
+        &*store,
+        &*file,
+        &job,
+        &crate::pipeline::CancelToken::default(),
+        &|_| {},
+    )
+    .unwrap();
+    let run = store.get_run(report.current_run).unwrap();
+    assert_eq!(run.kind, RunKind::PostPass);
+    let p = &run.engine_info["punctuation"];
+    assert_eq!(
+        (p["applied"].as_bool(), p["reason"].as_str()),
+        (Some(false), Some("error"))
+    );
+    assert!(
+        p["message"].as_str().unwrap().contains("the model blew up"),
+        "{p}"
+    );
+    let d = store.get_meeting(m.id).unwrap();
+    assert_eq!(d.meeting.status, MeetingStatus::Done);
+    assert!(report.flac_path.is_file(), "the FLAC was made");
+    assert_eq!(word_texts(&*store, m.id)[0], ("p0".to_owned(), None));
 }
 
 #[test]

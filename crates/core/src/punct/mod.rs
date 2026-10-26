@@ -19,6 +19,7 @@
 
 // Chunk A: label application, the test fixture and rebuilds.
 pub mod apply;
+mod chars;
 pub mod fixture;
 pub mod rebuild;
 
@@ -500,8 +501,9 @@ pub enum PunctReason {
     /// The model does not cover the run's language (or the script has no
     /// marks, Thai).
     Language,
-    /// The ASR already punctuates this channel (8 or more marks per 100
-    /// words): only the sentence-start casing rule ran.
+    /// The ASR already punctuates this channel
+    /// ([`apply::ASR_PUNCTUATES_PER_100`]: 12 or more marks per 100 words):
+    /// only the sentence-start casing rule ran.
     AsrPunctuates,
     /// ONNX Runtime is missing, the wrong module loaded, or a dependency of
     /// it is missing.
@@ -793,6 +795,11 @@ impl std::fmt::Debug for PunctSource {
 /// streams broken at the run's `max_gap_ms`) and returns the report for
 /// `engine_info.punctuation`. Without a punctuator every word gets the
 /// ASR's text back and the report is the one `loaded` carries.
+///
+/// A panic in the punctuator (or in applying its labels) never reaches the
+/// caller: the words keep the ASR's text, the report says `error` with the
+/// panic's message, and the punctuator is dropped, `loaded` keeping that
+/// report, so the rest of a bulk run does not use the session again.
 pub fn punctuate_loaded(
     loaded: &mut Loaded,
     channels: &mut [(Channel, Vec<TranscriptWord>)],
@@ -800,17 +807,43 @@ pub fn punctuate_loaded(
     lang: &RunLanguage,
     cancel: &dyn Fn() -> bool,
 ) -> PunctReport {
-    match loaded {
-        Ok(p) => {
+    let outcome = match loaded {
+        Ok(p) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut opts = p.options();
             opts.max_gap_ms = segment.max_gap_ms;
-            punctuate_channels(channels, Some(p.as_mut()), &opts, lang, cancel)
-        }
+            apply::punctuate(channels, Some(p.as_mut()), &opts, lang, cancel)
+        }))
+        .unwrap_or_else(|payload| {
+            let message = format!(
+                "punctuation panicked: {}",
+                apply::panic_message(payload.as_ref())
+            );
+            log::warn!("{message}");
+            apply::Outcome {
+                report: PunctReport::not_applied_with(PunctReason::Error, message),
+                panicked: true,
+            }
+        }),
         Err(report) => {
             punctuate_channels(channels, None, &PunctOptions::default(), lang, cancel);
-            (**report).clone()
+            return (**report).clone();
         }
+    };
+    if outcome.panicked {
+        apply::restore_asr_text(channels);
+        let report = PunctReport::not_applied_with(
+            PunctReason::Error,
+            outcome
+                .report
+                .message
+                .clone()
+                .unwrap_or_else(|| "the punctuation model panicked".to_owned()),
+        );
+        // The session is not used again; its drop may panic too.
+        let gone = std::mem::replace(loaded, Err(Box::new(report)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(gone)));
     }
+    outcome.report
 }
 
 /// The `transcript.punctuation` setting.

@@ -53,11 +53,15 @@
 //!    of the new run has that name.
 //!
 //! [`carry_over_identity`] is the carry for a run rebuilt from another
-//! one's words and labels (punctuation added or removed, echo words
-//! restored, plan 16 section 3.9): speakers are matched by `(channel,
+//! one's words (punctuation added or removed, echo words restored, the
+//! promoted live run; plan 16 section 3.9, `punct::rebuild`): the rebuild
+//! puts every word under the speaker row of its own source segment and
+//! creates every source speaker row, so speakers are matched by `(channel,
 //! engine_label)`, with no alignment and no region minimum, and keep their
-//! name, colour, global id, merge, `needs_review` and name anchor; then the
-//! `reassign` edits are replayed as in step 6.
+//! name, colour, global id, merge, `needs_review` and name anchor. No
+//! `reassign` edit is replayed: the words already sit where the edits (and
+//! later renames of their targets) put them, and a replay by display name
+//! would move them again.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -606,8 +610,8 @@ fn replay_edits(
 }
 
 /// The identity carry (module docs) over any backend: `to_run` was built
-/// from `from_run`'s words with the same labels. The caller provides
-/// atomicity.
+/// from `from_run`'s words with each word's own speaker row. The caller
+/// provides atomicity.
 pub(crate) fn carry_over_identity(
     b: &mut dyn CarryBackend,
     from_run: RunId,
@@ -671,15 +675,6 @@ pub(crate) fn carry_over_identity(
             report.shift_ms.insert(c, 0);
         }
     }
-    replay_edits(
-        b,
-        old_run.meeting_id,
-        to_run,
-        &old_speakers,
-        &old_match,
-        &|_| 0,
-        &mut report,
-    )?;
     report.needs_review.sort();
     report.needs_review.dedup();
     Ok(report)

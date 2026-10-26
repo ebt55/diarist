@@ -98,6 +98,8 @@ const RUN_CASES: &[(&str, RunCase)] = &[
         echo_dropped_and_gated_materialise,
     ),
     ("carry_over_identity_by_label", carry_over_identity_by_label),
+    ("run_segments_and_words", run_segments_and_words),
+    ("set_current_run_if_compares", set_current_run_if_compares),
 ];
 
 fn report(name: &str, e: Box<dyn std::any::Any + Send>) -> ! {
@@ -2140,9 +2142,12 @@ fn raw_text_round_trip(store: &dyn Store) {
 }
 
 /// `carry_over_identity` (plan 16 section 3.9 step 6): a run rebuilt from
-/// another's words with the same labels gets every speaker's name, colour,
-/// merge, review flag and anchor by `(channel, engine_label)`, however
-/// little the speaker said, and the `reassign` edits replayed.
+/// another's words, each under its own speaker row and with every row
+/// present, gets every speaker's name, colour, global id, merge, review flag
+/// and anchor by `(channel, engine_label)`, however little the speaker said.
+/// No `reassign` edit is replayed: the rebuild already put every word where
+/// the edits had (a replay by display name would move them again after a
+/// rename).
 fn carry_over_identity_by_label(store: &dyn RunStore) {
     let m = live_meeting(store);
     let spec: &[(&str, &[(i64, i64)])] = &[
@@ -2194,9 +2199,50 @@ fn carry_over_identity_by_label(store: &dyn RunStore) {
     assert!(w.needs_review, "the review flag comes along");
     assert_eq!(report.needs_review, vec![w.id]);
     assert!(report.shift_ms.values().all(|&s| s == 0));
-    // The reassign replays: 50-60 s is Priya's again, no split needed.
-    assert_eq!(report.edits_replayed, 1);
-    assert_eq!(report.segments_split, 0);
+    // Every field of every row, global id included, ids mapped.
+    let old_rows = store.run_speakers(old).unwrap();
+    let new_rows = store.run_speakers(new).unwrap();
+    assert_eq!(old_rows.len(), new_rows.len());
+    let label_of = |rows: &[Speaker], id: Option<SpeakerId>| {
+        id.map(|id| {
+            rows.iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .engine_label
+                .clone()
+        })
+    };
+    for o in &old_rows {
+        let n = new_rows
+            .iter()
+            .find(|n| (n.channel, &n.engine_label) == (o.channel, &o.engine_label))
+            .unwrap();
+        assert_eq!(
+            (
+                &n.display_name,
+                &n.color,
+                n.global_id,
+                n.needs_review,
+                n.name_anchor_start_ms,
+                n.name_anchor_end_ms,
+                label_of(&new_rows, n.merged_into)
+            ),
+            (
+                &o.display_name,
+                &o.color,
+                o.global_id,
+                o.needs_review,
+                o.name_anchor_start_ms,
+                o.name_anchor_end_ms,
+                label_of(&old_rows, o.merged_into)
+            ),
+            "{}",
+            o.engine_label
+        );
+    }
+    // No edit replays: the new run's words stay where they were built.
+    assert_eq!((report.edits_replayed, report.segments_split), (0, 0));
+    assert!(report.created_speakers.is_empty());
     store.set_current_run(m, new).unwrap();
     let tail: Vec<(i64, String)> = segments(store, m)
         .into_iter()
@@ -2207,7 +2253,7 @@ fn carry_over_identity_by_label(store: &dyn RunStore) {
         tail,
         [
             (43_000, "Speaker 4".to_owned()),
-            (50_000, "Priya".to_owned())
+            (50_000, "Speaker 4".to_owned())
         ]
     );
     // Bad runs.
@@ -2216,4 +2262,88 @@ fn carry_over_identity_by_label(store: &dyn RunStore) {
     let other = live_meeting(store);
     let elsewhere = run_with(store, other, RunKind::PostPass, &carry_transcript(spec));
     assert!(is_invalid(store.carry_over_identity(old, elsewhere)));
+}
+
+/// `run_segments` and `run_words` read any run, current or not, with each
+/// segment's own speaker row (not the merge root the views show).
+fn run_segments_and_words(store: &dyn RunStore) {
+    let (m, first) = seeded_meeting(store, "Runs", T0);
+    let mut t = sample_transcript();
+    t.words[2].margin = Some(0.5);
+    t.words[3].overlap = true;
+    t.words[0].raw_text = Some("hello".into());
+    let second = run_with(store, m, RunKind::PostPass, &t);
+    // A merge on the first run: the views show the root, run_segments the row.
+    let spk0 = by_label(store, first, "spk_0");
+    let spk1 = by_label(store, first, "spk_1");
+    store.merge_speakers(spk1.id, spk0.id).unwrap();
+    let shown = segments(store, m);
+    assert_eq!(shown[2].speaker_id, spk0.id);
+    let segs = store.run_segments(first).unwrap();
+    assert_eq!(segs.len(), 3);
+    assert!(segs.iter().all(|s| s.run_id == first && s.meeting_id == m));
+    assert_eq!(
+        segs.iter().map(|s| s.seq).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "seq order"
+    );
+    assert_eq!(segs[2].speaker_id, spk1.id, "its own row");
+    assert_eq!(segs[0].text, "Hello budget team");
+    let words = store.run_words(first).unwrap();
+    assert_eq!(words.len(), 9);
+    assert!(words.windows(2).all(|p| p[0].start_ms <= p[1].start_ms));
+    let own: std::collections::HashSet<SegmentId> = segs.iter().map(|s| s.id).collect();
+    assert!(words.iter().all(|w| own.contains(&w.segment_id)));
+    // The run that is not current, with its fusion fields and raw text.
+    let other = store.run_words(second).unwrap();
+    assert_eq!(other.len(), 9);
+    assert!(other.iter().all(|w| !own.contains(&w.segment_id)));
+    assert_eq!(other[2].margin, Some(0.5));
+    assert!(other[3].overlap);
+    assert_eq!(other[0].raw_text.as_deref(), Some("hello"));
+    assert_eq!(store.run_segments(second).unwrap().len(), 3);
+    // An empty run, and one that does not exist.
+    let empty = store
+        .create_run(m, RunKind::File, serde_json::json!({}))
+        .unwrap()
+        .id;
+    assert!(store.run_segments(empty).unwrap().is_empty());
+    assert!(store.run_words(empty).unwrap().is_empty());
+    assert!(is_not_found(store.run_segments(RunId(424_242))));
+    assert!(is_not_found(store.run_words(RunId(424_242))));
+}
+
+/// `set_current_run_if`: the compare-and-set a rebuild ends with.
+fn set_current_run_if_compares(store: &dyn RunStore) {
+    let (m, first) = seeded_meeting(store, "CAS", T0);
+    let second = run_with(store, m, RunKind::PostPass, &sample_transcript());
+    let third = run_with(store, m, RunKind::PostPass, &sample_transcript());
+    let current = || store.get_meeting(m).unwrap().current_run.unwrap().id;
+    // Still the run expected: switched.
+    assert!(store.set_current_run_if(m, first, second).unwrap());
+    assert_eq!(current(), second);
+    // Not any more: nothing changes.
+    assert!(!store.set_current_run_if(m, first, third).unwrap());
+    assert_eq!(current(), second);
+    // A meeting that records or is being finalized is never switched.
+    for status in [MeetingStatus::Processing, MeetingStatus::Recording] {
+        store.set_meeting_status(m, status).unwrap();
+        assert!(!store.set_current_run_if(m, second, third).unwrap());
+        assert_eq!(current(), second);
+    }
+    store.set_meeting_status(m, MeetingStatus::Failed).unwrap();
+    assert!(store.set_current_run_if(m, second, third).unwrap());
+    assert_eq!(current(), third);
+    // A meeting without a current run expects nothing.
+    store.delete_run(third).unwrap();
+    assert_eq!(store.get_meeting(m).unwrap().current_run, None);
+    assert!(!store.set_current_run_if(m, second, first).unwrap());
+    // Bad arguments.
+    let other = store.create_meeting(new_meeting("Other", T0)).unwrap().id;
+    assert!(is_invalid(store.set_current_run_if(other, first, second)));
+    assert!(is_not_found(store.set_current_run_if(
+        m,
+        first,
+        RunId(424_242)
+    )));
 }

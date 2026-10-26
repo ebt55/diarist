@@ -14,8 +14,10 @@
 //! case. Times, speaker, labels, confidence and the word count never change,
 //! so the normalised word sequence of a run is the same before and after.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
+use super::chars::is_punctuation;
 use super::{
     Case, LangHint, Mark, MarkPolicy, PunctOptions, PunctReason, PunctReport, PunctUnit,
     Punctuator, Script, WordLabel,
@@ -27,8 +29,10 @@ use crate::transcript::{ends_sentence, TranscriptWord};
 use crate::types::Channel;
 
 /// A channel whose ASR already marks this many words per 100 or more is not
-/// given to the model (`reason: "asr_punctuates"`; Parakeet marks 12.4).
-pub const ASR_PUNCTUATES_PER_100: f64 = 8.0;
+/// given to the model (`reason: "asr_punctuates"`; plan 16 section 3.13: 12,
+/// up from 8, because Nemotron 3.5 writes 10.4 per 100 on German read speech
+/// where the model still adds 6 to 9 F1 points; Parakeet marks 12.4).
+pub const ASR_PUNCTUATES_PER_100: f64 = 12.0;
 
 /// The language a run is punctuated in (plan 16 section 3.8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,12 +76,15 @@ impl RunLanguage {
 /// call can be repeated on words that were punctuated before. Per channel,
 /// the words in time order form streams, broken by pauses longer than
 /// `opts.max_gap_ms` (and speaker changes for [`PunctUnit::Turn`]); each
-/// stream is labelled in one [`Punctuator::label_stream`] call. A word whose
-/// display text differs from the ASR's gets `raw_text = Some(old)`; every
-/// other word `raw_text = None`. Without a punctuator nothing changes but
-/// the ASR's text is restored (`reason: "no_model"`). A model error or a
-/// cancellation leaves the whole run with the ASR's text (`reason:
-/// "error"`). Never panics on the model's output.
+/// stream is labelled in one [`Punctuator::label_stream`] call, which sees
+/// only the words with text (letters or digits): an empty, whitespace-only
+/// or punctuation-only word keeps its text and is not given to the model.
+/// A word whose display text differs from the ASR's gets `raw_text =
+/// Some(old)`; every other word `raw_text = None`. Without a punctuator
+/// nothing changes but the ASR's text is restored (`reason: "no_model"`).
+/// A model error, a panic in the model or a cancellation leaves the whole
+/// run with the ASR's text (`reason: "error"`). Never panics on the
+/// model's output.
 pub fn punctuate_channels(
     channels: &mut [(Channel, Vec<TranscriptWord>)],
     p: Option<&mut dyn Punctuator>,
@@ -85,7 +92,18 @@ pub fn punctuate_channels(
     lang: &RunLanguage,
     cancel: &dyn Fn() -> bool,
 ) -> PunctReport {
-    let started = Instant::now();
+    punctuate(channels, p, opts, lang, cancel).report
+}
+
+/// What [`punctuate`] did: the report, and whether the punctuator panicked
+/// (the caller drops it: [`super::punctuate_loaded`]).
+pub(crate) struct Outcome {
+    pub report: PunctReport,
+    pub panicked: bool,
+}
+
+/// The ASR's text back on every word of `channels`.
+pub(crate) fn restore_asr_text(channels: &mut [(Channel, Vec<TranscriptWord>)]) {
     for (_, words) in channels.iter_mut() {
         for w in words.iter_mut() {
             if let Some(raw) = w.raw_text.take() {
@@ -93,8 +111,33 @@ pub fn punctuate_channels(
             }
         }
     }
+}
+
+/// The text of a panic's payload.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".to_owned())
+}
+
+/// [`punctuate_channels`], telling a panic in the punctuator apart.
+pub(crate) fn punctuate(
+    channels: &mut [(Channel, Vec<TranscriptWord>)],
+    p: Option<&mut dyn Punctuator>,
+    opts: &PunctOptions,
+    lang: &RunLanguage,
+    cancel: &dyn Fn() -> bool,
+) -> Outcome {
+    let started = Instant::now();
+    restore_asr_text(channels);
+    let done = |report: PunctReport| Outcome {
+        report,
+        panicked: false,
+    };
     let Some(p) = p else {
-        return PunctReport::not_applied(PunctReason::NoModel);
+        return done(PunctReport::not_applied(PunctReason::NoModel));
     };
     let info = p.descriptor().clone();
     let mut report = PunctReport {
@@ -113,7 +156,7 @@ pub fn punctuate_channels(
         report.language_source = Some((*source).to_owned());
         if !info.covers(l) || l == "th" {
             report.reason = PunctReason::Language;
-            return report;
+            return done(report);
         }
     }
 
@@ -137,8 +180,11 @@ pub fn punctuate_channels(
         let channel_reason = if rate >= ASR_PUNCTUATES_PER_100 {
             for s in &streams {
                 let hint = stream_hint(words, s, language.as_ref().map(|l| l.0.clone()));
-                let mut texts: Vec<String> = s.iter().map(|&i| words[i].text.clone()).collect();
-                sentence_starts(&mut texts, &hint);
+                let olds: Vec<&str> = s.iter().map(|&i| words[i].text.as_str()).collect();
+                let parts: Vec<Part> = olds.iter().map(|o| Part::of(o)).collect();
+                let mut cores: Vec<String> = parts.iter().map(|w| w.core.to_owned()).collect();
+                sentence_starts(&mut cores, &hint);
+                let texts = checked(&parts, &parts, cores, &hint, &mut totals);
                 totals.commit(words, s, texts);
             }
             PunctReason::AsrPunctuates
@@ -147,7 +193,7 @@ pub fn punctuate_channels(
             let mut channel_failure: Option<PunctReason> = None;
             for s in &streams {
                 if cancel() {
-                    return failed(channels, report, "cancelled");
+                    return done(failed(channels, report, "cancelled"));
                 }
                 let hint = stream_hint(words, s, language.as_ref().map(|l| l.0.clone()));
                 if language.is_none() && !script_covered(&info, hint.script) {
@@ -159,19 +205,52 @@ pub fn punctuate_channels(
                     continue;
                 }
                 let olds: Vec<&str> = s.iter().map(|&i| words[i].text.as_str()).collect();
-                let inputs: Vec<String> = olds.iter().map(|o| strip_marks(o)).collect();
-                let input_refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
-                let labels = match p.label_stream(&input_refs, &hint, cancel) {
-                    Ok(l) => l,
-                    Err(CoreError::Cancelled) => return failed(channels, report, "cancelled"),
-                    Err(e) => return failed(channels, report, &e.to_string()),
+                let parts: Vec<Part> = olds.iter().map(|o| Part::of(o)).collect();
+                // The model's input: the words with text, without their
+                // trailing allow-list marks (under both policies).
+                let sent: Vec<usize> = (0..parts.len())
+                    .filter(|&k| has_text(parts[k].core))
+                    .collect();
+                let inputs: Vec<String> =
+                    sent.iter().map(|&k| strip_marks(parts[k].core)).collect();
+                let labels_sent = if inputs.is_empty() {
+                    Vec::new()
+                } else {
+                    let input_refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+                    // A panic in the model must not unwind into the job
+                    // (the JobQueue would swallow it and leave the meeting
+                    // `processing`).
+                    let called = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        let labels = p.label_stream(&input_refs, &hint, cancel);
+                        (labels, p.take_stats())
+                    }));
+                    let (labels, stats) = match called {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            let message = format!(
+                                "the punctuation model panicked: {}",
+                                panic_message(payload.as_ref())
+                            );
+                            return Outcome {
+                                report: failed(channels, report, &message),
+                                panicked: true,
+                            };
+                        }
+                    };
+                    totals.inner_marks_dropped += stats.inner_marks_dropped;
+                    match labels {
+                        Ok(l) => l,
+                        Err(CoreError::Cancelled) => {
+                            return done(failed(channels, report, "cancelled"))
+                        }
+                        Err(e) => return done(failed(channels, report, &e.to_string())),
+                    }
                 };
-                totals.inner_marks_dropped += p.take_stats().inner_marks_dropped;
-                if labels.len() != s.len() {
+                if labels_sent.len() != sent.len() {
                     log::warn!(
                         "punctuation: {} labels for a stream of {} words; the stream keeps the ASR's text",
-                        labels.len(),
-                        s.len()
+                        labels_sent.len(),
+                        sent.len()
                     );
                     totals.streams_refused += 1;
                     channel_failure.get_or_insert(PunctReason::Invariant);
@@ -180,27 +259,32 @@ pub fn punctuate_channels(
                 if language.is_none() {
                     script_used.get_or_insert(hint.script);
                 }
-                let bases: Vec<String> = match opts.policy {
-                    MarkPolicy::KeepAsr => olds.iter().map(|o| (*o).to_owned()).collect(),
-                    MarkPolicy::Replace => inputs.clone(),
-                };
-                let mut texts: Vec<String> = labels
+                let mut labels = vec![WordLabel::KEEP; parts.len()];
+                let mut input_of: Vec<Option<&str>> = vec![None; parts.len()];
+                for ((&k, label), input) in sent.iter().zip(labels_sent).zip(&inputs) {
+                    labels[k] = label;
+                    input_of[k] = Some(input.as_str());
+                }
+                let bases: Vec<Part> = parts
                     .iter()
-                    .enumerate()
-                    .map(|(k, label)| {
-                        let script = Script::of_word(olds[k]).unwrap_or(hint.script);
-                        labelled(&bases[k], &inputs[k], label, script, &hint, opts)
+                    .map(|w| match opts.policy {
+                        MarkPolicy::KeepAsr => w.clone(),
+                        MarkPolicy::Replace => w.with_core(strip_marks_str(w.core)),
                     })
                     .collect();
-                sentence_starts(&mut texts, &hint);
+                let mut cores: Vec<String> = (0..parts.len())
+                    .map(|k| match input_of[k] {
+                        Some(input) => {
+                            let script = Script::of_word(olds[k]).unwrap_or(hint.script);
+                            labelled(bases[k].core, input, &labels[k], script, &hint, opts)
+                        }
+                        None => bases[k].core.to_owned(),
+                    })
+                    .collect();
+                sentence_starts(&mut cores, &hint);
                 // Rules 2 and 3, checked on every word at run time: a word
                 // that fails keeps the ASR's text.
-                for (k, t) in texts.iter_mut().enumerate() {
-                    if t != olds[k] && !valid(olds[k], &bases[k], t, &hint) {
-                        totals.rejected_words += 1;
-                        *t = olds[k].to_owned();
-                    }
-                }
+                let texts = checked(&parts, &bases, cores, &hint, &mut totals);
                 totals.commit(words, s, texts);
                 channel_ok = true;
             }
@@ -238,7 +322,66 @@ pub fn punctuate_channels(
     report.inner_marks_dropped = Some(totals.inner_marks_dropped);
     report.streams_refused = Some(totals.streams_refused);
     report.wall_s = Some(round2(started.elapsed().as_secs_f64()));
-    report
+    done(report)
+}
+
+/// One word of a stream: the whitespace around the ASR's text stays where
+/// it is (a mark goes before trailing whitespace), `core` is what is
+/// labelled.
+#[derive(Debug, Clone)]
+struct Part<'a> {
+    lead: &'a str,
+    core: &'a str,
+    trail: &'a str,
+}
+
+impl<'a> Part<'a> {
+    fn of(text: &'a str) -> Self {
+        let start = text.len() - text.trim_start().len();
+        let end = text.trim_end().len().max(start);
+        Part {
+            lead: &text[..start],
+            core: &text[start..end],
+            trail: &text[end..],
+        }
+    }
+
+    /// The same whitespace around another core.
+    fn with_core(&self, core: &'a str) -> Self {
+        Part {
+            core,
+            ..self.clone()
+        }
+    }
+}
+
+/// The display texts of a stream: each new core is checked against the
+/// ASR's (`parts`) and its `base` (rules 2 and 3); one that fails keeps the
+/// ASR's text and is counted. The whitespace goes back around each core.
+fn checked(
+    parts: &[Part],
+    bases: &[Part],
+    cores: Vec<String>,
+    hint: &LangHint,
+    totals: &mut Totals,
+) -> Vec<String> {
+    parts
+        .iter()
+        .zip(bases)
+        .zip(cores)
+        .map(|((old, base), new)| {
+            if new != old.core && !valid(old.core, base.core, &new, hint) {
+                totals.rejected_words += 1;
+                return format!("{}{}{}", old.lead, old.core, old.trail);
+            }
+            format!("{}{}{}", old.lead, new, old.trail)
+        })
+        .collect()
+}
+
+/// Whether a word has letters or digits for the model (and for marks).
+fn has_text(word: &str) -> bool {
+    !norm(word).is_empty()
 }
 
 /// The ASR's text back on every word, and an error report.
@@ -247,13 +390,7 @@ fn failed(
     mut report: PunctReport,
     message: &str,
 ) -> PunctReport {
-    for (_, words) in channels.iter_mut() {
-        for w in words.iter_mut() {
-            if let Some(raw) = w.raw_text.take() {
-                w.text = raw;
-            }
-        }
-    }
+    restore_asr_text(channels);
     log::warn!("punctuation failed: {message}");
     report.applied = false;
     report.reason = PunctReason::Error;
@@ -294,9 +431,15 @@ impl Totals {
     }
 }
 
-/// Marks added and whether a letter was raised, from `old` to `new`.
+/// Marks added (every mark of the allow-list, the dash and the Spanish
+/// pre-marks included) and whether a letter was raised, from `old` to
+/// `new`.
 fn changes(old: &str, new: &str) -> (u64, bool) {
-    let marks = |s: &str| s.chars().filter(|c| is_mark_char(*c)).count() as i64;
+    let marks = |s: &str| {
+        s.chars()
+            .filter(|c| is_mark_char(*c) || is_allow_list_char(*c))
+            .count() as i64
+    };
     let added = (marks(new) - marks(old)).max(0) as u64;
     let upper = |s: &str| s.chars().filter(|c| c.is_uppercase()).count();
     (added, upper(new) > upper(old))
@@ -420,13 +563,18 @@ fn is_allow_list_char(c: char) -> bool {
 
 /// `old` without its trailing allow-list marks; `old` itself when nothing
 /// but marks would be left.
-fn strip_marks(old: &str) -> String {
+fn strip_marks_str(old: &str) -> &str {
     let stripped = old.trim_end_matches(is_allow_list_char);
     if norm(stripped).is_empty() {
-        old.to_owned()
+        old
     } else {
-        stripped.to_owned()
+        stripped
     }
+}
+
+/// [`strip_marks_str`], owned.
+fn strip_marks(old: &str) -> String {
+    strip_marks_str(old).to_owned()
 }
 
 /// Whether `mark` may be applied in `language` (plan 16 section 3.4).
@@ -514,9 +662,22 @@ fn raise(c: char, language: Option<&str>) -> Option<char> {
     (low.next().is_none() && l == c).then_some(u)
 }
 
+/// A clitic the ASR wrote as a word of its own: an apostrophe (`'` or `’`)
+/// and then a letter (`'s`, `’re`, `'ll`, `'d`, `'m`, `'ve`). Never given
+/// a first-letter capital ("'s" after a pause is not "'S").
+fn is_clitic(text: &str) -> bool {
+    let mut cs = text.chars();
+    matches!(cs.next(), Some('\'' | '’')) && cs.next().is_some_and(char::is_alphabetic)
+}
+
 /// Raises the first cased letter of `text`, if it is lower case and may be
-/// raised. A word that starts with an upper-case letter is left alone.
+/// raised. A word that starts with an upper-case letter is left alone, and
+/// so is a clitic ([`is_clitic`]); an opening quote or bracket is skipped
+/// (`“hello` becomes `“Hello`).
 fn raise_first(text: &str, language: Option<&str>) -> String {
+    if is_clitic(text) {
+        return text.to_owned();
+    }
     let mut out = String::with_capacity(text.len());
     let mut done = false;
     for c in text.chars() {
@@ -576,10 +737,10 @@ fn labelled(
     let mut new: String = cased.into_iter().collect();
     let has_text = !norm(base).is_empty();
     if let Some(m) = label.post.filter(|m| !m.is_pre()) {
-        let ends_in_punct = base
-            .chars()
-            .last()
-            .is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace());
+        // Real punctuation only: a word ending in a combining mark (a
+        // Devanagari nukta or virama, NFD Latin) or a symbol (an emoji)
+        // takes a mark.
+        let ends_in_punct = base.chars().last().is_some_and(is_punctuation);
         if has_text && !ends_in_punct && allowed(opts, language, m) {
             if let Some(r) = render(m, script, language) {
                 new.push_str(r);
@@ -587,10 +748,7 @@ fn labelled(
         }
     }
     if let Some(m) = label.pre.filter(|m| m.is_pre()) {
-        let starts_with_punct = base
-            .chars()
-            .next()
-            .is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace());
+        let starts_with_punct = base.chars().next().is_some_and(is_punctuation);
         if has_text && !starts_with_punct && allowed(opts, language, m) {
             if let Some(r) = render(m, script, language) {
                 new.insert_str(0, r);
@@ -602,10 +760,18 @@ fn labelled(
 
 /// Raises the first letter of a stream's first word and of every word
 /// after a sentence end, in scripts with case (plan 16 section 3.3 rule 6).
+/// A word without letters or digits (empty, whitespace, punctuation only)
+/// is not raised and does not end a sentence start: one that ends a
+/// sentence (a lone `?`) starts one, anything else (a lone `-`) leaves
+/// the flag as it was.
 fn sentence_starts(texts: &mut [String], hint: &LangHint) {
     let language = hint.language.as_deref();
     let mut start = true;
     for t in texts.iter_mut() {
+        if !has_text(t) {
+            start |= ends_sentence(t);
+            continue;
+        }
         let script = Script::of_word(t).unwrap_or(hint.script);
         if start && script.has_case() {
             *t = raise_first(t, language);
@@ -666,6 +832,8 @@ mod tests {
             speaker: spk.into(),
             raw_label: Some(spk.into()),
             raw_text: None,
+            margin: None,
+            overlap: false,
         }
     }
 
@@ -858,7 +1026,7 @@ mod tests {
     }
 
     /// `text` followed by `n` filler words (`f0` ...), so the ASR's own
-    /// marks stay under the 8-per-100 rate.
+    /// marks stay under the 12-per-100 cut-off.
     fn padded(text: &str, n: usize) -> String {
         let filler: Vec<String> = (0..n).map(|i| format!("f{i}")).collect();
         format!("{text} {}", filler.join(" "))
@@ -1064,10 +1232,11 @@ mod tests {
 
     #[test]
     fn a_channel_the_asr_punctuates_is_left_to_the_casing_rule() {
-        // Mic: 2 of 20 words marked by the ASR (10 per 100); loopback: none.
-        let mut mic_text: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
+        // Mic: 3 of 25 words marked by the ASR (12 per 100); loopback: none.
+        let mut mic_text: Vec<String> = (0..25).map(|i| format!("w{i}")).collect();
         mic_text[4] = "stop.".into();
         mic_text[9] = "and,".into();
+        mic_text[14] = "really?".into();
         let mic = stream(Channel::Mic, &mic_text.join(" "));
         let lb = stream(Channel::Loopback, "yes we can");
         let mut ch = vec![(Channel::Mic, mic), (Channel::Loopback, lb)];
@@ -1075,22 +1244,68 @@ mod tests {
         let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
         assert_eq!(r.channels.get("mic"), Some(&PunctReason::AsrPunctuates));
         assert_eq!(r.channels.get("loopback"), Some(&PunctReason::Ok));
-        assert_eq!(r.asr_marks_per_100.get("mic"), Some(&10.0));
+        assert_eq!(r.asr_marks_per_100.get("mic"), Some(&12.0));
         assert_eq!(r.asr_marks_per_100.get("loopback"), Some(&0.0));
         assert!(r.applied);
+        assert_eq!(r.rejected_words, Some(0));
         // The model only saw the loopback.
         assert_eq!(p.calls().len(), 1);
         assert_eq!(texts(&ch[1].1), ["Yes", "we", "can."]);
-        // The mic got capitals at its start and after "stop." only.
+        // The mic got capitals at its start and after "stop." and
+        // "really?" only.
         assert_eq!(ch[0].1[0].text, "W0");
         assert_eq!(ch[0].1[5].text, "W5");
         assert_eq!(ch[0].1[10].text, "w10");
+        assert_eq!(ch[0].1[15].text, "W15");
         assert_eq!(ch[0].1[4].text, "stop.");
         // Both channels punctuated by their ASR: not applied.
         let mut both = vec![(Channel::Mic, ch[0].1.clone())];
         let r = run(&mut both, &mut p, &PunctOptions::default(), &en());
         assert!(!r.applied);
         assert_eq!(r.reason, PunctReason::AsrPunctuates);
+    }
+
+    /// `n` words of which the first `marked` end in an ASR period.
+    fn marked_stream(n: usize, marked: usize) -> Vec<TranscriptWord> {
+        let words: Vec<String> = (0..n)
+            .map(|i| {
+                if i < marked {
+                    format!("m{i}.")
+                } else {
+                    format!("w{i}")
+                }
+            })
+            .collect();
+        stream(Channel::Source, &words.join(" "))
+    }
+
+    #[test]
+    fn the_asr_punctuates_cut_off_is_twelve_per_hundred() {
+        assert_eq!(ASR_PUNCTUATES_PER_100, 12.0);
+        for (n, marked, rate, reason) in [
+            (100, 12, 12.0, PunctReason::AsrPunctuates),
+            (25, 3, 12.0, PunctReason::AsrPunctuates),
+            (100, 11, 11.0, PunctReason::Ok),
+            (101, 12, 11.88, PunctReason::Ok),
+            // Above the old cut-off of 8 (Nemotron 3.5 on German read
+            // speech writes 10.4): still punctuated.
+            (1000, 104, 10.4, PunctReason::Ok),
+        ] {
+            let mut ch = vec![(Channel::Source, marked_stream(n, marked))];
+            let mut p = FixturePunctuator::marks(&[]);
+            let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
+            assert_eq!(
+                r.asr_marks_per_100.get("source"),
+                Some(&rate),
+                "{n} {marked}"
+            );
+            assert_eq!(r.channels.get("source"), Some(&reason), "{n} {marked}");
+            assert_eq!(
+                p.calls().is_empty(),
+                reason == PunctReason::AsrPunctuates,
+                "{n} {marked}"
+            );
+        }
     }
 
     #[test]
@@ -1259,5 +1474,281 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn combining_marks_and_symbols_are_not_punctuation() {
+        // Hindi words ending in a nukta (U+093C) or a virama (U+094D) get
+        // the danda; NFD Latin (a combining acute) gets its period and its
+        // capital; a word ending in an emoji gets the mark after it, a word
+        // that is only an emoji gets nothing.
+        let nukta = "\u{0915}\u{093C}";
+        let virama = "\u{0915}\u{094D}";
+        let mut hi = vec![(
+            Channel::Source,
+            stream(Channel::Source, &format!("{nukta} {virama} है")),
+        )];
+        let mut p = FixturePunctuator::per_word(|_| WordLabel::post(Mark::Period));
+        let r = run(
+            &mut hi,
+            &mut p,
+            &PunctOptions::default(),
+            &RunLanguage::new("hi"),
+        );
+        assert_eq!(
+            texts(&hi[0].1),
+            [format!("{nukta}।"), format!("{virama}।"), "है।".to_owned()]
+        );
+        assert_eq!(r.marks_added, Some(3));
+        assert_eq!(r.rejected_words, Some(0));
+        let nfd = "cafe\u{0301}";
+        let mut ch = vec![(
+            Channel::Source,
+            stream(
+                Channel::Source,
+                &format!("{nfd} ok\u{1F44D} \u{1F44D} ok\u{2764}\u{FE0F}"),
+            ),
+        )];
+        let mut p = FixturePunctuator::per_word(|_| WordLabel::post(Mark::Period));
+        let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
+        assert_eq!(
+            texts(&ch[0].1),
+            [
+                "Cafe\u{0301}.",
+                "Ok\u{1F44D}.",
+                "\u{1F44D}",
+                "Ok\u{2764}\u{FE0F}."
+            ]
+        );
+        // The emoji-only word was not given to the model.
+        assert_eq!(
+            p.calls(),
+            [vec![
+                nfd.to_owned(),
+                "ok\u{1F44D}".into(),
+                "ok\u{2764}\u{FE0F}".into()
+            ]]
+        );
+        assert_eq!(r.rejected_words, Some(0));
+    }
+
+    #[test]
+    fn words_without_text_are_not_given_to_the_model_and_keep_the_sentence_start() {
+        // Filler words keep the ASR's marks under the cut-off.
+        let mut words = stream(Channel::Source, &padded("done x - y next ... ? yes", 20));
+        words[1].text = String::new();
+        words[3].text = "  ".into();
+        let mut ch = vec![(Channel::Source, words)];
+        let mut p = FixturePunctuator::marks(&[("done", Mark::Period)]);
+        let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
+        assert_eq!(p.calls().len(), 1);
+        assert_eq!(p.calls()[0][..3], ["done", "next", "yes"]);
+        assert_eq!(p.calls()[0].len(), 23);
+        // "done." starts a sentence; the empty word, "-" and the
+        // whitespace word neither take a capital nor end the start, so
+        // "next" gets it; "..." and a lone "?" end a sentence, so "yes"
+        // gets one too.
+        assert_eq!(
+            texts(&ch[0].1)[..8],
+            ["Done.", "", "-", "  ", "Next", "...", "?", "Yes"]
+        );
+        assert_eq!(r.rejected_words, Some(0));
+        assert_eq!(r.words, Some(28));
+    }
+
+    #[test]
+    fn a_mark_goes_before_trailing_whitespace() {
+        let mut words = stream(Channel::Source, "so we");
+        words[0].text = "so ".into();
+        words[1].text = " we\t".into();
+        let mut ch = vec![(Channel::Source, words)];
+        let mut p = FixturePunctuator::per_word(|_| WordLabel::post(Mark::Comma));
+        let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
+        assert_eq!(p.calls(), [vec!["so", "we"]]);
+        assert_eq!(texts(&ch[0].1), ["So, ", " we,\t"]);
+        assert_eq!(ch[0].1[0].raw_text.as_deref(), Some("so "));
+        assert_eq!(r.rejected_words, Some(0));
+        // The segment text the builder joins has no stray space.
+        let t = crate::transcript::build_transcript(&ch[0].1, &Default::default());
+        assert_eq!(t.segments[0].text, "So, we,");
+        assert!(ends_sentence("done. ") && !ends_sentence("so, "));
+    }
+
+    #[test]
+    fn dashes_count_as_marks_added() {
+        let opts = PunctOptions {
+            marks_by_language: BTreeMap::from([("en".to_owned(), vec![Mark::Dash])]),
+            ..PunctOptions::default()
+        };
+        let mut ch = vec![(Channel::Source, stream(Channel::Source, "well so"))];
+        let mut p = FixturePunctuator::marks(&[("well", Mark::Dash)]);
+        let r = run(&mut ch, &mut p, &opts, &en());
+        assert_eq!(texts(&ch[0].1), ["Well-", "so"]);
+        assert_eq!(r.marks_added, Some(1));
+        assert_eq!(changes("e-mail", "E-mail."), (1, true));
+        assert_eq!(changes("qué", "¿qué"), (1, false));
+    }
+
+    #[test]
+    fn bad_labels_on_several_words_are_each_rejected_and_counted() {
+        // Upper-casing a Greek word that ends in a medial sigma changes its
+        // `norm` (the lower case of "ΛΟΓΟΣ" ends in the final sigma): three
+        // such words, each refused and counted, each keeping the ASR's text;
+        // the other words are labelled.
+        let mut ch = vec![(
+            Channel::Source,
+            stream(Channel::Source, "οδοσ και λογοσ ναι καλοσ τελος"),
+        )];
+        let mut p = FixturePunctuator::per_word(|w| {
+            if w.ends_with('σ') {
+                WordLabel {
+                    post: Some(Mark::Comma),
+                    case: Case::Upper,
+                    ..WordLabel::default()
+                }
+            } else {
+                WordLabel::post(Mark::Period)
+            }
+        });
+        let r = punctuate_channels(
+            &mut ch,
+            Some(&mut p),
+            &PunctOptions::default(),
+            &RunLanguage::new("el"),
+            &|| false,
+        );
+        assert_eq!(r.rejected_words, Some(3));
+        assert!(r.applied);
+        assert_eq!(
+            texts(&ch[0].1),
+            ["οδοσ", "και.", "λογοσ", "ναι.", "καλοσ", "τελος."]
+        );
+        assert!(ch[0].1.iter().step_by(2).all(|w| w.raw_text.is_none()));
+        assert_eq!(r.marks_added, Some(3));
+    }
+
+    #[test]
+    fn per_character_casing_applies_where_the_counts_match() {
+        // The model sees "iphone" (the ASR's comma stripped): six flags for
+        // six characters raise exactly the flagged letter, before the
+        // ASR's comma; four for "nasa" raise all four; a flag on a letter
+        // that cannot be raised (ß) leaves it.
+        let mut ch = vec![(
+            Channel::Source,
+            stream(Channel::Source, &padded("the iphone, nasa straße", 20)),
+        )];
+        let mut p = FixturePunctuator::per_word(|w| WordLabel {
+            case: Case::Chars(match w {
+                "iphone" => vec![false, true, false, false, false, false],
+                "nasa" => vec![true; 4],
+                "straße" => vec![true, false, false, false, true, false],
+                _ => vec![false; w.chars().count()],
+            }),
+            ..WordLabel::default()
+        });
+        let r = run(
+            &mut ch,
+            &mut p,
+            &PunctOptions::default(),
+            &RunLanguage::new("de"),
+        );
+        assert_eq!(p.calls()[0][..4], ["the", "iphone", "nasa", "straße"]);
+        assert_eq!(texts(&ch[0].1)[..4], ["The", "iPhone,", "NASA", "Straße"]);
+        assert_eq!(r.rejected_words, Some(0));
+        assert_eq!(r.case_upgrades, Some(4));
+        // Under Replace the ASR's comma goes and the flags still fit.
+        let mut ch = vec![(
+            Channel::Source,
+            stream(Channel::Source, &padded("the iphone,", 20)),
+        )];
+        let opts = PunctOptions {
+            policy: MarkPolicy::Replace,
+            ..PunctOptions::default()
+        };
+        run(&mut ch, &mut p, &opts, &RunLanguage::new("de"));
+        assert_eq!(texts(&ch[0].1)[..2], ["The", "iPhone"]);
+    }
+
+    #[test]
+    fn clitics_never_take_the_sentence_start_capital() {
+        let cases: [(&str, &[&str]); 6] = [
+            ("'s fine", &["'s", "fine"]),
+            ("’re ok", &["’re", "ok"]),
+            ("“hello there", &["“Hello", "there"]),
+            ("(okay then", &["(Okay", "then"]),
+            ("done. 'll do", &["Done.", "'ll", "do"]),
+            ("it's 'd 'm 've", &["It's", "'d", "'m", "'ve"]),
+        ];
+        for (text, want) in cases {
+            let mut ch = vec![(Channel::Source, stream(Channel::Source, text))];
+            let mut p = FixturePunctuator::marks(&[("done", Mark::Period)]);
+            let r = run(&mut ch, &mut p, &PunctOptions::default(), &en());
+            assert_eq!(texts(&ch[0].1), want, "{text}");
+            assert_eq!(r.rejected_words, Some(0), "{text}");
+        }
+        // After a gap: the clitic starts a new stream and still stays as
+        // the ASR wrote it; the start does not pass to the next word.
+        let mut words = stream(Channel::Source, "said 's right");
+        for w in &mut words[1..] {
+            w.start_ms += 7_000;
+            w.end_ms += 7_000;
+        }
+        let mut ch = vec![(Channel::Source, words)];
+        let mut p = FixturePunctuator::marks(&[]);
+        run(&mut ch, &mut p, &PunctOptions::default(), &en());
+        assert_eq!(texts(&ch[0].1), ["Said", "'s", "right"]);
+        // A model's first-letter casing does not raise one either.
+        let mut ch = vec![(Channel::Source, stream(Channel::Source, "'s ok"))];
+        let mut p = FixturePunctuator::per_word(|_| WordLabel {
+            case: Case::First,
+            ..WordLabel::default()
+        });
+        run(&mut ch, &mut p, &PunctOptions::default(), &en());
+        assert_eq!(texts(&ch[0].1), ["'s", "Ok"]);
+        assert!(is_clitic("'s") && is_clitic("’re") && !is_clitic("'") && !is_clitic("“hello"));
+    }
+
+    #[test]
+    fn a_panic_in_the_model_leaves_the_asr_text_and_says_so() {
+        let mut ch = vec![(Channel::Source, stream(Channel::Source, "hi there"))];
+        let mut p = FixturePunctuator::new(|_, _| panic!("index out of range"));
+        let out = punctuate(
+            &mut ch,
+            Some(&mut p),
+            &PunctOptions::default(),
+            &en(),
+            &|| false,
+        );
+        assert!(out.panicked);
+        assert_eq!(out.report.reason, PunctReason::Error);
+        assert!(out
+            .report
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("index out of range"));
+        assert_eq!(texts(&ch[0].1), ["hi", "there"]);
+        // Through `punctuate_loaded` the punctuator is dropped.
+        let mut loaded: crate::punct::Loaded =
+            Ok(Box::new(FixturePunctuator::new(|_, _| panic!("again"))));
+        let r = crate::punct::punctuate_loaded(
+            &mut loaded,
+            &mut ch,
+            &Default::default(),
+            &en(),
+            &|| false,
+        );
+        assert_eq!(r.reason, PunctReason::Error);
+        assert!(loaded.is_err());
+        assert_eq!(texts(&ch[0].1), ["hi", "there"]);
+        let r = crate::punct::punctuate_loaded(
+            &mut loaded,
+            &mut ch,
+            &Default::default(),
+            &en(),
+            &|| false,
+        );
+        assert_eq!(r.reason, PunctReason::Error);
+        assert!(r.message.unwrap().contains("again"));
     }
 }
