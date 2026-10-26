@@ -32,6 +32,7 @@ export const SETTING_DEFAULTS = {
   "playback.normalize": "true",
   "transcript.punctuation": "auto",
   "transcript.punctuation_threads": "4",
+  "transcript.collapse_loops": "on",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
