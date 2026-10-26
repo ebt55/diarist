@@ -415,9 +415,15 @@ export const PUNCT_NONE_HELP =
   "No punctuation model yet. Download it in the list above, or put a model folder with its .meet.json sidecar " +
   "into the models folder and press Refresh.";
 
+/**
+ * ONNX Runtime's environment is process-global: a model folder with the
+ * same minor release reuses the loaded copy; another minor version (1.32.x
+ * after 1.31.x) needs a restart, which the runtime row then says
+ * (`diagnostics::punctuation_check`).
+ */
 export const PUNCT_RESTART_NOTE =
-  "ONNX Runtime loads once per run of Diarist: a model whose folder brings another version of it takes effect " +
-  "after a restart.";
+  "ONNX Runtime loads once per run of Diarist: a model that needs another version of it (1.32 after 1.31, say) " +
+  "takes effect after a restart.";
 
 /** `transcript.punctuation` as `diarist_core::punct::setting` reads it. */
 export type PunctMode = "auto" | "off";
