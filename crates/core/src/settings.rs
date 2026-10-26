@@ -66,6 +66,12 @@ pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
 /// default, the low-latency setting live keeps), a number = that many 80 ms
 /// frames for every model ([`file_lookahead`]).
 pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
+/// Decoder lookahead of the live server, no UI (docs/plans/16 section 5):
+/// "" or `model` = the ASR model's own `live_right_context` (none today, so
+/// the runtime default), `low` = none (the runtime default, 1 frame), a
+/// number = that many 80 ms frames where the model was trained for it
+/// ([`live_lookahead`], [`crate::models::live_right_context`]).
+pub const ENGINE_LIVE_LOOKAHEAD: &str = "engine.live_lookahead";
 /// Diarizer preset of file jobs and the post-pass, no UI (docs/04 section
 /// 5): "" or `model` = the diarizer's own value, `streaming` = none (the
 /// runtime default, the setting live keeps), any other text = that preset
@@ -116,6 +122,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
     (ENGINE_FILE_LOOKAHEAD, ""),
+    (ENGINE_LIVE_LOOKAHEAD, ""),
     (ENGINE_FILE_DIAR_PRESET, ""),
     (SETUP_LATER, "false"),
     (SETUP_LANGUAGE_SEEDED, "false"),
@@ -227,6 +234,36 @@ pub fn file_lookahead(settings: &Settings) -> FileLookahead {
         FileLookahead::Frames(n)
     } else {
         FileLookahead::Model
+    }
+}
+
+/// The `engine.live_lookahead` setting (docs/plans/16 section 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveLookahead {
+    /// The ASR model's `live_right_context` (manifest entry or sidecar).
+    Model,
+    /// No flag: the runtime default (1 frame, 160 ms).
+    Low,
+    /// This value for every model that was trained for it; another model
+    /// keeps its own ([`crate::models::live_right_context`]).
+    Frames(u32),
+    /// Text that is none of the above, kept for the log line; read as
+    /// [`Self::Model`].
+    Unreadable(String),
+}
+
+/// `engine.live_lookahead`: `""` or `model` (any case), `low` (any case), a
+/// non-negative integer, else [`LiveLookahead::Unreadable`] (`-1`, `high`).
+pub fn live_lookahead(settings: &Settings) -> LiveLookahead {
+    let v = get(settings, ENGINE_LIVE_LOOKAHEAD).trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("model") {
+        LiveLookahead::Model
+    } else if v.eq_ignore_ascii_case("low") {
+        LiveLookahead::Low
+    } else if let Ok(n) = v.parse::<u32>() {
+        LiveLookahead::Frames(n)
+    } else {
+        LiveLookahead::Unreadable(v.to_owned())
     }
 }
 
@@ -416,6 +453,39 @@ mod tests {
         assert_eq!(six.resolve(Some(13)), Some(6));
         assert_eq!(six.resolve(None), Some(6));
         assert_eq!(read(Some("0")).resolve(Some(13)), Some(0));
+    }
+
+    #[test]
+    fn live_lookahead_forms() {
+        let store = MemoryStore::new();
+        let read = |v: Option<&str>| {
+            match v {
+                Some(v) => store.set_setting(ENGINE_LIVE_LOOKAHEAD, v).unwrap(),
+                None => store.remove_setting(ENGINE_LIVE_LOOKAHEAD).unwrap(),
+            }
+            live_lookahead(&effective(&store).unwrap())
+        };
+        // The default and `model`: the model's own value.
+        assert_eq!(default_of(ENGINE_LIVE_LOOKAHEAD), Some(""));
+        for v in [None, Some(""), Some("model"), Some(" MODEL ")] {
+            assert_eq!(read(v), LiveLookahead::Model, "{v:?}");
+        }
+        // `low`: no flag.
+        assert_eq!(read(Some("Low")), LiveLookahead::Low);
+        // A number, trimmed; 0 is a value (80 ms), not "unset".
+        assert_eq!(read(Some(" 6 ")), LiveLookahead::Frames(6));
+        assert_eq!(read(Some("0")), LiveLookahead::Frames(0));
+        assert_eq!(read(Some("13")), LiveLookahead::Frames(13));
+        // Anything else is kept for the log line and read as the model's.
+        for v in ["-1", "high", "6.5", "6 frames"] {
+            assert_eq!(read(Some(v)), LiveLookahead::Unreadable(v.into()), "{v}");
+        }
+        // The file lookahead is a separate key.
+        store.set_setting(ENGINE_LIVE_LOOKAHEAD, "6").unwrap();
+        assert_eq!(
+            file_lookahead(&effective(&store).unwrap()),
+            FileLookahead::Model
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //!
 //! `nemo-speech --json serve --asr-model <asr> --diar-model <diar> --device <device>
 //!  --host 127.0.0.1 --port <free> --no-ui --asr.batching.state_arena_slots 2
-//!  --asr.endpointing.enable=true`
+//!  --asr.endpointing.enable=true [--asr.streaming.rnnt_right_context <N>]`
 //!
 //! The listener opens only after the models load (4.6 to 5.9 s), so
 //! readiness is `GET /ready` returning 200. A monitor thread restarts the
@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::engine::nemo_cli::RIGHT_CONTEXT_FLAG;
 use crate::engine::process;
 use crate::error::{CoreError, Result};
 
@@ -44,6 +45,11 @@ pub struct ServeConfig {
     pub device: String,
     /// `--asr.batching.state_arena_slots` (one per live session).
     pub slots: u32,
+    /// `--asr.streaming.rnnt_right_context N` (80 ms frames) when set
+    /// ([`crate::models::live_right_context`]); `None`: no flag, the
+    /// runtime default (1 frame, 160 ms). A lookahead among
+    /// [`Self::extra_args`] is the only one then.
+    pub right_context: Option<u32>,
     /// Stop the server after this long without sessions (`None`: never).
     pub idle_timeout: Option<Duration>,
     /// Give up on a launch that is not ready after this long.
@@ -69,6 +75,7 @@ impl ServeConfig {
             asr_model: asr_model.into(),
             diar_model: diar_model.into(),
             slots: 2,
+            right_context: None,
             idle_timeout: Some(Duration::from_secs(30 * 60)),
             ready_timeout: Duration::from_secs(90),
             log_path: None,
@@ -100,8 +107,21 @@ impl ServeConfig {
         ] {
             a.push(s.into());
         }
+        if let Some(r) = self.right_context.filter(|_| !self.extra_right_context()) {
+            a.push(RIGHT_CONTEXT_FLAG.into());
+            a.push(r.to_string().into());
+        }
         a.extend(self.extra_args.iter().map(Into::into));
         a
+    }
+
+    /// [`Self::extra_args`] carry a lookahead (`FLAG N` or `FLAG=N`).
+    fn extra_right_context(&self) -> bool {
+        self.extra_args.iter().any(|x| {
+            x == RIGHT_CONTEXT_FLAG
+                || x.strip_prefix(RIGHT_CONTEXT_FLAG)
+                    .is_some_and(|rest| rest.starts_with('='))
+        })
     }
 }
 
@@ -645,6 +665,59 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(joined.contains("--device vulkan:0 --host"), "{joined}");
+    }
+
+    /// The live lookahead (docs/plans/16 section 5): no flag unless a value
+    /// is set, then right after endpointing; an extra flag is the only one.
+    #[test]
+    fn serve_line_takes_the_live_lookahead_only_when_set() {
+        let line = |cfg: &ServeConfig| -> Vec<String> {
+            cfg.args(8766)
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut cfg = ServeConfig::new("E:/engine", "E:/models", "E:/m/asr.gguf", "E:/m/diar.gguf");
+        assert_eq!(cfg.right_context, None);
+        let base = line(&cfg);
+        assert!(!base.iter().any(|a| a.contains("rnnt_right_context")));
+        for n in [0, 6, 13] {
+            cfg.right_context = Some(n);
+            let mut want = base.clone();
+            want.extend([
+                "--asr.streaming.rnnt_right_context".to_owned(),
+                n.to_string(),
+            ]);
+            assert_eq!(line(&cfg), want, "{n}");
+        }
+        // Before the extra flags.
+        cfg.right_context = Some(6);
+        cfg.extra_args = vec!["--verbose".into()];
+        let joined = line(&cfg).join(" ");
+        assert!(
+            joined.ends_with(
+                "--asr.endpointing.enable=true --asr.streaming.rnnt_right_context 6 --verbose"
+            ),
+            "{joined}"
+        );
+        // A lookahead among the extra flags wins, in either form.
+        for extra in [
+            vec!["--asr.streaming.rnnt_right_context".to_owned(), "1".into()],
+            vec!["--asr.streaming.rnnt_right_context=1".to_owned()],
+        ] {
+            cfg.extra_args = extra.clone();
+            let args = line(&cfg);
+            let flags: Vec<&String> = args
+                .iter()
+                .filter(|a| a.contains("rnnt_right_context"))
+                .collect();
+            assert_eq!(flags, [&extra[0]], "{extra:?}");
+        }
+        // A different flag with the same prefix is not one.
+        cfg.extra_args = vec!["--asr.streaming.rnnt_right_context_x".into(), "2".into()];
+        assert!(line(&cfg)
+            .windows(2)
+            .any(|w| w == ["--asr.streaming.rnnt_right_context", "6"]));
     }
 
     #[test]

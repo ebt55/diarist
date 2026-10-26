@@ -25,6 +25,7 @@ export const SETTING_DEFAULTS = {
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",
   "engine.file_lookahead": "",
+  "engine.live_lookahead": "",
   "engine.file_diar_preset": "",
   "setup.later": "false",
   "setup.language_seeded": "false",

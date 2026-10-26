@@ -285,6 +285,9 @@ fn scan_model(
         if c.capabilities.file_right_context.is_none() {
             c.capabilities.file_right_context = m.file_right_context;
         }
+        if c.capabilities.live_right_context.is_none() {
+            c.capabilities.live_right_context = m.live_right_context;
+        }
         if c.capabilities.file_preset.is_none() {
             c.capabilities.file_preset = m.file_preset.clone();
         }
@@ -615,6 +618,7 @@ mod tests {
             vram_mb: Some(100),
             vram_note: None,
             file_right_context: None,
+            live_right_context: None,
             file_preset: None,
             files: vec![],
             dir: None,
@@ -757,6 +761,7 @@ mod tests {
         manifest.models[0].size_bytes = bytes.len() as u64;
         manifest.models[0].file = "tiny.gguf".into();
         manifest.models[0].file_preset = Some("v3-offline".into());
+        manifest.models[0].live_right_context = Some(6);
         let p = paths
             .models()
             .join("nvidia")
@@ -785,17 +790,19 @@ mod tests {
             f.sha256.as_deref(),
             Some(manifest.models[0].sha256.as_str())
         );
-        // The manifest's file lookahead and preset reach the capabilities; a
-        // sidecar wins.
+        // The manifest's file and live lookaheads and preset reach the
+        // capabilities; a sidecar wins.
         assert_eq!(f.capabilities.file_right_context, Some(13));
+        assert_eq!(f.capabilities.live_right_context, Some(6));
         assert_eq!(f.capabilities.file_preset.as_deref(), Some("v3-offline"));
         std::fs::write(
             Sidecar::path_for(&p),
-            r#"{"file_right_context": 6, "file_preset": "v3-streaming"}"#,
+            r#"{"file_right_context": 6, "live_right_context": 1, "file_preset": "v3-streaming"}"#,
         )
         .unwrap();
         let r = scan(&paths, &store, &manifest).unwrap();
         assert_eq!(r.files[0].capabilities.file_right_context, Some(6));
+        assert_eq!(r.files[0].capabilities.live_right_context, Some(1));
         assert_eq!(
             r.files[0].capabilities.file_preset.as_deref(),
             Some("v3-streaming")

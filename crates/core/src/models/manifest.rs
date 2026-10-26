@@ -19,6 +19,26 @@ pub const USER_MODELS: &str = "models.user.json";
 /// Runtime versions whose CLI contract matches our fixtures (research/08).
 pub const TESTED_ENGINE_VERSIONS: &[&str] = &["0.2.0"];
 
+/// Decoder lookaheads (`--asr.streaming.rnnt_right_context`, 80 ms frames)
+/// the shipped streaming models were trained for, from their model cards'
+/// `att_context_size` lists (docs/research/17, lever 3): the EN model
+/// {0, 1, 6, 13}, Nemotron 3.5 {0, 1, 3, 6, 13}. The runtime takes any
+/// value without an error (docs/research/12 section 1), so the live
+/// lookahead is checked against these ([`crate::models::live_right_context`]).
+const TRAINED_LIVE_RIGHT_CONTEXTS: &[(&str, &[u32])] = &[
+    ("nemotron-en", &[0, 1, 6, 13]),
+    ("nemotron-3.5", &[0, 1, 3, 6, 13]),
+];
+
+/// The lookaheads manifest model `name` was trained for; `None` for a model
+/// whose values are not known (any other entry), which is not checked.
+pub fn trained_live_right_contexts(name: &str) -> Option<&'static [u32]> {
+    TRAINED_LIVE_RIGHT_CONTEXTS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| *v)
+}
+
 /// One recommended model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEntry {
@@ -74,6 +94,13 @@ pub struct ModelEntry {
     /// 3.5. Absent: no flag, the runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_right_context: Option<u32>,
+    /// Decoder lookahead of the live server (`nemo-speech serve
+    /// --asr.streaming.rnnt_right_context`, 80 ms frames), copied into the
+    /// matching file's capabilities. Must be one the model was trained for
+    /// ([`trained_live_right_contexts`]). Absent: no flag, the runtime
+    /// default (1 frame, 160 ms; docs/plans/16 section 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_right_context: Option<u32>,
     /// Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
     /// `v3-offline` for Nemotron 3 Diarization: the streaming algorithm with
     /// 21 s chunks), copied into the matching file's capabilities. Absent: no
@@ -563,6 +590,40 @@ mod tests {
         assert_eq!(json.matches("file_right_context").count(), 2);
         let back: Vec<ModelEntry> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m.models);
+    }
+
+    #[test]
+    fn live_lookahead_is_unset_until_measured_and_trained_when_set() {
+        let m = Manifest::builtin();
+        // docs/plans/16 section 5: no live flag until the measurement passes
+        // (chunk F part 2 sets 6 for both Nemotron models here).
+        for name in ["nemotron-en", "nemotron-3.5", "nemotron-3-diarization"] {
+            assert_eq!(m.model(name).unwrap().live_right_context, None, "{name}");
+        }
+        // Whatever the manifest sets is a value the model was trained for.
+        for e in &m.models {
+            if let Some(n) = e.live_right_context {
+                let trained = trained_live_right_contexts(&e.name);
+                assert!(trained.is_some_and(|v| v.contains(&n)), "{}: {n}", e.name);
+            }
+        }
+        assert_eq!(
+            trained_live_right_contexts("nemotron-en"),
+            Some(&[0, 1, 6, 13][..])
+        );
+        assert_eq!(
+            trained_live_right_contexts("Nemotron-3.5"),
+            Some(&[0, 1, 3, 6, 13][..])
+        );
+        assert_eq!(trained_live_right_contexts("parakeet-tdt"), None);
+        // Round trip: left out where unset, read back where set.
+        let json = serde_json::to_string(&m.models).unwrap();
+        assert!(!json.contains("live_right_context"), "{json}");
+        let mut en = m.model("nemotron-en").unwrap().clone();
+        en.live_right_context = Some(6);
+        let text = serde_json::to_string(&en).unwrap();
+        assert!(text.contains(r#""live_right_context":6"#), "{text}");
+        assert_eq!(serde_json::from_str::<ModelEntry>(&text).unwrap(), en);
     }
 
     #[test]

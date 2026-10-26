@@ -305,6 +305,12 @@ pub struct ModelCapabilities {
     /// the runtime default (the low-latency setting live keeps).
     #[serde(default)]
     pub file_right_context: Option<u32>,
+    /// Decoder lookahead of the live server (`nemo-speech serve
+    /// --asr.streaming.rnnt_right_context`, 80 ms frames), from the manifest
+    /// entry or the `<file>.meet.json` sidecar. `None`: no flag, the
+    /// runtime default (1 frame, 160 ms).
+    #[serde(default)]
+    pub live_right_context: Option<u32>,
     /// Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
     /// e.g. `v3-offline`), from the manifest entry or the sidecar. `None`: no
     /// flag, the runtime's streaming default (which live keeps).

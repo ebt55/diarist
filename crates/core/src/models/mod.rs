@@ -369,6 +369,111 @@ pub fn file_right_context(
     setting.resolve(own)
 }
 
+/// The decoder lookahead the live server runs an ASR model at
+/// ([`live_right_context`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveLookaheadChoice {
+    /// `serve --asr.streaming.rnnt_right_context`; `None`: no flag, the
+    /// runtime default (1 frame, 160 ms).
+    pub right_context: Option<u32>,
+    /// Why a value was not used (the setting's or the model's own), for one
+    /// log line at launch; `None` when nothing was refused.
+    pub refused: Option<String>,
+}
+
+/// The live lookahead for ASR model `file`, with the stored
+/// `engine.live_lookahead` and the data root's manifest
+/// ([`live_right_context`]); no flag for a model the experimental cascade
+/// runs (not streaming).
+pub fn asr_live_right_context(
+    paths: &DataPaths,
+    store: &dyn Store,
+    file: &ModelFile,
+) -> Result<LiveLookaheadChoice> {
+    if file.role != ModelRole::Unknown && !file.capabilities.streaming {
+        return Ok(LiveLookaheadChoice::default());
+    }
+    Ok(live_right_context(
+        file,
+        &settings::live_lookahead(&store.get_settings()?),
+        Manifest::load(&paths.root).ok().as_ref(),
+    ))
+}
+
+/// The decoder lookahead the live server runs `file` at (docs/plans/16
+/// section 5): `low` gives none; a number gives that value; `model` (the
+/// default) and an unreadable setting give the model's own
+/// `live_right_context` (its `<file>.meet.json`, else its manifest entry;
+/// none today, so no flag). A value the model was not trained for
+/// ([`manifest::trained_live_right_contexts`]: EN {0, 1, 6, 13}, 3.5
+/// {0, 1, 3, 6, 13}) is refused, because the runtime would take it without
+/// an error: a setting falls back to the model's own value, the model's own
+/// value to no flag, and [`LiveLookaheadChoice::refused`] says why. A model
+/// whose trained values are not known (dropped in by hand) is not checked.
+pub fn live_right_context(
+    file: &ModelFile,
+    setting: &settings::LiveLookahead,
+    manifest: Option<&Manifest>,
+) -> LiveLookaheadChoice {
+    use crate::protocol::lookahead_text;
+    use settings::LiveLookahead;
+    let name = file.manifest_name.as_deref().unwrap_or(&file.display_name);
+    let trained = file
+        .manifest_name
+        .as_deref()
+        .and_then(manifest::trained_live_right_contexts);
+    let accepts = |n: u32| trained.is_none_or(|v| v.contains(&n));
+    let list = || {
+        trained
+            .unwrap_or_default()
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut refused = Vec::new();
+    let own = file.capabilities.live_right_context.or_else(|| {
+        let name = file.manifest_name.as_deref()?;
+        manifest?.model(name)?.live_right_context
+    });
+    let own = match own {
+        Some(n) if !accepts(n) => {
+            refused.push(format!(
+                "{name}'s own live lookahead {n} is not one it was trained for ({}); no flag",
+                list()
+            ));
+            None
+        }
+        own => own,
+    };
+    let right_context = match setting {
+        LiveLookahead::Model => own,
+        LiveLookahead::Low => None,
+        LiveLookahead::Frames(n) if accepts(*n) => Some(*n),
+        LiveLookahead::Frames(n) => {
+            refused.push(format!(
+                "{} {n} is not a lookahead {name} was trained for ({}); using {}",
+                settings::ENGINE_LIVE_LOOKAHEAD,
+                list(),
+                lookahead_text(own.map(i64::from))
+            ));
+            own
+        }
+        LiveLookahead::Unreadable(v) => {
+            refused.push(format!(
+                "{} {v:?} is not `model`, `low` or a number; using {}",
+                settings::ENGINE_LIVE_LOOKAHEAD,
+                lookahead_text(own.map(i64::from))
+            ));
+            own
+        }
+    };
+    LiveLookaheadChoice {
+        right_context,
+        refused: (!refused.is_empty()).then(|| refused.join("; ")),
+    }
+}
+
 /// The manifest model low-VRAM mode switches file imports to: Nemotron 3.5,
 /// whose file pass peaks at 1.8 GB against 2.6 GB for the EN model (docs/04
 /// section 4).
@@ -1234,6 +1339,115 @@ mod tests {
             file_right_context(&old, FileLookahead::Low, Some(&builtin)),
             None
         );
+    }
+
+    #[test]
+    fn the_live_server_runs_at_a_lookahead_the_model_was_trained_for() {
+        use settings::LiveLookahead as L;
+        let file = |manifest: Option<&str>, own: Option<u32>| ModelFile {
+            id: ModelFileId(1),
+            path: "models/x.gguf".into(),
+            role: ModelRole::Asr,
+            architecture: Some("asr".into()),
+            display_name: "x".into(),
+            quant: None,
+            size_bytes: 1,
+            sha256: None,
+            source: ModelSource::Manifest,
+            capabilities: ModelCapabilities {
+                streaming: true,
+                live_right_context: own,
+                ..Default::default()
+            },
+            manifest_name: manifest.map(Into::into),
+            first_seen_at: 0,
+            last_seen_at: 0,
+            missing: false,
+        };
+        let builtin = Manifest::builtin();
+        let pick = |f: &ModelFile, s: L, m: Option<&Manifest>| live_right_context(f, &s, m);
+        let flag = |n: Option<u32>| LiveLookaheadChoice {
+            right_context: n,
+            refused: None,
+        };
+        let en = file(Some("nemotron-en"), None);
+        let n35 = file(Some("nemotron-3.5"), None);
+        // The default: no flag (the shipped manifest sets none yet).
+        assert_eq!(pick(&en, L::Model, Some(&builtin)), flag(None));
+        assert_eq!(pick(&n35, L::Model, None), flag(None));
+        // A number the model was trained for; `low` is none.
+        assert_eq!(pick(&en, L::Frames(6), Some(&builtin)), flag(Some(6)));
+        assert_eq!(pick(&en, L::Frames(0), Some(&builtin)), flag(Some(0)));
+        assert_eq!(pick(&n35, L::Frames(3), Some(&builtin)), flag(Some(3)));
+        assert_eq!(pick(&en, L::Low, Some(&builtin)), flag(None));
+        // 3 is not an EN value: refused, with the reason, back to the model's.
+        let got = pick(&en, L::Frames(3), Some(&builtin));
+        assert_eq!(got.right_context, None);
+        let why = got.refused.unwrap();
+        assert!(why.contains("engine.live_lookahead 3"), "{why}");
+        assert!(
+            why.contains("nemotron-en") && why.contains("(0, 1, 6, 13)"),
+            "{why}"
+        );
+        assert!(why.contains("using runtime default"), "{why}");
+        assert_eq!(pick(&n35, L::Frames(20), None).right_context, None);
+        // The manifest's own value (as chunk F part 2 would ship it), for a
+        // row scanned before the field existed; `low` still drops it, and a
+        // refused setting falls back to it.
+        let mut part2 = Manifest::builtin();
+        for e in &mut part2.models {
+            if e.name.starts_with("nemotron-") && e.role == ModelRole::Asr {
+                e.live_right_context = Some(6);
+            }
+        }
+        assert_eq!(pick(&en, L::Model, Some(&part2)), flag(Some(6)));
+        assert_eq!(pick(&n35, L::Low, Some(&part2)), flag(None));
+        let got = pick(&en, L::Frames(3), Some(&part2));
+        assert_eq!(got.right_context, Some(6));
+        assert!(got.refused.unwrap().ends_with("using 6"));
+        // The sidecar's value wins over the manifest's, and is checked too.
+        let own1 = file(Some("nemotron-en"), Some(1));
+        assert_eq!(pick(&own1, L::Model, Some(&part2)), flag(Some(1)));
+        let own3 = file(Some("nemotron-en"), Some(3));
+        let got = pick(&own3, L::Model, Some(&part2));
+        assert_eq!(got.right_context, None);
+        assert!(got.refused.unwrap().contains("own live lookahead 3"));
+        // Unreadable text: the model's value, with the text in the reason.
+        let got = pick(&en, L::Unreadable("high".into()), Some(&part2));
+        assert_eq!(got.right_context, Some(6));
+        assert!(got.refused.unwrap().contains(r#""high""#));
+        // A model dropped in by hand is not checked: the user's number or
+        // its sidecar's goes through.
+        let mine = file(None, Some(4));
+        assert_eq!(pick(&mine, L::Model, Some(&part2)), flag(Some(4)));
+        assert_eq!(pick(&mine, L::Frames(20), None), flag(Some(20)));
+
+        // Through the store: the stored setting; never for the cascade.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let mut tdt = en.clone();
+        tdt.capabilities.streaming = false;
+        assert_eq!(
+            asr_live_right_context(&paths, &store, &en).unwrap(),
+            flag(None)
+        );
+        store
+            .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "6")
+            .unwrap();
+        assert_eq!(
+            asr_live_right_context(&paths, &store, &en).unwrap(),
+            flag(Some(6))
+        );
+        assert_eq!(
+            asr_live_right_context(&paths, &store, &tdt).unwrap(),
+            flag(None)
+        );
+        store
+            .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "3")
+            .unwrap();
+        let got = asr_live_right_context(&paths, &store, &en).unwrap();
+        assert!(got.right_context.is_none() && got.refused.is_some());
     }
 
     #[test]

@@ -278,6 +278,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
         min_free_vram_mb: MIN_FREE_VRAM_MB,
         min_free_bytes: 0,
         live_engine_info: serde_json::json!({"runtime": "fake live"}),
+        live_right_context: None,
         on_job_event: None,
         punct: crate::punct::PunctSource::None,
     };
@@ -308,6 +309,11 @@ fn records_streams_and_runs_the_post_pass() {
     let d = store.get_meeting(m).unwrap();
     assert_eq!(d.meeting.status, MeetingStatus::Recording);
     assert_eq!(d.current_run.as_ref().unwrap().kind, RunKind::Live);
+    // No live lookahead flag by default (docs/plans/16 section 5).
+    assert_eq!(
+        d.current_run.as_ref().unwrap().engine_info["live_right_context"],
+        "runtime default"
+    );
     let alice = store
         .live_speaker(rec.run_id(), Channel::Loopback, "spk_0")
         .unwrap();
@@ -632,7 +638,9 @@ fn a_failed_post_pass_runs_again() {
 #[test]
 fn a_live_run_with_an_unplaced_name_is_kept() {
     let dir = tempfile::tempdir().unwrap();
-    let (ctx, store, _) = context(dir.path(), None);
+    let (mut ctx, store, _) = context(dir.path(), None);
+    // A server launched with a lookahead: the live run says which.
+    ctx.live_right_context = Some(6);
     let rec = Recorder::start(
         ctx.clone(),
         StartOptions::default(),
@@ -660,6 +668,7 @@ fn a_live_run_with_an_unplaced_name_is_kept() {
     );
     let live = store.get_run(out.live_run).unwrap();
     assert_eq!(live.kind, RunKind::Live);
+    assert_eq!(live.engine_info["live_right_context"], 6);
     let d = store.get_meeting(m).unwrap();
     assert_eq!(d.meeting.status, MeetingStatus::Done);
     let current = d.current_run.unwrap();

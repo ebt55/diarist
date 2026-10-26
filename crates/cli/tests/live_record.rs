@@ -298,6 +298,7 @@ fn live_recording_end_to_end() {
         min_free_vram_mb: MIN_FREE_VRAM_MB,
         min_free_bytes: MIN_FREE_BYTES,
         live_engine_info: serde_json::json!({"runtime": "nemo-speech", "adapter": "nemo-ws"}),
+        live_right_context: sup.config().right_context,
         on_job_event: None,
         punct: diarist_core::punct::PunctSource::None,
     };

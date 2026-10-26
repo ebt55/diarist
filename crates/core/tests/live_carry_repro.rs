@@ -29,6 +29,10 @@
 //!   Without them the channels use the nominal clock.
 //! - `REPRO_SPEED` (default 1: real time), `REPRO_SECONDS` (only the first
 //!   seconds), `REPRO_RENAME_AT` (fraction of the audio, default 0.5).
+//! - `DIARIST_LIVE_RIGHT_CONTEXT` (optional): the live server's lookahead
+//!   (`ServeConfig::right_context`, docs/plans/16 section 5); unset: no
+//!   flag, as shipped. The live run's `engine_info.live_right_context`
+//!   says which.
 //! - `REPRO_RESUME=1`: reuse `REPRO_OUT`'s database: finish a replay whose
 //!   stream stopped early, or run the post-pass and carry-over again on the
 //!   stored live run (earlier post-pass runs are deleted after their word
@@ -235,6 +239,9 @@ fn replay_meeting_through_live_server_and_post_pass() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(d)
     };
+    let live_rc = std::env::var("DIARIST_LIVE_RIGHT_CONTEXT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
     let out = std::env::var_os("REPRO_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("diarist-replay"));
@@ -311,7 +318,10 @@ fn replay_meeting_through_live_server_and_post_pass() {
         .create_run(
             meeting.id,
             RunKind::Live,
-            serde_json::json!({"replay": true}),
+            serde_json::json!({
+                "replay": true,
+                "live_right_context": diarist_core::protocol::lookahead_json(live_rc.map(i64::from)),
+            }),
         )
         .unwrap();
     store.set_current_run(meeting.id, run.id).unwrap();
@@ -355,6 +365,11 @@ fn replay_meeting_through_live_server_and_post_pass() {
     let mut cfg = ServeConfig::new(&cx.engine_dir, &cx.models, &cx.asr, &cx.diar);
     cfg.log_path = Some(cx.out.join("serve.log"));
     cfg.idle_timeout = None;
+    cfg.right_context = live_rc;
+    cx.say(format!(
+        "live lookahead: {}",
+        diarist_core::protocol::lookahead_text(live_rc.map(i64::from))
+    ));
     let sup = ServeSupervisor::new(cfg);
     sup.ensure_ready(Duration::from_secs(120)).unwrap();
     let engine = NemoWsLiveEngine::new(sup.clone(), false);
