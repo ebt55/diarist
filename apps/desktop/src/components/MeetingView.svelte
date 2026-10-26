@@ -625,8 +625,6 @@
    */
   let again = $state.raw<{ meeting: MeetingId; check: RerunCheck } | null>(null);
   let againBusy = $state(false);
-  /** The job "Process again" queued here, to say how it ended. */
-  let againJob: string | null = null;
   const processAgain = $derived(
     !isLive &&
       !finalizing &&
@@ -654,15 +652,16 @@
 
   async function startAgain() {
     const m = meeting;
-    if (!m || againBusy) return;
+    const audio = again?.meeting === meetingId ? again.check.audio : null;
+    if (!m || againBusy || !audio) return;
     const minutes = Math.max(1, Math.round((m.duration_ms ?? 0) / 60_000));
     const ok = await app.confirm({
       title: "Process again?",
       message:
         `The post-pass runs again over this meeting's stored audio (${minutes} min) with today's models and ` +
         `settings, on the GPU, after any job already queued. It needs that audio and the live transcript, which ` +
-        `Settings, "Keep the live transcript", keeps. The new transcript becomes the one shown and this one stays ` +
-        `as an earlier run. ` +
+        `Settings, "Keep the live transcript", keeps. The new transcript becomes the one shown; this one and ` +
+        `every earlier transcript, the live one too, stay. ` +
         (detail?.current_run?.kind === "live"
           ? "Names given on it carry over."
           : "Names given while recording carry over; names given on this transcript do not."),
@@ -673,8 +672,8 @@
     againBusy = true;
     try {
       const job = await api.rerunPostPass(meetingId);
-      againJob = job;
-      app.trackPostPass(job, meetingId, m.title);
+      // How it ends is told once, by the app (open meeting or not).
+      app.trackPostPass(job, meetingId, m.title, audio);
       await refreshAll(transcript?.anchorMs() ?? null);
     } catch (e) {
       again = null;
@@ -683,18 +682,6 @@
       againBusy = false;
     }
   }
-
-  onMount(() =>
-    app.onJob((e) => {
-      if (e.job_id !== againJob || e.type === "progress") return;
-      againJob = null;
-      if (e.type === "error") {
-        app.error(`Process again did not finish (${e.message}); the transcript stays as it was`);
-      } else if (e.type === "cancelled") {
-        app.toast("info", "Process again cancelled; the transcript stays as it was");
-      }
-    }),
-  );
 </script>
 
 <svelte:window {onkeydown} />
@@ -864,14 +851,14 @@
           </div>
           {#if job}<span class="mono elapsed">{formatClock(now - job.startedAt)}</span>{/if}
           {#if postPass}
-            <button type="button" class="link" onclick={() => app.cancelJob(postPass.job_id)} title="Keep the live transcript">Cancel</button>
+            <button type="button" class="link" onclick={() => app.cancelJob(postPass.job_id)} title={detail?.current_run?.kind === "live" ? "Keep the live transcript" : "Keep the current transcript"}>Cancel</button>
           {/if}
         </div>
       {:else if postPassError}
         <div class="banner error" role="alert">
           <div class="b-main">
             <strong>Finalizing failed.</strong>
-            <span>{postPassError} The live transcript stays.</span>
+            <span>{postPassError} {detail?.current_run?.kind === "live" ? "The live transcript stays." : "The current transcript stays."}</span>
           </div>
           <button type="button" class="btn" disabled={retrying} onclick={retryPostPass}>{retrying ? "Queuing…" : "Retry"}</button>
         </div>
