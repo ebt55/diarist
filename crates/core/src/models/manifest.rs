@@ -243,8 +243,9 @@ impl ModelEntry {
 /// folder it is relative to (no `..`, no drive, no root, no `\\?\`), and a
 /// name Windows keeps as written: no device name (`CON`, `NUL`, `AUX`,
 /// `PRN`, `COM0` to `COM9`, `LPT0` to `LPT9`, also with an extension), no
-/// part ending in `.` or a space, none of `< > " | ? *`. `Err` starts with
-/// `field`.
+/// part ending in `.` or a space, none of `< > " | ? *` or a control
+/// character (each part as [`check_engine_name`] checks a whole engine
+/// name). `Err` starts with `field`.
 pub fn check_relative_path(field: &str, path: &str) -> std::result::Result<(), String> {
     if path.trim().is_empty() {
         return Err(format!("{field}: empty"));
@@ -265,26 +266,37 @@ pub fn check_relative_path(field: &str, path: &str) -> std::result::Result<(), S
         return Err(format!("{field}: {path:?} names no file"));
     }
     for part in parts {
-        if part.ends_with(['.', ' ']) {
-            return Err(format!(
-                "{field}: {path:?}: {part:?} ends in a dot or a space, which Windows drops"
-            ));
-        }
-        if is_dos_device(part) {
-            return Err(format!(
-                "{field}: {path:?}: {part:?} is a device name on Windows, not a file"
-            ));
-        }
-        if part
-            .chars()
-            .any(|c| c < ' ' || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
-        {
-            return Err(format!(
-                "{field}: {path:?}: {part:?} has a character Windows does not allow in a name"
-            ));
+        if let Some(why) = plain_name_problem(part) {
+            return Err(format!("{field}: {path:?}: {part:?} {why}"));
         }
     }
     Ok(())
+}
+
+/// Why `name` is not one file or folder name that Windows keeps as
+/// written, or `None` when it is: not empty, `.` or `..`; no separator,
+/// drive or `:`; none of `< > " | ? *` or a control character; no trailing
+/// dot or space; not a device name ([`is_dos_device`]). The one rule behind
+/// each part of a manifest path ([`check_relative_path`]) and an engine
+/// folder name ([`check_engine_name`]).
+fn plain_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Some("is not a file or folder name".into());
+    }
+    if let Some(c) = name.chars().find(|c| {
+        c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    }) {
+        return Some(format!(
+            "has {c:?}, a character Windows does not allow in a name"
+        ));
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some("ends in a dot or a space, which Windows drops".into());
+    }
+    if is_dos_device(name) {
+        return Some("is a device name on Windows, not a file".into());
+    }
+    None
 }
 
 /// A download address: `http://` or `https://` and something after it.
@@ -313,7 +325,7 @@ pub fn check_url(field: &str, url: &str) -> std::result::Result<(), String> {
 /// to `LPT³`), in any case, also before an extension (`nul.json`) or
 /// trailing spaces.
 pub fn is_dos_device(part: &str) -> bool {
-    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = part.split('.').next().unwrap_or(part).trim_end();
     let up = stem.to_ascii_uppercase();
     if matches!(
         up.as_str(),
@@ -362,44 +374,20 @@ pub struct EngineEntry {
 
 /// Checks that an engine `name` is one plain folder name, since it becomes
 /// `engine\<name>` (and `engine\downloads\<name>.zip`) and
-/// `manifests\engine.json` in the data root can be edited: not empty, not
-/// `.` or `..`, no separator, drive or `:`, none of `<>"|?*` or control
-/// characters, no trailing dot or space, and not a DOS device name (`CON`,
-/// `NUL`, `COM1`, ... also with an extension).
+/// `manifests\engine.json` in the data root can be edited: the rules of
+/// one part of a manifest path (`plain_name_problem`: not empty, `.` or
+/// `..`, no separator, drive or `:`, none of `<>"|?*` or control
+/// characters, no trailing dot or space, not a device name such as `CON`,
+/// `NUL`, `COM0` to `COM9`, also with an extension).
 pub fn check_engine_name(name: &str) -> Result<()> {
-    const DEVICES: &[&str] = &["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
-    let bad = |why: &str| {
-        Err(CoreError::Models(format!(
+    match plain_name_problem(name) {
+        None => Ok(()),
+        Some(why) => Err(CoreError::Models(format!(
             "manifests/engine.json: the engine name {name:?} {why}; it becomes a folder name \
              under engine\\, so it must be one plain name such as \
              nemo-speech-0.2.0-windows-x86_64-cuda"
-        )))
-    };
-    if name.is_empty() || name == "." || name == ".." {
-        return bad("is not a folder name");
+        ))),
     }
-    if let Some(c) = name.chars().find(|c| {
-        matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || c.is_control()
-    }) {
-        return bad(&format!("contains {c:?}"));
-    }
-    if name.ends_with('.') || name.ends_with(' ') {
-        return bad("ends with a dot or a space");
-    }
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    let upper = stem.to_ascii_uppercase();
-    let numbered = |p: &str| {
-        upper.strip_prefix(p).is_some_and(|n| {
-            matches!(
-                n,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    };
-    if DEVICES.contains(&upper.as_str()) || numbered("COM") || numbered("LPT") {
-        return bad("is a reserved device name");
-    }
-    Ok(())
 }
 
 /// Both lists.
@@ -984,6 +972,9 @@ mod tests {
             "a<b",
             "a\"b",
             "a\tb",
+            // Control characters past ASCII 31 (DEL, C1), as for engine names.
+            "a\u{7f}b",
+            "onnx/a\u{9b}b.onnx",
         ] {
             let e = check_relative_path("files[0].path", bad).unwrap_err();
             assert!(e.starts_with("files[0].path:"), "{bad:?}: {e}");
@@ -1041,8 +1032,27 @@ mod tests {
             "com1",
             "LPT9.txt",
             "CONOUT$",
+            // The rules of a manifest path part apply too (one helper).
+            "com0",
+            "LPT0.zip",
+            "COM¹",
+            "nul .zip",
+            "x\u{7f}y",
         ] {
             assert!(check_engine_name(bad).is_err(), "{bad:?}");
+        }
+        // Each rule gives the same reason for a path part and an engine name.
+        for (bad, why) in [
+            ("CON", "device name"),
+            ("x.", "dot or a space"),
+            ("x?", "does not allow"),
+        ] {
+            let path = check_relative_path("f", bad).unwrap_err();
+            let engine = check_engine_name(bad).unwrap_err().to_string();
+            assert!(
+                path.contains(why) && engine.contains(why),
+                "{path} / {engine}"
+            );
         }
         // An edited `manifests\engine.json` with such a name does not load.
         let dir = tempfile::tempdir().unwrap();
