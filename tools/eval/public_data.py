@@ -132,6 +132,49 @@ def curl(url: str, dest: Path, *, size: int | None = None) -> None:
     part.replace(dest)
 
 
+def range_get(url: str, start: int, end: int, tmp: Path) -> bytes:
+    """Bytes start..end (inclusive) of url, by HTTP range requests, with the
+    same quiet.lock rules as curl(): a large range waits and pauses, and
+    resumes from what it has."""
+    n = end - start + 1
+    big = n > BIG_BYTES
+    q = _quiet_lock() if big else None
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    pieces: list[Path] = []
+    have = 0
+    while have < n:
+        if big:
+            wait_quiet()
+        piece = tmp.with_name(f"{tmp.name}.{len(pieces)}")
+        cmd = [CURL, "-L", "--fail", "--retry", "3", "--retry-delay", "5", "-A", USER_AGENT, "-sS",
+               "-r", f"{start + have}-{end}", "-o", str(piece), url]
+        if os.name == "nt":
+            cmd.insert(1, "--ssl-revoke-best-effort")
+        lock = _quiet_lock()
+        if not big and lock is not None and lock.exists():
+            cmd.insert(1, "--limit-rate")
+            cmd.insert(2, "1M")
+        p = subprocess.Popen(cmd)
+        paused = False
+        while p.poll() is None:
+            time.sleep(1)
+            if q is not None and q.exists():
+                p.terminate()
+                p.wait()
+                paused = True
+                log("paused: quiet.lock appeared; resuming when it is gone")
+                break
+        if not paused and p.returncode != 0:
+            raise SystemExit(f"curl failed ({p.returncode}) for a range of {url}")
+        if piece.is_file():
+            pieces.append(piece)
+            have += piece.stat().st_size
+    data = b"".join(pc.read_bytes() for pc in pieces)
+    for pc in pieces:
+        pc.unlink()
+    return data[:n]
+
+
 def fetch(url: str, dest: Path, sha256: str | None, *, size: int | None = None, allow_unpinned: bool = False) -> Path:
     """dest, downloaded if missing or if its hash does not match the pin."""
     if dest.is_file() and dest.stat().st_size > 0:
@@ -249,14 +292,20 @@ def rows_to_rttm(rows: list[dict], rec: str, max_gap: float) -> list[RttmRow]:
     return out
 
 
+def speaker_id(s: str) -> str:
+    """A speaker label safe for RTTM (one whitespace-free field)."""
+    return "_".join(str(s).split()) or "unknown"
+
+
 def write_refs(root: Path, sid: str, rows: list[dict], rttm: list[RttmRow]) -> tuple[Path, Path]:
     rows = sorted(rows, key=lambda r: (r["start_time"], r["end_time"]))
     for r in rows:
         r["session_id"] = sid
+        r["speaker"] = speaker_id(r["speaker"])
     seg = root / "refs" / f"{sid}.ref.seglst.jsonl"
     rt = root / "refs" / f"{sid}.ref.rttm"
     write_jsonl(seg, rows)
-    write_rttm(rt, [RttmRow(sid, r.start, r.dur, r.speaker) for r in rttm])
+    write_rttm(rt, [RttmRow(sid, r.start, r.dur, speaker_id(r.speaker)) for r in rttm])
     return seg, rt
 
 
