@@ -13,7 +13,8 @@ name: string,
  */
 version: string, 
 /**
- * The DLL, relative to the data root (absolute only when it lives
- * outside it, as `model_files.path` does).
+ * The DLL, relative to the data root; `<models>/...` or `<engine>/...`
+ * when that folder is outside the root; never absolute (no profile
+ * path in the database; `onnx::recorded_path`).
  */
 path: string, };

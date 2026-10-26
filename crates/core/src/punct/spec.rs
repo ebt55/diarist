@@ -34,6 +34,20 @@ pub const MAX_ROOT_LEVELS: usize = 3;
 /// Windows a stream is cut into when the block names no batch size.
 pub const DEFAULT_BATCH: u32 = 8;
 
+/// The range `batch` may take.
+pub const BATCH_RANGE: std::ops::RangeInclusive<u32> = 1..=64;
+
+/// The range `max_tokens` may take.
+pub const MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 16..=4096;
+
+/// `major.minor` of a version such as `1.31.0`, `1.31` or `1.31.2-dev`.
+pub fn major_minor(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split(['.', '-', '+']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 /// What a punctuation model is, for the runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -89,11 +103,13 @@ pub struct PunctSpec {
     #[ts(optional)]
     pub policy: Option<MarkPolicy>,
     /// The ONNX Runtime library, relative to the model's folder (default
-    /// [`RUNTIME_DLL`]).
+    /// [`RUNTIME_DLL`]; never named `onnxruntime.dll`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime: Option<String>,
-    /// The loaded library's version must start with this (`1.31.0`).
+    /// The ONNX Runtime release the model needs, by major and minor version:
+    /// `1.31.0` and `1.31` both accept any 1.31.x (the C API version and the
+    /// ABI change with the minor version; the patch is free).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_version: Option<String>,
@@ -278,7 +294,9 @@ impl PunctSpec {
 
     /// Windows per inference call.
     pub fn batch_size(&self) -> u32 {
-        self.batch.unwrap_or(DEFAULT_BATCH).max(1)
+        self.batch
+            .unwrap_or(DEFAULT_BATCH)
+            .clamp(*BATCH_RANGE.start(), *BATCH_RANGE.end())
     }
 
     /// Special tokens per window (BOS and EOS).
@@ -302,12 +320,45 @@ impl PunctSpec {
         check_relative_path("tokenizer", &self.tokenizer)?;
         if let Some(r) = &self.runtime {
             check_relative_path("runtime", r)?;
+            let name = r.rsplit(['/', '\\']).next().unwrap_or(r).trim();
+            if name.eq_ignore_ascii_case("onnxruntime.dll") {
+                return Err(format!(
+                    "runtime: {r:?}: rename the library to {RUNTIME_DLL}, so Windows never \
+                     takes another onnxruntime.dll in its place"
+                ));
+            }
         }
-        if self.max_tokens < 16 {
+        if let Some(v) = &self.runtime_version {
+            if major_minor(v).is_none() {
+                return Err(format!(
+                    "runtime_version: {v:?} is not a version such as \"1.31.0\""
+                ));
+            }
+        }
+        if !MAX_TOKENS_RANGE.contains(&self.max_tokens) {
             return Err(format!(
-                "max_tokens: {} is too small (at least 16)",
-                self.max_tokens
+                "max_tokens: {} is out of range ({} to {})",
+                self.max_tokens,
+                MAX_TOKENS_RANGE.start(),
+                MAX_TOKENS_RANGE.end()
             ));
+        }
+        if let Some(b) = self.batch {
+            if !BATCH_RANGE.contains(&b) {
+                return Err(format!(
+                    "batch: {b} is out of range ({} to {})",
+                    BATCH_RANGE.start(),
+                    BATCH_RANGE.end()
+                ));
+            }
+        }
+        if let Some(c) = self.context_tokens {
+            if c > self.max_tokens / 2 {
+                return Err(format!(
+                    "context_tokens: {c} is more than half of max_tokens ({})",
+                    self.max_tokens
+                ));
+            }
         }
         let room =
             i64::from(self.max_tokens) - i64::from(self.specials()) - 2 * i64::from(self.context());
@@ -583,7 +634,7 @@ mod tests {
             "{}",
             err(&pre_after)
         );
-        let tiny = A_SPEC.replace(r#""context_tokens": 48"#, r#""context_tokens": 252"#);
+        let tiny = A_SPEC.replace(r#""context_tokens": 48"#, r#""context_tokens": 253"#);
         assert!(err(&tiny).starts_with("context_tokens:"), "{}", err(&tiny));
         let two = A_SPEC.replace(
             r#""casing": "none""#,
@@ -604,6 +655,69 @@ mod tests {
             "{}",
             err(&case_label)
         );
+    }
+
+    #[test]
+    fn values_are_bounded_and_the_runtime_is_renamed() {
+        let with = |from: &str, to: &str| {
+            assert!(A_SPEC.contains(from), "{from}");
+            A_SPEC.replace(from, to)
+        };
+        for (from, to, field) in [
+            (r#""batch": 8"#, r#""batch": 0"#, "batch:"),
+            (r#""batch": 8"#, r#""batch": 65"#, "batch:"),
+            (r#""max_tokens": 512"#, r#""max_tokens": 15"#, "max_tokens:"),
+            (
+                r#""max_tokens": 512"#,
+                r#""max_tokens": 4097"#,
+                "max_tokens:",
+            ),
+            (
+                r#""context_tokens": 48"#,
+                r#""context_tokens": 257"#,
+                "context_tokens:",
+            ),
+            (
+                r#""runtime": "diarist-onnxruntime.dll""#,
+                r#""runtime": "onnxruntime.dll""#,
+                "runtime:",
+            ),
+            (
+                r#""runtime": "diarist-onnxruntime.dll""#,
+                r#""runtime": "lib\\OnnxRuntime.DLL""#,
+                "runtime:",
+            ),
+            (
+                r#""runtime_version": "1.31.0""#,
+                r#""runtime_version": "latest""#,
+                "runtime_version:",
+            ),
+        ] {
+            let e = err(&with(from, to));
+            assert!(e.starts_with(field), "{to}: {e}");
+        }
+        // The ends of the ranges are allowed.
+        for (from, to) in [
+            (r#""batch": 8"#, r#""batch": 1"#),
+            (r#""batch": 8"#, r#""batch": 64"#),
+            (r#""max_tokens": 512"#, r#""max_tokens": 4096"#),
+            (r#""context_tokens": 48"#, r#""context_tokens": 64"#),
+            (
+                r#""runtime_version": "1.31.0""#,
+                r#""runtime_version": "1.31""#,
+            ),
+        ] {
+            PunctSpec::from_json(&with(from, to)).unwrap();
+        }
+        assert!(
+            err(&with(r#""context_tokens": 48"#, r#""context_tokens": 252"#))
+                .starts_with("context_tokens:")
+        );
+        assert_eq!(major_minor("1.31.0"), Some((1, 31)));
+        assert_eq!(major_minor("1.31"), Some((1, 31)));
+        assert_eq!(major_minor(" 1.31.2-dev "), Some((1, 31)));
+        assert_eq!(major_minor("1"), None);
+        assert_eq!(major_minor("v1.31"), None);
     }
 
     #[test]

@@ -27,15 +27,18 @@ pub struct ModelEntry {
     /// What the first-run screen and Settings show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Index name for `nemo-speech pull` ("" for [`ModelEntry::direct`] entries).
+    /// Index name for `nemo-speech pull`, used only by `diarist-cli models
+    /// pull --via-runtime` (the old path, kept for one release); "" for
+    /// [`ModelEntry::direct`] entries.
     #[serde(default)]
     pub pull_name: String,
     pub role: ModelRole,
     /// Downloaded on first run.
     #[serde(default)]
     pub required: bool,
-    /// Fetched from `url` by our own downloader into `modelsSer` instead of
-    /// with `nemo-speech pull` (entries of `models.user.json`).
+    /// Lands in `models\user` instead of `models\<repo>\<revision>` (entries
+    /// of `models.user.json` default to it). Every entry, direct or not, is
+    /// fetched from `url` by Diarist's own downloader.
     #[serde(default)]
     pub direct: bool,
     /// Offered only behind the experimental setting.
@@ -85,7 +88,7 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<ModelExtraFile>,
     /// The folder under `models\` the entry lands in, instead of `user`
-    /// (direct entries) or `<repo>\<revision>` (pulled ones). Relative, no
+    /// (direct entries) or `<repo>\<revision>` (the others). Relative, no
     /// `..`: `models.user.json` is user-writable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
@@ -108,8 +111,10 @@ pub struct ModelExtraFile {
 
 impl ModelEntry {
     /// The folder the model lands in: `models\<dir>` when the entry names
-    /// one, else `models\user` for direct downloads and where `nemo-speech
-    /// pull` puts a pulled model (`<repo>\<revision>`).
+    /// one, else `models\user` for direct entries, else `<repo>\<revision>`
+    /// (the layout `nemo-speech pull` used, so files earlier versions pulled
+    /// are found). [`ModelEntry::validate`] keeps every part a plain
+    /// relative name, so this never leaves `models_dir`.
     pub fn dest_dir(&self, models_dir: &Path) -> std::path::PathBuf {
         if let Some(dir) = self.dir.as_deref().filter(|d| !d.trim().is_empty()) {
             crate::punct::spec::rel_path(models_dir, dir)
@@ -134,22 +139,68 @@ impl ModelEntry {
             .saturating_sub(self.files.iter().map(|f| f.size_bytes).sum())
     }
 
-    /// Checks the fields a user can get wrong in `models.user.json`: the
-    /// paths (relative, no `..`) and the description block. Errors name the
-    /// field.
+    /// Checks the fields a user can get wrong in `models.user.json` (or a
+    /// data root's `manifests\models.json`): the download address, the
+    /// paths the entry lands at (`repo` as `owner/name`, `revision`, `file`,
+    /// `dir`, `files`: relative, no `..`, no Windows device names, each
+    /// file once), the hashes of a multi-file entry and the description
+    /// block. Errors name the field.
     pub fn validate(&self) -> std::result::Result<(), String> {
+        check_url("url", &self.url)?;
         check_relative_path("file", &self.file)?;
+        if !self.repo.trim().is_empty() {
+            check_relative_path("repo", &self.repo)?;
+            let parts: Vec<&str> = self.repo.split(['/', '\\']).collect();
+            if parts.len() != 2 || parts.iter().any(|p| p.is_empty() || *p == ".") {
+                return Err(format!(
+                    "repo: {:?} must be owner/name (two parts)",
+                    self.repo
+                ));
+            }
+        }
+        if !self.revision.trim().is_empty() {
+            check_relative_path("revision", &self.revision)?;
+        }
         if let Some(dir) = &self.dir {
             check_relative_path("dir", dir)?;
         }
+        let lands_in_repo = !self.direct && self.dir.as_deref().is_none_or(|d| d.trim().is_empty());
+        if lands_in_repo && (self.repo.trim().is_empty() || self.revision.trim().is_empty()) {
+            return Err(
+                "repo: an entry that is not `direct` and has no `dir` lands in \
+                 <repo>\\<revision>, so it needs both"
+                    .into(),
+            );
+        }
+        let primary = normalized_relative(&self.file);
+        let mut seen: Vec<String> = Vec::with_capacity(self.files.len());
         for (i, f) in self.files.iter().enumerate() {
             check_relative_path(&format!("files[{i}].path"), &f.path)?;
-            if f.path
-                .replace('\\', "/")
-                .eq_ignore_ascii_case(&self.file.replace('\\', "/"))
-            {
+            check_url(&format!("files[{i}].url"), &f.url)?;
+            let n = normalized_relative(&f.path);
+            if n == primary {
                 return Err(format!("files[{i}].path: the primary file again"));
             }
+            if seen.contains(&n) {
+                return Err(format!("files[{i}].path: {:?} is listed twice", f.path));
+            }
+            seen.push(n);
+            // A file without a hash could never be told complete, so the
+            // entry would never count as installed (setup.rs).
+            if !is_sha256(&f.sha256) {
+                return Err(format!(
+                    "files[{i}].sha256: {:?} is not a SHA-256 (64 hex digits); every file of a \
+                     multi-file entry needs one",
+                    f.sha256
+                ));
+            }
+        }
+        if !self.files.is_empty() && !is_sha256(&self.sha256) {
+            return Err(format!(
+                "sha256: {:?} is not a SHA-256 (64 hex digits); a multi-file entry needs the \
+                 primary file's too",
+                self.sha256
+            ));
         }
         if self.files.iter().map(|f| f.size_bytes).sum::<u64>() > self.size_bytes {
             return Err("size_bytes: smaller than the other files together".into());
@@ -162,22 +213,109 @@ impl ModelEntry {
 }
 
 /// A path from a manifest or description block: relative, inside the
-/// folder it is relative to (no `..`, no drive, no root, no `\\?\`).
-/// `Err` starts with `field`.
+/// folder it is relative to (no `..`, no drive, no root, no `\\?\`), and a
+/// name Windows keeps as written: no device name (`CON`, `NUL`, `AUX`,
+/// `PRN`, `COM0` to `COM9`, `LPT0` to `LPT9`, also with an extension), no
+/// part ending in `.` or a space, none of `< > " | ? *`. `Err` starts with
+/// `field`.
 pub fn check_relative_path(field: &str, path: &str) -> std::result::Result<(), String> {
-    let p = path.trim();
-    if p.is_empty() {
+    if path.trim().is_empty() {
         return Err(format!("{field}: empty"));
     }
-    let bad = p.starts_with(['/', '\\'])
-        || p.contains(':')
-        || p.split(['/', '\\']).any(|part| part == "..");
-    if bad || Path::new(p).is_absolute() {
+    let bad = path.trim_start().starts_with(['/', '\\'])
+        || path.contains(':')
+        || path.split(['/', '\\']).any(|part| part == "..");
+    if bad || Path::new(path).is_absolute() {
         return Err(format!(
             "{field}: {path:?} must be a relative path inside the model's folder (no `..`, no drive)"
         ));
     }
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.is_empty() {
+        return Err(format!("{field}: {path:?} names no file"));
+    }
+    for part in parts {
+        if part.ends_with(['.', ' ']) {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} ends in a dot or a space, which Windows drops"
+            ));
+        }
+        if is_dos_device(part) {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} is a device name on Windows, not a file"
+            ));
+        }
+        if part
+            .chars()
+            .any(|c| c < ' ' || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} has a character Windows does not allow in a name"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// A download address: `http://` or `https://` and something after it.
+/// Every entry is fetched from its `url` by Diarist's own downloader, so an
+/// entry without one is refused when the list is read, not at download
+/// time. `Err` starts with `field`.
+pub fn check_url(field: &str, url: &str) -> std::result::Result<(), String> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Err(format!(
+            "{field}: empty; Diarist downloads every file from its url"
+        ));
+    }
+    let rest = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+        .filter(|r| !r.is_empty() && !r.starts_with('/'));
+    if rest.is_none() || u.chars().any(char::is_whitespace) {
+        return Err(format!("{field}: {url:?} is not an http(s) address"));
+    }
+    Ok(())
+}
+
+/// Whether `part` is a name Windows maps to a device: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9` (and `COM¹` to `COM³`, `LPT¹`
+/// to `LPT³`), in any case, also before an extension (`nul.json`) or
+/// trailing spaces.
+pub fn is_dos_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let up = stem.to_ascii_uppercase();
+    if matches!(
+        up.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|p| {
+        up.strip_prefix(p).is_some_and(|rest| {
+            let mut c = rest.chars();
+            matches!((c.next(), c.next()), (Some(d), None) if d.is_ascii_digit() || matches!(d, '¹' | '²' | '³'))
+        })
+    })
+}
+
+/// A relative path as compared for sameness: `/` and `\` alike, empty and
+/// `.` parts dropped, case folded (NTFS names ignore case).
+pub fn normalized_relative(path: &str) -> String {
+    path.split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// 64 hex digits.
+pub fn is_sha256(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// One runtime zip.
@@ -213,9 +351,12 @@ impl Manifest {
 
     /// The built-in lists, replaced by `<root>/manifests/{models,engine}.json`
     /// when present, then `<root>/models.user.json` merged over the models:
-    /// an entry with a known name replaces it, a new one is added. User
-    /// entries are fetched from their `url` directly unless they set
-    /// `"direct": false` and a `pull_name`.
+    /// an entry with a known name replaces it, a new one is added. Every
+    /// entry is fetched from its `url` by Diarist's own downloader; user
+    /// entries are `direct` (they land in `models\user`) unless they say
+    /// `"direct": false` (then `models\<repo>\<revision>`). Every entry is
+    /// checked ([`ModelEntry::validate`]); one that fails refuses the list,
+    /// naming the entry and the field.
     pub fn load(data_root: &Path) -> Result<Self> {
         let mut m = Self::builtin();
         let dir = data_root.join("manifests");
@@ -528,6 +669,33 @@ mod tests {
                 r#""heads": [], "x": [{"output""#,
                 "punctuation.heads",
             ),
+            // The same file twice, the primary again after "./" and "//",
+            // a device name, an extra file without its hash.
+            (
+                r#""path": "diarist-onnxruntime.dll""#,
+                r#""path": "Tokenizer.JSON""#,
+                "files[1].path",
+            ),
+            (
+                r#""path": "tokenizer.json""#,
+                r#""path": "./onnx//model_quantized.onnx""#,
+                "files[0].path",
+            ),
+            (
+                r#""path": "tokenizer.json""#,
+                r#""path": "onnx/NUL.json""#,
+                "files[0].path",
+            ),
+            (
+                r#""sha256": "2222222222222222222222222222222222222222222222222222222222222222""#,
+                r#""sha256": """#,
+                "files[0].sha256",
+            ),
+            (
+                r#""sha256": "1111111111111111111111111111111111111111111111111111111111111111""#,
+                r#""sha256": "1111""#,
+                "sha256",
+            ),
         ] {
             assert!(PUNCT_ENTRY.contains(from), "{from}");
             std::fs::write(dir.path().join(USER_MODELS), PUNCT_ENTRY.replace(from, to)).unwrap();
@@ -540,6 +708,187 @@ mod tests {
         for e in &Manifest::builtin().models {
             e.validate().unwrap();
         }
+    }
+
+    /// `repo`, `revision`, `file` and `url` are checked when the list is
+    /// read: the folder `dest_dir` builds from them never leaves `models\`,
+    /// and an entry without an address fails naming the entry.
+    #[test]
+    fn entries_land_inside_the_models_folder_and_have_an_address() {
+        const PULLED: &str = r#"[{"name": "mine", "role": "asr", "direct": false,
+            "repo": "owner/model", "revision": "abc123", "file": "m.gguf",
+            "url": "https://example.invalid/m.gguf", "size_bytes": 10,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}]"#;
+        let dir = tempfile::tempdir().unwrap();
+        let load = |json: &str| {
+            std::fs::write(dir.path().join(USER_MODELS), json).unwrap();
+            Manifest::load(dir.path())
+        };
+        let m = load(PULLED).unwrap();
+        let e = m.model("mine").unwrap();
+        assert_eq!(
+            e.dest_dir(Path::new("M")),
+            Path::new("M").join("owner").join("model").join("abc123")
+        );
+        for (from, to, field) in [
+            (r#""repo": "owner/model""#, r#""repo": "../model""#, "repo"),
+            (
+                r#""repo": "owner/model""#,
+                r#""repo": "owner/../x""#,
+                "repo",
+            ),
+            (r#""repo": "owner/model""#, r#""repo": "C:\\owner""#, "repo"),
+            (
+                r#""repo": "owner/model""#,
+                r#""repo": "\\\\server\\share""#,
+                "repo",
+            ),
+            (r#""repo": "owner/model""#, r#""repo": "owner""#, "repo"),
+            (r#""repo": "owner/model""#, r#""repo": "a/b/c""#, "repo"),
+            (r#""repo": "owner/model""#, r#""repo": "owner/CON""#, "repo"),
+            (
+                r#""repo": "owner/model""#,
+                r#""repo": "owner./model""#,
+                "repo",
+            ),
+            (r#""repo": "owner/model""#, r#""repo": "", "x": """#, "repo"),
+            (r#""revision": "abc123""#, r#""revision": "..""#, "revision"),
+            (
+                r#""revision": "abc123""#,
+                r#""revision": "/abs""#,
+                "revision",
+            ),
+            (
+                r#""revision": "abc123""#,
+                r#""revision": "a:b""#,
+                "revision",
+            ),
+            (
+                r#""revision": "abc123""#,
+                r#""revision": "nul""#,
+                "revision",
+            ),
+            (
+                r#""revision": "abc123""#,
+                r#""revision": "abc ""#,
+                "revision",
+            ),
+            (
+                r#""file": "m.gguf""#,
+                r#""file": "../../evil.gguf""#,
+                "file",
+            ),
+            (r#""file": "m.gguf""#, r#""file": "C:\\evil.gguf""#, "file"),
+            (r#""file": "m.gguf""#, r#""file": "aux.gguf""#, "file"),
+            (r#""file": "m.gguf""#, r#""file": "m.gguf.""#, "file"),
+            (
+                r#""url": "https://example.invalid/m.gguf""#,
+                r#""url": """#,
+                "url",
+            ),
+            (
+                r#""url": "https://example.invalid/m.gguf""#,
+                r#""url": "file:///C:/m.gguf""#,
+                "url",
+            ),
+            (
+                r#""url": "https://example.invalid/m.gguf""#,
+                r#""url": "https://""#,
+                "url",
+            ),
+        ] {
+            assert!(PULLED.contains(from), "{from}");
+            let err = load(&PULLED.replace(from, to)).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("{USER_MODELS}: mine: {field}")),
+                "{to}: {err}"
+            );
+        }
+        // Nested revisions and files are fine; a direct entry needs no repo.
+        load(&PULLED.replace(r#""revision": "abc123""#, r#""revision": "refs/pr/3""#)).unwrap();
+        load(&PULLED.replace(r#""file": "m.gguf""#, r#""file": "onnx/m.gguf""#)).unwrap();
+        let mut direct: Vec<serde_json::Value> = serde_json::from_str(PULLED).unwrap();
+        direct[0]["direct"] = serde_json::Value::Bool(true);
+        let o = direct[0].as_object_mut().unwrap();
+        o.remove("repo");
+        o.remove("revision");
+        let m = load(&serde_json::to_string(&direct).unwrap()).unwrap();
+        assert_eq!(
+            m.model("mine").unwrap().dest_dir(Path::new("M")),
+            Path::new("M").join("user")
+        );
+        // An extra file without an address fails at load, naming it.
+        let mut multi: Vec<serde_json::Value> = serde_json::from_str(PUNCT_ENTRY).unwrap();
+        multi[0]["files"][1]["url"] = serde_json::Value::String(String::new());
+        let err = load(&serde_json::to_string(&multi).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("punct-small: files[1].url: empty"), "{err}");
+        // The shipped list passes.
+        for e in &Manifest::builtin().models {
+            e.validate().unwrap();
+        }
+        assert!(check_url("u", "http://127.0.0.1:8080/x").is_ok());
+    }
+
+    #[test]
+    fn relative_paths_refuse_what_windows_would_not_keep() {
+        for ok in [
+            "tokenizer.json",
+            "onnx/model_quantized.onnx",
+            r"onnx\model.onnx",
+            "./tokenizer.json",
+            "console.json",
+            "com10.dll",
+            "lpt.txt",
+            "nulls/x.json",
+            ".hidden",
+        ] {
+            check_relative_path("f", ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            "",
+            "  ",
+            ".",
+            "./",
+            "../x",
+            "a/../../x",
+            "/x",
+            r"\x",
+            "C:x",
+            r"C:\x",
+            r"\\?\C:\x",
+            r"\\server\share\x",
+            "CON",
+            "nul.json",
+            "Aux",
+            "prn.tar.gz",
+            "com1",
+            "LPT9.dll",
+            "com0",
+            "COM¹",
+            "nul .txt",
+            "onnx/con/model.onnx",
+            "model.",
+            "model ",
+            "onnx./model.onnx",
+            "a?b",
+            "a*b",
+            "a|b",
+            "a<b",
+            "a\"b",
+            "a\tb",
+        ] {
+            let e = check_relative_path("files[0].path", bad).unwrap_err();
+            assert!(e.starts_with("files[0].path:"), "{bad:?}: {e}");
+        }
+        assert!(is_dos_device("CONOUT$"));
+        assert!(!is_dos_device("COM"));
+        assert_eq!(
+            normalized_relative(r"./Onnx//\model.onnx"),
+            "onnx/model.onnx"
+        );
+        assert!(is_sha256(&"a".repeat(64)) && !is_sha256(&"g".repeat(64)) && !is_sha256(""));
     }
 
     #[test]
