@@ -79,6 +79,14 @@
 //! mic stays ungated, `engine_info.echo` is `{"error": "<message>"}` and the
 //! error is logged; a canceller that fails leaves the raw mic to be
 //! transcribed and gated, with `aec_error` in `engine_info.echo`.
+//!
+//! Run again from the stored audio ([`PostPassJob::from_flac`], plan 16
+//! section 12.5 J): the job first decodes the registered `playback.flac`
+//! into the two WAVs ([`crate::audio::flac::decode_stereo_to_wavs`], each
+//! channel cut back to its stored length), then runs as above, and never
+//! encodes, moves or deletes the FLAC or touches its row; the decoded WAVs
+//! go when the job ends, whatever happens. No post-pass encodes over a
+//! registered `playback.flac`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -134,6 +142,11 @@ pub struct PostPassJob {
     pub segment: SegmentOptions,
     /// Where the punctuator comes from (the context's data paths).
     pub punct: PunctSource,
+    /// Run again from the stored audio (plan 16 section 12.5 J,
+    /// [`super::rerun_post_pass`]): the WAVs are decoded from the meeting's
+    /// registered `playback.flac` when the job starts and deleted when it
+    /// ends, whatever happens; the FLAC and its track row are never touched.
+    pub from_flac: bool,
 }
 
 impl PostPassJob {
@@ -1031,6 +1044,16 @@ pub fn run_post_pass(
         })
     };
     let (mic, lb) = (job.mic_wav(), job.loopback_wav());
+    // Run again from the stored audio (plan 16 section 12.5 J): the WAVs
+    // are decoded from `playback.flac` first and go when this returns,
+    // whatever happens.
+    let _decoded = if job.from_flac {
+        Some(super::rerun::decode_wavs(store, job, &|done, total| {
+            progress(JobStage::Decoding, done, total)
+        })?)
+    } else {
+        None
+    };
     let mic_frames = wav_frames(&mic)?;
     let lb_frames = wav_frames(&lb)?;
     let wav_bytes = std::fs::metadata(&mic)?.len() + std::fs::metadata(&lb)?.len();
@@ -1318,32 +1341,47 @@ pub fn run_post_pass(
         }
     };
 
-    // The playback track: stereo FLAC, then the WAVs go. A post-pass that
-    // was interrupted after registering its FLAC left a row to replace.
+    // The playback track: stereo FLAC, then the WAVs go. A registered
+    // `playback.flac` is the meeting's audio and is never encoded again
+    // (plan 16 section 12.5 J, review B4): a job run again from it decoded
+    // these WAVs from it (a decode or encode bug must not be able to destroy
+    // the only copy), and a post-pass interrupted after registering it had
+    // encoded it from these same WAVs. Its row stays. A row whose file is
+    // gone is replaced.
     let flac = job.flac();
-    let info = encode_stereo(&mic, &lb, &flac)?;
-    for t in store.list_audio_tracks(job.meeting)? {
-        if t.channel == TrackChannel::Playback {
-            store.delete_audio_track(t.id)?;
-        }
-    }
-    let rel = |p: &Path| -> String {
-        p.strip_prefix(&job.data_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| p.display().to_string())
+    let kept = if job.from_flac {
+        true
+    } else {
+        super::rerun::playback_flac(store, &job.data_root, job.meeting, &flac)?.is_some()
     };
-    store.add_audio_track(NewAudioTrack {
-        meeting_id: job.meeting,
-        channel: TrackChannel::Playback,
-        path: rel(&flac),
-        format: AudioFormat::Flac,
-        sample_rate: 16_000,
-        channels: 2,
-        duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
-        size_bytes: Some(info.bytes as i64),
-        // Each channel's own length, for a run from the FLAC later.
-        channel_frames: Some(info.channel_frames.to_vec()),
-    })?;
+    let (flac_frames, flac_bytes) = if kept {
+        (mic_frames.max(lb_frames), std::fs::metadata(&flac)?.len())
+    } else {
+        let info = encode_stereo(&mic, &lb, &flac)?;
+        for t in store.list_audio_tracks(job.meeting)? {
+            if t.channel == TrackChannel::Playback {
+                store.delete_audio_track(t.id)?;
+            }
+        }
+        let rel = |p: &Path| -> String {
+            p.strip_prefix(&job.data_root)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.display().to_string())
+        };
+        store.add_audio_track(NewAudioTrack {
+            meeting_id: job.meeting,
+            channel: TrackChannel::Playback,
+            path: rel(&flac),
+            format: AudioFormat::Flac,
+            sample_rate: 16_000,
+            channels: 2,
+            duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
+            size_bytes: Some(info.bytes as i64),
+            // Each channel's own length, for a run from the FLAC later.
+            channel_frames: Some(info.channel_frames.to_vec()),
+        })?;
+        (info.frames, info.bytes)
+    };
     for t in store.list_audio_tracks(job.meeting)? {
         if t.format == AudioFormat::Wav
             && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
@@ -1379,8 +1417,8 @@ pub fn run_post_pass(
         carry_over: carry,
         unplaced_names: unplaced,
         flac_path: flac,
-        flac_frames: info.frames,
-        flac_bytes: info.bytes,
+        flac_frames,
+        flac_bytes,
         wav_bytes,
         drift_ppm,
         transcribe_wall,

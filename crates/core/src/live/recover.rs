@@ -12,11 +12,16 @@
 //!   current is kept and the meeting finished (the live run goes unless
 //!   `keep_live_runs` or the post-pass recorded `unplaced_names`);
 //!   otherwise the materialised live run becomes current with a note in its
-//!   `engine_info`.
+//!   `engine_info`. A meeting with its registered `playback.flac` (a run
+//!   from the stored audio, plan 16 section 12.5 J, or a post-pass that got
+//!   as far as registering it) is finished as it is instead: the WAVs
+//!   beside the FLAC are copies (decoded from it, or already encoded into
+//!   it) and go, an unfinished post-pass run goes, the current run stays,
+//!   and the FLAC is never touched.
 
 use std::path::Path;
 
-use super::rerun::discard_unfinished_post_passes;
+use super::rerun::{discard_unfinished_post_passes, playback_flac};
 use super::{
     live_run_of, register_wavs, submit_post_pass, LiveContext, PostPassHandle, PostPassJob,
 };
@@ -26,7 +31,10 @@ use crate::punct::rebuild::descends_from;
 use crate::settings;
 use crate::store::{RunStore, StoreError};
 use crate::transcript::SegmentOptions;
-use crate::types::{JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source};
+use crate::types::{
+    AudioFormat, JobId, Meeting, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source,
+    TrackChannel,
+};
 
 /// The note a promoted live run gets in its `engine_info` (key `recovery`).
 pub const PROMOTED_NOTE: &str = "The post-pass was interrupted and the recorded audio is gone, \
@@ -100,6 +108,7 @@ fn post_pass_job(
         keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
         segment: SegmentOptions::default(),
         punct: ctx.punct.clone(),
+        from_flac: false,
     })
 }
 
@@ -172,6 +181,9 @@ fn recover_processing(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeeti
     let detail = store.get_meeting(id)?;
     let meeting = detail.meeting;
     let folder = ctx.data_root.join("audio").join(&meeting.uid);
+    if playback_flac(store, &ctx.data_root, id, &folder.join("playback.flac"))?.is_some() {
+        return finish_beside_flac(store, id, detail.current_run.is_some(), &folder);
+    }
     let frames = |p: &Path| {
         if p.is_file() {
             repair_header(p).map(|r| r.frames).unwrap_or(0)
@@ -245,4 +257,48 @@ fn recover_processing(ctx: &LiveContext, id: MeetingId) -> Result<RecoveredMeeti
         None => store.set_meeting_status(id, MeetingStatus::Failed)?,
     }
     Ok(r)
+}
+
+/// A `processing` meeting whose registered `playback.flac` holds its audio
+/// (see the module docs): the WAVs beside it go, never the FLAC, with their
+/// rows and an unfinished post-pass run; the current run stays and the
+/// meeting is `done` (`failed` without any run to show).
+fn finish_beside_flac(
+    store: &dyn RunStore,
+    id: MeetingId,
+    has_current: bool,
+    folder: &Path,
+) -> Result<RecoveredMeeting> {
+    for f in ["mic.wav", "loopback.wav", super::postpass::MIC_AEC_WAV] {
+        let _ = std::fs::remove_file(folder.join(f));
+    }
+    for t in store.list_audio_tracks(id)? {
+        if t.format == AudioFormat::Wav
+            && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
+        {
+            store.delete_audio_track(t.id)?;
+        }
+    }
+    let live = live_run_of(&store.list_runs(id)?).map(|r| r.id);
+    if let Some(run) = live {
+        discard_unfinished_post_passes(store, id, run)?;
+    }
+    let (status, action) = if has_current {
+        (MeetingStatus::Done, RecoveryAction::Finished)
+    } else {
+        (MeetingStatus::Failed, RecoveryAction::Failed)
+    };
+    store.set_meeting_status(id, status)?;
+    log::info!(
+        "recovery: meeting {id} keeps its playback.flac and its current run; the WAVs beside it went"
+    );
+    Ok(RecoveredMeeting {
+        meeting_id: id,
+        was: MeetingStatus::Processing,
+        action,
+        live_run: live,
+        mic_frames: 0,
+        loopback_frames: 0,
+        post_pass: None,
+    })
 }

@@ -1769,6 +1769,7 @@ fn echo_post_pass_full(
         keep_live_runs: true,
         segment: SegmentOptions::default(),
         punct: crate::punct::PunctSource::None,
+        from_flac: false,
     };
     let report = run_post_pass(
         &*store,
@@ -2210,6 +2211,7 @@ fn punct_job(
         keep_live_runs: false,
         segment: SegmentOptions::default(),
         punct,
+        from_flac: false,
     }
 }
 
