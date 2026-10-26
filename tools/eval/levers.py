@@ -9,6 +9,8 @@ over runs that run.py or nemo_direct.py already cached. Never touches the GPU.
   uv run python -I levers.py punct --words <words.json> [...]
   uv run python -I levers.py table --configs nemotron35,n35_rc_3,nemotron_en,en_rc_13
   uv run python -I levers.py boost --base .work/spikes/boost/n35_base --runs .work/spikes/boost/n35_b3 --phrases Craig beagle
+  uv run python -I levers.py loops --configs shipped_en --sessions all
+  uv run python -I levers.py loops --db <copy of diarist.db> --meetings 12-21 [--analysis <loops json>]
 
 offsets: word-start offset of each config against the base config on the
   same session: normalised words aligned by Levenshtein, starts compared on
@@ -32,11 +34,23 @@ boost: phrase hits, changes against the unboosted run, clip WER and the
 table: the lookahead summary, one row per config (quality on the short
   sessions, speed, and on the 77-minute session VRAM, tag agreement and the
   word-start offset against the same model's R = 1 config).
+loops: repeated-token runs and what the loop collapse of
+  crates/core/src/transcript/loops.rs (docs/plans/16 section 12.3) removes,
+  over the cached engine words JSON of eval runs (as the file import builds
+  its words) or over the current runs of a copy of a data root's database
+  (each channel's words in time order, as the post-pass and a rebuild see
+  them). Runs by length, median start gap and split; the collapsed pieces;
+  on sessions with a reference, how many copies of the token the reference
+  has around each run; with --analysis, the share of removed tokens that a
+  word-error analysis's loop records (Whisper lacks the repeat, Nemotron 3.5
+  has no loop there) confirm. Numbers only, per session label or meeting
+  number; no text is printed.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import statistics
@@ -418,6 +432,422 @@ def cmd_punct(a) -> None:
               f"{caps} capitalised ({100 * caps / max(len(ws), 1):.1f} %)")
 
 
+# --------------------------------------------------------------------------
+# loops: the repeated-token loop collapse (docs/plans/16 section 12.3), the
+# same rule as crates/core/src/transcript/loops.rs.
+
+LOOP_MIN_RUN = 4  # loops.rs LOOP_MIN_RUN
+LOOP_FRAME_MS = 80  # loops.rs LOOP_FRAME_MS: one encoder frame
+LOOP_SPLIT_MS = 400  # loops.rs LOOP_SPLIT_MS
+
+
+def loop_norm(text: str) -> str:
+    """crates/core/src/audio/echo/text.rs `norm`: lower case, letters, digits
+    and spaces kept, trimmed."""
+    return "".join(c for c in text.lower() if c.isalnum() or c.isspace()).strip()
+
+
+def _continuous(c: str) -> bool:
+    """Han, Hiragana, Katakana or Thai (`punct::Script::is_continuous`)."""
+    o = ord(c)
+    return (
+        0x0E00 <= o <= 0x0E7F or 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF or 0xFF66 <= o <= 0xFF9F
+        or o in (0x3005, 0x3007) or 0x3400 <= o <= 0x4DBF or 0x4E00 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF
+        or 0x20000 <= o <= 0x3134F
+    )
+
+
+def loop_eligible(n: str) -> bool:
+    """A token the collapse may touch: a non-empty norm that is not digits
+    only and has no Han, Kana or Thai character."""
+    return bool(n) and not all(c.isnumeric() or c.isspace() for c in n) and not any(_continuous(c) for c in n)
+
+
+def loop_runs(words: list[dict], key=lambda w: (w["norm"], w["speaker"])) -> list[list[tuple[int, int]]]:
+    """Maximal runs of consecutive words (in time order) with the same key
+    (the norm and the speaker label), each split into pieces wherever two
+    consecutive starts are more than LOOP_SPLIT_MS apart: per run its
+    pieces as inclusive (first, last) indices."""
+    out = []
+    i = 0
+    while i < len(words):
+        j = i
+        while j + 1 < len(words) and key(words[j + 1]) == key(words[i]):
+            j += 1
+        pieces, a = [], i
+        for k in range(i + 1, j + 1):
+            if words[k]["start"] - words[k - 1]["start"] > LOOP_SPLIT_MS:
+                pieces.append((a, k - 1))
+                a = k
+        pieces.append((a, j))
+        out.append(pieces)
+        i = j + 1
+    return out
+
+
+def piece_gaps(words: list[dict], piece: tuple[int, int]) -> list[int]:
+    i, j = piece
+    return [words[k + 1]["start"] - words[k]["start"] for k in range(i, j)]
+
+
+def loop_kind(words: list[dict], piece: tuple[int, int]) -> str | None:
+    """`loop`: LOOP_MIN_RUN or more words at a median start gap of at most
+    one frame; `frame3`: exactly three words starting in one frame (within
+    half a frame of the first, i.e. equal on the 80 ms grid); else None
+    (the piece is kept)."""
+    i, j = piece
+    n = j - i + 1
+    if not loop_eligible(words[i]["norm"]):
+        return None
+    if n >= LOOP_MIN_RUN:
+        return "loop" if statistics.median(piece_gaps(words, piece)) <= LOOP_FRAME_MS else None
+    if n == 3 and words[j]["start"] - words[i]["start"] < LOOP_FRAME_MS / 2:
+        return "frame3"
+    return None
+
+
+def loop_removed(words: list[dict], key=lambda w: (w["norm"], w["speaker"]), split: bool = True,
+                 triple_median: bool = False) -> int:
+    """Words the rule removes from `words`; with `split=False` and
+    `triple_median=True`, the draft rule of plan 16 section 12.3 before its
+    review (no 400 ms split; three words at a median gap of one frame)."""
+    removed = 0
+    for pieces in loop_runs(words, key):
+        if not split:
+            pieces = [(pieces[0][0], pieces[-1][1])]
+        for (i, j) in pieces:
+            n = j - i + 1
+            if triple_median and n == 3:
+                hit = loop_eligible(words[i]["norm"]) and statistics.median(piece_gaps(words, (i, j))) <= LOOP_FRAME_MS
+            else:
+                hit = loop_kind(words, (i, j)) is not None
+            removed += (n - 1) if hit else 0
+    return removed
+
+
+def engine_stream(path: Path) -> list[dict]:
+    """A runtime words JSON as the file import stores it: microseconds
+    rounded, then milliseconds rounded (words_from_engine), clamped to the
+    audio, speakers numbered by first appearance (spk_N, else spk_unknown),
+    sorted by start (stable)."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    labels: dict = {}
+    out = []
+    for w in doc.get("words", []):
+        s_us = round(max(float(w["start"]), 0.0) * 1e6)
+        e_us = round(max(float(w["end"]), float(w["start"]), 0.0) * 1e6)
+        spk = w.get("speaker")
+        label = "spk_unknown" if spk is None else f"spk_{labels.setdefault(spk, len(labels))}"
+        out.append({"start": (s_us + 500) // 1000, "end": (e_us + 500) // 1000, "text": str(w["word"]),
+                    "speaker": label, "seg": None})
+    dur = max(int(round(float(doc.get("duration") or 0) * 1000)), max((w["end"] for w in out), default=0))
+    for w in out:
+        w["start"] = min(w["start"], dur)
+        w["end"] = min(max(w["end"], w["start"]), dur)
+        w["norm"] = loop_norm(w["text"])
+    out.sort(key=lambda w: w["start"])
+    return out
+
+
+def db_streams(con, run_id: int) -> dict[str, list[dict]]:
+    """The words of a stored run by channel, in (start, id) order, each with
+    the engine label of its own segment's speaker row (as a rebuild reads
+    them: punct::rebuild::source_run) and its segment."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(words)")}
+    asr = "coalesce(w.raw_text, w.text)" if "raw_text" in cols else "w.text"
+    q = f"""select w.start_ms, w.end_ms, {asr}, sp.channel, sp.engine_label, s.id
+            from words w join segments s on s.id = w.segment_id join speakers sp on sp.id = s.speaker_id
+            where s.run_id = ? order by w.start_ms, w.id"""
+    out: dict[str, list[dict]] = {}
+    for s, e, t, ch, lab, seg in con.execute(q, (run_id,)):
+        out.setdefault(ch, []).append({"start": s, "end": e, "text": t, "norm": loop_norm(t), "speaker": lab, "seg": seg})
+    return out
+
+
+def _q(v: list[float], p: float) -> str:
+    if not v:
+        return "–"
+    v = sorted(v)
+    return f"{v[min(len(v) - 1, int(p * (len(v) - 1)))]:.0f}"
+
+
+class LoopTally:
+    """Counters over one or more channel streams."""
+
+    def __init__(self) -> None:
+        self.c: Counter = Counter()
+        self.gaps: dict[str, list[float]] = {"3": [], "4-5": [], "6+": []}
+
+    def add(self, words: list[dict], refs=None, margin: float = 1.0) -> list[dict]:
+        """Counts `words` (one channel) and returns its collapsed pieces as
+        {start, end, n, kind, norm, i, j}; with `refs` (normalised reference
+        words with times), the reference's copies of the token around each
+        collapsed or kept 4+ piece are counted too."""
+        c = self.c
+        c["words"] += len(words)
+        collapsed = []
+        for pieces in loop_runs(words):
+            if len(pieces) > 1:
+                c["runs_split"] += 1
+                c["runs_split_collapsed"] += any(loop_kind(words, p) for p in pieces)
+            for (i, j) in pieces:
+                n = j - i + 1
+                if n < 2:
+                    continue
+                g = piece_gaps(words, (i, j))
+                med = statistics.median(g)
+                kind = loop_kind(words, (i, j))
+                if n == 2:
+                    c["pairs"] += 1
+                    c["pairs_one_frame"] += g[0] <= LOOP_FRAME_MS
+                elif n == 3:
+                    self.gaps["3"].append(med)
+                    same = words[j]["start"] - words[i]["start"] < LOOP_FRAME_MS / 2
+                    c["triples"] += 1
+                    c["triples_same_frame"] += same
+                    c["triples_one_frame_spacing"] += (not same) and max(g) <= LOOP_FRAME_MS
+                else:
+                    self.gaps["4-5" if n <= 5 else "6+"].append(med)
+                    c["runs4"] += 1
+                    c["runs4_fast"] += med <= LOOP_FRAME_MS
+                    c["runs4_81_160"] += LOOP_FRAME_MS < med <= 2 * LOOP_FRAME_MS
+                    c["runs4_slow"] += med > 2 * LOOP_FRAME_MS
+                    c["runs4_jitter"] += LOOP_FRAME_MS < med < 1.5 * LOOP_FRAME_MS
+                if n >= 4 and kind is None:
+                    c["kept4_pieces"] += 1
+                    c["kept4_words"] += n
+                    if not loop_eligible(words[i]["norm"]):
+                        c["kept4_ineligible"] += 1
+                if kind:
+                    c[f"collapsed_{kind}"] += 1
+                    c["removed"] += n - 1
+                    c[f"removed_{kind}"] += n - 1
+                    if words[i]["seg"] is not None and words[i]["seg"] != words[j]["seg"]:
+                        c["crossing_segment"] += 1
+                    nxt = words[j + 1]["norm"] if j + 1 < len(words) else ""
+                    if nxt.startswith(words[i]["norm"]) and len(nxt) > len(words[i]["norm"]):
+                        c["false_start"] += 1
+                    collapsed.append({"start": words[i]["start"], "end": words[j]["end"], "n": n, "kind": kind,
+                                      "norm": words[i]["norm"], "i": i, "j": j})
+                if refs is not None and (kind or n >= 4):
+                    toks = normalize_token(words[i]["text"])
+                    side = "c" if kind else "k"
+                    if not toks:
+                        c[f"ref_{side}_filler"] += 1
+                        continue
+                    a, b = words[i]["start"] / 1000 - margin, words[j]["end"] / 1000 + margin
+                    lo = bisect.bisect_left(refs[1], a)
+                    have = sum(1 for k in range(lo, len(refs[0])) if refs[1][k] <= b and refs[0][k].word == toks[0])
+                    c[f"ref_{side}_pieces"] += 1
+                    c[f"ref_{side}_le1"] += have <= 1
+                    c[f"ref_{side}_some"] += 1 < have < n
+                    c[f"ref_{side}_all"] += have >= n
+        # What the speaker condition kept (expected 0: plan 16 section 12.3).
+        no_spk = sum(j - i for pieces in loop_runs(words, key=lambda w: w["norm"]) for (i, j) in pieces
+                     if loop_kind(words, (i, j)))
+        c["removed_without_speaker_rule"] += no_spk
+        return collapsed
+
+    def row(self) -> list[str]:
+        c = self.c
+        return [
+            str(c["words"]), f"{c['pairs']} ({c['pairs_one_frame']})",
+            f"{c['triples']} ({c['triples_same_frame']} / {c['triples_one_frame_spacing']})",
+            f"{c['runs4']} ({c['runs4_fast']} / {c['runs4_81_160']} / {c['runs4_slow']})",
+            f"{c['runs_split']} ({c['runs_split_collapsed']})",
+            f"{c['collapsed_loop']} / {c['collapsed_frame3']}", str(c["removed"]),
+            f"{c['kept4_pieces']} ({c['kept4_words']})",
+        ]
+
+
+LOOP_HEAD = (
+    "| {src} | Channel | Words | Pairs (one frame) | Runs of 3 (same frame / one-frame spacing) | "
+    "Pieces of 4+ (median ≤ 80 / 81–160 / > 160 ms) | Runs split at 400 ms (with a collapse) | Collapsed (4+ / 3 in a frame) | "
+    "Words removed | 4+ kept (words) |"
+)
+
+
+def _ref_words(session):
+    """The session's reference as normalised words with times (cue-level
+    Zoom times interpolated by length), and their starts."""
+    import run as R
+    from common import interpolate_words
+
+    segs, _, _ = R.load_reference(session)
+    words = interpolate_words(segs)
+    return words, [w.start for w in words]
+
+
+def _loops_eval(a) -> None:
+    sessions = load_sessions(a.sessions_file)
+    runs = Path(a.runs_dir) if a.runs_dir else RUNS
+    sids = list(sessions) if a.sessions == "all" else [x.strip() for x in a.sessions.split(",") if x.strip()]
+    for cfg in [x.strip() for x in a.configs.split(",") if x.strip()]:
+        print(f"\n### {cfg}\n")
+        print(LOOP_HEAD.format(src="Session"))
+        print("|" + "---|" * 10)
+        total = LoopTally()
+        groups: dict[str, LoopTally] = {}
+        for sid in sids:
+            p = runs / cfg / sid / "engine.words.json"
+            if not p.is_file():
+                continue
+            words = engine_stream(p)
+            refs = None
+            if not a.no_ref:
+                try:
+                    refs = _ref_words(sessions[sid])
+                except (SystemExit, OSError, ValueError) as e:
+                    print(f"{sid}: no reference ({type(e).__name__})", file=sys.stderr)
+            t = LoopTally()
+            t.add(words, refs, a.margin)
+            for agg in (total, groups.setdefault(sessions[sid].group, LoopTally())):
+                agg.c.update(t.c)
+                for k, v in t.gaps.items():
+                    agg.gaps[k] += v
+            print(f"| {sessions[sid].label} | source | " + " | ".join(t.row()) + " |")
+        for g, t in groups.items():
+            print(f"| group {g} | source | " + " | ".join(t.row()) + " |")
+        print(f"| all | source | " + " | ".join(total.row()) + " |")
+        c = total.c
+        print(f"\nPieces by length, median start gap p10/p50/p90 (ms): 3: {_q(total.gaps['3'], .1)}/{_q(total.gaps['3'], .5)}/"
+              f"{_q(total.gaps['3'], .9)} ({len(total.gaps['3'])}); 4-5: {_q(total.gaps['4-5'], .1)}/{_q(total.gaps['4-5'], .5)}/"
+              f"{_q(total.gaps['4-5'], .9)} ({len(total.gaps['4-5'])}); 6+: {_q(total.gaps['6+'], .1)}/"
+              f"{_q(total.gaps['6+'], .5)}/{_q(total.gaps['6+'], .9)} ({len(total.gaps['6+'])})")
+        print(f"Collapsed pieces crossing a segment: n/a (import words); followed by a word that starts with the token "
+              f"(false start): {c['false_start']}; 4+ pieces with a median gap of 81 to 119 ms (clock rounding): "
+              f"{c['runs4_jitter']}; words a speaker change kept from the collapse: "
+              f"{c['removed_without_speaker_rule'] - c['removed']}")
+        if not a.no_ref:
+            print("\nReference copies of the token within "
+                  f"{a.margin:.1f} s of each piece (fillers have no reference token):\n")
+            print("| Pieces | Count | Filler | Reference has at most 1 | 2 to n − 1 | n or more |")
+            print("|---|---|---|---|---|---|")
+            for side, name in (("c", "collapsed"), ("k", "4+ kept by the timing rule")):
+                print(f"| {name} | {c[f'ref_{side}_pieces'] + c[f'ref_{side}_filler']} | {c[f'ref_{side}_filler']} | "
+                      f"{c[f'ref_{side}_le1']} | {c[f'ref_{side}_some']} | {c[f'ref_{side}_all']} |")
+
+
+def _parse_meetings(spec: str) -> list[int]:
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-")
+            out += list(range(int(lo), int(hi) + 1))
+        elif part:
+            out.append(int(part))
+    return out
+
+
+def _analysis_spans(rec_list: list[dict], words: list[dict]) -> list[tuple[float, float]]:
+    """A loop record's span (s): from its start to the last start of the
+    same-norm words that follow it in `words` (speaker and splits ignored)."""
+    spans = []
+    starts = [w["start"] / 1000 for w in words]
+    for r in rec_list:
+        k = bisect.bisect_left(starts, r["t"] - 0.15)
+        if k >= len(words) or starts[k] > r["t"] + 0.15:
+            spans.append((r["t"], r["t"]))
+            continue
+        e = k
+        while e + 1 < len(words) and words[e + 1]["norm"] == words[k]["norm"]:
+            e += 1
+        spans.append((starts[k], starts[e]))
+    return spans
+
+
+def _loops_db(a) -> None:
+    import sqlite3
+
+    con = sqlite3.connect(a.db)
+    analysis = json.loads(Path(a.analysis).read_text(encoding="utf-8")) if a.analysis else None
+    print(LOOP_HEAD.format(src="Meeting"))
+    print("|" + "---|" * 10)
+    total = LoopTally()
+    per_segment: Counter = Counter()
+    share: Counter = Counter()
+    for mid in _parse_meetings(a.meetings):
+        row = con.execute("select current_run_id from meetings where id = ?", (mid,)).fetchone()
+        if not row or row[0] is None:
+            continue
+        streams = db_streams(con, row[0])
+        for ch in sorted(streams, key=lambda c: ("loopback", "mic", "source").index(c) if c in ("loopback", "mic", "source") else 9):
+            words = streams[ch]
+            t = LoopTally()
+            collapsed = t.add(words)
+            total.c.update(t.c)
+            for k, v in t.gaps.items():
+                total.gaps[k] += v
+            print(f"| {mid} | {ch} | " + " | ".join(t.row()) + " |")
+            # The rule within one segment, and the draft rule before the
+            # review over the channel stream and within one segment (the
+            # reviewer's and the planner's counts of section 12.3).
+            seg = lambda w: (w["norm"], w["speaker"], w["seg"])  # noqa: E731
+            per_segment["stream", mid] += t.c["removed"]
+            per_segment["segment", mid] += loop_removed(words, seg)
+            per_segment["draft stream", mid] += loop_removed(words, split=False, triple_median=True)
+            per_segment["draft segment", mid] += loop_removed(words, seg, split=False, triple_median=True)
+            if analysis and str(mid) in analysis:
+                recs = analysis[str(mid)]
+                key = "POST_LB" if ch == "loopback" else "POST_ME"
+                tie = "N35_LB" if ch == "loopback" else ("AEC_N35" if "STORED_AEC" in recs else "RAW_N35")
+                spans = _analysis_spans(recs.get(key, {}).get("list", []), words)
+                tie_spans = _analysis_spans(recs.get(tie, {}).get("list", []), words)
+                wh2 = [r.get("whisper_n", 0) >= 2 for r in recs.get(key, {}).get("list", [])]
+                for p in collapsed:
+                    s0, s1 = p["start"] / 1000, words[p["j"]]["start"] / 1000
+                    hit = [k for k, (x, y) in enumerate(spans) if x - 0.15 <= s1 and s0 <= y + 0.15]
+                    removed = p["n"] - 1
+                    share["removed", ch] += removed
+                    if hit:
+                        share["labelled", ch] += removed
+                        share["labelled_whisper2", ch] += removed if any(wh2[k] for k in hit) else 0
+                        if not any(x - 0.5 <= s1 and s0 <= y + 0.5 for x, y in tie_spans):
+                            share["en_only", ch] += removed
+                    elif p["kind"] == "frame3":
+                        share["frame3_unlabelled", ch] += removed
+    print("| all | both | " + " | ".join(total.row()) + " |")
+    c = total.c
+    print(f"\nPieces by length, median start gap p10/p50/p90 (ms): 3: {_q(total.gaps['3'], .1)}/{_q(total.gaps['3'], .5)}/"
+          f"{_q(total.gaps['3'], .9)} ({len(total.gaps['3'])}); 4-5: {_q(total.gaps['4-5'], .1)}/{_q(total.gaps['4-5'], .5)}/"
+          f"{_q(total.gaps['4-5'], .9)} ({len(total.gaps['4-5'])}); 6+: {_q(total.gaps['6+'], .1)}/"
+          f"{_q(total.gaps['6+'], .5)}/{_q(total.gaps['6+'], .9)} ({len(total.gaps['6+'])})")
+    print(f"Collapsed pieces crossing a segment boundary: {c['crossing_segment']}; followed by a word that starts with "
+          f"the token (false start): {c['false_start']}; 4+ pieces with a median gap of 81 to 119 ms: {c['runs4_jitter']}; "
+          f"words a speaker-label change kept from the collapse: {c['removed_without_speaker_rule'] - c['removed']}")
+    ms = sorted({m for (_, m) in per_segment})
+    print("\nWords removed per meeting:\n")
+    print("| Count | " + " | ".join(str(m) for m in ms) + " | Total |")
+    print("|---|" + "---|" * (len(ms) + 1))
+    for k, name in (("stream", "the rule, channel stream (as built)"), ("segment", "the rule, within one segment"),
+                    ("draft stream", "draft rule (no split, 3 at a one-frame median), channel stream"),
+                    ("draft segment", "draft rule, within one segment")):
+        print(f"| {name} | " + " | ".join(str(per_segment[k, m]) for m in ms) + f" | {sum(per_segment[k, m] for m in ms)} |")
+    if analysis:
+        for ch in ("loopback", "mic"):
+            r = share["removed", ch]
+            if not r:
+                continue
+            print(f"{ch}: {r} removed; in a loop the analysis recorded (Whisper has fewer than 3 copies) "
+                  f"{share['labelled', ch]} ({100 * share['labelled', ch] / r:.1f} %), of them with no Nemotron 3.5 loop "
+                  f"there (EN only) {share['en_only', ch]} ({100 * share['en_only', ch] / r:.1f} %); in records where "
+                  f"Whisper has 2 copies {share['labelled_whisper2', ch]}; unlabelled 3-in-a-frame "
+                  f"{share['frame3_unlabelled', ch]}")
+        r = share["removed", "loopback"] + share["removed", "mic"]
+        if r:
+            lab = share["labelled", "loopback"] + share["labelled", "mic"]
+            en = share["en_only", "loopback"] + share["en_only", "mic"]
+            print(f"both: {r} removed; labelled {lab} ({100 * lab / r:.1f} %); EN only {en} ({100 * en / r:.1f} %)")
+
+
+def cmd_loops(a) -> None:
+    if a.db:
+        _loops_db(a)
+    else:
+        _loops_eval(a)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -465,9 +895,18 @@ def main() -> None:
     p.add_argument("--base-en", default="nemotron_en")
     p = sub.add_parser("punct")
     p.add_argument("--words", nargs="+", required=True)
+    p = sub.add_parser("loops")
+    p.add_argument("--configs", default="shipped_en", help="eval run configs (their engine.words.json)")
+    p.add_argument("--sessions", default="all")
+    p.add_argument("--runs-dir", help="another .work/runs folder to read (read only)")
+    p.add_argument("--no-ref", action="store_true", help="skip the reference check")
+    p.add_argument("--margin", type=float, default=1.0, help="reference window around a piece (s)")
+    p.add_argument("--db", help="a copy of a data root's diarist.db: its meetings' current runs instead of eval runs")
+    p.add_argument("--meetings", default="1-1000", help="meeting ids for --db, e.g. 12-21")
+    p.add_argument("--analysis", help="a word-error analysis's loops JSON, for the EN-only share (--db)")
     a = ap.parse_args()
     {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts, "compare": cmd_compare,
-     "punct": cmd_punct}[a.cmd](a)
+     "punct": cmd_punct, "loops": cmd_loops}[a.cmd](a)
 
 
 if __name__ == "__main__":
