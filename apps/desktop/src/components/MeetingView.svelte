@@ -6,6 +6,7 @@
   import type { EchoDroppedWord } from "../lib/generated/EchoDroppedWord";
   import type { MeetingDetail } from "../lib/generated/MeetingDetail";
   import type { MeetingId } from "../lib/generated/MeetingId";
+  import type { ModelFile } from "../lib/generated/ModelFile";
   import type { SegmentId } from "../lib/generated/SegmentId";
   import type { SegmentView } from "../lib/generated/SegmentView";
   import type { SpeakerId } from "../lib/generated/SpeakerId";
@@ -15,6 +16,7 @@
   import { live } from "../lib/live.svelte";
   import { Player } from "../lib/player.svelte";
   import { parseVolume, playbackGain } from "../lib/playerGain";
+  import { punctLine, punctMode, punctModel, punctReport } from "../lib/punctuation";
   import { app, isTyping } from "../lib/state.svelte";
   import AudioBar from "./AudioBar.svelte";
   import Icon from "./Icon.svelte";
@@ -132,6 +134,48 @@
     }
   }
 
+  /**
+   * The punctuation line of the details (plan 16 sections 3.8 and 3.9): what
+   * `engine_info.punctuation` of the current run says, with Add or Remove
+   * punctuation. Both run as jobs; the transcript reloads when one ends.
+   */
+  let modelFiles = $state.raw<ModelFile[]>([]);
+  const punct = $derived(
+    isLive || finalizing || !meeting
+      ? null
+      : punctLine(punctReport(detail?.current_run?.engine_info), {
+          model: punctModel(modelFiles, app.setting("selected_model.punctuation")),
+          files: modelFiles,
+          off: punctMode(app.setting("transcript.punctuation")) === "off",
+          language: meeting.language,
+        }),
+  );
+  const punctBusy = $derived(app.punctuating.has(meetingId));
+
+  async function loadModelFiles() {
+    try {
+      modelFiles = await api.listModelFiles();
+    } catch {
+      modelFiles = []; // The line then offers no Add; the meeting still opens.
+    }
+  }
+
+  function punctAction() {
+    const line = punct;
+    if (!line?.action || !meeting || punctBusy) return;
+    void app.punctuate(meetingId, meeting.title, line.action === "remove");
+  }
+
+  function punctLink() {
+    const line = punct;
+    if (line?.link === "settings") {
+      app.settingsAnchor = "punctuation";
+      app.route = "settings";
+    } else if (line?.link === "diagnostics") {
+      app.route = "diagnostics";
+    }
+  }
+
   /** Why an imported file failed (this session): unknown tokens, an engine error. */
   const importError = $derived(
     meeting?.source === "file" && meeting.status === "failed" ? (app.postPassErrors.get(meetingId) ?? null) : null,
@@ -225,6 +269,13 @@
   onMount(() => {
     if (audioEl) player.attach(audioEl);
     void load();
+    void loadModelFiles();
+    const offPunct = app.onPunctuated((id) => {
+      if (id !== meetingId) return;
+      removed = null;
+      void loadModelFiles();
+      void reload();
+    });
     const off = app.onJob((e) => {
       if (e.type === "done" && e.meeting_id === meetingId) {
         const t0 = performance.now();
@@ -241,6 +292,7 @@
     });
     return () => {
       off();
+      offPunct();
       clearTimeout(speakerFetch);
       player.destroy();
     };
@@ -662,6 +714,19 @@
                 <p class="removed-list">Loading…</p>
               {/if}
             </details>
+          {/if}
+        </div>
+      {/if}
+      {#if punct}
+        <div class="echo-line punct-line">
+          <span>{punct.text}</span>
+          {#if punct.action}
+            <button type="button" class="link" disabled={punctBusy} onclick={punctAction}>
+              {punctBusy ? "Working…" : punct.actionLabel}
+            </button>
+          {/if}
+          {#if punct.link}
+            <button type="button" class="link" onclick={punctLink}>{punct.linkLabel}</button>
           {/if}
         </div>
       {/if}
