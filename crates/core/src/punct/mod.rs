@@ -24,6 +24,12 @@ use crate::settings;
 use crate::store::{Store, StoreError};
 use crate::types::RunId;
 
+// The ONNX runner (chunk B): the description block, the tokenizer and
+// generic windowing.
+pub mod spec;
+pub mod tokenize;
+pub mod windows;
+
 /// A punctuation model: labels whole streams of words.
 ///
 /// `Send` so a job can keep one session for a batch of meetings (the bulk

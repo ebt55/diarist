@@ -226,6 +226,10 @@ pub struct ModelSelection {
     pub engine: Option<ModelFileId>,
     pub asr: Option<ModelFileId>,
     pub diarizer: Option<ModelFileId>,
+    /// The punctuation model (docs/plans/16 section 3.8); never an
+    /// unrecognised file.
+    #[serde(default)]
+    pub punctuation: Option<ModelFileId>,
 }
 
 /// Settings key that stores the selected file for `role`:
@@ -272,15 +276,18 @@ impl EngineStatus {
                 .and_then(|v| v.parse::<i64>().ok())
                 .map(ModelFileId)
                 .filter(|id| {
-                    files
-                        .iter()
-                        .any(|f| f.id == *id && (f.role == role || f.role == ModelRole::Unknown))
+                    files.iter().any(|f| {
+                        f.id == *id
+                            && (f.role == role
+                                || (f.role == ModelRole::Unknown && role != ModelRole::Punctuation))
+                    })
                 })
         };
         let selected = ModelSelection {
             engine: selected_id(ModelRole::Engine),
             asr: selected_id(ModelRole::Asr),
             diarizer: selected_id(ModelRole::Diarizer),
+            punctuation: selected_id(ModelRole::Punctuation),
         };
         let mut engines = Vec::new();
         let mut models_by_role: BTreeMap<ModelRole, Vec<ModelFile>> = BTreeMap::new();
@@ -461,6 +468,29 @@ pub struct DownloadItem {
     pub backend: Option<String>,
     /// Tested by us (runtime packages; models are always `true`).
     pub tested: bool,
+    /// Every file of a multi-file model (a punctuation model: the tokenizer,
+    /// licences, the ONNX Runtime library, then the model itself), each
+    /// with its URL, hash and destination, for Copy link and a manual
+    /// install. Empty for a single-file download, which `url`, `sha256` and
+    /// `dest` describe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<DownloadFile>>")]
+    pub files: Vec<DownloadFile>,
+}
+
+/// One file of a multi-file [`DownloadItem`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DownloadFile {
+    /// Relative to the item's folder (`onnx/model_quantized.onnx`).
+    pub path: String,
+    pub url: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    /// Where it lands (absolute).
+    pub dest: String,
+    /// Already there with the expected size.
+    pub present: bool,
 }
 
 /// One meeting the launch-time recovery finished (`recovery_report`).

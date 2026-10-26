@@ -102,11 +102,23 @@ pub fn selected_file(store: &dyn Store, role: ModelRole) -> Result<Option<ModelF
     else {
         return Ok(None);
     };
-    // An unrecognised file the user chose for this role counts too.
+    // An unrecognised file the user chose for this role counts too
+    // (`role_accepts`).
     Ok(store
         .list_model_files()?
         .into_iter()
-        .find(|f| f.id == id && (f.role == role || f.role == ModelRole::Unknown) && !f.missing))
+        .find(|f| f.id == id && role_accepts(role, f.role) && !f.missing))
+}
+
+/// Whether a file of `file_role` can be the selection for `role`: its own
+/// role, or an unrecognised file the user forces for ASR or the diarizer
+/// (the runtime may refuse it). Never an unknown file for the engine or for
+/// punctuation, whose runner needs the description block an unknown file
+/// lacks (docs/plans/16 section 3.6).
+pub fn role_accepts(role: ModelRole, file_role: ModelRole) -> bool {
+    file_role == role
+        || (file_role == ModelRole::Unknown
+            && !matches!(role, ModelRole::Engine | ModelRole::Punctuation))
 }
 
 /// Resolves the selected engine, ASR model and diarizer to paths. Errors
@@ -725,7 +737,15 @@ pub fn select_by_id(store: &dyn Store, role: ModelRole, id: ModelFileId) -> Resu
         .into_iter()
         .find(|f| f.id == id)
         .ok_or_else(|| StoreError::not_found("model file", id))?;
-    if file.role != role && !(file.role == ModelRole::Unknown && role != ModelRole::Engine) {
+    if role == ModelRole::Punctuation && file.role == ModelRole::Unknown {
+        return Err(StoreError::Invalid(format!(
+            "{} cannot be used for punctuation: it {}",
+            file.display_name,
+            scan::PUNCT_NOTE
+        ))
+        .into());
+    }
+    if !role_accepts(role, file.role) {
         return Err(StoreError::Invalid(format!(
             "{} is a {} file, not {role}; pick it under its own role",
             file.display_name, file.role

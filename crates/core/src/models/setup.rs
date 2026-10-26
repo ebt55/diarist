@@ -4,17 +4,20 @@
 //! GPU; what the downloads are (URL, hash, folder); does the disk fit. No
 //! check is a gate: the UI shows what is missing next to a one-click fix.
 
+use std::path::Path;
+
 use serde::Serialize;
 use ts_rs::TS;
 
-use super::manifest::Manifest;
+use super::manifest::{Manifest, ModelEntry};
 use super::paths::{free_disk_bytes, DataPaths};
 use super::selected_file;
 use crate::error::Result;
 use crate::gpu::{recommended_backend, GpuAdapter, GpuInfo};
+use crate::punct::spec::rel_path;
 use crate::store::Store;
 use crate::types::{ModelFile, ModelRole};
-use crate::views::{DownloadItem, DownloadKind};
+use crate::views::{DownloadFile, DownloadItem, DownloadKind};
 
 /// What the first-run screen shows (`setup_status`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -86,11 +89,16 @@ pub fn download_items(
             licence: e.licence.clone(),
             backend: Some(e.backend.clone()),
             tested: e.tested,
+            files: Vec::new(),
         });
     }
     let mut models: Vec<_> = manifest.models.iter().collect();
     models.sort_by_key(|m| (!m.required, m.experimental));
     for m in models {
+        let parts = entry_files(m, &paths.models());
+        let primary = files
+            .iter()
+            .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str()));
         items.push(DownloadItem {
             kind: DownloadKind::Model,
             name: m.name.clone(),
@@ -99,9 +107,8 @@ pub fn download_items(
                 .clone()
                 .unwrap_or_else(|| format!("{} ({})", m.name, m.role)),
             size_bytes: m.size_bytes,
-            installed: files
-                .iter()
-                .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str())),
+            // A multi-file model is installed only with every file there.
+            installed: primary && parts.iter().all(|p| p.present),
             required: m.required,
             experimental: m.experimental,
             url: m.url.clone(),
@@ -110,9 +117,41 @@ pub fn download_items(
             licence: m.licence.clone(),
             backend: None,
             tested: true,
+            files: parts,
         });
     }
     items
+}
+
+/// Every file of a multi-file entry in download order (the other files,
+/// then the primary one), with where it lands and whether a file of the
+/// expected size is there. Empty for a single-file entry.
+pub fn entry_files(m: &ModelEntry, models_dir: &Path) -> Vec<DownloadFile> {
+    if m.files.is_empty() {
+        return Vec::new();
+    }
+    let root = m.dest_dir(models_dir);
+    let part = |path: &str, url: &str, size: u64, sha: &str| {
+        let dest = rel_path(&root, path);
+        DownloadFile {
+            path: path.to_owned(),
+            url: url.to_owned(),
+            size_bytes: size,
+            sha256: sha.to_owned(),
+            present: std::fs::metadata(&dest).is_ok_and(|md| md.is_file() && md.len() == size),
+            dest: dest.display().to_string(),
+        }
+    };
+    m.files
+        .iter()
+        .map(|f| part(&f.path, &f.url, f.size_bytes, &f.sha256))
+        .chain(std::iter::once(part(
+            &m.file,
+            &m.url,
+            m.primary_size_bytes(),
+            &m.sha256,
+        )))
+        .collect()
 }
 
 /// The first-run state from the scanned `files` (scan first), with `gpu`

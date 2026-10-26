@@ -256,7 +256,7 @@ enum ModelsCommand {
     List,
     /// Rescan models\ and engine\.
     Scan,
-    /// Select a model for a role (asr, diarizer) by id, name or file name.
+    /// Select a model for a role (asr, diarizer, punctuation) by id, name or file name.
     Select { role: String, query: String },
     /// Fetch models with `nemo-speech pull` (required ones by default).
     Pull {
@@ -642,8 +642,9 @@ fn parse_role(s: &str) -> CliResult<ModelRole> {
         "asr" => Ok(ModelRole::Asr),
         "diarizer" | "diarization" | "diar" => Ok(ModelRole::Diarizer),
         "engine" => Ok(ModelRole::Engine),
+        "punctuation" | "punct" => Ok(ModelRole::Punctuation),
         other => Err(CliError::Usage(format!(
-            "unknown role {other:?} (asr, diarizer, engine)"
+            "unknown role {other:?} (asr, diarizer, engine, punctuation)"
         ))),
     }
 }
@@ -1582,6 +1583,10 @@ mod tests {
         ));
         assert!(matches!(export_target(None, None, false), Ok(None)));
         assert!(matches!(parse_role("diar"), Ok(ModelRole::Diarizer)));
+        assert!(matches!(
+            parse_role("punctuation"),
+            Ok(ModelRole::Punctuation)
+        ));
         assert!(parse_role("gpu").is_err());
     }
 }

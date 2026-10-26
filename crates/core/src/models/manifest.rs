@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
+use crate::punct::spec::PunctSpec;
 use crate::types::ModelRole;
 
 const MODELS_JSON: &str = include_str!("../../../../manifests/models.json");
@@ -76,13 +77,43 @@ pub struct ModelEntry {
     /// flag, the runtime's streaming default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_preset: Option<String>,
+    /// More files of a multi-file model (a punctuation model: its tokenizer,
+    /// licence files and the ONNX Runtime library), fetched before the
+    /// primary `file`, so the scanner (keyed on the primary file) never sees
+    /// a selectable model with a part missing. `size_bytes` is the total of
+    /// all files; `file`, `url` and `sha256` describe the primary file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ModelExtraFile>,
+    /// The folder under `models\` the entry lands in, instead of `user`
+    /// (direct entries) or `<repo>\<revision>` (pulled ones). Relative, no
+    /// `..`: `models.user.json` is user-writable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// The description block of a punctuation model (docs/plans/16 section
+    /// 3.6), copied into the matched file's capabilities by the scanner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punctuation: Option<PunctSpec>,
+}
+
+/// One more file of a [`ModelEntry`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelExtraFile {
+    /// Relative to the entry's folder; Hugging Face names may be nested
+    /// (`onnx/model_quantized.onnx`, `tokenizer.json` at the root).
+    pub path: String,
+    pub url: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 impl ModelEntry {
-    /// The folder the model lands in: `modelsSer` for direct downloads,
-    /// else where `nemo-speech pull` puts it (`<repo><revision>`).
+    /// The folder the model lands in: `models\<dir>` when the entry names
+    /// one, else `models\user` for direct downloads and where `nemo-speech
+    /// pull` puts a pulled model (`<repo>\<revision>`).
     pub fn dest_dir(&self, models_dir: &Path) -> std::path::PathBuf {
-        if self.direct {
+        if let Some(dir) = self.dir.as_deref().filter(|d| !d.trim().is_empty()) {
+            crate::punct::spec::rel_path(models_dir, dir)
+        } else if self.direct {
             models_dir.join("user")
         } else {
             self.repo
@@ -91,6 +122,62 @@ impl ModelEntry {
                 .join(&self.revision)
         }
     }
+
+    /// The primary file's name, without a folder (`file` may be nested).
+    pub fn file_name(&self) -> &str {
+        self.file.rsplit(['/', '\\']).next().unwrap_or(&self.file)
+    }
+
+    /// The primary file's size: `size_bytes` less the other files.
+    pub fn primary_size_bytes(&self) -> u64 {
+        self.size_bytes
+            .saturating_sub(self.files.iter().map(|f| f.size_bytes).sum())
+    }
+
+    /// Checks the fields a user can get wrong in `models.user.json`: the
+    /// paths (relative, no `..`) and the description block. Errors name the
+    /// field.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        check_relative_path("file", &self.file)?;
+        if let Some(dir) = &self.dir {
+            check_relative_path("dir", dir)?;
+        }
+        for (i, f) in self.files.iter().enumerate() {
+            check_relative_path(&format!("files[{i}].path"), &f.path)?;
+            if f.path
+                .replace('\\', "/")
+                .eq_ignore_ascii_case(&self.file.replace('\\', "/"))
+            {
+                return Err(format!("files[{i}].path: the primary file again"));
+            }
+        }
+        if self.files.iter().map(|f| f.size_bytes).sum::<u64>() > self.size_bytes {
+            return Err("size_bytes: smaller than the other files together".into());
+        }
+        if let Some(spec) = &self.punctuation {
+            spec.validate().map_err(|e| format!("punctuation.{e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// A path from a manifest or description block: relative, inside the
+/// folder it is relative to (no `..`, no drive, no root, no `\\?\`).
+/// `Err` starts with `field`.
+pub fn check_relative_path(field: &str, path: &str) -> std::result::Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err(format!("{field}: empty"));
+    }
+    let bad = p.starts_with(['/', '\\'])
+        || p.contains(':')
+        || p.split(['/', '\\']).any(|part| part == "..");
+    if bad || Path::new(p).is_absolute() {
+        return Err(format!(
+            "{field}: {path:?} must be a relative path inside the model's folder (no `..`, no drive)"
+        ));
+    }
+    Ok(())
 }
 
 /// One runtime zip.
@@ -154,6 +241,9 @@ impl Manifest {
                         "{USER_MODELS}: {e} (each entry needs name, role, file, url, size_bytes, sha256)"
                     ))
                 })?;
+                e.validate().map_err(|err| {
+                    CoreError::Models(format!("{USER_MODELS}: {}: {err}", e.name))
+                })?;
                 match m
                     .models
                     .iter_mut()
@@ -163,6 +253,11 @@ impl Manifest {
                     None => m.models.push(e),
                 }
             }
+        }
+        for e in &m.models {
+            e.validate().map_err(|err| {
+                CoreError::Models(format!("manifests/models.json: {}: {err}", e.name))
+            })?;
         }
         Ok(m)
     }
@@ -186,11 +281,12 @@ impl Manifest {
             .find(|m| m.name.eq_ignore_ascii_case(name) || m.pull_name.eq_ignore_ascii_case(name))
     }
 
-    /// The entry a file on disk corresponds to: same file name and size.
+    /// The entry a file on disk corresponds to: same file name and size (of
+    /// the primary file, for a multi-file entry).
     pub fn match_file(&self, file_name: &str, size_bytes: u64) -> Option<&ModelEntry> {
-        self.models
-            .iter()
-            .find(|m| m.file.eq_ignore_ascii_case(file_name) && m.size_bytes == size_bytes)
+        self.models.iter().find(|m| {
+            m.file_name().eq_ignore_ascii_case(file_name) && m.primary_size_bytes() == size_bytes
+        })
     }
 
     /// Models fetched on first run.
@@ -349,6 +445,101 @@ mod tests {
         std::fs::write(dir.path().join(USER_MODELS), r#"[{"name": "broken"}]"#).unwrap();
         let err = Manifest::load(dir.path()).unwrap_err().to_string();
         assert!(err.contains("each entry needs"), "{err}");
+    }
+
+    /// A punctuation entry in `models.user.json`: nested primary file, the
+    /// tokenizer and the runtime as extra files, its own folder and the
+    /// description block (the shape chunk D ships in `models.json`).
+    const PUNCT_ENTRY: &str = r#"[{
+        "name": "punct-small", "role": "punctuation",
+        "repo": "Horizon-Labs/punctuation-restoration-small",
+        "revision": "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1",
+        "file": "onnx/model_quantized.onnx",
+        "url": "https://example.invalid/onnx/model_quantized.onnx",
+        "size_bytes": 1600,
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "files": [
+            {"path": "tokenizer.json", "url": "https://example.invalid/tokenizer.json",
+             "size_bytes": 500, "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+            {"path": "diarist-onnxruntime.dll", "url": "https://example.invalid/onnxruntime.dll",
+             "size_bytes": 100, "sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+        ],
+        "dir": "Horizon-Labs/punctuation-restoration-small/ee31fdf",
+        "languages": ["*"],
+        "punctuation": {
+            "tokenizer": "tokenizer.json", "max_tokens": 512, "context_tokens": 48,
+            "bos_id": 2, "eos_id": 1,
+            "inputs": {"ids": "input_ids", "mask": "attention_mask"},
+            "heads": [{"output": "logits", "kind": "post", "labels": ["", ".", ",", "?", "-", ":"],
+                       "position": "last_token", "values": "logits"}],
+            "runtime_version": "1.31.0"
+        }
+    }]"#;
+
+    #[test]
+    fn multi_file_entries_round_trip_and_land_in_their_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(USER_MODELS), PUNCT_ENTRY).unwrap();
+        let m = Manifest::load(dir.path()).unwrap();
+        let e = m.model("punct-small").unwrap();
+        assert_eq!(e.role, ModelRole::Punctuation);
+        assert!(e.direct, "user entries are direct");
+        assert_eq!(e.files.len(), 2);
+        assert_eq!(e.file_name(), "model_quantized.onnx");
+        assert_eq!(e.primary_size_bytes(), 1000, "size_bytes is the total");
+        assert_eq!(e.punctuation.as_ref().unwrap().max_tokens, 512);
+        // `dir` wins over `user` and over `<repo>\<revision>`.
+        let models = Path::new("M");
+        assert_eq!(
+            e.dest_dir(models),
+            models
+                .join("Horizon-Labs")
+                .join("punctuation-restoration-small")
+                .join("ee31fdf")
+        );
+        // The scanner matches the primary file by its own size.
+        assert!(m.match_file("model_quantized.onnx", 1000).is_some());
+        assert!(m.match_file("model_quantized.onnx", 1600).is_none());
+        // Round trip, and the new fields stay out of single-file entries.
+        let back: Vec<ModelEntry> =
+            serde_json::from_str(&serde_json::to_string(&m.models).unwrap()).unwrap();
+        assert_eq!(back, m.models);
+        let shipped = serde_json::to_string(&Manifest::builtin().models).unwrap();
+        for key in ["\"files\"", "\"dir\"", "\"punctuation\""] {
+            assert!(!shipped.contains(key), "{key}");
+        }
+
+        // A path out of the folder, an absolute one, a broken block: refused,
+        // naming the field.
+        for (from, to, field) in [
+            (
+                r#""path": "tokenizer.json""#,
+                r#""path": "../../tokenizer.json""#,
+                "files[0].path",
+            ),
+            (
+                r#""dir": "Horizon-Labs"#,
+                r#""dir": "C:\\Windows\\Horizon-Labs"#,
+                "dir",
+            ),
+            (r#""file": "onnx/"#, r#""file": "/onnx/"#, "file"),
+            (
+                r#""heads": [{"output""#,
+                r#""heads": [], "x": [{"output""#,
+                "punctuation.heads",
+            ),
+        ] {
+            assert!(PUNCT_ENTRY.contains(from), "{from}");
+            std::fs::write(dir.path().join(USER_MODELS), PUNCT_ENTRY.replace(from, to)).unwrap();
+            let err = Manifest::load(dir.path()).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("punct-small: {field}")),
+                "{field}: {err}"
+            );
+        }
+        for e in &Manifest::builtin().models {
+            e.validate().unwrap();
+        }
     }
 
     #[test]

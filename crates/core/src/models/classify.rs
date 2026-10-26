@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use super::gguf::{GgufHeader, GgufValue};
 use crate::error::{CoreError, Result};
+use crate::punct::spec::PunctSpec;
 use crate::types::{ModelCapabilities, ModelRole};
 
 /// The result of classifying one file.
@@ -128,6 +129,10 @@ pub struct Sidecar {
     /// Diarizer preset for file jobs (`--asr.diar.preset`); wins over the
     /// manifest's value.
     pub file_preset: Option<String>,
+    /// A punctuation model's description block (docs/plans/16 section 3.6,
+    /// docs/04 section 5); wins over the manifest's. An `.onnx` file is
+    /// listed as `punctuation` only with a valid one.
+    pub punctuation: Option<PunctSpec>,
 }
 
 impl Sidecar {
@@ -175,6 +180,9 @@ impl Sidecar {
         }
         if let Some(v) = &self.file_preset {
             c.capabilities.file_preset = Some(v.clone());
+        }
+        if let Some(v) = &self.punctuation {
+            c.capabilities.punctuation = Some(v.clone());
         }
     }
 }
@@ -289,5 +297,48 @@ mod tests {
         assert_eq!(c.capabilities.file_preset, None);
         std::fs::write(Sidecar::path_for(&model), "{not json").unwrap();
         assert!(Sidecar::read(&model).is_err());
+    }
+
+    #[test]
+    fn sidecar_punctuation_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        std::fs::write(
+            Sidecar::path_for(&model),
+            r#"{"role": "punctuation", "languages": ["*"], "punctuation": {
+                "tokenizer": "tokenizer.json", "max_tokens": 512,
+                "heads": [{"output": "logits", "kind": "post", "labels": ["", "."],
+                           "position": "last_token", "values": "logits"}]}}"#,
+        )
+        .unwrap();
+        let sc = Sidecar::read(&model).unwrap().unwrap();
+        let mut c = unknown_onnx();
+        sc.apply(&mut c);
+        assert_eq!(c.role, ModelRole::Punctuation);
+        assert_eq!(c.capabilities.languages, ["*"]);
+        let spec = c.capabilities.punctuation.unwrap();
+        assert_eq!(
+            (spec.tokenizer.as_str(), spec.max_tokens),
+            ("tokenizer.json", 512)
+        );
+        // A block without heads names the field.
+        std::fs::write(
+            Sidecar::path_for(&model),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 512}}"#,
+        )
+        .unwrap();
+        let e = Sidecar::read(&model).unwrap_err().to_string();
+        assert!(e.contains("heads"), "{e}");
+    }
+
+    fn unknown_onnx() -> Classification {
+        Classification {
+            role: ModelRole::Unknown,
+            family: None,
+            architecture: None,
+            display_name: None,
+            quant: None,
+            capabilities: ModelCapabilities::default(),
+        }
     }
 }

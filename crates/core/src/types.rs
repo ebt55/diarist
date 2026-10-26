@@ -310,6 +310,12 @@ pub struct ModelCapabilities {
     /// flag, the runtime's streaming default (which live keeps).
     #[serde(default)]
     pub file_preset: Option<String>,
+    /// A punctuation model's description block (docs/plans/16 section 3.6),
+    /// from the manifest entry or the `<file>.meet.json` sidecar; an `.onnx`
+    /// file is a `punctuation` file only with a valid one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub punctuation: Option<crate::punct::spec::PunctSpec>,
 }
 
 /// A file the model scanner found (`model_files`).
