@@ -65,7 +65,7 @@ Per session and config, run.py:
 3. exports the transcript RTTM (`diarist-cli export --format rttm`) and copies the standalone diarizer RTTM that `--rttm` keeps and the runtime's own words JSON (`engine.words.json`), all under `.work/runs/<config>/<session>/` with a `run.json` (wall times, VRAM, engine version, engine args, binary hash);
 4. scores against the reference and writes `metrics.json` there, then the report.
 
-A finished run is cached by (session, config) and is redone when the config's ASR, diarizer, language or engine args change, so re-running only recomputes the metrics. Delete `.work/runs/<config>/<session>` (or pass `--force`) to transcribe again.
+A finished run is cached by (session, config) and is redone when the config's ASR, diarizer, language, engine args or `punctuation` change, so re-running only recomputes the metrics. Delete `.work/runs/<config>/<session>` (or pass `--force`) to transcribe again.
 
 Report naming: sessions appear under their `label` (docs/05 shorthand such as "Aug 2", "Sep 5"); tables hold numbers only.
 
@@ -81,8 +81,11 @@ Report naming: sessions appear under their `label` (docs/05 shorthand such as "A
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 13 and `--asr.diar.preset v3-offline` passed explicitly (the measurements behind 0.1.0-beta.2's defaults) |
 | `shipped_n35`, `shipped_en` | both | no `engine_args`: the app's own defaults. With a 0.1.0-beta.2 build (`tools/eval/.bin/diarist-cli.exe`; the earlier build is kept as `diarist-cli-0.1.0-beta.1.exe`) run.json records lookahead 13 and preset v3-offline, and `levers.py diff --a n35_rc_13_diar_off --b shipped_n35 --sessions ami,aug2,aug9,sep5,sep7,seplog,aug14` shows identical words, times and tags |
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 1.12 s plus `--asr.diar.preset v3-offline` in the fused pass (21 s diarizer chunks); the standalone `--rttm` pass stays on `v3-streaming` |
+| `shipped_en_punct` | nemotron-en | `shipped_en` with `punctuation = true`: the data root runs with `transcript.punctuation = auto` and the manifest's punctuation model selected. Words, times and speakers are unchanged, so cpWER, tcpWER and WDER equal `shipped_en`'s; DER, JER and ORC-WER move because segments end at sentence ends (docs/eval/2026-10-26-punctuation.md section 12) |
 
 To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest names from `manifests/models.json`), `language`, a `description` and optionally `engine_args`: a list of flags for `nemo-speech transcribe`, one item per argument (`["--asr.streaming.rnnt_right_context", "13"]`). They reach the transcribe step only, not the standalone diarize pass.
+
+Punctuation is off in every config's data root (run.py writes `transcript.punctuation = off`), so the tables measure the speech model and the diarizer. `punctuation = true` turns it on for one config (`auto`, with the manifest's required punctuation model, or the one named by `punctuation_model`); the model must be in the models folder, else `models select punctuation` fails and the run stops.
 
 ## WER-only mode (FLEURS)
 

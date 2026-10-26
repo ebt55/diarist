@@ -120,3 +120,21 @@ description = "Nemotron EN, the app's own defaults, nothing passed"
 asr = "nemotron-en"
 diarizer = "nemotron-3-diarization"
 language = "en"
+
+# --- Punctuation (0.1.0-beta.5, docs/plans/16 section 3.5) ---
+# Every data root runs with `transcript.punctuation = off` unless its config
+# says `punctuation = true`: run.py writes the setting into the config's data
+# root and keeps the key in the cache key, so the accuracy tables keep
+# measuring the speech model and the diarizer. A `punctuation = true` config
+# selects the manifest's required punctuation model (or `punctuation_model`),
+# which must be in the models folder. Punctuation never changes words, times
+# or speakers, so cpWER, tcpWER and WDER equal shipped_en's; DER, JER and
+# ORC-WER move, because segments now end at sentence ends
+# (docs/eval/2026-10-26-punctuation.md section 12).
+
+[shipped_en_punct]
+description = "Nemotron EN, the app's own defaults, with punctuation on (transcript.punctuation = auto, the manifest's punctuation model)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
