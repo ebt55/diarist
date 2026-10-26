@@ -337,8 +337,17 @@ mod tests {
         let m = Manifest::builtin();
         let required: Vec<&str> = m.required().map(|e| e.name.as_str()).collect();
         // The EN model is the default ASR (docs/eval, 15 Oct 2026); 3.5 is the
-        // optional pick for other or mixed languages.
-        assert_eq!(required, ["nemotron-3-diarization", "nemotron-en"]);
+        // optional pick for other or mixed languages. The punctuation model
+        // is fetched on first run too (plan 16 section 3.13.7; the owner may
+        // veto `required` here without a code change).
+        assert_eq!(
+            required,
+            [
+                "nemotron-3-diarization",
+                "nemotron-en",
+                PUNCTUATION_MODEL
+            ]
+        );
         let parakeet = m.model("parakeet-tdt").unwrap();
         assert!(parakeet.experimental && !parakeet.required);
         let multi = m.model("nemotron-3.5").unwrap();
@@ -504,9 +513,15 @@ mod tests {
         let back: Vec<ModelEntry> =
             serde_json::from_str(&serde_json::to_string(&m.models).unwrap()).unwrap();
         assert_eq!(back, m.models);
-        let shipped = serde_json::to_string(&Manifest::builtin().models).unwrap();
-        for key in ["\"files\"", "\"dir\"", "\"punctuation\""] {
-            assert!(!shipped.contains(key), "{key}");
+        for e in Manifest::builtin()
+            .models
+            .iter()
+            .filter(|e| e.role != ModelRole::Punctuation)
+        {
+            let json = serde_json::to_string(e).unwrap();
+            for key in ["\"files\":", "\"dir\":", "\"punctuation\":"] {
+                assert!(!json.contains(key), "{}: {key}", e.name);
+            }
         }
 
         // A path out of the folder, an absolute one, a broken block: refused,
@@ -540,6 +555,177 @@ mod tests {
         for e in &Manifest::builtin().models {
             e.validate().unwrap();
         }
+    }
+
+    /// The shipped punctuation model's manifest name (plan 16 section 3.13.7).
+    const PUNCTUATION_MODEL: &str = "Punctuation (Horizon-Labs small)";
+
+    /// Candidate A as plan 16 section 3.13.7 fixes it: the upstream int8
+    /// file and tokenizer from Hugging Face at the pinned revision, the
+    /// licence texts and the renamed ONNX Runtime 1.31.0 DLL from the
+    /// project's models release, and the description block.
+    #[test]
+    fn the_punctuation_entry_is_candidate_a_with_every_file() {
+        use crate::punct::spec::{
+            HeadKind, HeadPosition, HeadValues, InputCasing, MarkLabel, TokenizerKind, RUNTIME_DLL,
+        };
+        use crate::punct::{CasingKind, Mark, MarkPolicy, PunctUnit};
+
+        let m = Manifest::builtin();
+        let e = m.model(PUNCTUATION_MODEL).unwrap();
+        assert_eq!(e.role, ModelRole::Punctuation);
+        assert!(e.required && e.direct && !e.experimental && !e.streaming);
+        assert_eq!(e.pull_name, "");
+        assert_eq!(e.repo, "Horizon-Labs/punctuation-restoration-small");
+        let rev = "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1";
+        assert_eq!(e.revision, rev);
+        let hf = format!("https://huggingface.co/{}/resolve/{rev}/", e.repo);
+        assert_eq!(e.file, "onnx/model_quantized.onnx");
+        assert_eq!(e.url, format!("{hf}onnx/model_quantized.onnx"));
+        assert_eq!(
+            e.sha256,
+            "5679870be92c7fa47c9be9b2872fac389ef28d43d2c33f35e1315b93a82f4ace"
+        );
+        assert_eq!(e.primary_size_bytes(), 268_414_381);
+        assert!(e.licence.starts_with("Apache-2.0") && e.licence.ends_with("base model MIT"));
+        assert_eq!(e.dir.as_deref(), Some("horizon-labs/punctuation-restoration-small"));
+        assert_eq!(
+            e.dest_dir(Path::new("M")),
+            Path::new("M")
+                .join("horizon-labs")
+                .join("punctuation-restoration-small")
+        );
+
+        // Every other file, in download order, with its size and SHA-256.
+        let release = "https://github.com/ebt55/diarist/releases/download/models-2026-10/";
+        let files: Vec<(&str, u64, &str)> = e
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.size_bytes, f.sha256.as_str()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                (
+                    "tokenizer.json",
+                    34_363_286,
+                    "f34b44a6dc8a0eef651bfa10e8325057530152606a69d9c3b6ae02efb1558f0a"
+                ),
+                (
+                    "LICENSE-Apache-2.0.txt",
+                    11_358,
+                    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+                ),
+                (
+                    "NOTICE-punctuation.txt",
+                    2_179,
+                    "f9d70a3fe979fefacbb384d3bdec12fbdf14cfa11f0adbe6f7ac3d9a615ded92"
+                ),
+                (
+                    "onnxruntime-LICENSE.txt",
+                    1_094,
+                    "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+                ),
+                (
+                    "onnxruntime-ThirdPartyNotices.txt",
+                    344_457,
+                    "c53a76501ef60db6f865f20599f220761201ac4057683acefdab37d861b86622"
+                ),
+                (
+                    RUNTIME_DLL,
+                    17_253_176,
+                    "0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c"
+                ),
+            ]
+        );
+        for f in &e.files {
+            let host = if f.path == "tokenizer.json" {
+                hf.as_str()
+            } else {
+                release
+            };
+            assert_eq!(f.url, format!("{host}{}", f.path), "{}", f.path);
+        }
+        assert_eq!(
+            e.size_bytes,
+            268_414_381 + e.files.iter().map(|f| f.size_bytes).sum::<u64>()
+        );
+        assert_eq!(e.size_bytes, 320_389_931);
+        // The scanner matches the primary file by its own size.
+        let matched = m.match_file("model_quantized.onnx", 268_414_381).unwrap();
+        assert_eq!(matched.name, PUNCTUATION_MODEL);
+
+        // Every offered language but Thai, by primary subtag (nb and nn are
+        // the card's `no`).
+        let mut offered: Vec<String> = crate::models::languages::LanguageTable::builtin()
+            .entries
+            .iter()
+            .map(|l| crate::models::languages::primary_subtag(&l.code))
+            .filter(|l| l != "th")
+            .collect();
+        offered.sort();
+        offered.dedup();
+        let mut langs = e.languages.clone();
+        langs.sort();
+        assert_eq!(langs, offered);
+        assert_eq!(e.languages.len(), 35);
+
+        // The description block.
+        let s = e.punctuation.as_ref().unwrap();
+        s.validate().unwrap();
+        assert_eq!(s.tokenizer, "tokenizer.json");
+        assert_eq!(s.tokenizer_kind, TokenizerKind::HfJson);
+        assert_eq!(s.input_casing, InputCasing::Lower);
+        assert_eq!((s.max_tokens, s.context(), s.batch_size()), (512, 48, 8));
+        assert_eq!((s.bos_id, s.eos_id, s.pad_id), (Some(2), Some(1), 0));
+        assert_eq!(s.inputs.ids, "input_ids");
+        assert_eq!(s.inputs.mask.as_deref(), Some("attention_mask"));
+        assert_eq!(s.heads.len(), 1);
+        let h = &s.heads[0];
+        assert_eq!(
+            (h.output.as_str(), h.kind, h.position, h.values),
+            (
+                "logits",
+                HeadKind::Post,
+                HeadPosition::LastToken,
+                HeadValues::Logits
+            )
+        );
+        assert_eq!(h.labels, ["none", ".", ",", "?", "-", ":"]);
+        let labels: Vec<MarkLabel> = h
+            .labels
+            .iter()
+            .map(|l| MarkLabel::parse(l).unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                MarkLabel::None,
+                MarkLabel::Mark(Mark::Period),
+                MarkLabel::Mark(Mark::Comma),
+                MarkLabel::Mark(Mark::Question),
+                MarkLabel::Mark(Mark::Dash),
+                MarkLabel::Mark(Mark::Colon),
+            ]
+        );
+        // No casing head: the sentence-start rule only.
+        assert_eq!(s.casing, CasingKind::None);
+        assert_eq!(s.unit, Some(PunctUnit::Turn));
+        assert_eq!(s.policy, Some(MarkPolicy::KeepAsr));
+        assert_eq!(s.runtime_file(), RUNTIME_DLL);
+        assert_eq!(s.runtime_version.as_deref(), Some("1.31.0"));
+        // `.` `,` `?` everywhere; no comma for hi, ja and zh; `:` and `-` never.
+        let pcq = vec![Mark::Period, Mark::Comma, Mark::Question];
+        let pq = vec![Mark::Period, Mark::Question];
+        assert_eq!(
+            s.marks_by_language,
+            std::collections::BTreeMap::from([
+                ("*".to_owned(), pcq),
+                ("hi".to_owned(), pq.clone()),
+                ("ja".to_owned(), pq.clone()),
+                ("zh".to_owned(), pq),
+            ])
+        );
     }
 
     #[test]

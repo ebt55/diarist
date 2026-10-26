@@ -365,6 +365,62 @@ mod tests {
         }
     }
 
+    /// Every file of the shipped punctuation model together (plan 16
+    /// section 3.13.7); a required download, never a setup gate.
+    const PUNCTUATION_BYTES: u64 = 320_389_931;
+
+    /// A fresh data root's first-run items list the punctuation model as a
+    /// required download with every file: the other files first, the
+    /// primary file last, each with its address, hash and place.
+    #[test]
+    fn first_run_items_list_the_punctuation_model_with_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let manifest = Manifest::builtin();
+        let s = setup_status(&paths, &manifest, &[], Some(nvidia(true)), vec![]);
+        let item = s
+            .items
+            .iter()
+            .find(|i| i.name == "Punctuation (Horizon-Labs small)")
+            .unwrap();
+        assert_eq!(item.kind, DownloadKind::Model);
+        assert!(item.required && !item.installed && !item.experimental);
+        assert_eq!(item.size_bytes, PUNCTUATION_BYTES);
+        let folder = paths
+            .models()
+            .join("horizon-labs")
+            .join("punctuation-restoration-small");
+        assert_eq!(item.dest, folder.display().to_string());
+        let names: Vec<&str> = item.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "tokenizer.json",
+                "LICENSE-Apache-2.0.txt",
+                "NOTICE-punctuation.txt",
+                "onnxruntime-LICENSE.txt",
+                "onnxruntime-ThirdPartyNotices.txt",
+                "diarist-onnxruntime.dll",
+                "onnx/model_quantized.onnx",
+            ]
+        );
+        assert_eq!(
+            item.files.iter().map(|f| f.size_bytes).sum::<u64>(),
+            PUNCTUATION_BYTES
+        );
+        for f in &item.files {
+            assert!(!f.present, "{}", f.path);
+            assert!(f.url.starts_with("https://") && f.url.ends_with(&f.path), "{}", f.url);
+            assert_eq!(f.sha256.len(), 64, "{}", f.path);
+            assert_eq!(f.dest, rel_path(&folder, &f.path).display().to_string());
+        }
+        let last = item.files.last().unwrap();
+        assert_eq!((last.url.as_str(), last.sha256.as_str()), (item.url.as_str(), item.sha256.as_str()));
+        // The setup screen is still about the engine, ASR and diarizer only.
+        assert!(s.needs_setup && !s.engine_ready && !s.asr_ready && !s.diarizer_ready);
+        assert!(s.disk_needed_bytes > 107_012_128 + 699_872_960 + PUNCTUATION_BYTES);
+    }
+
     #[test]
     fn first_run_until_engine_asr_and_diarizer_are_present() {
         let dir = tempfile::tempdir().unwrap();
@@ -398,10 +454,11 @@ mod tests {
             .filter(|i| i.required)
             .map(|i| i.name.as_str())
             .collect();
-        assert_eq!(required.len(), 3, "{required:?}");
+        assert_eq!(required.len(), 4, "{required:?}");
         assert!(required.contains(&"nemotron-en") && required.contains(&"nemotron-3-diarization"));
+        assert!(required.contains(&"Punctuation (Horizon-Labs small)"));
         assert!(s.items.last().unwrap().experimental, "Parakeet last");
-        let models: u64 = 107_012_128 + 699_872_960;
+        let models: u64 = 107_012_128 + 699_872_960 + PUNCTUATION_BYTES;
         assert!(
             s.disk_needed_bytes > models + 102_183_465 * 2,
             "{}",
@@ -452,7 +509,7 @@ mod tests {
         );
         assert!(s.needs_setup && s.engine_ready && s.diarizer_ready && !s.asr_ready);
         assert!(s.items[0].installed);
-        assert_eq!(s.disk_needed_bytes, 699_872_960);
+        assert_eq!(s.disk_needed_bytes, 699_872_960 + PUNCTUATION_BYTES);
 
         // Any ASR file will do, not only the recommended one.
         store
