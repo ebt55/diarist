@@ -6,7 +6,8 @@
 //! - Schema changes are numbered SQL files under `migrations/`, embedded with
 //!   `include_str!` and applied in order by `PRAGMA user_version`. Before
 //!   pending migrations run on an existing database, the backup API copies it
-//!   to `<db>.bak-<old version>` next to it (only the newest such copy is kept).
+//!   to `<db>.bak-<old version>` next to it (only the newest such copy is
+//!   kept, and the one the last release can open: [`RELEASED_SCHEMA`]).
 //! - Meeting and run ids come from the `counters` table (migration 0002), so
 //!   an id is never handed out twice, even after the newest row is deleted.
 //! - Full-text search uses the external-content FTS5 table `segments_fts`
@@ -484,10 +485,19 @@ pub fn migration_backup_prefix(db: &Path) -> String {
     format!("{name}.bak-")
 }
 
+/// The schema version of the newest published release (0.1.0-beta.4: 3).
+/// Its pre-migration copy (`<db>.bak-3`) is never deleted, so going back to
+/// that release always finds a database it can open, however many
+/// migrations the builds after it apply one by one (each makes a copy of
+/// its own: 3 to 4 to 5 leaves `bak-3` and `bak-4`). Raised to
+/// `MIGRATIONS.len()` when a release ships.
+pub const RELEASED_SCHEMA: u32 = 3;
+
 /// Before pending migrations run on an existing database (schema version
 /// 1 or later), copies it with the backup API to `<db>.bak-<version>` next to
-/// it and deletes older copies. A copy that cannot be made stops the open:
-/// the migration does not run without one.
+/// it and deletes older copies, except the one of [`RELEASED_SCHEMA`]. A
+/// copy that cannot be made stops the open: the migration does not run
+/// without one.
 fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<PathBuf>> {
     let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current == 0 || current as usize >= MIGRATIONS.len() {
@@ -505,10 +515,12 @@ fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<P
     })?;
     std::fs::rename(&tmp, &dest)
         .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))?;
+    // The copy the last release can open stays, whatever came after it.
+    let released = format!("{prefix}{RELEASED_SCHEMA}");
     if let Some(dir) = db.parent().and_then(|d| std::fs::read_dir(d).ok()) {
         for entry in dir.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(&prefix) && entry.path() != dest {
+            if name.starts_with(&prefix) && entry.path() != dest && name != released {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -1835,7 +1847,7 @@ fn list_model_files(conn: &Connection) -> StoreResult<Vec<ModelFile>> {
 mod tests {
     use super::*;
     use crate::store::{NewSegment, NewSpeaker, NewWord};
-    use crate::types::Source;
+    use crate::types::{AudioFormat, Source, TrackChannel};
 
     fn meeting(store: &SqliteStore, title: &str) -> Meeting {
         store
@@ -2220,6 +2232,87 @@ mod tests {
         assert_eq!(words[1].asr_text(), "there");
         drop(store);
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+    }
+
+    #[test]
+    fn migration_0005_after_0004_keeps_the_copy_beta4_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("diarist.db");
+        let (a, track) = {
+            let store = SqliteStore::open(&db).unwrap();
+            let a = meeting(&store, "Beta 5 build");
+            let track = store
+                .add_audio_track(NewAudioTrack {
+                    meeting_id: a.id,
+                    channel: TrackChannel::Playback,
+                    path: format!("audio/{}/playback.flac", a.uid),
+                    format: AudioFormat::Flac,
+                    sample_rate: 16_000,
+                    channels: 2,
+                    duration_ms: Some(6_000),
+                    size_bytes: Some(50_000),
+                    channel_frames: Some(vec![96_000, 95_000]),
+                })
+                .unwrap();
+            (a.id, track.id)
+        };
+        // Schema 4, as a build with 0004 and without 0005 left it, after its
+        // own upgrade from beta.4 (schema 3) made `bak-3`; an older copy is
+        // there too.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        assert_eq!(RELEASED_SCHEMA, 3);
+        let bak3 = dir.path().join("diarist.db.bak-3");
+        std::fs::write(&bak3, b"the database beta.4 opens").unwrap();
+        let bak2 = dir.path().join("diarist.db.bak-2");
+        std::fs::write(&bak2, b"older").unwrap();
+
+        let store = SqliteStore::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        let bak4 = dir.path().join("diarist.db.bak-4");
+        assert_eq!(store.migration_backup(), Some(bak4.as_path()));
+        // The copy beta.4 opens stays; the older one goes.
+        assert_eq!(std::fs::read(&bak3).unwrap(), b"the database beta.4 opens");
+        assert!(!bak2.exists());
+        // bak-4 is the schema 4 database, without the column.
+        let copy = Connection::open(&bak4).unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        assert!(copy
+            .prepare("SELECT channel_frames FROM audio_tracks")
+            .is_err());
+        drop(copy);
+        // The existing row reads without channel lengths; new rows keep them.
+        let tracks = store.list_audio_tracks(a).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, track);
+        assert_eq!(tracks[0].channel_frames, None);
+        assert_eq!(tracks[0].size_bytes, Some(50_000));
+        let t = store
+            .add_audio_track(NewAudioTrack {
+                meeting_id: a,
+                channel: TrackChannel::Mic,
+                path: "audio/x/mic.wav".into(),
+                format: AudioFormat::Wav,
+                sample_rate: 16_000,
+                channels: 1,
+                duration_ms: Some(6_000),
+                size_bytes: None,
+                channel_frames: Some(vec![96_000]),
+            })
+            .unwrap();
+        assert_eq!(t.channel_frames, Some(vec![96_000]));
+        drop(store);
+        // Up to date: no copy, and both copies stay.
+        assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+        assert!(bak3.is_file() && bak4.is_file());
     }
 
     #[test]
