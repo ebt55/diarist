@@ -195,6 +195,7 @@ pub fn run() {
         .manage(Startup::default())
         .manage(Legacy(legacy.clone()))
         .manage(commands::LastDownloadError::default())
+        .manage(commands::PunctJobs::default())
         .manage(live::LiveHandle(Arc::new(live::LiveState::new())))
         .manage(crash::CrashNotice(Mutex::new(crash_launch.notice.clone())))
         .plugin(
@@ -319,6 +320,10 @@ pub fn run() {
             commands::restore_echo_dropped,
             commands::remove_restored_echo,
             commands::language_table,
+            commands::punctuate_meeting,
+            commands::punctuation_backfill,
+            commands::punctuation_status,
+            commands::recommended_downloads_notice,
         ])
         .setup(move |app| {
             let store = open_store(&paths, demo, legacy.as_ref())?;
