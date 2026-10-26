@@ -58,11 +58,21 @@ impl TokenCounter for HfTokenizer {
             out.word_of.push(w);
             out.ends_word
                 .push(ranges.get(w).is_some_and(|r| e == r.1 && e > r.0));
-            out.pieces
-                .push(piece.trim_start_matches('\u{2581}').to_owned());
+            let (lead, text) = strip_marker(piece);
+            out.pieces.push(text.to_owned());
+            out.lead.push(lead);
         }
         Ok(out)
     }
+}
+
+/// A piece without its leading SentencePiece word markers (`▁`), and how
+/// many there were (in characters, as the model's per-character flags
+/// count them).
+pub fn strip_marker(piece: &str) -> (usize, &str) {
+    let text = piece.trim_start_matches('\u{2581}');
+    let lead = piece[..piece.len() - text.len()].chars().count();
+    (lead, text)
 }
 
 /// `words` joined by `sep`, with each word's byte range in the text.
@@ -152,6 +162,15 @@ mod tests {
         assert_eq!(e.word_of, [0, 1, 2, 2]);
         assert_eq!(e.ends_word, [true, true, false, true]);
         assert_eq!(e.word_ranges(3), [0..1, 1..2, 2..4]);
+        assert_eq!(e.lead, [0, 0, 0, 0]);
         assert!(HfTokenizer::load(&dir.path().join("missing.json")).is_err());
+    }
+
+    #[test]
+    fn the_word_marker_is_counted_where_it_is_stripped() {
+        assert_eq!(strip_marker("\u{2581}monday"), (1, "monday"));
+        assert_eq!(strip_marker("day"), (0, "day"));
+        assert_eq!(strip_marker("\u{2581}"), (1, ""));
+        assert_eq!(strip_marker("\u{2581}\u{2581}é"), (2, "é"));
     }
 }

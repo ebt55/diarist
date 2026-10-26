@@ -24,6 +24,10 @@ pub struct Encoded {
     /// Each token's characters as the tokenizer normalised them (the
     /// SentencePiece word marker `▁` removed), for per-character casing.
     pub pieces: Vec<String>,
+    /// How many `▁` were removed from the front of each piece. B's and C's
+    /// per-character casing flags count the marker as character 0, so a
+    /// piece's letter `i` has flag `lead + i`.
+    pub lead: Vec<usize>,
 }
 
 impl Encoded {
@@ -212,6 +216,7 @@ pub(crate) mod tests {
                     e.word_of.push(w);
                     e.ends_word.push(p + 1 == n);
                     e.pieces.push(piece);
+                    e.lead.push(0);
                 }
             }
             Ok(e)
