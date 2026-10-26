@@ -63,8 +63,11 @@ pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
-pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
-pub use rerun::{rerun_check, rerun_post_pass, RerunAudio, RerunCheck, AUDIO_GONE, NO_LIVE_RUN};
+pub use recover::{needs_recovery, recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
+pub use rerun::{
+    rerun_check, rerun_post_pass, RerunAudio, RerunCheck, AUDIO_GONE, LEFTOVERS, NO_LIVE_RUN,
+    RERUN_MARKER,
+};
 pub(crate) use restore::{check_idle, segment_options};
 pub use restore::{remove_restored_echo, restore_echo_dropped, EchoRestore};
 pub use snapshot::{snapshot, snapshot_except};

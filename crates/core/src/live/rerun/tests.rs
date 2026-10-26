@@ -43,7 +43,13 @@ struct Ears {
     hang_at: Mutex<Option<usize>>,
     hanging: AtomicBool,
     cancelled: Arc<AtomicBool>,
+    /// Runs when the job with the given index starts (the test's hand in
+    /// the middle of a post-pass).
+    on_job: Mutex<Option<OnJob>>,
 }
+
+/// A job index and what to do when that job starts.
+type OnJob = (usize, Box<dyn Fn() + Send>);
 
 impl Ears {
     fn jobs(&self) -> usize {
@@ -73,6 +79,11 @@ impl Engine for Ears {
             });
             heard.len() - 1
         };
+        if let Some((at, f)) = &*self.on_job.lock().unwrap() {
+            if *at == index {
+                f();
+            }
+        }
         let (tx, rx) = channel();
         if *self.fail_at.lock().unwrap() == Some(index) {
             tx.send(EngineEvent::Error {
@@ -208,8 +219,17 @@ impl Finished {
         )
     }
 
+    /// Nothing a post-pass makes beside the FLAC is left: the WAVs, their
+    /// `.part` files, the canceller's output, the marker.
     fn no_wavs_left(&self) {
-        for f in ["mic.wav", "loopback.wav", "mic-aec.wav"] {
+        for f in [
+            "mic.wav",
+            "loopback.wav",
+            "mic.wav.part",
+            "loopback.wav.part",
+            "mic-aec.wav",
+            RERUN_MARKER,
+        ] {
             assert!(!self.folder.join(f).exists(), "{f} was left");
         }
     }
@@ -570,9 +590,39 @@ fn a_run_from_the_flac_that_fails_midway_leaves_the_flac_and_the_transcript() {
     assert_eq!(f.ears.jobs(), jobs, "nothing was transcribed");
     assert_eq!(sha256(&f.flac()), before.0);
     f.no_wavs_left();
+    assert!(!f.folder.join(RERUN_MARKER).exists());
     assert_eq!(f.status(), MeetingStatus::Done);
     assert_eq!(f.current(), f.first);
     assert_eq!(f.runs(), runs);
+}
+
+#[test]
+fn a_run_from_the_flac_that_fails_after_making_its_run_leaves_the_transcript() {
+    // The FLAC goes out of reach while the mic is transcribed: the run is
+    // made and filled, then the size check before the switch fails. The
+    // transcript is the one the meeting had and the new run is gone.
+    let f = finished(true);
+    let runs = f.runs();
+    let flac = f.flac();
+    let away = f.folder.join("moved.flac");
+    let (from, to) = (flac.clone(), away.clone());
+    *f.ears.on_job.lock().unwrap() = Some((
+        f.ears.jobs() + 1,
+        Box::new(move || std::fs::rename(&from, &to).unwrap()),
+    ));
+    let err = f
+        .wait(rerun_post_pass(&f.ctx, f.meeting).unwrap())
+        .unwrap_err();
+    assert!(
+        err.contains("cannot look at") && err.contains("playback.flac"),
+        "{err}"
+    );
+    assert_eq!(f.status(), MeetingStatus::Done);
+    assert_eq!(f.current(), f.first);
+    assert_eq!(f.runs(), runs, "the new run was deleted");
+    assert!(!f.folder.join("mic.wav").exists() && !f.folder.join("loopback.wav").exists());
+    assert!(!f.folder.join(RERUN_MARKER).exists());
+    std::fs::rename(&away, &flac).unwrap();
 }
 
 #[test]
@@ -589,60 +639,395 @@ fn a_cancelled_run_from_the_flac_leaves_the_flac_and_the_transcript() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(f.ears.hanging.load(Ordering::SeqCst));
-    // The decoded WAVs exist while the job runs.
+    // The decoded WAVs exist while the job runs, with the marker beside
+    // them (no run yet: the engine has not answered).
     assert!(f.folder.join("mic.wav").is_file() && f.folder.join("loopback.wav").is_file());
+    let marker = read_marker(&f.folder).unwrap().unwrap();
+    assert_eq!(marker.job, h.job_id.to_string());
+    assert_eq!(marker.run, None);
     f.ctx.queue.cancel(&h.job_id);
     let err = f.wait(h).unwrap_err();
     assert!(err.contains("ancel"), "{err}");
     assert_eq!(f.untouched(), before);
     f.no_wavs_left();
+    assert!(!f.folder.join(RERUN_MARKER).exists());
     assert_eq!(f.status(), MeetingStatus::Done);
     assert_eq!(f.current(), f.first);
     assert_eq!(f.runs(), runs);
 }
 
-#[test]
-fn crash_recovery_after_a_run_from_the_flac_keeps_the_flac_and_the_transcript() {
-    let f = finished(true);
-    let before = f.untouched();
-    // The app died while the run from the FLAC transcribed: the meeting is
-    // `processing`, the decoded WAVs are there (one cut short), and the new
-    // run was created but not finished.
-    let runs = f.runs();
+/// How far a run from the FLAC got when the app died.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Crash {
+    /// Half way through the decode: `.part` files.
+    Decoding,
+    /// Transcribing: the decoded WAVs and the canceller's output.
+    Transcribing,
+    /// Its run made and named in the marker, not finished.
+    RunMade,
+    /// Its run finished, not current yet (between `finish_run` and
+    /// `set_current_run`).
+    RunFinished,
+    /// Its run current, the decoded copies not deleted yet.
+    RunCurrent,
+}
+
+/// Leaves the meeting as a run from the FLAC that died at `at` left it:
+/// `processing`, the marker, the files of that stage. Returns the run the
+/// job made, if it got that far.
+fn crash_mid_rerun(f: &Finished, at: Crash) -> Option<RunId> {
     f.store
         .set_meeting_status(f.meeting, MeetingStatus::Processing)
         .unwrap();
-    write_wav(&f.folder.join("mic.wav"), &noise(7, MIC));
-    let mut w = crate::audio::wav::WavSink::create(&f.folder.join("loopback.wav")).unwrap();
-    w.write(&noise(99, 20_000)).unwrap();
-    std::mem::forget(w);
-    std::fs::write(f.folder.join("mic-aec.wav"), b"RIFF").unwrap();
-    let half = f
-        .store
-        .create_run(f.meeting, RunKind::PostPass, serde_json::json!({}))
-        .unwrap()
-        .id;
+    let (mic, lb) = (f.folder.join("mic.wav"), f.folder.join("loopback.wav"));
+    let run = matches!(at, Crash::RunMade | Crash::RunFinished | Crash::RunCurrent).then(|| {
+        let id = f
+            .store
+            .create_run(f.meeting, RunKind::PostPass, serde_json::json!({}))
+            .unwrap()
+            .id;
+        if at != Crash::RunMade {
+            f.store.finish_run(id, RunStatus::Done).unwrap();
+        }
+        if at == Crash::RunCurrent {
+            f.store.set_current_run(f.meeting, id).unwrap();
+        }
+        id
+    });
+    write_marker(
+        &f.folder,
+        &RerunMarker {
+            job: "job-that-died".into(),
+            run: run.map(|r| r.0),
+        },
+    )
+    .unwrap();
+    if at == Crash::Decoding {
+        write_wav(&part_path(&mic), &noise(7, MIC / 2));
+        let mut w = crate::audio::wav::WavSink::create(&part_path(&lb)).unwrap();
+        w.write(&noise(99, 20_000)).unwrap();
+        std::mem::forget(w);
+    } else {
+        decode_stereo_to_wavs(&f.flac(), &mic, &lb, Some([MIC, LB]), &|_, _| {}).unwrap();
+        std::fs::write(f.folder.join("mic-aec.wav"), b"RIFF").unwrap();
+    }
+    run
+}
 
-    let recovered = recover(&f.ctx).unwrap();
-    assert_eq!(recovered.len(), 1);
-    let r = &recovered[0];
-    assert_eq!(r.action, RecoveryAction::Finished);
-    assert!(
-        r.post_pass.is_none(),
-        "nothing runs over the decoded copies"
-    );
-    assert_eq!(r.live_run, Some(f.live));
+#[test]
+fn crash_recovery_after_a_run_from_the_flac_keeps_the_flac_and_every_earlier_run() {
+    for at in [
+        Crash::Decoding,
+        Crash::Transcribing,
+        Crash::RunMade,
+        Crash::RunFinished,
+        Crash::RunCurrent,
+    ] {
+        let f = finished(true);
+        let before = f.untouched();
+        let runs = f.runs();
+        let made = crash_mid_rerun(&f, at);
+
+        let recovered = recover(&f.ctx).unwrap();
+        assert_eq!(recovered.len(), 1, "{at:?}");
+        let r = &recovered[0];
+        assert_eq!(r.action, RecoveryAction::Finished, "{at:?}");
+        assert!(r.note.is_none(), "{at:?}: {:?}", r.note);
+        assert!(
+            r.post_pass.is_none(),
+            "{at:?}: nothing runs over the copies"
+        );
+        assert_eq!(r.live_run, Some(f.live));
+        // The FLAC, its row and the gain track as they were; every file the
+        // job made is gone, the marker last.
+        assert_eq!(f.untouched(), before, "{at:?}");
+        f.no_wavs_left();
+        for p in [
+            part_path(&f.folder.join("mic.wav")),
+            part_path(&f.folder.join("loopback.wav")),
+            f.folder.join(RERUN_MARKER),
+        ] {
+            assert!(!p.exists(), "{at:?}: {} was left", p.display());
+        }
+        assert_eq!(f.status(), MeetingStatus::Done, "{at:?}");
+        if at == Crash::RunCurrent {
+            // It had become current: it stays, with every earlier run.
+            let made = made.unwrap();
+            assert_eq!(f.current(), made);
+            let mut want = runs.clone();
+            want.push((made, RunKind::PostPass, RunStatus::Done));
+            assert_eq!(f.runs(), want);
+        } else {
+            // The job's own run went (unfinished, or finished and never
+            // current); every earlier run stays.
+            if let Some(run) = made {
+                assert!(f.store.get_run(run).is_err(), "{at:?}");
+            }
+            assert_eq!(f.runs(), runs, "{at:?}");
+            assert_eq!(f.current(), f.first);
+        }
+        assert!(recover(&f.ctx).unwrap().is_empty(), "{at:?}");
+        // And it can run again.
+        let report = f.wait(rerun_post_pass(&f.ctx, f.meeting).unwrap()).unwrap();
+        assert_eq!(f.current(), report.current_run);
+        assert_eq!(f.untouched(), before);
+        assert!(f.store.get_run(f.first).is_ok());
+    }
+}
+
+/// Holds `p` open with no sharing (another program holding the file), so
+/// nothing else can open it until this drops; looking at it still works.
+#[cfg(windows)]
+fn lock(p: &Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(p)
+        .unwrap()
+}
+
+#[test]
+fn a_crash_mid_rerun_with_the_flac_out_of_reach_changes_nothing() {
+    // The FLAC renamed away, a folder in its place, and (Windows) locked.
+    let mut cases = vec!["renamed away", "a folder in its place"];
+    if cfg!(windows) {
+        cases.push("locked");
+    }
+    for case in cases {
+        let f = finished(true);
+        let made = crash_mid_rerun(&f, Crash::RunFinished).unwrap();
+        let flac_sha = sha256(&f.flac());
+        let runs = f.runs();
+        let tracks = f.store.list_audio_tracks(f.meeting).unwrap();
+        let (mic, lb) = (f.folder.join("mic.wav"), f.folder.join("loopback.wav"));
+        let copies = (sha256(&mic), sha256(&lb));
+        let away = f.folder.join("moved.flac");
+        #[cfg(windows)]
+        let mut held = None;
+        match case {
+            "renamed away" => std::fs::rename(f.flac(), &away).unwrap(),
+            "a folder in its place" => {
+                std::fs::rename(f.flac(), &away).unwrap();
+                std::fs::create_dir(f.flac()).unwrap();
+            }
+            _ => {
+                #[cfg(windows)]
+                {
+                    held = Some(lock(&f.flac()));
+                }
+            }
+        }
+
+        let recovered = recover(&f.ctx).unwrap();
+        assert_eq!(recovered.len(), 1, "{case}");
+        let r = &recovered[0];
+        assert_eq!(r.action, RecoveryAction::Untouched, "{case}");
+        let note = r.note.clone().unwrap();
+        assert!(
+            note.contains("playback.flac") && note.contains("changed nothing")
+                || note.contains("Nothing was deleted"),
+            "{case}: {note}"
+        );
+        // Failed, with a clear message; every run and every file as it was;
+        // nothing encoded.
+        assert_eq!(f.status(), MeetingStatus::Failed, "{case}");
+        assert_eq!(f.runs(), runs, "{case}");
+        assert!(f.store.get_run(made).is_ok());
+        assert_eq!(f.current(), f.first);
+        assert_eq!(f.store.list_audio_tracks(f.meeting).unwrap(), tracks);
+        assert_eq!((sha256(&mic), sha256(&lb)), copies, "{case}");
+        assert!(f.folder.join(RERUN_MARKER).is_file());
+        // A run again is refused while the files are there.
+        #[cfg(windows)]
+        let still_locked = held.is_some();
+        #[cfg(not(windows))]
+        let still_locked = false;
+        if !still_locked && case != "renamed away" {
+            let e = rerun_post_pass(&f.ctx, f.meeting)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                e.contains("not a file") || e.contains("Audio files"),
+                "{case}: {e}"
+            );
+        }
+        // Put back: the next start finishes it, the earlier runs stay.
+        #[cfg(windows)]
+        drop(held.take());
+        if case != "locked" {
+            if case == "a folder in its place" {
+                std::fs::remove_dir(f.flac()).unwrap();
+            }
+            std::fs::rename(&away, f.flac()).unwrap();
+        }
+        assert_eq!(sha256(&f.flac()), flac_sha, "{case}: the FLAC changed");
+        let recovered = recover(&f.ctx).unwrap();
+        assert_eq!(recovered.len(), 1, "{case}");
+        assert_eq!(recovered[0].was, MeetingStatus::Failed);
+        assert_eq!(recovered[0].action, RecoveryAction::Finished, "{case}");
+        assert_eq!(f.status(), MeetingStatus::Done);
+        f.no_wavs_left();
+        assert!(!f.folder.join(RERUN_MARKER).exists());
+        assert!(f.store.get_run(made).is_err(), "the job's orphan run went");
+        assert_eq!(f.current(), f.first);
+        assert_eq!(sha256(&f.flac()), flac_sha);
+        assert!(recover(&f.ctx).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_damaged_flac_with_the_original_wavs_beside_it_keeps_them() {
+    // A post-pass that registered its FLAC and died before deleting the
+    // WAVs it was made from; then the FLAC was damaged.
+    for damage in ["a byte flipped", "cut short", "none"] {
+        let f = finished(true);
+        let flac_bytes = std::fs::read(f.flac()).unwrap();
+        f.store
+            .set_meeting_status(f.meeting, MeetingStatus::Processing)
+            .unwrap();
+        let (mic, lb) = (f.folder.join("mic.wav"), f.folder.join("loopback.wav"));
+        write_wav(&mic, &noise(7, MIC));
+        write_wav(&lb, &noise(99, LB));
+        register_wavs(&*f.store, f.meeting, &f.root, &f.folder, 5_000).unwrap();
+        let originals = (sha256(&mic), sha256(&lb));
+        let runs = f.runs();
+        match damage {
+            "a byte flipped" => {
+                let mut b = flac_bytes.clone();
+                let at = b.len() * 2 / 3;
+                b[at] ^= 0x10;
+                std::fs::write(f.flac(), &b).unwrap();
+            }
+            "cut short" => {
+                std::fs::write(f.flac(), &flac_bytes[..flac_bytes.len() - 1_000]).unwrap()
+            }
+            _ => {}
+        }
+        let damaged = sha256(&f.flac());
+        let recovered = recover(&f.ctx).unwrap();
+        assert_eq!(recovered.len(), 1);
+        if damage == "none" {
+            // A good FLAC: the WAVs were copies of it and go.
+            assert_eq!(recovered[0].action, RecoveryAction::Finished);
+            f.no_wavs_left();
+            assert_eq!(f.store.list_audio_tracks(f.meeting).unwrap().len(), 1);
+            assert_eq!(f.status(), MeetingStatus::Done);
+            continue;
+        }
+        assert_eq!(recovered[0].action, RecoveryAction::Untouched, "{damage}");
+        let note = recovered[0].note.clone().unwrap();
+        assert!(note.contains("could not be matched"), "{damage}: {note}");
+        // The originals survive, with their rows; the FLAC is not encoded
+        // again (still the damaged bytes); the runs as they were.
+        assert_eq!((sha256(&mic), sha256(&lb)), originals, "{damage}");
+        assert_eq!(f.store.list_audio_tracks(f.meeting).unwrap().len(), 3);
+        assert_eq!(sha256(&f.flac()), damaged);
+        assert_eq!(f.runs(), runs);
+        assert_eq!(f.status(), MeetingStatus::Failed);
+        // Every start says so again, and changes nothing.
+        let again = recover(&f.ctx).unwrap();
+        assert_eq!(again[0].action, RecoveryAction::Untouched);
+        assert_eq!((sha256(&mic), sha256(&lb)), originals);
+        // And a run from the FLAC is refused.
+        let e = rerun_post_pass(&f.ctx, f.meeting)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("Audio files are already beside"), "{e}");
+        assert_eq!((sha256(&mic), sha256(&lb)), originals);
+    }
+}
+
+#[test]
+fn a_run_from_the_flac_never_goes_over_files_beside_it() {
+    let f = finished(true);
+    let before = f.untouched();
+    let runs = f.runs();
+    let (mic, lb) = (f.folder.join("mic.wav"), f.folder.join("loopback.wav"));
+    // Any of mic.wav, loopback.wav or a marker beside the FLAC: refused
+    // before anything changes, the file as it was.
+    for name in ["mic.wav", "loopback.wav", RERUN_MARKER] {
+        let p = f.folder.join(name);
+        std::fs::write(&p, b"somebody's file").unwrap();
+        assert_eq!(
+            rerun_check(&*f.store, &f.root, f.meeting).unwrap().audio,
+            Some(RerunAudio::Flac)
+        );
+        let e = rerun_post_pass(&f.ctx, f.meeting)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains("Audio files are already beside") && e.contains(name),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), b"somebody's file");
+        assert_eq!(f.status(), MeetingStatus::Done);
+        assert_eq!(f.runs(), runs);
+        std::fs::remove_file(&p).unwrap();
+    }
+    // One that appears while the job waits in the queue: the job refuses it
+    // at its start and leaves the file, the transcript and the FLAC.
+    f.ctx.queue.set_paused(true);
+    let h = rerun_post_pass(&f.ctx, f.meeting).unwrap();
+    assert_eq!(f.status(), MeetingStatus::Processing);
+    write_wav(&lb, &noise(5, 1_000));
+    let theirs = sha256(&lb);
+    f.ctx.queue.set_paused(false);
+    let e = f.wait(h).unwrap_err();
+    assert!(e.contains("Audio files are already beside"), "{e}");
+    assert_eq!(sha256(&lb), theirs);
+    assert!(!mic.exists() && !part_path(&mic).exists() && !part_path(&lb).exists());
+    assert!(!f.folder.join(RERUN_MARKER).exists());
     assert_eq!(f.untouched(), before);
-    f.no_wavs_left();
-    assert!(f.store.get_run(half).is_err());
+    assert_eq!(f.status(), MeetingStatus::Done);
     assert_eq!(f.runs(), runs);
     assert_eq!(f.current(), f.first);
-    assert_eq!(f.status(), MeetingStatus::Done);
-    assert!(recover(&f.ctx).unwrap().is_empty());
-    // And it can run again.
+}
+
+#[test]
+fn processing_again_keeps_the_live_run_with_keep_live_runs_off() {
+    // The live run kept (it was on then), the setting off now, and the live
+    // run current (say a Restore made it so).
+    let f = finished(true);
+    f.store
+        .set_setting(settings::KEEP_LIVE_RUNS, "false")
+        .unwrap();
+    f.store.set_current_run(f.meeting, f.live).unwrap();
+    let runs = f.runs();
     let report = f.wait(rerun_post_pass(&f.ctx, f.meeting).unwrap()).unwrap();
+    assert!(!report.live_run_deleted);
+    assert_eq!(f.store.get_run(f.live).unwrap().kind, RunKind::Live);
+    assert!(f.store.get_run(f.first).is_ok());
+    let mut want = runs;
+    want.push((report.current_run, RunKind::PostPass, RunStatus::Done));
+    assert_eq!(f.runs(), want);
     assert_eq!(f.current(), report.current_run);
-    assert_eq!(f.untouched(), before);
+    f.no_wavs_left();
+}
+
+#[test]
+fn a_run_from_the_flac_needs_room_for_the_decoded_audio() {
+    let f = finished(true);
+    let track = f.store.list_audio_tracks(f.meeting).unwrap().remove(0);
+    // Both channels and the canceller's output at 2 bytes a frame, three
+    // WAV headers and the headroom: about 115 MB per channel-hour.
+    let need = decode_space(&track);
+    assert_eq!(need, (2 * MIC + LB) * 2 + 3 * 44 + SPACE_HEADROOM);
+    let hour = AudioTrack {
+        channel_frames: None,
+        duration_ms: Some(3_600_000),
+        ..track.clone()
+    };
+    let per_channel_hour = (decode_space(&hour) - SPACE_HEADROOM - 3 * 44) / 3;
+    assert_eq!(per_channel_hour, 115_200_000);
+    assert!(space_check(&f.folder, Some(need), need).is_ok());
+    assert!(space_check(&f.folder, None, need).is_ok());
+    let e = space_check(&f.folder, Some(need - 1), need).unwrap_err();
+    assert!(matches!(e, CoreError::InsufficientSpace { .. }), "{e}");
+    assert!(e.to_string().contains("not enough free disk space"), "{e}");
 }
 
 #[test]
@@ -650,9 +1035,11 @@ fn no_post_pass_encodes_over_a_registered_flac() {
     let f = finished(true);
     let before = f.untouched();
     // WAVs that are not what the FLAC holds (silence), beside it, and a
-    // post-pass over them as a run from the WAVs.
+    // post-pass over them as a run from the WAVs: the FLAC is kept, and so
+    // are they.
     write_wav(&f.folder.join("mic.wav"), &vec![0; MIC as usize]);
     write_wav(&f.folder.join("loopback.wav"), &vec![0; MIC as usize]);
+    let silence = sha256(&f.folder.join("mic.wav"));
     let job = PostPassJob {
         job_id: JobId::new(),
         meeting: f.meeting,
@@ -667,6 +1054,18 @@ fn no_post_pass_encodes_over_a_registered_flac() {
         punct: crate::punct::PunctSource::None,
         from_flac: false,
     };
+    let e = run_post_pass(&*f.store, &*f.ears, &job, &CancelToken::default(), &|_| {})
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("does not hold what mic.wav and loopback.wav hold"),
+        "{e}"
+    );
+    assert_eq!(f.untouched(), before);
+    assert_eq!(sha256(&f.folder.join("mic.wav")), silence);
+    // The WAVs it was made from: kept, and they go.
+    write_wav(&f.folder.join("mic.wav"), &noise(7, MIC));
+    write_wav(&f.folder.join("loopback.wav"), &noise(99, LB));
     let report =
         run_post_pass(&*f.store, &*f.ears, &job, &CancelToken::default(), &|_| {}).unwrap();
     assert_eq!(f.untouched(), before);
@@ -853,9 +1252,16 @@ fn a_stored_meeting_runs_again_from_its_flac_exactly() {
     let flac_same = sha256(&flac) == flac_sha;
     let gain_same = gain_sha.is_none_or(|g| sha256(&gain) == g);
     let tracks_same = store.list_audio_tracks(id).unwrap() == tracks;
-    let wavs_gone = ["mic.wav", "loopback.wav", "mic-aec.wav"]
-        .iter()
-        .all(|f| !folder.join(f).exists());
+    let wavs_gone = [
+        "mic.wav",
+        "loopback.wav",
+        "mic.wav.part",
+        "loopback.wav.part",
+        "mic-aec.wav",
+        RERUN_MARKER,
+    ]
+    .iter()
+    .all(|f| !folder.join(f).exists());
     let d = store.get_meeting(id).unwrap();
     let current_new = d.current_run.as_ref().map(|r| r.id) == Some(report.current_run)
         && report.current_run != old.id;
