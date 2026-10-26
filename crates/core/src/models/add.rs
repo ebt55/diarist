@@ -23,9 +23,12 @@ pub fn file_name_from_url(url: &str) -> Result<String> {
         .next()
         .unwrap_or("")
         .trim_end_matches('/');
-    if !(path.starts_with("https://") || path.starts_with("http://")) {
+    // The downloader is https only (`download::https_only`); say so here
+    // rather than fail in the request.
+    if !path.starts_with("https://") {
         return Err(CoreError::Models(format!(
-            "{url} is not an http(s) link; paste the direct download address of the file"
+            "{url} is not an https link; Diarist downloads over https only, so paste the \
+             file's direct https address"
         )));
     }
     let after_host = path
@@ -142,6 +145,10 @@ mod tests {
             "a b.gguf"
         );
         assert!(file_name_from_url("ftp://x/y.gguf").is_err());
+        let err = file_name_from_url("http://example.com/model.gguf")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("https only"), "{err}");
         assert!(file_name_from_url("https://example.com/").is_err());
         assert!(file_name_from_url("https://example.com/folder").is_err());
     }
