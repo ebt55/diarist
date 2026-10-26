@@ -565,10 +565,12 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   while the `.part` is written, so a second download of the same file (the
   CLI during an app install) fails at once with "already downloading".
 - Models: since 0.1.0-beta.5 the app and `diarist-cli models pull` fetch
-  every manifest model with `download_model`, from its `url` into
+  every manifest model with `models::fetch_entry`, every file from its
+  `url` (the other files first, the primary file last) into
   `ModelEntry::dest_dir` (`<repo>\<revision>\` for shipped models, the
   layout `nemo-speech pull` used, so earlier pulls are found; `models\user\`
-  for direct entries), and write `<file>.sha256`; no engine is needed. A
+  for direct entries; `models\<dir>` when the entry names one), and write
+  `<file>.sha256`; no engine is needed. A
   `<file>.partial` an interrupted `nemo-speech pull` left there is deleted
   once the model is in place. `nemo-speech pull` (System32 `curl.exe`,
   which fails where revocation checks are blocked; model paths it builds

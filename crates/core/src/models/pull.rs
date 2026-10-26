@@ -3,7 +3,7 @@
 //! section 3).
 //!
 //! Since 0.1.0-beta.5 the app and `diarist-cli models pull` fetch models
-//! with our own downloader ([`super::download::download_model`]); the
+//! with our own downloader ([`super::fetch::fetch_entry`]); the
 //! runtime's downloader, System32 `curl.exe`, fails where a network blocks
 //! certificate revocation checks. This path stays for one release behind
 //! `diarist-cli models pull --via-runtime`, then goes. Files it pulled carry

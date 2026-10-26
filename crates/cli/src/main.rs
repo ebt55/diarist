@@ -1142,9 +1142,8 @@ fn models_pull(ctx: &Ctx, names: &[String], via_runtime: bool) -> CliResult {
         eprintln!("downloading {} ({} MB)", e.name, e.size_bytes >> 20);
         // Never called when the file is already there with the right hash.
         let mut fetched = false;
-        // fetch_entry replaces download_model here: every file of a
-        // multi-file entry (a punctuation model), the others first and the
-        // primary file last.
+        // fetch_entry: every file of a multi-file entry (a punctuation
+        // model), the others first and the primary file last.
         let dest = models::fetch_entry(e, &ctx.paths, &mut |done, total| {
             fetched = true;
             if let Some(t) = total.filter(|t| *t > 0) {

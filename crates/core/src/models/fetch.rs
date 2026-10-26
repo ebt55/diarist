@@ -6,8 +6,10 @@
 //! The other files come first and the primary file last, so the scanner,
 //! which keys on the primary file, never lists a model with a part missing;
 //! a failed download leaves the verified files in place and the next call
-//! fetches only what is missing. A single-file entry is the same as
-//! [`super::download_model`].
+//! fetches only what is missing. A single-file entry is one call of
+//! [`download_file`]. This is the only model downloader since 0.1.0-beta.5;
+//! the `<file>.partial` an interrupted `nemo-speech pull` left is deleted
+//! once its file is in place.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +50,11 @@ pub fn fetch_entry(
             &mut |d, _| progress(before + d, total),
         )?;
         record(&dest, sha)?;
+        // The `<file>.partial` an interrupted `nemo-speech pull` (up to
+        // 0.1.0-beta.4) left goes once the file is in place; nothing resumes it.
+        let mut partial = dest.as_os_str().to_owned();
+        partial.push(".partial");
+        let _ = std::fs::remove_file(PathBuf::from(partial));
         Ok(dest)
     };
     for f in &entry.files {

@@ -873,8 +873,8 @@ pub async fn pull_model(
         progress(0, false, None);
         // The downloader reports every 256 KiB; the UI needs four a second.
         let mut last = Instant::now() - Duration::from_secs(1);
-        // fetch_entry replaces download_model here: it also fetches the other
-        // files of a multi-file entry (a punctuation model), primary last.
+        // fetch_entry fetches every file of an entry, the other files of a
+        // multi-file entry (a punctuation model) first and the primary last.
         let result = models::fetch_entry(&entry, &data_paths, &mut |done, _| {
             if last.elapsed() >= Duration::from_millis(250) {
                 last = Instant::now();

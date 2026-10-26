@@ -19,8 +19,9 @@
 //!   deletes the partial file.
 //! - The engine zip is extracted into `engine\<name>.tmp` and renamed to
 //!   `engine\<name>` (a single top-level folder in the zip is stripped).
-//! - Models ([`download_model`]) land where the manifest puts them and get
-//!   the `<file>.sha256` cache the scanner reads. Since 0.1.0-beta.5 this
+//! - Models (every file of an entry, through [`super::fetch::fetch_entry`])
+//!   land where the manifest puts them and get the `<file>.sha256` cache
+//!   the scanner reads (`record_sha256`). Since 0.1.0-beta.5 this
 //!   replaces `nemo-speech pull`, whose downloader (System32 `curl.exe`)
 //!   fails on networks that block certificate revocation checks.
 
@@ -31,7 +32,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{check_engine_name, EngineEntry, Manifest, ModelEntry};
+use super::manifest::{check_engine_name, EngineEntry, Manifest};
 use super::paths::DataPaths;
 use crate::engine::process;
 use crate::error::{CoreError, Result};
@@ -441,46 +442,6 @@ pub(crate) fn record_sha256(file: &Path, sha256: &str) {
     );
 }
 
-/// The file a manifest model is downloaded to: [`ModelEntry::dest_dir`]
-/// (`<models>\<repo>\<revision>\` for shipped models, the layout
-/// `nemo-speech pull` used, so files pulled by earlier versions are found
-/// where they are) joined with the entry's file name.
-pub fn model_dest(entry: &ModelEntry, models_dir: &Path) -> PathBuf {
-    entry.dest_dir(models_dir).join(&entry.file)
-}
-
-/// Downloads a manifest model from its `url` with [`download_file`] (resume,
-/// size and SHA-256 against the manifest) to [`model_dest`], and records the
-/// verified hash in `<file>.sha256`. A file already there with the right
-/// hash is kept. The `<file>.partial` an interrupted `nemo-speech pull`
-/// (up to 0.1.0-beta.4) left next to it is deleted once the model is in
-/// place; this downloader never resumes it. Returns the file.
-pub fn download_model(
-    entry: &ModelEntry,
-    models_dir: &Path,
-    progress: Progress<'_>,
-) -> Result<PathBuf> {
-    if entry.url.trim().is_empty() {
-        return Err(dl_err(format!(
-            "{} has no download address in the manifest; put {} into {} by hand",
-            entry.name,
-            entry.file,
-            entry.dest_dir(models_dir).display()
-        )));
-    }
-    let dest = model_dest(entry, models_dir);
-    let size = Some(entry.size_bytes).filter(|s| *s > 0);
-    download_file(&entry.url, &dest, &entry.sha256, size, progress)?;
-    let sha = if entry.sha256.trim().is_empty() {
-        sha256_file(&dest)?
-    } else {
-        entry.sha256.clone()
-    };
-    record_sha256(&dest, &sha);
-    let _ = std::fs::remove_file(suffixed(&dest, ".partial"));
-    Ok(dest)
-}
-
 /// Extracts `zip_path` into `dest` (created). A single top-level folder
 /// common to every entry is stripped. Entries escaping `dest` are rejected.
 pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
@@ -629,6 +590,8 @@ pub fn install_dropped_engines(paths: &DataPaths, manifest: &Manifest) -> Vec<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::fetch::fetch_entry;
+    use crate::models::manifest::ModelEntry;
     use std::sync::{Arc, Mutex};
 
     /// Serves `body` on 127.0.0.1 with Range support; records Range headers.
@@ -1128,7 +1091,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = DataPaths::at(dir.path().join("root"));
         let entry = model_entry(&url, &body, false);
-        let dest = model_dest(&entry, &paths.models());
+        let dest = entry.dest_dir(&paths.models()).join(&entry.file);
         // `<models>\<repo>\<revision>\<file>`, where `nemo-speech pull` put it.
         assert_eq!(
             dest,
@@ -1146,7 +1109,7 @@ mod tests {
         let curl_partial = suffixed(&dest, ".partial");
         std::fs::write(&curl_partial, &body[..20_000]).unwrap();
         let mut last = 0;
-        let got = download_model(&entry, &paths.models(), &mut |n, _| last = n).unwrap();
+        let got = fetch_entry(&entry, &paths, &mut |n, _| last = n).unwrap();
         assert_eq!(got, dest);
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         assert_eq!(last, body.len() as u64);
@@ -1176,7 +1139,7 @@ mod tests {
         assert_eq!(store.list_model_files().unwrap().len(), 1);
 
         // Present and verified: a second call fetches nothing.
-        download_model(&entry, &paths.models(), &mut |_, _| {}).unwrap();
+        fetch_entry(&entry, &paths, &mut |_, _| {}).unwrap();
         assert_eq!(ranges.lock().unwrap().len(), 1);
     }
 
@@ -1187,14 +1150,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = DataPaths::at(dir.path());
         let entry = model_entry(&url, &body, true);
-        let got = download_model(&entry, &paths.models(), &mut |_, _| {}).unwrap();
+        let got = fetch_entry(&entry, &paths, &mut |_, _| {}).unwrap();
         assert_eq!(got, entry.dest_dir(&paths.models()).join(&entry.file));
         assert_eq!(got, paths.models().join("user").join("test-asr.q8_0.gguf"));
 
         let mut wrong = model_entry(&url, &body, false);
         wrong.sha256 = "0".repeat(64);
-        let dest = model_dest(&wrong, &paths.models());
-        let err = download_model(&wrong, &paths.models(), &mut |_, _| {})
+        let dest = wrong.dest_dir(&paths.models()).join(&wrong.file);
+        let err = fetch_entry(&wrong, &paths, &mut |_, _| {})
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not match the expected"), "{err}");
@@ -1204,12 +1167,13 @@ mod tests {
         side.push(".sha256");
         assert!(!PathBuf::from(side).exists());
 
+        // An entry without an address is refused before any request.
         let mut no_url = model_entry("", &body, false);
         no_url.url = String::new();
-        let err = download_model(&no_url, &paths.models(), &mut |_, _| {})
+        let err = fetch_entry(&no_url, &paths, &mut |_, _| {})
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no download address"), "{err}");
+        assert!(err.contains("test-asr: url: empty"), "{err}");
     }
 
     fn engine_zip() -> Vec<u8> {

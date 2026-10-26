@@ -11,8 +11,8 @@
 //!   pointing at present files.
 //! - [`manifest`]: the recommended lists in `manifests/`.
 //! - [`download`]: our downloader (resume, SHA-256, atomic rename) for the
-//!   engine zip and its extraction, and for every manifest model
-//!   ([`download_model`]); [`pull`]: the old `nemo-speech pull` path, kept
+//!   engine zip and its extraction, and for every file of a manifest model
+//!   (through [`fetch`]); [`pull`]: the old `nemo-speech pull` path, kept
 //!   for one release behind `diarist-cli models pull --via-runtime`;
 //!   [`doctor`]: runtime version and GPU.
 //! - [`fetch`]: every file of a manifest entry, the other files first and
@@ -60,9 +60,7 @@ pub use device::{
     AUTO_DEVICE, CPU_SLOW_NOTICE,
 };
 pub use doctor::{doctor, DoctorReport};
-pub use download::{
-    download_file, download_model, install_engine, model_dest, sha256_file, verify_file,
-};
+pub use download::{download_file, install_engine, sha256_file, verify_file};
 pub use fetch::fetch_entry;
 pub use gguf::{read_header, GgufHeader, GgufValue};
 pub use manifest::{EngineEntry, Manifest, ModelEntry, TESTED_ENGINE_VERSIONS};
