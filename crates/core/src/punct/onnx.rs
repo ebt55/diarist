@@ -1107,6 +1107,7 @@ mod tests {
         let model = model.expect("an .onnx with a .meet.json in DIARIST_PUNCT_MODEL");
         let sidecar = crate::models::Sidecar::read(&model).unwrap().unwrap();
         let spec = sidecar.punctuation.expect("a punctuation block");
+        let has_case = spec.head(HeadKind::Case).is_some();
         let root = tempfile::tempdir().unwrap();
         let paths = DataPaths::at(root.path()).with_models_dir(&folder);
         let words: Vec<&str> = FIXTURE.split_whitespace().collect();
@@ -1144,11 +1145,14 @@ mod tests {
         assert_eq!(a.len(), words.len(), "one label per word");
         assert_eq!(a, b, "deterministic");
         let (_, peak) = rss();
-        // Every label is a mark after the word, nothing that changes letters
-        // (A has no casing head), and each marked word keeps its normalised
-        // text (plan 16 section 3.3 rule 3).
+        // Without a casing head (A) nothing changes letters, and each marked
+        // word keeps its normalised text (plan 16 section 3.3 rule 3).
         let marks = a.iter().filter(|l| l.post.is_some()).count();
-        assert!(a.iter().all(|l| l.pre.is_none() && l.case == Case::Keep));
+        let cased = a.iter().filter(|l| l.case != Case::Keep).count();
+        assert!(has_case || cased == 0);
+        assert!(a.iter().all(|l| l.post.is_none_or(|m| !m.is_pre())));
+        assert!(a.iter().all(|l| l.pre.is_none_or(|m| m.is_pre())));
+        eprintln!("{marks} marks, {cased} casing labels");
         let mut shown_text = Vec::new();
         for (w, l) in words.iter().zip(&a) {
             let shown = match l.post {
@@ -1186,6 +1190,51 @@ mod tests {
             p.label_stream(&long, &hint, &|| false).unwrap().len(),
             long.len()
         );
+        // Through Diarist's label application (chunk A's apply.rs), which
+        // checks every invariant of plan 16 section 3.3 per word: nothing is
+        // rejected or refused, and only the display text changes.
+        let source: Vec<crate::transcript::TranscriptWord> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| crate::transcript::TranscriptWord {
+                channel: crate::types::Channel::Source,
+                start_ms: i as i64 * 400,
+                end_ms: i as i64 * 400 + 300,
+                text: (*w).to_owned(),
+                confidence: None,
+                speaker: "spk_0".into(),
+                raw_label: Some("spk_0".into()),
+                raw_text: None,
+            })
+            .collect();
+        let mut channels = vec![(crate::types::Channel::Source, source.clone())];
+        let opts = p.options();
+        let report = super::super::punctuate_channels(
+            &mut channels,
+            Some(&mut p as &mut dyn Punctuator),
+            &opts,
+            &super::super::RunLanguage::new("en"),
+            &|| false,
+        );
+        assert_eq!(report.reason, PunctReason::Ok, "{report:?}");
+        assert_eq!(report.rejected_words, Some(0), "{report:?}");
+        assert_eq!(report.streams_refused.unwrap_or(0), 0, "{report:?}");
+        let out = &channels[0].1;
+        assert_eq!(out.len(), source.len());
+        for (o, s) in out.iter().zip(&source) {
+            assert_eq!(
+                (o.start_ms, o.end_ms, &o.speaker),
+                (s.start_ms, s.end_ms, &s.speaker)
+            );
+            assert_eq!(norm(&o.text), norm(&s.text), "{} -> {}", s.text, o.text);
+            assert_eq!(o.raw_text.is_some(), o.text != s.text);
+        }
+        eprintln!(
+            "applied: {} marks, {} capitals",
+            report.marks_added.unwrap_or(0),
+            report.case_upgrades.unwrap_or(0)
+        );
+
         // Cancel is honoured.
         assert!(matches!(
             p.label_stream(&long, &hint, &|| true),
