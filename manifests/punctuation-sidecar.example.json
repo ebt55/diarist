@@ -5,7 +5,7 @@
   "punctuation": {
     "tokenizer": "tokenizer.json",
     "tokenizer_kind": "hf_json",
-    "input_casing": "keep",
+    "input_casing": "lower",
     "max_tokens": 512,
     "context_tokens": 48,
     "batch": 8,
@@ -24,7 +24,7 @@
     ],
     "casing": "none",
     "marks_by_language": { "*": ["period", "comma", "question"] },
-    "unit": "stream",
+    "unit": "turn",
     "policy": "keep_asr",
     "runtime": "diarist-onnxruntime.dll",
     "runtime_version": "1.31.0"

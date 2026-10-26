@@ -1222,4 +1222,128 @@ mod tests {
     }
 
     const RUNTIME_DLL_NAME: &str = super::super::spec::RUNTIME_DLL;
+
+    /// Chunk B's CLI check, step 1 (plan 16 section 7.2 B): a scratch data
+    /// root (`DIARIST_PUNCT_CHECK_ROOT`) with one meeting imported through
+    /// the file import from a cached `transcribe --json` output
+    /// (`DIARIST_PUNCT_CHECK_WORDS`, default the 5-minute AMI fixture), no
+    /// engine and no GPU. Then `diarist-cli --data-dir <root> --models-dir
+    /// <model folder> punctuate <id>` and the exports before and after.
+    #[test]
+    #[ignore = "needs DIARIST_PUNCT_CHECK_ROOT (an empty scratch folder)"]
+    fn cli_check_root() {
+        use crate::audio::{DecodedInfo, Decoder, DecoderKind};
+        use crate::engine::nemo_cli::{engine_words, file_events, parse_transcribe_json};
+        use crate::engine::{Engine, EngineEvent, EngineInfo, EngineWord, FileJob};
+        use crate::pipeline::{import_file, CancelToken, ImportOptions, ImportRequest};
+        use crate::store::{SqliteStore, Store};
+        use crate::types::JobId;
+        use crate::views::Settings;
+
+        struct Replay {
+            words: Vec<EngineWord>,
+            audio_us: u64,
+        }
+        impl Engine for Replay {
+            fn transcribe_file(
+                &self,
+                job: FileJob,
+            ) -> crate::Result<std::sync::mpsc::Receiver<EngineEvent>> {
+                let (tx, rx) = std::sync::mpsc::channel();
+                for ev in file_events(
+                    &job.job_id,
+                    crate::types::Channel::Source,
+                    self.words.clone(),
+                    self.audio_us,
+                    std::time::Duration::from_secs(1),
+                ) {
+                    tx.send(ev).unwrap();
+                }
+                Ok(rx)
+            }
+            fn cancel(&self, _: JobId) {}
+            fn info(&self) -> EngineInfo {
+                EngineInfo {
+                    runtime: "replay of a cached transcribe --json".into(),
+                    ..Default::default()
+                }
+            }
+        }
+        struct Silence(i64);
+        impl Decoder for Silence {
+            fn decode_to_wav16k(&self, _: &Path, output: &Path) -> crate::Result<DecodedInfo> {
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut w = hound::WavWriter::create(output, spec).unwrap();
+                for _ in 0..16_000 {
+                    w.write_sample(0i16).unwrap();
+                }
+                w.finalize().unwrap();
+                Ok(DecodedInfo {
+                    duration_ms: self.0,
+                    source_sample_rate: 16_000,
+                    source_channels: 1,
+                    decoder: DecoderKind::Other,
+                })
+            }
+        }
+
+        let Some(root) = std::env::var_os("DIARIST_PUNCT_CHECK_ROOT").map(PathBuf::from) else {
+            eprintln!("skipped: DIARIST_PUNCT_CHECK_ROOT is not set");
+            return;
+        };
+        let words_json = std::env::var_os("DIARIST_PUNCT_CHECK_WORDS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/nemotron35_transcribe_diarize_5min.json")
+            });
+        let out = parse_transcribe_json(&std::fs::read_to_string(&words_json).unwrap()).unwrap();
+        let words = engine_words(&out);
+        let end_us = words.iter().map(|w| w.t1_us).max().unwrap_or(0);
+        let audio_us = ((out.duration * 1e6) as u64).max(end_us);
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SqliteStore::open(root.join("diarist.db")).unwrap();
+        let src = root.join("replayed.wav");
+        std::fs::write(&src, b"replayed: the engine is a cached words file").unwrap();
+        let opts = ImportOptions {
+            min_free_bytes: 0,
+            ..ImportOptions::new(&DataPaths::at(&root), &Settings::default())
+        };
+        let id = import_file(
+            &store,
+            &Replay {
+                words: words.clone(),
+                audio_us,
+            },
+            &Silence((audio_us / 1_000) as i64),
+            ImportRequest {
+                job_id: JobId("punct-cli-check".into()),
+                path: src,
+                title: Some(
+                    words_json
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+                diarize: true,
+            },
+            &opts,
+            &CancelToken::default(),
+            &|_| {},
+        )
+        .unwrap();
+        let stored = store.get_words(id, i64::MIN, i64::MAX).unwrap().len();
+        println!(
+            "meeting {} ({} words from {}, {:.1} min of audio)",
+            id.0,
+            stored,
+            words_json.display(),
+            audio_us as f64 / 60e6
+        );
+    }
 }
