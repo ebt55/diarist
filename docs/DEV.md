@@ -467,6 +467,23 @@ All are in `settings::DEFAULTS` (and `generated/settingDefaults.ts`):
 The level meters show the gain the AGC applied; their tooltip shows the
 peak before it.
 
+### Punctuation settings
+
+Plan 16 section 3.8; also in `settings::DEFAULTS`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `transcript.punctuation` | `auto` | `auto`: the post-pass, imports, Restore and "Add punctuation" punctuate the words when a punctuation model is selected, installed and covers the run's language (`punct::load`); `off`: never (`engine_info.punctuation.reason` is `off`). Nothing live is punctuated in beta.5 |
+| `transcript.punctuation_threads` | `4` | ONNX Runtime intra-op threads, clamped to 1 to the machine's cores (`punct::threads`); no UI |
+| `selected_model.punctuation` | `""` | The selected punctuation model file, like the other roles; the scan picks the recommended one |
+
+Punctuation never changes a word, its times or its speaker: the display
+text goes to `words.text`, the speech model's text to `words.raw_text`
+where they differ (docs/02). `diarist-cli punctuate <meeting>` (or
+`--all-missing`) adds it to finished meetings as a new run, `--remove`
+takes it out; without a model it prints the reason and exits 0. The eval
+data roots keep it `off` (plan 16 section 3.5).
+
 ### Crash recovery
 
 At launch, before a recorder can start, `live::recover` finishes live
@@ -476,6 +493,9 @@ meetings a crash left behind:
   is materialised and made current, and the post-pass is queued.
 - `processing` (the post-pass was queued or running) with both WAVs: the
   runs the interrupted post-pass wrote are deleted and it is queued again.
+  A copy of the live run (Restore, a punctuation rebuild) that was current
+  stays current, so the post-pass carries its names over; such copies are
+  never taken for the live run.
 - `processing` without WAVs: a finished `post_pass` run that is current is
   kept (the live run is deleted unless `keep_live_runs` or the post-pass
   recorded `engine_info.unplaced_names`); otherwise the live

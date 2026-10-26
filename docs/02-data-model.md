@@ -1,6 +1,6 @@
 # Data model (SQLite)
 
-Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjudication (research/06). One SQLite file at `<data root>\diarist.db`, WAL mode, foreign keys on. Backups via the rusqlite backup API or `VACUUM INTO` a temp file followed by flush and rename; never by copying the live file.
+Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjudication (research/06); v0.4, 26 Oct 2026: `words.raw_text` (migration 0004), punctuation rebuilds and the identity carry (plan 16, chunk A). One SQLite file at `<data root>\diarist.db`, WAL mode, foreign keys on. Backups via the rusqlite backup API or `VACUUM INTO` a temp file followed by flush and rename; never by copying the live file.
 
 ## Principles
 
@@ -13,7 +13,8 @@ Status: v0.3, 15 Oct 2026, after the architecture review (research/05) and adjud
 - **Gain tracks.** A channel recorded with automatic gain (the loopback by default, the mic with `capture.mic_agc`) also writes `<channel>.gain` beside its WAV: the gain in dB the AGC applied to every 10 ms of the timeline, a 16-byte header (`DGTK`, version 1, 10 values per record, 16,000 Hz, 160 samples per value) and one record of ten little-endian `f32` per 100 ms frame, appended and flushed every second with the WAV. A crash leaves whole records plus at most a partial one, which the reader drops, so nothing needs repairing; 1.44 MB per hour. The post-pass echo canceller divides the loopback by it to get the reference the speakers played (`crates/core/src/audio/gain_track.rs`, `audio/aec/offline.rs`). It is not an `audio_tracks` row: it stays in the meeting folder as long as the FLAC, goes with the folder when the meeting is deleted, and audio retention deletes it with the FLAC. The post-pass's echo-cancelled mic, `mic-aec.wav`, exists only while the mic is transcribed and is deleted right after (and with the WAVs).
 - Schema migrates by numbered SQL files applied at startup (`PRAGMA user_version`).
 - **Ids are never reused.** A rowid table hands out `max(id) + 1`, so deleting the newest meeting gave its id to the next one and anything that remembered the old meeting by id saw the new one. Since migration 0002, meeting and transcript run ids come from the `counters` table (`next_meeting_id`, `next_run_id`, started at `max(id) + 1` of a 0.1.0-beta.1 database) and advance in the same transaction as the insert. Speakers, segments and words still take `max(id) + 1`; they belong to one run and the UI reloads them with it.
-- **A copy before every upgrade.** Before pending migrations run on an existing database, the backup API copies it to `diarist.db.bak-<old schema version>` next to it; only the newest copy is kept, and the open stops if the copy cannot be made. Copy diagnostics names it.
+- **A copy before every upgrade.** Before pending migrations run on an existing database, the backup API copies it to `diarist.db.bak-<old schema version>` next to it; only the newest copy is kept, and the open stops if the copy cannot be made. Copy diagnostics names it. The first 0.1.0-beta.5 start leaves `diarist.db.bak-3` (schema 3 to 4); a beta.4 build refuses a version-4 database, so going back to beta.4 means restoring that copy.
+- **Display text and the ASR's text.** Punctuation (plan 16) is applied by Diarist to the finished words and never changes a word, its times or its speaker. `words.text` holds what the UI shows (punctuated, sentence-start capitals), because splitting, reassigning and edit replay rebuild `segments.text` from `words.text`; `words.raw_text` holds the speech model's text where it differs, NULL where it is the same. Every rebuild starts from `COALESCE(raw_text, text)`. What ran, or why not, is the run's `engine_info.punctuation`: `{applied, reason, model, revision, sha256, runtime: {name, version, path}, language, language_source, unit, policy, asr_marks_per_100: {<channel>: n}, channels: {<channel>: reason}, words, marks_added, case_upgrades, rejected_words, inner_marks_dropped, streams_refused, wall_s, threads, rebuilt_from}`, replaced wholesale on every build; `reason` is `ok`, `off`, `no_model`, `language`, `asr_punctuates`, `runtime`, `error` (with `message`) or `invariant`. `runtime.path` is relative to the data root.
 
 ## Tables
 
@@ -113,7 +114,8 @@ CREATE TABLE words (
   confidence    REAL,
   raw_label     TEXT,                            -- engine's speaker label before smoothing or edits
   margin        REAL,                            -- v1.5: top speaker score minus runner-up
-  overlap       INTEGER NOT NULL DEFAULT 0       -- v1.5: 1 when another speaker was active
+  overlap       INTEGER NOT NULL DEFAULT 0,      -- v1.5: 1 when another speaker was active
+  raw_text      TEXT                             -- 0004: the ASR's text where `text` (display, punctuated) differs; NULL = same as text
 );
 CREATE INDEX words_segment ON words(segment_id);
 CREATE INDEX words_meeting_start ON words(meeting_id, start_ms);
@@ -207,6 +209,8 @@ CREATE TABLE counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL);  -- 0002: 
 - **File import.** One `file` run. On success it becomes `current_run_id`.
 - **Live.** A `live` run receives `live_utterances` while recording. On stop, the latest `rev` of each `utt` is materialised into segments and words of the live run (so a crash of the post-pass still leaves a readable transcript), then a `post_pass` run is created and, on success, becomes current. The live run is kept until the post-pass is done, then deleted unless `settings.keep_live_runs = 1` or a display name of the live run reached no speaker of the new run (the post-pass run's `engine_info.unplaced_names` counts them; crash recovery honours it too).
 - **Re-runs** (`rediarize`, `refuse`): new run, carry-over, becomes current only when the user accepts it in the UI (or always, from the CLI with a flag). Old runs stay for comparison and for the eval harness.
+- **Punctuation** (plan 16 section 3.2). The post-pass and imports punctuate the words after the echo gate and before segmentation, with the selected punctuation model of the caller's data paths. With `post_pass_mode = on_issues` and a clean recording, a punctuator turns the promotion of the live run into a `post_pass` run built from the live run's words (raw text, the engine's labels), punctuated, with `engine_info.promoted_live` (the live run's id), the live run's `engine_info.echo` and `echo_dropped`, speakers carried by identity; it becomes current and the live run goes as after a transcribing post-pass. Without a punctuator the live run is promoted as before.
+- **Rebuilds** ("Add punctuation", "Remove punctuation", the bulk action, `diarist-cli punctuate`): the current run's words, back to the ASR's text, punctuated (or not) and segmented with the run's own options into a new run of the same kind, with `engine_info` copied, `punctuation` replaced and `punctuation.rebuilt_from` naming the root run (followed through `rebuilt_from` and `echo.restored_from`, so Add, Remove, Add never chain copies of copies), the current run's `echo_dropped` copied, speakers carried by identity; it becomes current. Nothing is deleted. Restore works the same way (the removed words added on the mic, punctuated again) but still replaces an earlier restored copy of the same run. Copies (`rebuilt_from` or `restored_from`) are never the live run of a re-run, crash recovery or a snapshot; a re-run of the post-pass carries names over from the current run when it is such a copy of the live run, and crash recovery keeps such a copy current while the post-pass waits.
 
 ## Carry-over from the previous current run
 
@@ -218,6 +222,10 @@ First the two runs are lined up per channel, because their word times need not a
 4. New speakers left unmatched get `needs_review = 1`; the UI shows them with a "new label" badge. (A post-pass that splits a live label into two usually means two people were conflated.)
 5. Merges are not carried structurally; matched speakers inherit the merged root's name, so two new labels may share a name, and the UI offers "merge again" in one click.
 6. `edits` of kind `reassign` are replayed in `created_at` order at word level: new words whose midpoints fall inside the edit's range belong to the edit's target. If that covers a whole segment, the segment is reassigned; otherwise the segment is split at the word boundary and the covered part reassigned. The target is resolved by display name against the new run after step 2; if no speaker has that name, a speaker row `user_N` with `needs_review = 1` is created rather than dropping the edit.
+
+## Identity carry for rebuilt runs
+
+A run rebuilt from another run's words with the same labels (a punctuation rebuild, Restore, the promoted live run) does not need the time-overlap rules: `RunStore::carry_over_identity(from, to)` copies every speaker row by `(channel, engine_label)` with its display name, colour, `global_id`, merge (mapped to the new run's root), `needs_review` and name anchor, however little the speaker said, then replays the `reassign` edits as in step 6 above (no alignment shift). Speakers of the new run with no counterpart are left as built. The time-overlap carry would give small speakers "new label" badges and lose their colours on every rebuild.
 
 ## Speaker rename, merge, reassign
 
