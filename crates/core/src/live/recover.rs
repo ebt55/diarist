@@ -461,6 +461,8 @@ fn finish_beside_flac(
         part_path(&mic),
         part_path(&lb),
         folder.join(super::postpass::MIC_AEC_WAV),
+        // A marker rewrite the crash cut short.
+        folder.join(format!("{RERUN_MARKER}.tmp")),
     ] {
         match std::fs::remove_file(&p) {
             Ok(()) => {}

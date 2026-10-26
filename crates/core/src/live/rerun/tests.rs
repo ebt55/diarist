@@ -702,6 +702,10 @@ fn crash_mid_rerun(f: &Finished, at: Crash) -> Option<RunId> {
         },
     )
     .unwrap();
+    if at == Crash::RunMade {
+        // The marker's rewrite (naming the run) cut short, as well.
+        std::fs::write(f.folder.join(format!("{RERUN_MARKER}.tmp")), b"{\"job\":").unwrap();
+    }
     if at == Crash::Decoding {
         write_wav(&part_path(&mic), &noise(7, MIC / 2));
         let mut w = crate::audio::wav::WavSink::create(&part_path(&lb)).unwrap();
@@ -746,6 +750,7 @@ fn crash_recovery_after_a_run_from_the_flac_keeps_the_flac_and_every_earlier_run
             part_path(&f.folder.join("mic.wav")),
             part_path(&f.folder.join("loopback.wav")),
             f.folder.join(RERUN_MARKER),
+            f.folder.join(format!("{RERUN_MARKER}.tmp")),
         ] {
             assert!(!p.exists(), "{at:?}: {} was left", p.display());
         }
