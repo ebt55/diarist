@@ -13,7 +13,9 @@ use crate::models::{free_disk_bytes, languages, DataPaths};
 use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, RunStore};
-use crate::transcript::{build_transcript, words_from_engine, SegmentOptions, UNKNOWN_LABEL};
+use crate::transcript::{
+    build_transcript, loops, words_from_engine, SegmentOptions, UNKNOWN_LABEL,
+};
 use crate::types::{
     AudioFormat, Channel, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source, TrackChannel,
 };
@@ -96,7 +98,9 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///    in `engine_info`), then `engine.transcribe_file` and drain its events
 ///    until `Done` or `Error`; a set `cancel` token (from the [`JobQueue`])
 ///    is forwarded to `engine.cancel`. Optionally the standalone diarize pass.
-/// 4. Punctuate the words (`opts.punct`, plan 16 section 3.2; the report
+/// 4. Collapse the decoder's repeated-token loops (`transcript.collapse_loops`,
+///    plan 16 section 12.3; `engine_info.loops`), punctuate the words
+///    (`opts.punct`, plan 16 section 3.2; the report
 ///    goes to the run's `engine_info.punctuation` through
 ///    `set_run_engine_info`), build speakers, segments (`transcript`
 ///    module) and words; `store.insert_transcript`, `finish_run(done)`,
@@ -400,9 +404,12 @@ fn run_import(
     if languages::unknown_token_output(words.iter().map(|w| w.text.as_str())) {
         return Err(CoreError::UnknownTokens);
     }
+    // Repeated-token loops collapse (plan 16 section 12.3): one channel, a
+    // loop never spans two speaker labels.
+    let mut channels = vec![(Channel::Source, words)];
+    let loops = loops::collapse_channels(&mut channels, loops::enabled(store));
     // Punctuation: one channel, the diarized labels as they are; the
     // session is dropped right after.
-    let mut channels = vec![(Channel::Source, words)];
     let punctuation = {
         let mut loaded = opts.punct.load(store);
         punctuate_loaded(
@@ -419,6 +426,7 @@ fn run_import(
     let words = channels.pop().map(|(_, w)| w).unwrap_or_default();
     let mut info = run.engine_info.clone();
     info["punctuation"] = punctuation.to_json();
+    info["loops"] = loops.to_json();
     store.set_run_engine_info(run.id, info)?;
     let transcript = build_transcript(&words, &opts.segment);
     store.insert_transcript(run.id, &transcript)?;
@@ -471,6 +479,8 @@ mod tests {
         WaitForCancel,
         /// Runs of `<unk>`, as for a language the model was not trained on.
         UnknownTokens,
+        /// A decoder loop: six copies of one word in one frame.
+        Loop,
     }
 
     struct FakeEngine {
@@ -534,6 +544,32 @@ mod tests {
                         spk: Some("spk_0".into()),
                     })
                     .collect();
+                    for ev in file_events(
+                        &job.job_id,
+                        Channel::Source,
+                        words,
+                        300_032_000,
+                        Duration::from_secs(1),
+                    ) {
+                        tx.send(ev).unwrap();
+                    }
+                }
+                Mode::Loop => {
+                    // "so", a loop of six on spk_0 (the last with a comma),
+                    // four at human pace on spk_1, "end".
+                    let at = |t_ms: u64, text: &str, spk: &str| EngineWord {
+                        t0_us: t_ms * 1_000,
+                        t1_us: t_ms * 1_000 + 80_000,
+                        text: text.to_owned(),
+                        conf: None,
+                        spk: Some(spk.into()),
+                    };
+                    let mut words = vec![at(0, "so", "spk_0")];
+                    words.extend(
+                        (0..6).map(|k| at(1_000, if k == 5 { "the," } else { "the" }, "spk_0")),
+                    );
+                    words.extend((0..4).map(|k| at(2_000 + k * 240, "the", "spk_1")));
+                    words.push(at(4_000, "end", "spk_1"));
                     for ev in file_events(
                         &job.job_id,
                         Channel::Source,
@@ -731,6 +767,76 @@ mod tests {
         // Sentence ends split segments: more segments than without.
         let segs = |id| store.get_segments(id, 0, 10_000).unwrap().len();
         assert!(segs(punctuated) > segs(plain));
+    }
+
+    /// Plan 16 section 12.3: the loop becomes one word spanning it, the
+    /// repeats at human pace (another speaker) stay, `engine_info.loops`
+    /// counts it; with `transcript.collapse_loops = off` every word stays.
+    #[test]
+    fn imports_collapse_repeated_token_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let src = input(dir.path());
+        let import = || {
+            let opts = ImportOptions {
+                min_free_bytes: 0,
+                ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
+            };
+            import_file(
+                &store,
+                &FakeEngine::new(Mode::Loop),
+                &FakeDecoder,
+                request(&src),
+                &opts,
+                &CancelToken::default(),
+                &|_| {},
+            )
+            .unwrap()
+        };
+        let words = |id| -> Vec<(i64, i64, String, Option<String>)> {
+            store
+                .get_words(id, i64::MIN, i64::MAX)
+                .unwrap()
+                .into_iter()
+                .map(|w| (w.start_ms, w.end_ms, w.text, w.raw_label))
+                .collect()
+        };
+        let loops_of = |id| {
+            store
+                .get_meeting(id)
+                .unwrap()
+                .current_run
+                .unwrap()
+                .engine_info["loops"]
+                .clone()
+        };
+        let on = import();
+        let w = words(on);
+        assert_eq!(w.len(), 7, "{w:?}");
+        assert_eq!(w[1], (1_000, 1_080, "the,".into(), Some("spk_0".into())));
+        assert_eq!(
+            w.iter().filter(|x| x.3.as_deref() == Some("spk_1")).count(),
+            5,
+            "the repeats at human pace and \"end\" stay"
+        );
+        let l = loops_of(on);
+        assert_eq!(l["applied"], true);
+        assert_eq!(
+            (l["runs"].as_u64(), l["words_removed"].as_u64()),
+            (Some(1), Some(5))
+        );
+        assert_eq!(l["per_channel"]["source"]["words_removed"], 5);
+        assert_eq!(
+            l["rule"],
+            serde_json::json!({"min_run": 4, "frame_ms": 80, "split_ms": 400})
+        );
+        store
+            .set_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let off = import();
+        assert_eq!(words(off).len(), 12);
+        assert_eq!(loops_of(off)["applied"], false);
+        assert_eq!(loops_of(off)["words_removed"], 0);
     }
 
     #[test]
