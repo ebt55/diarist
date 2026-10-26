@@ -530,6 +530,7 @@ fn seed_model_files(st: &mut State) {
                 vram_mb_measured: f.vram_measured,
                 vram_mb_estimate: f.vram_estimate,
                 file_right_context: None,
+                live_right_context: None,
                 file_preset: None,
                 punctuation: None,
             },
