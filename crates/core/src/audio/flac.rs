@@ -5,16 +5,66 @@
 //!
 //! [`decode_stereo_to_wavs`] is the way back, for running a finished
 //! meeting's post-pass again from its only copy of the audio (plan 16
-//! section 12.5 J): the FLAC is opened for reading only, and a file that
-//! does not decode in full and to its own checksum is refused.
+//! section 12.5 J): the FLAC is opened for reading only, a file that does
+//! not decode in full and to its own checksum is refused, and the WAVs are
+//! written as `.part` files first and never over WAVs that are there.
+//! [`check_copies`] tells whether WAVs beside a FLAC are copies of what it
+//! holds, before anyone deletes them.
 
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flac_codec::encode::{FlacSampleWriter, Options};
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::Decoder;
+use symphonia::core::errors::Error as SymError;
+use symphonia::core::formats::FormatReader;
 
 use crate::audio::capture::{audio_err, CAPTURE_RATE};
 use crate::error::Result;
+
+/// Makes a written file durable: its data is flushed to the disk, then its
+/// folder's entries where the platform allows it (best effort: Windows
+/// opens a folder only with backup semantics and some file systems refuse
+/// the flush; the file's own flush is what counts).
+pub(crate) fn sync_file_and_dir(path: &Path) -> Result<()> {
+    // FlushFileBuffers needs a handle with write access; nothing is written.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
+    sync_dir(path.parent());
+    Ok(())
+}
+
+/// Best effort: flushes a folder's entries (a rename or a new file in it).
+pub(crate) fn sync_dir(dir: Option<&Path>) {
+    let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) else {
+        return;
+    };
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS: the only way to open a folder.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(0x0200_0000)
+            .open(dir)
+    };
+    #[cfg(not(windows))]
+    let f = std::fs::File::open(dir);
+    if let Ok(f) = f {
+        let _ = f.sync_all();
+    }
+}
+
+/// The file a WAV is decoded into before it is complete and checked:
+/// `mic.wav` → `mic.wav.part`.
+pub fn part_path(wav: &Path) -> PathBuf {
+    let mut s = wav.as_os_str().to_owned();
+    s.push(".part");
+    PathBuf::from(s)
+}
 
 /// What [`encode_stereo`] wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,11 +133,137 @@ pub fn encode_stereo(left: &Path, right: &Path, out: &Path) -> Result<FlacInfo> 
     }
     w.finalize()
         .map_err(|e| audio_err(format!("finalize {}: {e}", out.display())))?;
+    // On the disk before the caller registers it as the meeting's audio
+    // and deletes the WAVs it came from.
+    sync_file_and_dir(out)
+        .map_err(|e| audio_err(format!("flush {} to the disk: {e}", out.display())))?;
     Ok(FlacInfo {
         frames,
         bytes: std::fs::metadata(out)?.len(),
         channel_frames,
     })
+}
+
+/// A stereo 16 kHz 16-bit FLAC read front to back, every frame's CRC and
+/// the file's MD5 checked ([`decode_stereo_to_wavs`], [`check_copies`]).
+/// The file is opened for reading only.
+struct StereoReader {
+    name: String,
+    format: Box<dyn FormatReader>,
+    dec: Box<dyn Decoder>,
+    track: u32,
+    /// Frames the header gives.
+    total: Option<u64>,
+    /// Frames read so far.
+    done: u64,
+    sb: Option<SampleBuffer<i16>>,
+}
+
+impl StereoReader {
+    fn open(flac: &Path) -> Result<Self> {
+        use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_FLAC};
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let name = flac.display().to_string();
+        let err = |e: SymError| audio_err(format!("decode {name}: {e}"));
+        let file = std::fs::File::open(flac)
+            .map_err(|e| audio_err(format!("open {name} for reading: {e}")))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("flac");
+        let format = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .map_err(err)?
+            .format;
+        let track = format
+            .default_track()
+            .ok_or_else(|| audio_err(format!("decode {name}: no audio track")))?
+            .clone();
+        let p = &track.codec_params;
+        let channels = p.channels.map_or(0, |c| c.count());
+        if p.codec != CODEC_TYPE_FLAC
+            || p.sample_rate != Some(CAPTURE_RATE)
+            || p.bits_per_sample != Some(16)
+            || channels != 2
+        {
+            return Err(audio_err(format!(
+                "decode {name}: not 16 kHz 16-bit stereo FLAC ({:?} Hz, {:?} bits, {channels} channels)",
+                p.sample_rate, p.bits_per_sample
+            )));
+        }
+        let dec = symphonia::default::get_codecs()
+            .make(p, &DecoderOptions { verify: true })
+            .map_err(err)?;
+        Ok(Self {
+            total: p.n_frames,
+            track: track.id,
+            name,
+            format,
+            dec,
+            done: 0,
+            sb: None,
+        })
+    }
+
+    /// The next packet's frames, interleaved (left, right), with the frame
+    /// they start at; `None` at the end of the file.
+    fn next_block(&mut self) -> Result<Option<(u64, &[i16])>> {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None)
+                }
+                Err(e) => return Err(audio_err(format!("decode {}: {e}", self.name))),
+            };
+            if packet.track_id() != self.track {
+                continue;
+            }
+            let buf = self
+                .dec
+                .decode(&packet)
+                .map_err(|e| audio_err(format!("decode {}: {e}", self.name)))?;
+            // `capacity` in frames here, in samples (both channels) there.
+            let frames = buf.capacity();
+            if self.sb.as_ref().is_none_or(|s| s.capacity() < 2 * frames) {
+                self.sb = Some(SampleBuffer::<i16>::new(frames as u64, *buf.spec()));
+            }
+            let s = self.sb.as_mut().expect("sample buffer");
+            s.copy_interleaved_ref(buf);
+            let at = self.done;
+            self.done += (s.samples().len() / 2) as u64;
+            return Ok(Some((at, s.samples())));
+        }
+    }
+
+    /// After the last packet: every frame the header names was read, and
+    /// the audio matches the file's MD5. `true` when it carries one.
+    fn finish(mut self) -> Result<bool> {
+        if let Some(n) = self.total {
+            if self.done != n {
+                return Err(audio_err(format!(
+                    "decode {}: {} of its {n} frames decoded",
+                    self.name, self.done
+                )));
+            }
+        }
+        let verify = self.dec.finalize().verify_ok;
+        if verify == Some(false) {
+            return Err(audio_err(format!(
+                "decode {}: the decoded audio does not match the file's MD5",
+                self.name
+            )));
+        }
+        Ok(verify == Some(true))
+    }
 }
 
 /// What [`decode_stereo_to_wavs`] wrote.
@@ -110,12 +286,16 @@ pub struct DecodedWavs {
 /// FLAC's length. `progress(done, total)` in frames (`total` 0 when the
 /// header gives none).
 ///
-/// `flac` is opened for reading only and never written. Refused, with both
-/// WAVs removed: a file that is not 16 kHz 16-bit stereo FLAC, a packet
-/// that does not decode, fewer frames than the header says, audio that
-/// fails the FLAC's MD5, `channel_frames` that do not fit (the longer one
-/// is not the FLAC's length, or the cut-off padding is not silence), and a
-/// WAV path that is the FLAC's own.
+/// `flac` is opened for reading only and never written. The audio goes to
+/// `<left>.part` and `<right>.part` ([`part_path`]), which become `left`
+/// and `right` only once the whole file decoded and checked out; a WAV
+/// that is already at `left` or `right` is never written over, truncated
+/// or deleted (the decode is refused). Refused, with the `.part` files
+/// removed: a WAV already there, a file that is not 16 kHz 16-bit stereo
+/// FLAC, a packet that does not decode, fewer frames than the header says,
+/// audio that fails the FLAC's MD5, `channel_frames` that do not fit (the
+/// longer one is not the FLAC's length, or the cut-off padding is not
+/// silence), and a WAV path that is the FLAC's own.
 pub fn decode_stereo_to_wavs(
     flac: &Path,
     left: &Path,
@@ -129,12 +309,48 @@ pub fn decode_stereo_to_wavs(
             flac.display()
         )));
     }
-    let r = decode_into(flac, left, right, channel_frames, progress);
+    for p in [left, right] {
+        vacant(p).map_err(|e| audio_err(format!("decode {}: {e}", flac.display())))?;
+    }
+    let (lp, rp) = (part_path(left), part_path(right));
+    let r = decode_into(flac, &lp, &rp, channel_frames, progress).and_then(|got| {
+        place(&lp, left)?;
+        if let Err(e) = place(&rp, right) {
+            // `left` is this call's own file.
+            let _ = std::fs::remove_file(left);
+            return Err(e);
+        }
+        Ok(got)
+    });
     if r.is_err() {
-        let _ = std::fs::remove_file(left);
-        let _ = std::fs::remove_file(right);
+        let _ = std::fs::remove_file(&lp);
+        let _ = std::fs::remove_file(&rp);
     }
     r
+}
+
+/// `Ok` when nothing is at `p` (only `NotFound` counts as nothing).
+fn vacant(p: &Path) -> std::result::Result<(), String> {
+    match std::fs::symlink_metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(format!(
+            "{} is already there; it is left as it is",
+            p.display()
+        )),
+        Err(e) => Err(format!("cannot check {}: {e}", p.display())),
+    }
+}
+
+/// A finished `.part` file becomes its WAV, never over a file that is there.
+fn place(part: &Path, dest: &Path) -> Result<()> {
+    vacant(dest).map_err(audio_err)?;
+    std::fs::rename(part, dest).map_err(|e| {
+        audio_err(format!(
+            "rename {} to {}: {e}",
+            part.display(),
+            dest.display()
+        ))
+    })
 }
 
 fn decode_into(
@@ -144,46 +360,9 @@ fn decode_into(
     channel_frames: Option<[u64; 2]>,
     progress: &dyn Fn(u64, u64),
 ) -> Result<DecodedWavs> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_FLAC};
-    use symphonia::core::errors::Error as SymError;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
     let name = flac.display();
-    let err = |e: SymError| audio_err(format!("decode {name}: {e}"));
-    let file = std::fs::File::open(flac)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension("flac");
-    let mut format = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(err)?
-        .format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| audio_err(format!("decode {name}: no audio track")))?
-        .clone();
-    let p = &track.codec_params;
-    let channels = p.channels.map_or(0, |c| c.count());
-    if p.codec != CODEC_TYPE_FLAC
-        || p.sample_rate != Some(CAPTURE_RATE)
-        || p.bits_per_sample != Some(16)
-        || channels != 2
-    {
-        return Err(audio_err(format!(
-            "decode {name}: not 16 kHz 16-bit stereo FLAC ({:?} Hz, {:?} bits, {channels} channels)",
-            p.sample_rate, p.bits_per_sample
-        )));
-    }
-    let total = p.n_frames;
+    let mut reader = StereoReader::open(flac)?;
+    let total = reader.total;
     if let (Some(n), Some([a, b])) = (total, channel_frames) {
         if a.max(b) != n {
             return Err(audio_err(format!(
@@ -191,9 +370,6 @@ fn decode_into(
             )));
         }
     }
-    let mut dec = symphonia::default::get_codecs()
-        .make(p, &DecoderOptions { verify: true })
-        .map_err(err)?;
     let create = |path: &Path| {
         hound::WavWriter::create(path, crate::audio::wav::spec())
             .map_err(|e| audio_err(format!("create {}: {e}", path.display())))
@@ -201,26 +377,7 @@ fn decode_into(
     let (mut lw, mut rw) = (create(left)?, create(right)?);
     let keep = channel_frames.unwrap_or([u64::MAX; 2]);
     let mut written = [0u64; 2];
-    let mut done = 0u64;
-    let mut sb: Option<SampleBuffer<i16>> = None;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(err(e)),
-        };
-        if packet.track_id() != track.id {
-            continue;
-        }
-        let buf = dec.decode(&packet).map_err(err)?;
-        // `capacity` in frames here, in samples (both channels) there.
-        let frames = buf.capacity();
-        if sb.as_ref().is_none_or(|s| s.capacity() < 2 * frames) {
-            sb = Some(SampleBuffer::<i16>::new(frames as u64, *buf.spec()));
-        }
-        let s = sb.as_mut().expect("sample buffer");
-        s.copy_interleaved_ref(buf);
-        let samples = s.samples();
+    while let Some((done, samples)) = reader.next_block()? {
         let n = (samples.len() / 2) as u64;
         for (c, w) in [&mut lw, &mut rw].into_iter().enumerate() {
             // Frames `done..done + n` of this channel: those before its own
@@ -246,22 +403,10 @@ fn decode_into(
                 .map_err(|e| audio_err(format!("write the WAVs of {name}: {e}")))?;
             written[c] += take as u64;
         }
-        done += n;
-        progress(done, total.unwrap_or(0));
+        progress(done + n, total.unwrap_or(0));
     }
-    if let Some(n) = total {
-        if done != n {
-            return Err(audio_err(format!(
-                "decode {name}: {done} of its {n} frames decoded"
-            )));
-        }
-    }
-    let verify = dec.finalize().verify_ok;
-    if verify == Some(false) {
-        return Err(audio_err(format!(
-            "decode {name}: the decoded audio does not match the file's MD5"
-        )));
-    }
+    let done = reader.done;
+    let verified = reader.finish()?;
     if let Some([a, b]) = channel_frames {
         if written != [a, b] {
             return Err(audio_err(format!(
@@ -276,16 +421,69 @@ fn decode_into(
     Ok(DecodedWavs {
         frames: done,
         channel_frames: written,
-        verified: verify == Some(true),
+        verified,
     })
+}
+
+/// Whether the WAVs beside a playback FLAC (`[left, right]`, either may be
+/// absent) are copies of what it holds, before anyone deletes them: the
+/// FLAC decodes in full, to its MD5 when it carries one, and each WAV given
+/// is 16 kHz mono PCM16 holding its channel's samples, the rest of the
+/// channel silence (the encoder's padding of the shorter input). Both are
+/// only read. The error says where they part.
+pub fn check_copies<P: AsRef<Path>>(flac: &Path, wavs: [Option<P>; 2]) -> Result<()> {
+    let name = flac.display().to_string();
+    let mut readers = Vec::new();
+    for (c, p) in wavs.iter().enumerate() {
+        let Some(p): Option<&Path> = p.as_ref().map(|p| p.as_ref()) else {
+            continue;
+        };
+        let r = hound::WavReader::open(p)
+            .map_err(|e| audio_err(format!("open {}: {e}", p.display())))?;
+        if r.spec() != crate::audio::wav::spec() {
+            return Err(audio_err(format!(
+                "{} is not 16 kHz mono PCM16 ({:?})",
+                p.display(),
+                r.spec()
+            )));
+        }
+        readers.push((c, p, r.into_samples::<i16>()));
+    }
+    let mut reader = StereoReader::open(flac)?;
+    while let Some((done, samples)) = reader.next_block()? {
+        for (c, p, wav) in readers.iter_mut() {
+            for (i, &v) in samples.iter().skip(*c).step_by(2).enumerate() {
+                let w = wav
+                    .next()
+                    .transpose()
+                    .map_err(|e| audio_err(format!("read {}: {e}", p.display())))?;
+                if w.unwrap_or(0) != v {
+                    return Err(audio_err(format!(
+                        "{} differs from channel {c} of {name} at frame {}",
+                        p.display(),
+                        done + i as u64
+                    )));
+                }
+            }
+        }
+    }
+    let frames = reader.done;
+    reader.finish()?;
+    for (_, p, wav) in readers.iter_mut() {
+        if wav.next().is_some() {
+            return Err(audio_err(format!(
+                "{} is longer than the {frames} frames of {name}",
+                p.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Decodes a FLAC (or any symphonia-readable file) to interleaved i16 and
 /// its channel count. Used to verify the playback track.
 pub fn decode_i16(path: &Path) -> Result<(Vec<i16>, usize)> {
-    use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::errors::Error as SymError;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -465,15 +663,30 @@ mod tests {
         let seen = seen.into_inner().unwrap();
         assert_eq!(seen.last(), Some(&(40_000, 40_000)));
         assert!(seen.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(!part_path(&l).exists() && !part_path(&r).exists());
+        // They are copies of what the FLAC holds; the original WAVs too.
+        check_copies(&flac, [Some(&l), Some(&r)]).unwrap();
+        check_copies(
+            &flac,
+            [Some(&d.join("mic.wav")), Some(&d.join("loopback.wav"))],
+        )
+        .unwrap();
+        check_copies(&flac, [None, Some(&r)]).unwrap();
         // Without them (a recording from before beta.5): both at the FLAC's
         // length, the shorter one padded with silence as it was encoded.
+        std::fs::remove_file(&l).unwrap();
+        std::fs::remove_file(&r).unwrap();
         let got = decode_stereo_to_wavs(&flac, &l, &r, None, &|_, _| {}).unwrap();
         assert_eq!(got.channel_frames, [40_000, 40_000]);
         assert_eq!(wav_samples(&l), left);
         let padded = wav_samples(&r);
         assert_eq!(padded[..37_123], right[..]);
         assert!(padded[37_123..].iter().all(|&v| v == 0));
+        // The padded copy is a copy too.
+        check_copies(&flac, [Some(&l), Some(&r)]).unwrap();
         // Encoding the decoded WAVs again gives the same file.
+        std::fs::remove_file(&l).unwrap();
+        std::fs::remove_file(&r).unwrap();
         let again = out.join("again.flac");
         let got =
             decode_stereo_to_wavs(&flac, &l, &r, Some(info.channel_frames), &|_, _| {}).unwrap();
@@ -503,6 +716,10 @@ mod tests {
                 .expect_err("refused")
                 .to_string();
             assert!(!l.exists() && !r.exists(), "{e}: a WAV was left");
+            assert!(
+                !part_path(&l).exists() && !part_path(&r).exists(),
+                "{e}: a .part file was left"
+            );
             assert_eq!(sha256(path), before, "{e}: the FLAC changed");
             e
         };
@@ -538,5 +755,73 @@ mod tests {
             .to_string();
         assert!(e.contains("must be other files"), "{e}");
         assert_eq!(std::fs::read(&flac).unwrap(), bytes);
+        // A damaged FLAC does not pass for the WAVs it was made from.
+        let e = check_copies(
+            &flipped,
+            [Some(&d.join("mic.wav")), Some(&d.join("loopback.wav"))],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("decode") || e.contains("differs"), "{e}");
+    }
+
+    #[test]
+    fn a_decode_never_writes_over_wavs_that_are_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        two_wavs(d, 40_000, 37_123);
+        let flac = d.join("playback.flac");
+        let info = encode_stereo(&d.join("mic.wav"), &d.join("loopback.wav"), &flac).unwrap();
+        let (mic, lb) = (d.join("mic.wav"), d.join("loopback.wav"));
+        let (m0, l0) = (sha256(&mic), sha256(&lb));
+        // Both there, or only one: refused, both as they were, no .part left.
+        for only in [None, Some(&mic), Some(&lb)] {
+            if let Some(p) = only {
+                let keep = d.join("keep.wav");
+                std::fs::rename(p, &keep).unwrap();
+                let e =
+                    decode_stereo_to_wavs(&flac, &mic, &lb, Some(info.channel_frames), &|_, _| {})
+                        .unwrap_err()
+                        .to_string();
+                assert!(e.contains("already there"), "{e}");
+                // The decode did not make the one that was missing either.
+                assert!(!p.exists());
+                std::fs::rename(&keep, p).unwrap();
+            } else {
+                let e = decode_stereo_to_wavs(&flac, &mic, &lb, None, &|_, _| {})
+                    .unwrap_err()
+                    .to_string();
+                assert!(e.contains("already there"), "{e}");
+            }
+            assert_eq!((sha256(&mic), sha256(&lb)), (m0.clone(), l0.clone()));
+            assert!(!part_path(&mic).exists() && !part_path(&lb).exists());
+        }
+        // Not copies: another WAV, a shorter one, a longer one.
+        let other = d.join("other.wav");
+        let mut w = WavSink::create(&other).unwrap();
+        w.write(&vec![5i16; 40_000]).unwrap();
+        w.finalize().unwrap();
+        let e = check_copies(&flac, [Some(&other), None])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("differs from channel 0"), "{e}");
+        let short = d.join("short.wav");
+        let mut w = WavSink::create(&short).unwrap();
+        w.write(&wav_samples(&mic)[..30_000]).unwrap();
+        w.finalize().unwrap();
+        let e = check_copies(&flac, [Some(&short), None])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("differs from channel 0 of"), "{e}");
+        let long = d.join("long.wav");
+        let mut w = WavSink::create(&long).unwrap();
+        let mut s = wav_samples(&mic);
+        s.push(1);
+        w.write(&s).unwrap();
+        w.finalize().unwrap();
+        let e = check_copies(&flac, [Some(&long), None])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is longer than"), "{e}");
     }
 }
