@@ -39,7 +39,7 @@ References: Zoom's own `transcript.vtt` (Zoom's speech recognition with per-part
 
 ## Results
 
-Speed: × real time comes from the run itself when that run held quiet.lock and no other heavy job overlapped it (the gate set, Talk 2 to 7, Aug 1, 3 and 5, and 3.5 on Aug 4). Otherwise it comes from a timing-only re-run of the same configuration in an exclusive window, checked with `nvidia-smi pmon` (no other process above 5 % SM use; the idle desktop app excepted). Talk 1 and Aug 4 first ran while another agent's build overlapped; those were re-timed. "pending" marks sessions whose timing re-run is still owed: the window was interrupted at 02:50 on 27 Oct by another GPU job. The words do not depend on load, so every accuracy column is final. During the window ComfyUI held about 2.5 GB of VRAM idle. Pooled × real time counts only the timed sessions and says how many.
+Speed: × real time comes from the run itself when that run held quiet.lock and no other heavy job overlapped it (the gate set, Talk 2 to 7, Aug 1, 3 and 5, and 3.5 on Aug 4). Otherwise it comes from a timing-only re-run of the same configuration in an exclusive window, checked with `nvidia-smi pmon` (no other process above 5 % SM use; the idle desktop app excepted). Talk 1 and Aug 4 first ran while another agent's build overlapped; those were re-timed. The window ran on 27 Oct 2026 from 02:42 to 03:46 IST. It was interrupted once by another GPU job, and runs from that stretch were repeated after the job ended. Any run with a non-Diarist process above 5 % SM in a pmon sample was also repeated, and every repeat was clean. In the window's first part ComfyUI held about 2.5 GB of VRAM while idle, which the VRAM delta (peak minus the reading just before each run) excludes. Every session is timed.
 
 ### Gate set (six user meetings plus AMI)
 
@@ -73,48 +73,48 @@ Speed: × real time comes from the run itself when that run held quiet.lock and 
 | Aug 5 | EN | 43 | 5.2 | 5.2 | 5.1 | 52 | 239 | 141 | 0.1 | 2.4 | +0 | 2 | 1 | 85 |
 | Aug 5 | 3.5 | 43 | 5.0 | 5.1 | 5.0 | 111 | 137 | 174 | 0.1 | 2.3 | +0 | 2 | 1 | 86 |
 | Aug 6 | EN | 65 | 5.2 | 5.2 | 5.1 | 223 | 144 | 252 | 0.1 | 4.9 | +0 | 24 | 3 | 77 |
-| Aug 6 | 3.5 | 65 | 6.6 | 6.6 | 6.6 | 373 | 122 | 312 | 0.0 | 5.5 | +0 | 36 | 3 | pending |
+| Aug 6 | 3.5 | 65 | 6.6 | 6.6 | 6.6 | 373 | 122 | 312 | 0.0 | 5.5 | +0 | 36 | 3 | 83 |
 | Aug 7 | EN | 55 | 35.3 | 35.5 | 8.4 | 202 | 256 | 205 | 14.2 | 21.5 | +2 | 35 | 1 | 72 |
-| Aug 7 | 3.5 | 55 | 35.5 | 35.9 | 8.2 | 269 | 155 | 229 | 14.7 | 22.3 | +2 | 31 | 2 | pending |
+| Aug 7 | 3.5 | 55 | 35.5 | 35.9 | 8.2 | 269 | 155 | 229 | 14.7 | 22.3 | +2 | 31 | 2 | 82 |
 | Aug 8 | EN | 46 | 6.8 | 6.8 | 6.7 | 128 | 120 | 210 | 0.0 | 7.4 | +0 | 14 | 1 | 78 |
-| Aug 8 | 3.5 | 46 | 7.5 | 7.5 | 7.4 | 183 | 74 | 250 | 0.0 | 6.6 | +0 | 11 | 1 | pending |
+| Aug 8 | 3.5 | 46 | 7.5 | 7.5 | 7.4 | 183 | 74 | 250 | 0.0 | 6.6 | +0 | 11 | 1 | 80 |
 | Aug 10 | EN | 47 | 6.4 | 6.4 | 6.2 | 138 | 153 | 126 | 0.1 | 7.4 | +0 | 25 | 1 | 77 |
-| Aug 10 | 3.5 | 47 | 6.6 | 6.6 | 6.6 | 179 | 127 | 133 | 0.1 | 7.4 | +0 | 22 | 3 | pending |
+| Aug 10 | 3.5 | 47 | 6.6 | 6.6 | 6.6 | 179 | 127 | 133 | 0.1 | 7.4 | +0 | 22 | 3 | 77 |
 | Aug 11 | EN | 43 | 5.7 | 5.7 | 5.7 | 77 | 315 | 70 | 0.0 | 4.2 | +0 | 14 | 0 | 82 |
-| Aug 11 | 3.5 | 43 | 4.7 | 4.7 | 4.7 | 137 | 143 | 103 | 0.0 | 4.7 | +0 | 20 | 0 | pending |
+| Aug 11 | 3.5 | 43 | 4.7 | 4.7 | 4.7 | 137 | 143 | 103 | 0.0 | 4.7 | +0 | 20 | 0 | 75 |
 | Aug 12 | EN | 46 | 4.4 | 4.4 | 4.3 | 44 | 204 | 59 | 0.1 | 3.0 | +0 | 1 | 0 | 73 |
-| Aug 12 | 3.5 | 46 | 3.0 | 3.0 | 3.0 | 70 | 71 | 73 | 0.0 | 2.4 | +0 | 1 | 0 | pending |
+| Aug 12 | 3.5 | 46 | 3.0 | 3.0 | 3.0 | 70 | 71 | 73 | 0.0 | 2.4 | +0 | 1 | 0 | 79 |
 | Aug 13 | EN | 47 | 5.7 | 5.8 | 5.6 | 142 | 96 | 123 | 0.1 | 10.7 | +0 | 26 | 0 | 69 |
-| Aug 13 | 3.5 | 47 | 6.0 | 6.0 | 5.9 | 175 | 64 | 142 | 0.0 | 7.7 | +0 | 18 | 1 | pending |
+| Aug 13 | 3.5 | 47 | 6.0 | 6.0 | 5.9 | 175 | 64 | 142 | 0.0 | 7.7 | +0 | 18 | 1 | 80 |
 | Aug 15 | EN | 44 | 8.4 | 8.5 | 7.3 | 161 | 159 | 124 | 0.6 | 7.8 | +1 | 7 | 2 | 79 |
-| Aug 15 | 3.5 | 44 | 7.4 | 7.4 | 6.6 | 169 | 96 | 135 | 0.4 | 6.6 | +1 | 10 | 2 | pending |
+| Aug 15 | 3.5 | 44 | 7.4 | 7.4 | 6.6 | 169 | 96 | 135 | 0.4 | 6.6 | +1 | 10 | 2 | 80 |
 | Sep 1 | EN | 35 | 8.8 | 8.8 | 8.7 | 195 | 137 | 119 | 0.1 | 7.2 | +0 | 20 | 1 | 77 |
-| Sep 1 | 3.5 | 35 | 9.6 | 9.6 | 9.5 | 257 | 93 | 143 | 0.1 | 7.3 | +0 | 23 | 2 | pending |
-| Sep 2 | EN | 42 | 6.6 | 6.6 | 6.4 | 139 | 120 | 199 | 0.1 | 5.4 | +0 | 14 | 0 | pending |
-| Sep 2 | 3.5 | 42 | 7.1 | 7.1 | 6.9 | 163 | 93 | 241 | 0.1 | 5.4 | +0 | 17 | 1 | pending |
-| Sep 3 | EN | 43 | 6.9 | 6.9 | 6.8 | 230 | 123 | 198 | 0.1 | 5.1 | +0 | 32 | 3 | pending |
-| Sep 3 | 3.5 | 43 | 8.3 | 8.3 | 8.3 | 300 | 95 | 275 | 0.1 | 6.3 | +0 | 29 | 2 | pending |
-| Sep 4 | EN | 43 | 8.4 | 8.4 | 8.2 | 225 | 188 | 159 | 0.2 | 7.0 | +0 | 21 | 0 | pending |
-| Sep 4 | 3.5 | 43 | 9.0 | 9.0 | 8.8 | 297 | 131 | 185 | 0.1 | 7.7 | +0 | 27 | 2 | pending |
-| Sep 6 | EN | 47 | 4.8 | 4.9 | 4.6 | 181 | 118 | 113 | 0.2 | 6.4 | +0 | 40 | 2 | pending |
-| Sep 6 | 3.5 | 47 | 5.9 | 6.0 | 5.7 | 305 | 79 | 127 | 0.2 | 8.4 | +0 | 43 | 2 | pending |
-| Jul 1 | EN | 28 | 9.7 | 9.7 | 9.5 | 174 | 93 | 112 | 0.2 | 8.1 | +0 | 23 | 3 | pending |
-| Jul 1 | 3.5 | 28 | 9.5 | 9.5 | 9.4 | 217 | 48 | 110 | 0.2 | 10.0 | +0 | 22 | 1 | pending |
-| Jul 2 | EN | 40 | 6.7 | 6.7 | 6.7 | 157 | 191 | 108 | 0.0 | 7.8 | +0 | 43 | 3 | pending |
-| Jul 2 | 3.5 | 40 | 6.2 | 6.3 | 6.2 | 209 | 89 | 127 | 0.0 | 9.6 | +0 | 41 | 4 | pending |
-| Jul 3 | EN | 63 | 9.1 | 9.1 | 8.9 | 225 | 587 | 273 | 0.1 | 4.5 | +0 | 34 | 0 | pending |
-| Jul 3 | 3.5 | 63 | 10.0 | 10.0 | 9.8 | 425 | 309 | 467 | 0.2 | 5.8 | +0 | 44 | 1 | pending |
-| Jul 4 | EN | 40 | 5.4 | 5.4 | 5.1 | 104 | 111 | 106 | 0.2 | 7.5 | +0 | 21 | 1 | pending |
-| Jul 4 | 3.5 | 40 | 5.9 | 5.9 | 5.8 | 142 | 107 | 120 | 0.0 | 7.0 | +0 | 25 | 1 | pending |
-| Jul 5 | EN | 52 | 12.1 | 12.2 | 12.1 | 195 | 413 | 291 | 0.1 | 7.2 | +0 | 32 | 2 | pending |
-| Jul 5 | 3.5 | 52 | 11.8 | 11.9 | 11.8 | 283 | 265 | 328 | 0.0 | 7.7 | +0 | 40 | 5 | pending |
+| Sep 1 | 3.5 | 35 | 9.6 | 9.6 | 9.5 | 257 | 93 | 143 | 0.1 | 7.3 | +0 | 23 | 2 | 81 |
+| Sep 2 | EN | 42 | 6.6 | 6.6 | 6.4 | 139 | 120 | 199 | 0.1 | 5.4 | +0 | 14 | 0 | 72 |
+| Sep 2 | 3.5 | 42 | 7.1 | 7.1 | 6.9 | 163 | 93 | 241 | 0.1 | 5.4 | +0 | 17 | 1 | 84 |
+| Sep 3 | EN | 43 | 6.9 | 6.9 | 6.8 | 230 | 123 | 198 | 0.1 | 5.1 | +0 | 32 | 3 | 81 |
+| Sep 3 | 3.5 | 43 | 8.3 | 8.3 | 8.3 | 300 | 95 | 275 | 0.1 | 6.3 | +0 | 29 | 2 | 83 |
+| Sep 4 | EN | 43 | 8.4 | 8.4 | 8.2 | 225 | 188 | 159 | 0.2 | 7.0 | +0 | 21 | 0 | 76 |
+| Sep 4 | 3.5 | 43 | 9.0 | 9.0 | 8.8 | 297 | 131 | 185 | 0.1 | 7.7 | +0 | 27 | 2 | 82 |
+| Sep 6 | EN | 47 | 4.8 | 4.9 | 4.6 | 181 | 118 | 113 | 0.2 | 6.4 | +0 | 40 | 2 | 80 |
+| Sep 6 | 3.5 | 47 | 5.9 | 6.0 | 5.7 | 305 | 79 | 127 | 0.2 | 8.4 | +0 | 43 | 2 | 81 |
+| Jul 1 | EN | 28 | 9.7 | 9.7 | 9.5 | 174 | 93 | 112 | 0.2 | 8.1 | +0 | 23 | 3 | 76 |
+| Jul 1 | 3.5 | 28 | 9.5 | 9.5 | 9.4 | 217 | 48 | 110 | 0.2 | 10.0 | +0 | 22 | 1 | 76 |
+| Jul 2 | EN | 40 | 6.7 | 6.7 | 6.7 | 157 | 191 | 108 | 0.0 | 7.8 | +0 | 43 | 3 | 78 |
+| Jul 2 | 3.5 | 40 | 6.2 | 6.3 | 6.2 | 209 | 89 | 127 | 0.0 | 9.6 | +0 | 41 | 4 | 78 |
+| Jul 3 | EN | 63 | 9.1 | 9.1 | 8.9 | 225 | 587 | 273 | 0.1 | 4.5 | +0 | 34 | 0 | 76 |
+| Jul 3 | 3.5 | 63 | 10.0 | 10.0 | 9.8 | 425 | 309 | 467 | 0.2 | 5.8 | +0 | 44 | 1 | 83 |
+| Jul 4 | EN | 40 | 5.4 | 5.4 | 5.1 | 104 | 111 | 106 | 0.2 | 7.5 | +0 | 21 | 1 | 73 |
+| Jul 4 | 3.5 | 40 | 5.9 | 5.9 | 5.8 | 142 | 107 | 120 | 0.0 | 7.0 | +0 | 25 | 1 | 81 |
+| Jul 5 | EN | 52 | 12.1 | 12.2 | 12.1 | 195 | 413 | 291 | 0.1 | 7.2 | +0 | 32 | 2 | 82 |
+| Jul 5 | 3.5 | 52 | 11.8 | 11.9 | 11.8 | 283 | 265 | 328 | 0.0 | 7.7 | +0 | 40 | 5 | 83 |
 
 ### Talks (folder D)
 
 | Session | Model | Min | cpWER | tcpWER | WER | del | ins | sub | WDER | DER c0.25 | Count err | Gaps ≥ 2 s | Gaps ≥ 5 s | × real time |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Talk 1 | EN | 53 | 6.6 | 6.6 | 6.3 | 140 | 143 | 179 | 0.2 | 6.9 | +0 | 15 | 3 | 72 |
-| Talk 1 | 3.5 | 53 | 6.7 | 6.7 | 6.5 | 153 | 111 | 218 | 0.1 | 5.4 | +0 | 13 | 3 | pending |
+| Talk 1 | 3.5 | 53 | 6.7 | 6.7 | 6.5 | 153 | 111 | 218 | 0.1 | 5.4 | +0 | 13 | 3 | 82 |
 | Talk 2 | EN | 45 | 7.2 | 7.2 | 7.0 | 138 | 180 | 205 | 0.1 | 4.2 | -1 | 23 | 0 | 82 |
 | Talk 2 | 3.5 | 45 | 7.4 | 7.4 | 7.3 | 184 | 116 | 241 | 0.1 | 4.2 | -1 | 22 | 0 | 83 |
 | Talk 3 | EN | 52 | 12.8 | 12.8 | 12.3 | 343 | 337 | 236 | 0.4 | 9.1 | -1 | 49 | 4 | 66 |
@@ -134,14 +134,14 @@ Speed: × real time comes from the run itself when that run held quiet.lock and 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | gate | EN | 7 | 324 | 16.7 | 7.5 | 1396 | 1302 | 1037 | 152 | 23 | 4 | 77 |
 | gate | 3.5 | 7 | 324 | 16.8 | 7.8 | 1879 | 812 | 1209 | 176 | 30 | 4 | 83 |
-| broad | EN | 22 | 1017 | 8.3 | 6.8 | 3533 | 4242 | 3448 | 502 | 30 | 3 | 77 (13 timed) |
-| broad | 3.5 | 22 | 1017 | 8.6 | 7.2 | 5076 | 2573 | 4195 | 542 | 46 | 3 | 84 (4 timed) |
+| broad | EN | 22 | 1017 | 8.3 | 6.8 | 3533 | 4242 | 3448 | 502 | 30 | 3 | 77 |
+| broad | 3.5 | 22 | 1017 | 8.6 | 7.2 | 5076 | 2573 | 4195 | 542 | 46 | 3 | 81 |
 | talks | EN | 7 | 356 | 14.0 | 8.7 | 1324 | 1708 | 1691 | 172 | 12 | 7 | 74 |
-| talks | 3.5 | 7 | 356 | 14.4 | 9.2 | 1782 | 1107 | 2104 | 171 | 12 | 7 | 82 (6 timed) |
-| all Zoom | EN | 35 | 1676 | 10.9 | 7.2 | 5914 | 7236 | 6098 | 816 | 61 | 14 | 76 (26 timed) |
-| all Zoom | 3.5 | 35 | 1676 | 11.2 | 7.6 | 8341 | 4473 | 7424 | 877 | 85 | 14 | 83 (16 timed) |
-| all | EN | 36 | 1697 | 11.0 | 7.3 | 6253 | 7252 | 6176 | 826 | 65 | 14 | 76 (27 timed) |
-| all | 3.5 | 36 | 1697 | 11.3 | 7.7 | 8737 | 4492 | 7508 | 889 | 88 | 14 | 83 (17 timed) |
+| talks | 3.5 | 7 | 356 | 14.4 | 9.2 | 1782 | 1107 | 2104 | 171 | 12 | 7 | 82 |
+| all Zoom | EN | 35 | 1676 | 10.9 | 7.2 | 5914 | 7236 | 6098 | 816 | 61 | 14 | 76 |
+| all Zoom | 3.5 | 35 | 1676 | 11.2 | 7.6 | 8341 | 4473 | 7424 | 877 | 85 | 14 | 82 |
+| all | EN | 36 | 1697 | 11.0 | 7.3 | 6253 | 7252 | 6176 | 826 | 65 | 14 | 76 |
+| all | 3.5 | 36 | 1697 | 11.3 | 7.7 | 8737 | 4492 | 7508 | 889 | 88 | 14 | 82 |
 
 
 ## Reproducing

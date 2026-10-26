@@ -11,7 +11,7 @@ Spike 1 (and spike 2 as a 2 × 2) of `docs/research/17-model-landscape-2026-10.m
 - **Live setting and FLEURS English.** The same picture: FLEURS for 3.5 is 8.77 % shipped and 8.77 % fixed, with identical error counts.
 - **Why this is not a hidden effect.** The runtime is deterministic: re-runs are identical word for word. The fix changes 2.3 to 6.5 words per 1,000, no more than a control that changes only a positional table by float rounding (2.1 to 5.1 per 1,000). Those edits go in both directions, and no gap appears or disappears beyond that control's band.
 - **Speed and VRAM.** No speed cost; peak VRAM about +95 MiB (f16: about +575 MiB).
-- **Runtime built from main (2 × 2, gate set).** It adds about 3 % deletions and 10 to 15 more gaps on the Zoom sessions with either GGUF. AMI deletions stay flat and AMI cpWER rises 0.7 to 0.9 points through speaker attribution. A v0.2.0 built locally with the same toolchain matches the release, so the change comes from main's code, not the build.
+- **Runtime built from main (2 × 2, gate set).** It adds about 3 % deletions and 10 to 15 more gaps on the Zoom sessions with either GGUF. AMI deletions stay flat and AMI cpWER rises 0.7 to 0.9 points through speaker attribution. A v0.2.0 built locally with the same toolchain matches the release, so the change comes from main's code, not the build. main is also faster: 102 against 81 × real time for the same-toolchain v0.2.0 (EN, gate set).
 - **Startup fix.** Words in the first 10 s change by at most 2.
 
 So the owner's "many word errors sometimes" is not explained by the Q8 pointwise quantization on these recordings. About 830 to 890 stretches of 2 s or more where Zoom has words and we have none are identical across shipped, fixed and f16. They are the lever to look at next (section 8).
@@ -297,7 +297,20 @@ Nemotron 3.5, gate set:
 | gate | rs_n35_shipped_main | 7 | 324 | 17.1 | 4169 | 7.9 | 1897 | 821 | 1242 | 187 (787) | 32 | 35 / 23 | 5 / 3 |
 | gate | rs_n35_q8pw_main | 7 | 324 | 17.1 | 4182 | 8.0 | 1908 | 822 | 1255 | 188 (787) | 33 | 35 / 22 | 6 / 3 |
 
-Speed of the two local builds (EN, gate set, transcribe step): pending; the exclusive timing window was interrupted on 27 Oct and these blocks have not run yet.
+Speed, Nemotron EN, gate set (324 min), `nemo-speech transcribe` step under quiet.lock:
+
+| Runtime | Build | GGUF | × real time | Transcribe s | VRAM Δ median / max, MiB |
+|---|---|---|---|---|---|
+| 0.2.0 | NVIDIA release package | NVIDIA q8_0 | 77 | 251 | 1,460 / 1,646 |
+| 0.2.0 | NVIDIA release package | fixed q8_0 | 80 | 242 | 1,556 / 1,703 |
+| 0.2.0 | NVIDIA release package | f16 | 80 | 244 | 2,036 / 2,044 |
+| 0.2.0 (`6a3ca36`) | local, CUDA 12.8 | NVIDIA q8_0 | 81 | 239 | 1,473 / 1,589 |
+| main (`e680fc3`) | local, CUDA 12.8 | NVIDIA q8_0 | 102 | 190 | 1,482 / 2,486 |
+| main (`e680fc3`) | local, CUDA 12.8 | fixed q8_0 | 106 | 184 | 1,586 / 2,146 |
+
+The release rows were timed on 26 Oct and the local builds in an exclusive window on 27 Oct, checked with `nvidia-smi pmon`. One main session, Sep 7, showed the desktop browser at 6 to 22 % SM in three attempts; the pooled main speed is 102 with or without it, and runs flagged that way were about 1 % slower than clean runs in the same block. Nemotron 3.5 on the release package: 83, 83 and 85 × real time (shipped, fixed, f16; VRAM median 1,428, 1,510 and 1,998 MiB).
+
+- **Speed: main is faster.** Against v0.2.0 built with the same toolchain, main's transcribe step takes 21 % less time (102 against 81 × real time) at the same median VRAM. Its maximum peak is higher on one session (2.5 GB against 1.6 GB). The local v0.2.0 build is within 5 % of NVIDIA's package (81 against 77, timed on different days).
 
 - **Toolchain: no effect.** The local v0.2.0 build matches NVIDIA's release package: EN deletions 1,394 against 1,396, gaps 152 against 152. It changes 3.2 (EN) and 5.2 (3.5) words per 1,000, the same level as the weight perturbations above.
 - **main's code: a different decode, slightly worse on Zoom.**
@@ -328,7 +341,7 @@ Sources: https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b and htt
 |---|---|---|
 | Ship re-converted q8_0 GGUFs on 0.2.0 (self-hosted) | No measurable gain on 1,697 min for either model, file or live setting (sections 2 to 5); +68 MiB download and about +95 MiB VRAM; hosting plus the licence notices (section 7) for nothing measured | **Do not**, for accuracy reasons. Nothing argues against it either, except the hosting work |
 | Take NVIDIA's republished GGUFs when they appear | Same weights policy as our fixed files; also embeds the SentencePiece tokenizer that word boosting needs (research/12 section 4) | **Yes, as a routine manifest bump**: run the gate set once to confirm, as for any model change (the fixed files change 2 to 6 words per 1,000) |
-| Runtime from `main` (≥ `1a7e945`) or the next tag | main at `e680fc3` adds about 3 % deletions and 10 to 15 more gaps on the gate set's Zoom sessions with either GGUF; AMI cpWER rises 0.7 to 0.9 points through attribution (section 6) | **Wait** for the next tag and re-run the gate set and the broad set with the gap count before adopting it. Bisect between v0.2.0 and main if the next tag shows the same |
+| Runtime from `main` (≥ `1a7e945`) or the next tag | main at `e680fc3` adds about 3 % deletions and 10 to 15 more gaps on the gate set's Zoom sessions with either GGUF; AMI cpWER rises 0.7 to 0.9 points through attribution; the transcribe step is about 26 % faster (102 against 81 × real time, section 6) | **Wait** for the next tag and re-run the gate set and the broad set with the gap count before adopting it. Bisect between v0.2.0 and main if the next tag shows the same |
 
 What the data says about "many word errors sometimes": with every precision and both runtimes, Zoom has three or more words in about 830 (EN) to 890 (3.5) stretches of 2 s or more where we have none. That is about 29 to 31 per hour of meeting, 65 to 88 of them 5 s or longer. They are the same stretches in shipped, fixed and f16, so they are not a quantization effect. Some are Zoom's own insertions or pauses inside a long Zoom cue, but on AMI's manual reference the same check finds 10 to 12 such gaps in 21 minutes. The next spike should characterise them: audio level inside each gap, overlap with other speakers, and whether EN and 3.5 miss the same stretches. The EN model's FLEURS deletions (quiet speech, research/12 section 5) point the same way.
 
