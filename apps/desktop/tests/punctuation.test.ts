@@ -289,7 +289,12 @@ describe("the bulk action", () => {
     expect(backfillDoneText(done({ total: 5, outcomes: [o(1, {})], cancelled: true })).text).toBe(
       "Stopped: punctuation added to 1 of 5 meetings; the earlier versions stay.",
     );
-    expect(backfillDoneText(done({ cancelled: true })).text).toBe("Stopped: punctuation added to 0 of 0 meetings.");
+    expect(backfillDoneText(done({ cancelled: true })).text).toBe(
+      "Adding punctuation to older meetings was cancelled; nothing changed.",
+    );
+    expect(backfillDoneText(done({ total: 4, cancelled: true })).text).toBe(
+      "Adding punctuation to older meetings was cancelled; nothing changed.",
+    );
   });
 
   test("nothing to do, or nothing to do it with", () => {

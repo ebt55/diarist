@@ -339,7 +339,10 @@ function unavailableText(r: PunctReport): string {
 /** The report when the bulk action is done. */
 export function backfillDoneText(o: BackfillOutcome): Notice {
   if (o.unavailable) return { kind: "info", text: `No punctuation was added: ${unavailableText(o.unavailable)}.` };
-  if (o.total === 0 && !o.cancelled) {
+  if (o.cancelled && o.outcomes.length === 0) {
+    return { kind: "info", text: "Adding punctuation to older meetings was cancelled; nothing changed." };
+  }
+  if (o.total === 0) {
     return { kind: "info", text: "Every finished meeting has punctuation already, or needs none." };
   }
   const added = o.outcomes.filter((x) => x.run !== null && x.punctuation?.applied).length;
