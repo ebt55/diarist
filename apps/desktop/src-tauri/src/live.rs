@@ -108,6 +108,9 @@ struct ServeKey {
     diar: PathBuf,
     /// `--device`: the runtime package's (`cuda:0`, `vulkan:0`, `cpu`).
     device: String,
+    /// `--asr.streaming.rnnt_right_context` (`engine.live_lookahead`, the
+    /// model's own value); `None`: no flag.
+    right_context: Option<u32>,
 }
 
 struct Serve {
@@ -500,11 +503,21 @@ fn ensure_server_if(
     device: &str,
     idle_only: bool,
 ) -> Option<(ServeSupervisor, bool)> {
+    // The live lookahead (docs/plans/16 section 5); a value the model was
+    // not trained for is refused and logged when the server launches.
+    let lookahead = {
+        let (store, paths, _, _) = app_parts(app);
+        models::asr_live_right_context(&paths, &*store, &sel.asr_file).unwrap_or_else(|e| {
+            log::warn!("live lookahead: {e}; no flag");
+            Default::default()
+        })
+    };
     let key = ServeKey {
         engine_dir: sel.engine_dir.clone(),
         asr: sel.asr.clone(),
         diar: sel.diarizer.clone(),
         device: device.to_owned(),
+        right_context: lookahead.right_context,
     };
     let live = handle(app);
     let mut serve = lock(&live.serve);
@@ -528,8 +541,9 @@ fn ensure_server_if(
     }
     if let Some(old) = serve.take() {
         log::info!(
-            "live server: the model changed (now {}), stopping the old server",
-            file_name(&key.asr)
+            "live server: the model or the live lookahead changed (now {} at {}), stopping the old server",
+            file_name(&key.asr),
+            diarist_core::protocol::lookahead_text(key.right_context.map(i64::from))
         );
         old.supervisor.stop();
     }
@@ -537,6 +551,10 @@ fn ensure_server_if(
     let mut cfg = ServeConfig::new(&sel.engine_dir, paths.models(), &sel.asr, &sel.diarizer);
     // The runtime package's device: the Vulkan and CPU packages refuse `cuda:0`.
     cfg.device = key.device.clone();
+    cfg.right_context = key.right_context;
+    if let Some(why) = &lookahead.refused {
+        log::warn!("live lookahead: {why}");
+    }
     // Stopped after `engine.idle_minutes` without a recording (frees its VRAM).
     let store = Arc::clone(&app.state::<AppStore>().0);
     cfg.idle_timeout = settings::effective(&*store)
@@ -559,10 +577,11 @@ fn ensure_server_if(
     let before = free_vram(app, Duration::from_secs(5), &key.device).map(|r| r.free_mb);
     supervisor.start();
     log::info!(
-        "live server starting: device {} | asr {} | diarizer {} | free VRAM before {} | idle stop {}",
+        "live server starting: device {} | asr {} | diarizer {} | lookahead {} | free VRAM before {} | idle stop {}",
         key.device,
         sel.asr_file.display_name,
         sel.diarizer_file.display_name,
+        diarist_core::protocol::lookahead_text(key.right_context.map(i64::from)),
         before.map_or("unknown".into(), |m| format!("{m} MB")),
         supervisor
             .config()
@@ -752,6 +771,7 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             log::warn!("recording: {n}");
         }
         let (supervisor, multilingual) = ensure_server(app, &built.selection, &built.device);
+        let supervisor_lookahead = supervisor.config().right_context;
         let reading = gate_vram(app, &built.device);
         let free = reading.map(|r| r.free_mb);
         let ctx = LiveContext {
@@ -769,6 +789,8 @@ pub(crate) fn start(app: &AppHandle, req: StartRequest, strict: bool) -> CmdResu
             min_free_vram_mb: MIN_FREE_VRAM_MB,
             min_free_bytes: MIN_FREE_BYTES,
             live_engine_info: engine_info(&built.selection, &built.device),
+            // What the server was launched with (part of its key).
+            live_right_context: supervisor_lookahead,
             on_job_event: Some(job_event_fn(app, Arc::clone(&meeting_slot))),
             punct: diarist_core::punct::PunctSource::Data(paths.clone()),
         };
@@ -1230,6 +1252,8 @@ fn offline_context(
         min_free_vram_mb: MIN_FREE_VRAM_MB,
         min_free_bytes: MIN_FREE_BYTES,
         live_engine_info: engine_info(&built.selection, &built.device),
+        // No live session is opened through it.
+        live_right_context: None,
         on_job_event: Some(job_event_fn(app, meeting)),
         punct: diarist_core::punct::PunctSource::Data(paths.clone()),
     })

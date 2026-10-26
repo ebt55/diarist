@@ -156,6 +156,11 @@ pub struct LiveContext {
     pub min_free_bytes: u64,
     /// Runtime and models, stored in the live run's `engine_info`.
     pub live_engine_info: serde_json::Value,
+    /// The decoder lookahead the live server runs at
+    /// ([`crate::engine::ServeConfig::right_context`]; `None`: no flag, the
+    /// runtime default), stored as the live run's
+    /// `engine_info.live_right_context` (a number or `runtime default`).
+    pub live_right_context: Option<u32>,
     /// Post-pass progress and its terminal event.
     pub on_job_event: Option<JobEventFn>,
     /// The post-pass's punctuation (plan 16 section 3.2): the caller's data
@@ -580,6 +585,8 @@ impl Recorder {
         }
         info["language"] = serde_json::json!(language);
         info["diarize_mic"] = serde_json::json!(opts.diarize_mic);
+        info["live_right_context"] =
+            crate::protocol::lookahead_json(ctx.live_right_context.map(i64::from));
         info["capture_autoconvert"] = serde_json::json!(autoconvert);
         info["agc"] = serde_json::json!({
             "loopback": agc_setting(&stored, Channel::Loopback),
