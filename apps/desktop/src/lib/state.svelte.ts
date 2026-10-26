@@ -1,7 +1,7 @@
 // App-wide state: route, meeting list, open meeting, jobs, toasts, theme.
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
+import { api, errorText, langApi, onEvent, onJobEvent, punctApi } from "./api";
 import { CPU_NOTICE, isCpuPackage, selectedEngine } from "./cpuNotice";
 import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
@@ -16,6 +16,18 @@ import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
 import type { StartupReport } from "./generated/StartupReport";
 import { SETTING_DEFAULTS, type SettingKey } from "./generated/settingDefaults";
+import {
+  BACKFILL_JOB_NAME,
+  PUNCT_PROGRESS_EVENT,
+  TRY_AGAIN,
+  backfillDoneText,
+  punctErrorText,
+  punctJobName,
+  punctOutcomeText,
+  type BackfillOutcome,
+  type PunctOutcome,
+  type PunctProgress,
+} from "./punctuation";
 
 export type Route = "library" | "settings" | "diagnostics" | "setup";
 
@@ -49,8 +61,11 @@ export interface Toast {
 
 export interface Job {
   id: string;
-  /** An import, or the post-pass of a live recording. */
-  kind: "import" | "postpass";
+  /**
+   * An import, the post-pass of a live recording, or Add or Remove
+   * punctuation (for `punctuate`, `doneMs` and `totalMs` count meetings).
+   */
+  kind: "import" | "postpass" | "punctuate";
   meetingId: MeetingId | null;
   name: string;
   stage: JobStage;
@@ -143,6 +158,7 @@ class AppState {
       .catch(() => {});
     this.ready = Promise.all([meetings, settings]).then(() => {});
     void onJobEvent((e) => this.#onJob(e));
+    void onEvent<PunctProgress>(PUNCT_PROGRESS_EVENT, (p) => this.#onPunctProgress(p));
     // After the first paint data: the check scans the models folder.
     void this.ready.then(() => this.#checkSetup());
     void onEvent<StartupReport>("app:startup", (r) => this.#onStartup(r));
@@ -453,6 +469,8 @@ class AppState {
 
   #handleJob(e: JobEvent): void {
     const job = this.jobs.find((j) => j.id === e.job_id);
+    // Punctuation jobs report through their command (`punctuate`, `backfill`).
+    if (job?.kind === "punctuate") return;
     const name = job && job.name !== "Importing…" ? job.name : "file";
     if (e.type === "progress") {
       const first = !job || job.stage === "queued";
@@ -527,6 +545,101 @@ class AppState {
           meetingId: id ?? undefined,
         });
       }
+    }
+  }
+
+  // ---- Punctuation (plan 16 section 3.9) ----------------------------------------
+
+  /** Meetings with Add or Remove punctuation queued or running. */
+  punctuating = $state.raw(new Set<MeetingId>());
+  /** The bulk action is queued or running. */
+  backfillRunning = $state(false);
+  #punctListeners = new Set<(id: MeetingId) => void>();
+
+  /** Called with a meeting's id when a punctuation job on it ended (its current run may be new). */
+  onPunctuated(cb: (id: MeetingId) => void): () => void {
+    this.#punctListeners.add(cb);
+    return () => this.#punctListeners.delete(cb);
+  }
+
+  #setPunctuating(id: MeetingId, on: boolean): void {
+    const next = new Set(this.punctuating);
+    if (on) next.add(id);
+    else next.delete(id);
+    this.punctuating = next;
+  }
+
+  #onPunctProgress(p: PunctProgress): void {
+    const job = this.jobs.find((j) => j.id === p.job_id);
+    if (job) Object.assign(job, { stage: "saving", doneMs: p.done, totalMs: p.total });
+  }
+
+  /** A job id the backend accepts (any unique string). */
+  #newJobId(): string {
+    const c = globalThis.crypto as Crypto | undefined;
+    return `punct-${c?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+  }
+
+  /**
+   * "Add punctuation" (`remove`: "Remove punctuation") on one meeting, as a
+   * job in the job list; says what it did when it is done, and offers Try
+   * again when it could not run (the meeting records, it changed meanwhile).
+   */
+  async punctuate(meetingId: MeetingId, title: string, remove: boolean): Promise<PunctOutcome | null> {
+    if (this.punctuating.has(meetingId)) return null;
+    const id = this.#newJobId();
+    this.#upsertJob(id, { kind: "punctuate", meetingId, name: punctJobName(remove, title) });
+    this.#setPunctuating(meetingId, true);
+    try {
+      const o = await punctApi.punctuateMeeting(meetingId, remove, id);
+      const files = await api.listModelFiles().catch(() => []);
+      const t = punctOutcomeText(o, remove, files);
+      const elsewhere = this.openId !== meetingId || this.route !== "library";
+      this.toast(
+        t.kind,
+        elsewhere ? `"${title || "Untitled meeting"}": ${t.text}` : t.text,
+        elsewhere ? { label: "Open", run: () => this.open(meetingId), meetingId } : undefined,
+      );
+      return o;
+    } catch (e) {
+      const msg = errorText(e);
+      void api.log("warn", `${remove ? "remove" : "add"} punctuation on meeting ${meetingId}: ${msg}`);
+      this.toast("error", punctErrorText(remove, msg), {
+        label: TRY_AGAIN,
+        run: () => void this.punctuate(meetingId, title, remove),
+        meetingId,
+      });
+      return null;
+    } finally {
+      this.jobs = this.jobs.filter((j) => j.id !== id);
+      this.#setPunctuating(meetingId, false);
+      for (const cb of this.#punctListeners) cb(meetingId);
+    }
+  }
+
+  /** The bulk action, "Add punctuation to N older meetings" (confirmed by the caller); reports when done. */
+  async backfill(): Promise<BackfillOutcome | null> {
+    if (this.backfillRunning) return null;
+    const id = this.#newJobId();
+    this.backfillRunning = true;
+    this.#upsertJob(id, { kind: "punctuate", meetingId: null, name: BACKFILL_JOB_NAME });
+    try {
+      const o = await punctApi.backfill(id);
+      const t = backfillDoneText(o);
+      this.toast(t.kind, t.text);
+      for (const x of o.outcomes) if (x.run !== null) for (const cb of this.#punctListeners) cb(x.meeting_id);
+      return o;
+    } catch (e) {
+      const msg = errorText(e);
+      void api.log("warn", `punctuation for older meetings: ${msg}`);
+      this.toast("error", `Adding punctuation to older meetings did not work: ${msg.replace(/\.$/, "")}.`, {
+        label: TRY_AGAIN,
+        run: () => void this.backfill(),
+      });
+      return null;
+    } finally {
+      this.jobs = this.jobs.filter((j) => j.id !== id);
+      this.backfillRunning = false;
     }
   }
 }

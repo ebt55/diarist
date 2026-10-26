@@ -42,6 +42,7 @@ import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
 import type { WordsUpdate } from "./generated/WordsUpdate";
+import type { BackfillOutcome, DownloadsNotice, PunctOutcome, PunctStatus } from "./punctuation";
 
 export type { Waveform };
 
@@ -181,4 +182,19 @@ export const langApi = {
     invoke<Readiness>("check_ready", { action, language }),
   prepareRecording: (language: string) => invoke<void>("prepare_recording", { language }),
   languageTable: () => invoke<import("./generated/LanguageEntry").LanguageEntry[]>("language_table"),
+};
+
+/**
+ * Punctuation (plan 16 sections 3.8 and 3.9) and the "recommended downloads"
+ * notice (4.3): the commands in src-tauri/src/commands.rs, their result types
+ * in `lib/punctuation.ts`. Add, Remove and the bulk action run as jobs and
+ * resolve when they are done; `job_id` is chosen here so the job list knows
+ * the job before it starts.
+ */
+export const punctApi = {
+  punctuateMeeting: (meeting_id: MeetingId, remove: boolean, job_id: JobId) =>
+    invoke<PunctOutcome>("punctuate_meeting", { meeting_id, remove, job_id }),
+  backfill: (job_id: JobId) => invoke<BackfillOutcome>("punctuation_backfill", { job_id }),
+  status: () => invoke<PunctStatus>("punctuation_status"),
+  downloadsNotice: () => invoke<DownloadsNotice | null>("recommended_downloads_notice"),
 };

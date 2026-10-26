@@ -7,6 +7,7 @@
   import type { MeetingSummary } from "../lib/generated/MeetingSummary";
   import type { JobStage } from "../lib/generated/JobStage";
   import { live } from "../lib/live.svelte";
+  import { punctJobStage } from "../lib/punctuation";
   import { app } from "../lib/state.svelte";
   import Brand from "./Brand.svelte";
   import Icon from "./Icon.svelte";
@@ -257,7 +258,7 @@
   </div>
 
   {#if app.jobs.length > 0}
-    <section class="jobs" aria-label="Imports and finalizing in progress">
+    <section class="jobs" aria-label="Jobs in progress">
       {#each app.jobs as job (job.id)}
         {@const pct = job.totalMs ? Math.min(100, Math.round((job.doneMs / job.totalMs) * 100)) : 0}
         {@const waiting = job.stage === "queued" && live.queuePaused}
@@ -278,7 +279,7 @@
             aria-valuenow={pct}
             aria-valuemin="0"
             aria-valuemax="100"
-            aria-label="{job.kind === 'postpass' ? 'Finalizing' : 'Import'} {job.name}"
+            aria-label="{job.kind === 'postpass' ? 'Finalizing ' : job.kind === 'import' ? 'Import ' : ''}{job.name}"
           >
             <div class="bar-fill" style="width: {pct}%"></div>
           </div>
@@ -288,7 +289,9 @@
                 ? "Cancelling…"
                 : waiting
                   ? "Waiting for the recording to stop"
-                  : STAGES[job.stage]}{waiting ? "" : ` · ${formatClock(now - job.startedAt)} elapsed`}</span
+                  : job.kind === "punctuate"
+                    ? punctJobStage(job.stage !== "queued", job.doneMs, job.totalMs)
+                    : STAGES[job.stage]}{waiting ? "" : ` · ${formatClock(now - job.startedAt)} elapsed`}</span
             >
             <button type="button" class="link" disabled={job.cancelling} onclick={() => app.cancelJob(job.id)}>Cancel</button>
           </div>

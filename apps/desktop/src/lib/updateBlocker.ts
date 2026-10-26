@@ -1,17 +1,18 @@
 // Why "Install and restart" must wait: the update restarts Diarist, which
-// would end a recording, an import or a post-pass. The same rule and words
+// would end a recording, an import, a post-pass or a punctuation job. The same rule and words
 // as `install_update` (commands.rs), with the jobs named. Free of Svelte and
 // Tauri so `bun test` can run it (tests/updateBlocker.test.ts).
 
 /** What the job list knows about a job (`Job` in state.svelte.ts). */
 export interface JobLike {
-  kind: "import" | "postpass";
+  kind: "import" | "postpass" | "punctuate";
   name: string;
   /** `queued` until it starts. */
   stage: string;
 }
 
 function describe(j: JobLike): string {
+  if (j.kind === "punctuate") return "A punctuation job";
   return j.kind === "postpass" ? `Finalizing "${j.name}"` : `The import of ${j.name}`;
 }
 
