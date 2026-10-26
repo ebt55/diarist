@@ -225,12 +225,14 @@ fn scan_model(
     let is_gguf = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let mut problem = None;
+    // Every problem is kept, in order: a sidecar that does not parse names
+    // its field first, the punctuation hint follows.
+    let mut problems: Vec<String> = Vec::new();
     let mut c = if is_gguf {
         match read_header(path) {
             Ok(h) => classify(&h, size),
             Err(e) => {
-                problem = Some(e.to_string());
+                problems.push(e.to_string());
                 unknown()
             }
         }
@@ -240,7 +242,7 @@ fn scan_model(
     match Sidecar::read(path) {
         Ok(Some(sc)) => sc.apply(&mut c),
         Ok(None) => {}
-        Err(e) => problem = Some(e.to_string()),
+        Err(e) => problems.push(e.to_string()),
     }
     let file_name = path
         .file_name()
@@ -259,7 +261,7 @@ fn scan_model(
         got.is_some_and(|h| h.eq_ignore_ascii_case(&m.sha256))
     });
     if let (Some(m), None) = (candidate, entry) {
-        problem = Some(format!(
+        problems.push(format!(
             "{}: same name and size as {} but SHA-256 {} instead of {}; not used as {}",
             path.display(),
             m.name,
@@ -304,7 +306,7 @@ fn scan_model(
         }
     }
     if let Err(note) = punctuation_role(&mut c, path, is_gguf, &paths.models()) {
-        problem = Some(format!("{}: {note}", path.display()));
+        problems.push(format!("{}: {note}", path.display()));
     }
     let source = if verified.is_some() {
         ModelSource::Pull
@@ -326,7 +328,7 @@ fn scan_model(
             capabilities: c.capabilities,
             manifest_name: entry.map(|m| m.name.clone()),
         },
-        problem,
+        (!problems.is_empty()).then(|| problems.join("; ")),
     ))
 }
 
@@ -972,8 +974,27 @@ mod tests {
         std::fs::create_dir_all(said.parent().unwrap()).unwrap();
         std::fs::write(&said, b"onnx").unwrap();
         std::fs::write(Sidecar::path_for(&said), r#"{"role": "punctuation"}"#).unwrap();
+        // A sidecar that does not parse (no `heads`).
+        let broken = paths.models().join("broken").join("m.onnx");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, b"onnx").unwrap();
+        std::fs::write(
+            Sidecar::path_for(&broken),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 512}}"#,
+        )
+        .unwrap();
 
         let r = scan(&paths, &store, &manifest).unwrap();
+        // Its parse error names the field, and the hint follows it.
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.contains("broken"))
+            .unwrap_or_else(|| panic!("{:?}", r.errors));
+        let (field, hint) = (e.find("heads").unwrap(), e.find(PUNCT_NOTE).unwrap());
+        assert!(field < hint, "{e}");
+        assert!(e.contains(".meet.json:"), "{e}");
+        assert_eq!(file_at(&r, "broken/m.onnx").role, ModelRole::Unknown);
         let p = file_at(&r, "punct-small/onnx/model_quantized.onnx");
         assert_eq!(p.role, ModelRole::Punctuation, "{:?}", r.errors);
         assert_eq!(p.capabilities.languages, ["en", "de"]);
@@ -1038,6 +1059,13 @@ mod tests {
         let paths = DataPaths::at(dir.path());
         let store = MemoryStore::new();
         let body = b"not really an onnx model".to_vec();
+        let tok_sha: String = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(b"{}")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
         let mut entry: crate::models::ModelEntry = serde_json::from_value(serde_json::json!({
             "name": "punct-small", "label": "Punctuation (small)", "role": "punctuation",
             "direct": true, "required": true,
@@ -1047,7 +1075,7 @@ mod tests {
             "size_bytes": body.len() as u64 + 2,
             "sha256": "",
             "files": [{"path": "tokenizer.json", "url": "https://example.invalid/tokenizer.json",
-                       "size_bytes": 2, "sha256": ""}],
+                       "size_bytes": 2, "sha256": tok_sha}],
             "dir": "Horizon-Labs/punctuation-restoration-small/ee31fdf",
             "languages": ["*"],
             "punctuation": serde_json::from_str::<serde_json::Value>(PUNCT_BLOCK).unwrap(),
@@ -1107,6 +1135,15 @@ mod tests {
             "primary last"
         );
         assert!(item.files.iter().all(|p| p.present));
+        // A file the entry gives no hash for is never present, even with the
+        // right size (Manifest::load refuses such an entry anyway).
+        let mut unhashed = manifest.models[0].clone();
+        unhashed.files[0].sha256 = String::new();
+        assert!(unhashed
+            .validate()
+            .unwrap_err()
+            .starts_with("files[0].sha256"));
+        assert!(!crate::models::setup::entry_files(&unhashed, &paths.models())[0].present);
         std::fs::remove_file(root.join("tokenizer.json")).unwrap();
         let items = crate::models::download_items(&paths, &manifest, &r.files, "cuda");
         assert!(

@@ -135,21 +135,42 @@ impl ModelEntry {
     }
 
     /// Checks the fields a user can get wrong in `models.user.json`: the
-    /// paths (relative, no `..`) and the description block. Errors name the
-    /// field.
+    /// paths (relative, no `..`, no Windows device names, each file once),
+    /// the hashes of a multi-file entry and the description block. Errors
+    /// name the field.
     pub fn validate(&self) -> std::result::Result<(), String> {
         check_relative_path("file", &self.file)?;
         if let Some(dir) = &self.dir {
             check_relative_path("dir", dir)?;
         }
+        let primary = normalized_relative(&self.file);
+        let mut seen: Vec<String> = Vec::with_capacity(self.files.len());
         for (i, f) in self.files.iter().enumerate() {
             check_relative_path(&format!("files[{i}].path"), &f.path)?;
-            if f.path
-                .replace('\\', "/")
-                .eq_ignore_ascii_case(&self.file.replace('\\', "/"))
-            {
+            let n = normalized_relative(&f.path);
+            if n == primary {
                 return Err(format!("files[{i}].path: the primary file again"));
             }
+            if seen.contains(&n) {
+                return Err(format!("files[{i}].path: {:?} is listed twice", f.path));
+            }
+            seen.push(n);
+            // A file without a hash could never be told complete, so the
+            // entry would never count as installed (setup.rs).
+            if !is_sha256(&f.sha256) {
+                return Err(format!(
+                    "files[{i}].sha256: {:?} is not a SHA-256 (64 hex digits); every file of a \
+                     multi-file entry needs one",
+                    f.sha256
+                ));
+            }
+        }
+        if !self.files.is_empty() && !is_sha256(&self.sha256) {
+            return Err(format!(
+                "sha256: {:?} is not a SHA-256 (64 hex digits); a multi-file entry needs the \
+                 primary file's too",
+                self.sha256
+            ));
         }
         if self.files.iter().map(|f| f.size_bytes).sum::<u64>() > self.size_bytes {
             return Err("size_bytes: smaller than the other files together".into());
@@ -162,22 +183,88 @@ impl ModelEntry {
 }
 
 /// A path from a manifest or description block: relative, inside the
-/// folder it is relative to (no `..`, no drive, no root, no `\\?\`).
-/// `Err` starts with `field`.
+/// folder it is relative to (no `..`, no drive, no root, no `\\?\`), and a
+/// name Windows keeps as written: no device name (`CON`, `NUL`, `AUX`,
+/// `PRN`, `COM0` to `COM9`, `LPT0` to `LPT9`, also with an extension), no
+/// part ending in `.` or a space, none of `< > " | ? *`. `Err` starts with
+/// `field`.
 pub fn check_relative_path(field: &str, path: &str) -> std::result::Result<(), String> {
-    let p = path.trim();
-    if p.is_empty() {
+    if path.trim().is_empty() {
         return Err(format!("{field}: empty"));
     }
-    let bad = p.starts_with(['/', '\\'])
-        || p.contains(':')
-        || p.split(['/', '\\']).any(|part| part == "..");
-    if bad || Path::new(p).is_absolute() {
+    let bad = path.trim_start().starts_with(['/', '\\'])
+        || path.contains(':')
+        || path.split(['/', '\\']).any(|part| part == "..");
+    if bad || Path::new(path).is_absolute() {
         return Err(format!(
             "{field}: {path:?} must be a relative path inside the model's folder (no `..`, no drive)"
         ));
     }
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.is_empty() {
+        return Err(format!("{field}: {path:?} names no file"));
+    }
+    for part in parts {
+        if part.ends_with(['.', ' ']) {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} ends in a dot or a space, which Windows drops"
+            ));
+        }
+        if is_dos_device(part) {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} is a device name on Windows, not a file"
+            ));
+        }
+        if part
+            .chars()
+            .any(|c| c < ' ' || matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!(
+                "{field}: {path:?}: {part:?} has a character Windows does not allow in a name"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Whether `part` is a name Windows maps to a device: `CON`, `PRN`, `AUX`,
+/// `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9` (and `COM¹` to `COM³`, `LPT¹`
+/// to `LPT³`), in any case, also before an extension (`nul.json`) or
+/// trailing spaces.
+pub fn is_dos_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let up = stem.to_ascii_uppercase();
+    if matches!(
+        up.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|p| {
+        up.strip_prefix(p).is_some_and(|rest| {
+            let mut c = rest.chars();
+            matches!((c.next(), c.next()), (Some(d), None) if d.is_ascii_digit() || matches!(d, '¹' | '²' | '³'))
+        })
+    })
+}
+
+/// A relative path as compared for sameness: `/` and `\` alike, empty and
+/// `.` parts dropped, case folded (NTFS names ignore case).
+pub fn normalized_relative(path: &str) -> String {
+    path.split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// 64 hex digits.
+pub fn is_sha256(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// One runtime zip.
@@ -528,6 +615,33 @@ mod tests {
                 r#""heads": [], "x": [{"output""#,
                 "punctuation.heads",
             ),
+            // The same file twice, the primary again after "./" and "//",
+            // a device name, an extra file without its hash.
+            (
+                r#""path": "diarist-onnxruntime.dll""#,
+                r#""path": "Tokenizer.JSON""#,
+                "files[1].path",
+            ),
+            (
+                r#""path": "tokenizer.json""#,
+                r#""path": "./onnx//model_quantized.onnx""#,
+                "files[0].path",
+            ),
+            (
+                r#""path": "tokenizer.json""#,
+                r#""path": "onnx/NUL.json""#,
+                "files[0].path",
+            ),
+            (
+                r#""sha256": "2222222222222222222222222222222222222222222222222222222222222222""#,
+                r#""sha256": """#,
+                "files[0].sha256",
+            ),
+            (
+                r#""sha256": "1111111111111111111111111111111111111111111111111111111111111111""#,
+                r#""sha256": "1111""#,
+                "sha256",
+            ),
         ] {
             assert!(PUNCT_ENTRY.contains(from), "{from}");
             std::fs::write(dir.path().join(USER_MODELS), PUNCT_ENTRY.replace(from, to)).unwrap();
@@ -540,6 +654,66 @@ mod tests {
         for e in &Manifest::builtin().models {
             e.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn relative_paths_refuse_what_windows_would_not_keep() {
+        for ok in [
+            "tokenizer.json",
+            "onnx/model_quantized.onnx",
+            r"onnx\model.onnx",
+            "./tokenizer.json",
+            "console.json",
+            "com10.dll",
+            "lpt.txt",
+            "nulls/x.json",
+            ".hidden",
+        ] {
+            check_relative_path("f", ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            "",
+            "  ",
+            ".",
+            "./",
+            "../x",
+            "a/../../x",
+            "/x",
+            r"\x",
+            "C:x",
+            r"C:\x",
+            r"\\?\C:\x",
+            r"\\server\share\x",
+            "CON",
+            "nul.json",
+            "Aux",
+            "prn.tar.gz",
+            "com1",
+            "LPT9.dll",
+            "com0",
+            "COM¹",
+            "nul .txt",
+            "onnx/con/model.onnx",
+            "model.",
+            "model ",
+            "onnx./model.onnx",
+            "a?b",
+            "a*b",
+            "a|b",
+            "a<b",
+            "a\"b",
+            "a\tb",
+        ] {
+            let e = check_relative_path("files[0].path", bad).unwrap_err();
+            assert!(e.starts_with("files[0].path:"), "{bad:?}: {e}");
+        }
+        assert!(is_dos_device("CONOUT$"));
+        assert!(!is_dos_device("COM"));
+        assert_eq!(
+            normalized_relative(r"./Onnx//\model.onnx"),
+            "onnx/model.onnx"
+        );
+        assert!(is_sha256(&"a".repeat(64)) && !is_sha256(&"g".repeat(64)) && !is_sha256(""));
     }
 
     #[test]
