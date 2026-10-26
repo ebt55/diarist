@@ -120,6 +120,47 @@ def cli(data: Path, *args: str, capture: bool = True) -> subprocess.CompletedPro
     return p
 
 
+def collapse_loops_of(cfg: dict) -> bool:
+    """configs.toml `collapse_loops`: the repeated-token loop collapse
+    (transcript.collapse_loops, docs/plans/16 section 12.3) in the config's
+    data root. On unless a config says `collapse_loops = false`, as in the
+    app, so the tables measure what users get."""
+    return bool(cfg.get("collapse_loops", True))
+
+
+def set_setting(data: Path, key: str, value: str) -> None:
+    """Writes one setting into the data root's database, as the app's
+    Settings would (diarist-cli has no settings verb)."""
+    import sqlite3
+
+    con = sqlite3.connect(data / "diarist.db")
+    try:
+        con.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def run_loops(data: Path, meeting_id: int) -> dict | None:
+    """`engine_info.loops` of the meeting's current run in the data root
+    (counts only), or None when the diarist-cli build has no loop collapse."""
+    import sqlite3
+
+    con = sqlite3.connect(data / "diarist.db")
+    try:
+        row = con.execute(
+            "SELECT r.engine_info FROM meetings m JOIN transcript_runs r ON r.id = m.current_run_id WHERE m.id = ?",
+            (meeting_id,),
+        ).fetchone()
+    finally:
+        con.close()
+    loops = json.loads(row[0]).get("loops") if row and row[0] else None
+    return loops if isinstance(loops, dict) else None
+
+
 def prepare_data_root(config: str, cfg: dict) -> Path:
     data = WORK / "data" / config
     data.mkdir(parents=True, exist_ok=True)
@@ -127,6 +168,7 @@ def prepare_data_root(config: str, cfg: dict) -> Path:
         cli(data, "models", "scan")
     cli(data, "models", "select", "asr", cfg["asr"])
     cli(data, "models", "select", "diarizer", cfg["diarizer"])
+    set_setting(data, "transcript.collapse_loops", "on" if collapse_loops_of(cfg) else "off")
     return data
 
 
@@ -143,9 +185,13 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
         return None
     if meta.get("status") != "ok" or meta.get("schema") != RUN_SCHEMA or not (d / "transcript.json").is_file():
         return None
-    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")) or list(
-        meta.get("engine_args") or []
-    ) != list(cfg.get("engine_args") or []):
+    # A run made before the loop collapse existed has no `collapse_loops`:
+    # its words were not collapsed.
+    if (
+        any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language"))
+        or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+        or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
+    ):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
     if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
@@ -232,6 +278,9 @@ def transcribe(
     )
     ph = phase_times(audio_dir)
     t_asr0, t_asr1, t_dia1 = ph["engine_start"] or t_start, ph["transcribe_end"], ph["diarize_end"]
+    loops = run_loops(data, int(mid))
+    if collapse_loops_of(cfg) and loops is None:
+        log(f"[{rid}] warning: this diarist-cli build has no loop collapse (no engine_info.loops); rebuild it")
     meta = {
         "schema": RUN_SCHEMA,
         "status": "ok",
@@ -254,6 +303,10 @@ def transcribe(
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
         "engine_args": list(cfg.get("engine_args") or []),
+        # transcript.collapse_loops in the data root, and what the run's
+        # engine_info.loops counted (None from a build without the collapse).
+        "collapse_loops": collapse_loops_of(cfg),
+        "loops": {k: loops.get(k) for k in ("applied", "runs", "words_removed")} if loops else None,
         "engine_version": eng["engine"] if eng else None,
         "asr_file": eng["asr"] if eng else None,
         "diarizer_file": eng["diar"] if eng else None,
@@ -535,6 +588,15 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
         f" (local .verified matches: {diar.get('verified')}); preset {diar_preset_of(cfg, any_meta)}",
         f"- Decoder lookahead (`rnnt_right_context`): {lookahead_of(cfg, any_meta)}",
+        "- Repeated-token loops: "
+        + (
+            "collapsed (`transcript.collapse_loops = on`, the app's default; "
+            f"{sum((m.get('loops') or {}).get('words_removed') or 0 for m in metas.values())} words removed over these runs"
+            + ("; some runs come from a diarist-cli build without the collapse" if any(m.get("loops") is None for m in metas.values()) else "")
+            + ")"
+            if collapse_loops_of(cfg)
+            else "not collapsed (`transcript.collapse_loops = off` in the data root)"
+        ),
         f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
         + "".join(f" {a}" for a in engine_arg_flags(cfg))
         + "`, then `export --format rttm`",
@@ -747,6 +809,7 @@ def run_fleurs(config: str, cfg: dict, langs: list[str], mode: str, force: bool,
             if (
                 meta.get("status") != "ok" or meta.get("language") != tag or meta.get("asr") != cfg["asr"]
                 or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+                or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
             ):
                 meta = None
         except (OSError, ValueError):
