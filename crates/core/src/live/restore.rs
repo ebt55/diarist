@@ -3,29 +3,32 @@
 //!
 //! [`restore_echo_dropped`] rebuilds the meeting's current run from its
 //! stored words plus the run's `echo_dropped` list (on the mic, as `me`).
-//! Every stored word keeps the label the engine gave it (`raw_label`; an
-//! undiarized mic is `me`) and goes back to the ASR's text (`raw_text`,
-//! else `text`); the channels are punctuated again with the restored words
-//! in place (plan 16 section 3.2: they change the context and the sentence
-//! starts), each channel is segmented on its own with the run's segment
-//! options (`engine_info.segmentation`, else the defaults) and the segments
-//! are ordered by start time as the post-pass does
-//! ([`build_transcript_channels`]). The result is a new run of the same kind
-//! with `engine_info.echo.restored: true` (with `restored_from`,
+//! Every stored word keeps the speaker row of its own segment
+//! ([`crate::punct::rebuild::source_run`]: names, colours, merges, `user_N`
+//! rows and reassignments come along exactly) and goes back to the ASR's
+//! text (`raw_text`, else `text`); the channels are punctuated again with
+//! the restored words in place (plan 16 section 3.2: they change the
+//! context and the sentence starts), each channel is segmented on its own
+//! with the run's segment options (`engine_info.segmentation`, else the
+//! defaults) and the segments are ordered by start time as the post-pass
+//! does. The result is a new run of the same kind with
+//! `engine_info.echo.restored: true` (with `restored_from`,
 //! `restored_words` and `dropped: 0`), `engine_info.punctuation` replaced
 //! and an empty `echo_dropped`; speakers carry over by identity
-//! ([`RunStore::carry_over_identity`]: names, colours, merges, anchors,
-//! then the reassignments), and the new run becomes current. The old run
-//! stays: [`remove_restored_echo`] ("Remove echo words again") makes it
-//! current again, and restoring it once more replaces the earlier restored
-//! run.
+//! ([`RunStore::carry_over_identity`]), and the new run becomes current
+//! only while `run` still is ([`RunStore::set_current_run_if`]; otherwise
+//! [`crate::punct::rebuild::MEETING_CHANGED`]). The old run stays:
+//! [`remove_restored_echo`] ("Remove echo words again") makes it current
+//! again. Restoring it once more replaces the earlier restored run, after
+//! the new one is current; a punctuation copy made of a restored run is
+//! never deleted.
 
 use crate::error::{CoreError, Result};
-use crate::punct::rebuild::{current_channels, run_language};
+use crate::punct::rebuild::{rebuild_transcript, run_language, source_run, store_rebuild};
 use crate::punct::{punctuate_loaded, PunctSource};
 use crate::store::{CarryOverReport, RunStore, StoreError};
-use crate::transcript::{build_transcript_channels, SegmentOptions, TranscriptWord, ME_LABEL};
-use crate::types::{Channel, MeetingId, MeetingStatus, RunId, RunStatus};
+use crate::transcript::{SegmentOptions, TranscriptWord, ME_LABEL};
+use crate::types::{Channel, MeetingId, MeetingStatus, RunId};
 
 /// What [`restore_echo_dropped`] did.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,16 +105,11 @@ pub fn restore_echo_dropped(
             "No words were removed from \"me\" as echo in this transcript.",
         ));
     }
-    // An earlier restore of this run is replaced.
-    for r in store.list_runs(meeting)? {
-        if r.id != run && r.engine_info["echo"]["restored_from"].as_i64() == Some(run.0) {
-            store.delete_run(r.id)?;
-        }
-    }
 
-    // The stored words by channel, with the engine's labels (mic first, as
-    // the post-pass), and the removed words back on the mic.
-    let mut channels = current_channels(store, meeting)?;
+    // The stored words by channel, each with its own speaker row (mic
+    // first, as the post-pass), and the removed words back on the mic.
+    let source = source_run(store, run)?;
+    let mut channels = source.channels.clone();
     if channels.first().map(|c| c.0) != Some(Channel::Mic) {
         channels.insert(0, (Channel::Mic, Vec::new()));
     }
@@ -127,6 +125,8 @@ pub fn restore_echo_dropped(
             speaker: ME_LABEL.to_owned(),
             raw_label: None,
             raw_text: None,
+            margin: None,
+            overlap: false,
         }));
     for (_, words) in channels.iter_mut() {
         words.sort_by_key(|w| w.start_ms);
@@ -138,7 +138,7 @@ pub fn restore_echo_dropped(
         let mut loaded = punct.load(store);
         punctuate_loaded(&mut loaded, &mut channels, &segment, &lang, &|| false)
     };
-    let transcript = build_transcript_channels(channels, &segment);
+    let transcript = rebuild_transcript(&source, channels, &segment);
 
     let mut info = old.engine_info.clone();
     if !info.is_object() {
@@ -153,38 +153,40 @@ pub fn restore_echo_dropped(
     info["echo"]["dropped"] = serde_json::json!(0);
     // Replaced wholesale: the old run's block describes other words.
     info["punctuation"] = punctuation.to_json();
-    let new = store.create_run(meeting, old.kind, info)?;
-    let built = (|| -> Result<CarryOverReport> {
-        store.set_echo_dropped(new.id, &[])?;
-        store.insert_transcript(new.id, &transcript)?;
-        store.finish_run(new.id, RunStatus::Done)?;
-        Ok(store.carry_over_identity(run, new.id)?)
-    })();
-    let report = match built {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = store.delete_run(new.id);
-            return Err(e);
+    let (new, report) = store_rebuild(store, meeting, run, old.kind, info, Some(&[]), &transcript)?;
+    // Only now that the new run is current: an earlier restore of this run
+    // is replaced. A punctuation copy of one is not a restore (it inherited
+    // `restored_from` with the rest of `engine_info`) and stays.
+    for r in store.list_runs(meeting)? {
+        let earlier = r.id != run
+            && r.id != new
+            && r.engine_info["echo"]["restored_from"].as_i64() == Some(run.0)
+            && r.engine_info["punctuation"]["rebuilt_from"].is_null();
+        if earlier {
+            if let Err(e) = store.delete_run(r.id) {
+                log::warn!(
+                    "meeting {meeting}: the earlier restored run {} stays: {e}",
+                    r.id
+                );
+            }
         }
-    };
-    store.set_current_run(meeting, new.id)?;
+    }
     log::info!(
-        "meeting {meeting}: {restored} echo words restored into \"me\" as run {} (from run {run}, kept); carry-over {} matched, {} named, {} need review",
-        new.id,
+        "meeting {meeting}: {restored} echo words restored into \"me\" as run {new} (from run {run}, kept); carry-over {} matched, {} named, {} need review",
         report.matched.len(),
         report.named.len(),
         report.needs_review.len()
     );
     Ok(EchoRestore {
         meeting,
-        run: new.id,
+        run: new,
         from_run: run,
         restored,
         carry_over: report,
     })
 }
 
-/// "Remove echo words again": makes the run that the restored run `run`
+// "Remove echo words again": makes the run that the restored run `run`
 /// was built from current again and returns it. The restored run stays (a
 /// later Restore replaces it).
 pub fn remove_restored_echo(store: &dyn RunStore, run: RunId) -> Result<RunId> {
@@ -223,7 +225,8 @@ mod tests {
     use crate::punct::fixture::FixturePunctuator;
     use crate::punct::{rebuild_run, Mark, PunctReason, RebuildWhy};
     use crate::store::{MemoryStore, NewMeeting, SqliteStore, Store};
-    use crate::types::{EchoDroppedWord, RunKind, SegmentId, Source};
+    use crate::transcript::build_transcript_channels;
+    use crate::types::{EchoDroppedWord, RunKind, RunStatus, SegmentId, Source};
 
     fn word(channel: Channel, start: i64, text: &str, spk: Option<&str>) -> TranscriptWord {
         TranscriptWord {
@@ -235,6 +238,8 @@ mod tests {
             speaker: spk.unwrap_or(ME_LABEL).into(),
             raw_label: spk.map(str::to_owned),
             raw_text: None,
+            margin: None,
+            overlap: false,
         }
     }
 
@@ -512,5 +517,134 @@ mod tests {
     fn restore_on_a_punctuated_run_is_restore_plus_punctuation() {
         restore_punctuated(&SqliteStore::open_in_memory().unwrap());
         restore_punctuated(&MemoryStore::new());
+    }
+
+    fn speaker_of(store: &dyn RunStore, run: RunId, label: &str) -> crate::types::SpeakerId {
+        store
+            .run_speakers(run)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.engine_label == label)
+            .unwrap()
+            .id
+    }
+
+    /// Every stored word keeps its speaker row exactly (a reassignment, a
+    /// later rename, a merge); the restored words go to "me".
+    fn restore_keeps_speakers(store: &dyn RunStore) {
+        use crate::punct::rebuild::testing::{rows, seen};
+        let (m, run) = meeting(store);
+        let alice = speaker_of(store, run, "spk_0");
+        let bob = speaker_of(store, run, "spk_1");
+        store.rename_speaker(alice, "Alice", None).unwrap();
+        store.rename_speaker(bob, "Bob", None).unwrap();
+        store
+            .rename_speaker(speaker_of(store, run, "me"), "Me Myself", None)
+            .unwrap();
+        let three = store
+            .get_segments(m, 0, u32::MAX)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.start_ms == 6_000)
+            .unwrap()
+            .id;
+        store.reassign_segment(three, alice).unwrap();
+        store.rename_speaker(alice, "Alicia", None).unwrap();
+        let before = seen(store, run);
+
+        let r = restore_echo_dropped(store, &punct(), run).unwrap();
+        assert_eq!(rows(store, run), rows(store, r.run));
+        let after = seen(store, r.run);
+        let (restored, kept): (Vec<_>, Vec<_>) = after
+            .into_iter()
+            .partition(|w| w.channel == Channel::Mic && [2_080, 2_470].contains(&w.start));
+        assert_eq!(kept, before);
+        assert_eq!(restored.len(), 2);
+        assert!(restored
+            .iter()
+            .all(|w| w.own == ME_LABEL && w.name == "Me Myself" && w.raw_label.is_none()));
+        let three = kept.iter().find(|w| w.asr == "three").unwrap();
+        assert_eq!(
+            (three.own.as_str(), three.name.as_str()),
+            ("spk_0", "Alicia")
+        );
+        assert_eq!(r.carry_over.created_speakers, []);
+    }
+
+    #[test]
+    fn restore_keeps_every_stored_word_with_its_speaker() {
+        restore_keeps_speakers(&SqliteStore::open_in_memory().unwrap());
+        restore_keeps_speakers(&MemoryStore::new());
+    }
+
+    /// A punctuator that runs `during` while it labels, then marks nothing.
+    fn racing(during: impl Fn() + Send + Sync + 'static) -> PunctSource {
+        let during = std::sync::Arc::new(during);
+        PunctSource::factory(move || {
+            let during = std::sync::Arc::clone(&during);
+            FixturePunctuator::new(move |words, _| {
+                during();
+                Ok(vec![crate::punct::WordLabel::KEEP; words.len()])
+            })
+        })
+    }
+
+    /// Finding 2: Restore again replaces an earlier restored run, but never
+    /// a punctuation copy of one (which inherits `echo.restored_from`), and
+    /// only once the new run is current.
+    fn restore_keeps_punctuation_copies(store: std::sync::Arc<dyn RunStore>) {
+        let (m, run) = meeting(&*store);
+        let first = restore_echo_dropped(&*store, &PunctSource::None, run).unwrap();
+        // "Add punctuation" on the restored run, and a name given there.
+        let copy = rebuild_run(&*store, &punct(), m, RebuildWhy::Add, &|| false)
+            .unwrap()
+            .run
+            .unwrap();
+        let info = store.get_run(copy).unwrap().engine_info;
+        assert_eq!(info["echo"]["restored_from"].as_i64(), Some(run.0));
+        assert!(info["punctuation"]["rebuilt_from"].is_i64());
+        let zoe = speaker_of(&*store, copy, "spk_0");
+        store.rename_speaker(zoe, "Zoe", None).unwrap();
+        // Back to the run without the echo words, and Restore once more.
+        assert_eq!(remove_restored_echo(&*store, copy).unwrap(), run);
+        let again = restore_echo_dropped(&*store, &PunctSource::None, run).unwrap();
+        assert!(
+            store.get_run(first.run).is_err(),
+            "the earlier restore goes"
+        );
+        assert_eq!(
+            store
+                .run_speakers(copy)
+                .unwrap()
+                .into_iter()
+                .find(|s| s.id == zoe)
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Zoe"),
+            "the punctuation copy stays, with its name"
+        );
+        // A Restore that loses a race (the copy made current meanwhile)
+        // switches nothing and deletes nothing.
+        assert_eq!(remove_restored_echo(&*store, again.run).unwrap(), run);
+        let runs = store.list_runs(m).unwrap().len();
+        let s = std::sync::Arc::clone(&store);
+        let switch = racing(move || s.set_current_run(m, copy).unwrap());
+        let err = restore_echo_dropped(&*store, &switch, run).unwrap_err();
+        assert!(crate::punct::rebuild::is_meeting_changed(&err), "{err}");
+        assert!(
+            store.get_run(again.run).is_ok(),
+            "the earlier restore stays"
+        );
+        assert_eq!(store.list_runs(m).unwrap().len(), runs);
+        assert_eq!(store.get_meeting(m).unwrap().current_run.unwrap().id, copy);
+    }
+
+    #[test]
+    fn restore_never_deletes_a_punctuation_copy_or_deletes_before_switching() {
+        restore_keeps_punctuation_copies(std::sync::Arc::new(
+            SqliteStore::open_in_memory().unwrap(),
+        ));
+        restore_keeps_punctuation_copies(std::sync::Arc::new(MemoryStore::new()));
     }
 }

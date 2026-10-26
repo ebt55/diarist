@@ -87,6 +87,11 @@ pub struct TranscriptWord {
     /// The ASR's text where `text` holds display text that differs from it
     /// (punctuation, `words.raw_text`); `None` when `text` is the ASR's.
     pub raw_text: Option<String>,
+    /// v1.5 fusion (`words.margin`): `None` from the engines today; a
+    /// rebuild copies the stored value.
+    pub margin: Option<f32>,
+    /// v1.5 fusion (`words.overlap`); a rebuild copies the stored value.
+    pub overlap: bool,
 }
 
 impl TranscriptWord {
@@ -115,6 +120,8 @@ pub fn words_from_engine(
             speaker: w.spk.clone().unwrap_or_else(|| default_label.to_owned()),
             raw_label: w.spk.clone(),
             raw_text: None,
+            margin: None,
+            overlap: false,
         })
         .collect()
 }
@@ -159,9 +166,11 @@ pub struct SegmentDraft {
 
 /// True when `text` ends a sentence (`.`, `?`, `!`, `…`, `。` `？` `！`, the
 /// Devanagari `।` `॥`, the Arabic `؟` `۔`, the Ethiopic `።` `፧` and the Greek
-/// question mark U+037E; also before closing quotes).
+/// question mark U+037E; also before closing quotes and trailing whitespace).
 pub fn ends_sentence(text: &str) -> bool {
-    let trimmed = text.trim_end_matches(['"', '\'', ')', '”', '’', ']']);
+    let trimmed = text
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', '”', '’', ']']);
     matches!(
         trimmed.chars().last(),
         Some(
@@ -310,8 +319,8 @@ impl TranscriptBuilder {
             text: w.text.clone(),
             confidence: w.confidence,
             raw_label: w.raw_label.clone(),
-            margin: None,
-            overlap: false,
+            margin: w.margin,
+            overlap: w.overlap,
             raw_text: w.raw_text.clone(),
         }));
     }
@@ -370,6 +379,8 @@ mod tests {
             speaker: spk.into(),
             raw_label: Some(spk.into()),
             raw_text: None,
+            margin: None,
+            overlap: false,
         }
     }
 
@@ -438,6 +449,7 @@ mod tests {
             assert!(ends_sentence(s), "{s}");
         }
         assert!(!ends_sentence("،") && !ends_sentence("hello,"));
+        assert!(ends_sentence("done. ") && ends_sentence("ok?\" "));
     }
 
     #[test]
