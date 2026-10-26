@@ -58,6 +58,7 @@ pub fn attach_demo_audio(store: &dyn Store, data_root: &Path) {
             channels: 2,
             duration_ms: Some(i64::from(DEMO_SECONDS) * 1000),
             size_bytes: Some(size),
+            channel_frames: None,
         };
         if let Err(e) = store.add_audio_track(track) {
             log::warn!("demo audio for meeting {meeting_id}: {e}");

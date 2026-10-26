@@ -1341,6 +1341,8 @@ pub fn run_post_pass(
         channels: 2,
         duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
         size_bytes: Some(info.bytes as i64),
+        // Each channel's own length, for a run from the FLAC later.
+        channel_frames: Some(info.channel_frames.to_vec()),
     })?;
     for t in store.list_audio_tracks(job.meeting)? {
         if t.format == AudioFormat::Wav

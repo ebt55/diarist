@@ -276,6 +276,7 @@ fn run_import(
         channels: info.source_channels,
         duration_ms: Some(info.duration_ms),
         size_bytes: std::fs::metadata(source).ok().map(|m| m.len() as i64),
+        channel_frames: None,
     })?;
     if keep_wav {
         store.add_audio_track(NewAudioTrack {
@@ -287,6 +288,7 @@ fn run_import(
             channels: 1,
             duration_ms: Some(info.duration_ms),
             size_bytes: std::fs::metadata(wav).ok().map(|m| m.len() as i64),
+            channel_frames: None,
         })?;
     }
     store.finish_meeting(meeting, started_at + info.duration_ms, info.duration_ms)?;

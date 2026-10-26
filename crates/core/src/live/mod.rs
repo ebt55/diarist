@@ -1154,6 +1154,7 @@ fn register_wavs(
             channels: 1,
             duration_ms: Some(duration_ms),
             size_bytes: std::fs::metadata(&path).ok().map(|m| m.len() as i64),
+            channel_frames: None,
         })?;
     }
     Ok(())

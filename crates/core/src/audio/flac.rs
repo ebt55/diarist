@@ -500,8 +500,7 @@ mod tests {
         let refused = |path: &Path, frames: Option<[u64; 2]>| -> String {
             let before = sha256(path);
             let e = decode_stereo_to_wavs(path, &l, &r, frames, &|_, _| {})
-                .err()
-                .expect("refused")
+                .expect_err("refused")
                 .to_string();
             assert!(!l.exists() && !r.exists(), "{e}: a WAV was left");
             assert_eq!(sha256(path), before, "{e}: the FLAC changed");

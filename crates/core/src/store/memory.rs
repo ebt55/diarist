@@ -1286,6 +1286,7 @@ impl Store for MemoryStore {
             channels: track.channels,
             duration_ms: track.duration_ms,
             size_bytes: track.size_bytes,
+            channel_frames: track.channel_frames,
         };
         st.tracks.insert(row.id, row.clone());
         Ok(row)

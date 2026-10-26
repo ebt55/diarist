@@ -65,6 +65,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0004_raw_text",
         include_str!("migrations/0004_raw_text.sql"),
     ),
+    (
+        "0005_track_frames",
+        include_str!("migrations/0005_track_frames.sql"),
+    ),
 ];
 
 /// Characters of transcript text in [`MeetingSummary::preview`].
@@ -645,8 +649,7 @@ fn word_from_row(r: &Row<'_>) -> rusqlite::Result<Word> {
     })
 }
 
-const TRACK_COLS: &str =
-    "id, meeting_id, channel, path, format, sample_rate, channels, duration_ms, size_bytes";
+const TRACK_COLS: &str = "id, meeting_id, channel, path, format, sample_rate, channels,      duration_ms, size_bytes, channel_frames";
 
 fn track_from_row(r: &Row<'_>) -> rusqlite::Result<AudioTrack> {
     Ok(AudioTrack {
@@ -659,6 +662,9 @@ fn track_from_row(r: &Row<'_>) -> rusqlite::Result<AudioTrack> {
         channels: r.get(6)?,
         duration_ms: r.get(7)?,
         size_bytes: r.get(8)?,
+        channel_frames: r
+            .get::<_, Option<String>>(9)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -1726,8 +1732,8 @@ impl Store for SqliteStore {
         meeting_exists(&conn, track.meeting_id)?;
         conn.execute(
             "INSERT INTO audio_tracks (meeting_id, channel, path, format, sample_rate, channels,
-                duration_ms, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                duration_ms, size_bytes, channel_frames)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 track.meeting_id.0,
                 track.channel.as_str(),
@@ -1736,7 +1742,11 @@ impl Store for SqliteStore {
                 track.sample_rate,
                 track.channels,
                 track.duration_ms,
-                track.size_bytes
+                track.size_bytes,
+                track
+                    .channel_frames
+                    .as_ref()
+                    .map(|f| serde_json::json!(f).to_string())
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -2086,7 +2096,8 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             conn.execute_batch(
                 "DROP TABLE counters; ALTER TABLE transcript_runs DROP COLUMN echo_dropped;
-                 ALTER TABLE words DROP COLUMN raw_text; PRAGMA user_version = 1;",
+                 ALTER TABLE words DROP COLUMN raw_text;
+                 ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 1;",
             )
             .unwrap();
         }

@@ -609,10 +609,27 @@ fn audio_tracks(store: &dyn Store) {
             channels: 2,
             duration_ms: Some(6_000),
             size_bytes: Some(96_000),
+            channel_frames: None,
         })
         .unwrap();
+    assert_eq!(track.channel_frames, None);
+    // The playback FLAC of a live meeting keeps each channel's own length.
+    let flac = store
+        .add_audio_track(NewAudioTrack {
+            meeting_id: id,
+            channel: TrackChannel::Playback,
+            path: "audio/U/playback.flac".into(),
+            format: AudioFormat::Flac,
+            sample_rate: 16_000,
+            channels: 2,
+            duration_ms: Some(6_000),
+            size_bytes: Some(50_000),
+            channel_frames: Some(vec![96_000, 95_123]),
+        })
+        .unwrap();
+    assert_eq!(flac.channel_frames, Some(vec![96_000, 95_123]));
     let tracks = store.list_audio_tracks(id).unwrap();
-    assert_eq!(tracks, vec![track]);
+    assert_eq!(tracks, vec![track, flac]);
     assert!(is_not_found(store.list_audio_tracks(MeetingId(424_242))));
     store.delete_meeting(id).unwrap();
     assert!(is_not_found(store.list_audio_tracks(id)));
@@ -702,6 +719,7 @@ fn track(meeting_id: MeetingId, channel: TrackChannel, format: AudioFormat) -> N
         channels: 1,
         duration_ms: Some(6_000),
         size_bytes: None,
+        channel_frames: None,
     }
 }
 

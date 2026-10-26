@@ -95,6 +95,10 @@ pub struct NewAudioTrack {
     pub channels: u16,
     pub duration_ms: Option<i64>,
     pub size_bytes: Option<i64>,
+    /// Sample frames of each channel before the shorter one was padded
+    /// (`[mic, loopback]` for the playback FLAC); `None` when unknown.
+    #[serde(default)]
+    pub channel_frames: Option<Vec<u64>>,
 }
 
 /// A complete transcript for one run, written in one transaction by
