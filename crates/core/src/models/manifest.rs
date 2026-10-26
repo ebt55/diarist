@@ -816,7 +816,7 @@ mod tests {
     }
 
     /// The shipped punctuation model's manifest name (plan 16 section 3.13.7).
-    const PUNCTUATION_MODEL: &str = "Punctuation (Horizon-Labs small)";
+    const PUNCTUATION_MODEL: &str = "punctuation-horizon-small";
 
     /// Candidate A as plan 16 section 3.13.7 fixes it: the upstream int8
     /// file and tokenizer from Hugging Face at the pinned revision, the

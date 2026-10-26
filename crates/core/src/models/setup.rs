@@ -383,7 +383,7 @@ mod tests {
         let item = s
             .items
             .iter()
-            .find(|i| i.name == "Punctuation (Horizon-Labs small)")
+            .find(|i| i.name == "punctuation-horizon-small")
             .unwrap();
         assert_eq!(item.kind, DownloadKind::Model);
         assert!(item.required && !item.installed && !item.experimental);
@@ -465,7 +465,7 @@ mod tests {
             .collect();
         assert_eq!(required.len(), 4, "{required:?}");
         assert!(required.contains(&"nemotron-en") && required.contains(&"nemotron-3-diarization"));
-        assert!(required.contains(&"Punctuation (Horizon-Labs small)"));
+        assert!(required.contains(&"punctuation-horizon-small"));
         assert!(s.items.last().unwrap().experimental, "Parakeet last");
         let models: u64 = 107_012_128 + 699_872_960 + PUNCTUATION_BYTES;
         assert!(

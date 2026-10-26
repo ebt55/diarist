@@ -80,7 +80,7 @@
     "vram_note": "peak delta, 77-minute file without diarization, RTX 3080 (research/08 section 7). Experimental: silently drops spans (research/08 section 8)"
   },
   {
-    "name": "Punctuation (Horizon-Labs small)",
+    "name": "punctuation-horizon-small",
     "label": "Horizon-Labs punctuation small: adds . , ? and sentence capitals after Stop, 35 languages, CPU",
     "pull_name": "",
     "role": "punctuation",

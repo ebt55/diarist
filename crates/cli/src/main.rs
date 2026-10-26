@@ -267,7 +267,8 @@ enum ModelsCommand {
     /// Download models from the manifest (required ones by default), checked
     /// against its SHA-256.
     Pull {
-        /// Manifest names (nemotron-3.5, nemotron-3-diarization, nemotron-en, parakeet-tdt).
+        /// Manifest names (nemotron-3.5, nemotron-3-diarization, nemotron-en,
+        /// punctuation-horizon-small, parakeet-tdt).
         names: Vec<String>,
         /// Fetch with the runtime's `nemo-speech pull` (System32 curl.exe)
         /// as before 0.1.0-beta.5; kept for one release. Not for a deep data
