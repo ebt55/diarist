@@ -455,6 +455,92 @@ impl Head {
     }
 }
 
+/// The heads the runner reads (a `boundary` head is read by nothing).
+struct Heads {
+    post: Option<Head>,
+    pre: Option<Head>,
+    case: Option<Head>,
+}
+
+impl Heads {
+    fn of(spec: &PunctSpec) -> Self {
+        let head = |k: HeadKind| spec.head(k).map(Head::new);
+        Self {
+            post: head(HeadKind::Post),
+            pre: head(HeadKind::Pre),
+            case: head(HeadKind::Case),
+        }
+    }
+
+    /// The word labels from the tokens' outputs; marks predicted inside a
+    /// word are counted in `stats`.
+    fn word_labels(
+        &self,
+        stats: &mut LabelStats,
+        model_words: &[String],
+        enc: &Encoded,
+        toks: &[TokOut],
+    ) -> Vec<WordLabel> {
+        let mut labels = vec![WordLabel::KEEP; model_words.len()];
+        for (w, r) in enc.word_ranges(model_words.len()).into_iter().enumerate() {
+            if r.start == r.end {
+                continue;
+            }
+            let (first, last) = (r.start, r.end - 1);
+            let at_end = enc.ends_word[last];
+            let pick = |pos: HeadPosition, of_pre: bool| match pos {
+                HeadPosition::FirstToken => first,
+                HeadPosition::LastToken => last,
+                HeadPosition::PerSubword if of_pre => first,
+                HeadPosition::PerSubword => last,
+            };
+            let label = &mut labels[w];
+            if let Some(h) = &self.post {
+                if h.position == HeadPosition::PerSubword {
+                    let inner = (first..last)
+                        .filter(|&k| matches!(h.mark(toks[k].post), MarkLabel::Mark(_)))
+                        .count();
+                    stats.inner_marks_dropped += inner as u64;
+                }
+                let k = pick(h.position, false);
+                if at_end || h.position == HeadPosition::FirstToken {
+                    if let MarkLabel::Mark(m) = h.mark(toks[k].post) {
+                        if !m.is_pre() {
+                            label.post = Some(m);
+                        }
+                    }
+                } else if matches!(h.mark(toks[k].post), MarkLabel::Mark(_)) {
+                    // The word's last token runs into the next word.
+                    stats.inner_marks_dropped += 1;
+                }
+            }
+            if let Some(h) = &self.pre {
+                if let MarkLabel::Mark(m) = h.mark(toks[pick(h.position, true)].pre) {
+                    if m.is_pre() {
+                        label.pre = Some(m);
+                    }
+                }
+            }
+            if let Some(h) = &self.case {
+                label.case = if toks[first].chars.is_some() {
+                    char_case(
+                        &model_words[w],
+                        &enc.pieces[r.clone()],
+                        &enc.lead[r.clone()],
+                        &toks[r.clone()],
+                    )
+                } else {
+                    h.cases
+                        .get(toks[pick(h.position, true)].case as usize)
+                        .cloned()
+                        .unwrap_or_default()
+                };
+            }
+        }
+        labels
+    }
+}
+
 /// A punctuation model in ONNX Runtime.
 pub struct OnnxPunctuator {
     session: Session,
@@ -462,9 +548,7 @@ pub struct OnnxPunctuator {
     spec: PunctSpec,
     info: PunctModelInfo,
     threads: u32,
-    post: Option<Head>,
-    pre: Option<Head>,
-    case: Option<Head>,
+    heads: Heads,
     stats: LabelStats,
 }
 
@@ -550,11 +634,8 @@ impl OnnxPunctuator {
                 ));
             }
         }
-        let head = |k: HeadKind| spec.head(k).map(Head::new);
         Ok(Self {
-            post: head(HeadKind::Post),
-            pre: head(HeadKind::Pre),
-            case: head(HeadKind::Case),
+            heads: Heads::of(&spec),
             session,
             tokenizer,
             spec,
@@ -612,7 +693,7 @@ impl OnnxPunctuator {
                     .into_dyn(),
             ));
         }
-        let heads = [&self.post, &self.pre, &self.case];
+        let heads = [&self.heads.post, &self.heads.pre, &self.heads.case];
         let outputs = self.session.run(inputs).map_err(ort_err)?;
         let mut out: Vec<Vec<TokOut>> = batch
             .iter()
@@ -643,81 +724,23 @@ impl OnnxPunctuator {
         }
         Ok(out)
     }
-
-    /// The word labels from the tokens' outputs.
-    fn word_labels(
-        &mut self,
-        model_words: &[String],
-        enc: &Encoded,
-        toks: &[TokOut],
-    ) -> Vec<WordLabel> {
-        let mut labels = vec![WordLabel::KEEP; model_words.len()];
-        for (w, r) in enc.word_ranges(model_words.len()).into_iter().enumerate() {
-            if r.start == r.end {
-                continue;
-            }
-            let (first, last) = (r.start, r.end - 1);
-            let at_end = enc.ends_word[last];
-            let pick = |pos: HeadPosition, of_pre: bool| match pos {
-                HeadPosition::FirstToken => first,
-                HeadPosition::LastToken => last,
-                HeadPosition::PerSubword if of_pre => first,
-                HeadPosition::PerSubword => last,
-            };
-            let label = &mut labels[w];
-            if let Some(h) = &self.post {
-                if h.position == HeadPosition::PerSubword {
-                    let inner = (first..last)
-                        .filter(|&k| matches!(h.mark(toks[k].post), MarkLabel::Mark(_)))
-                        .count();
-                    self.stats.inner_marks_dropped += inner as u64;
-                }
-                let k = pick(h.position, false);
-                if at_end || h.position == HeadPosition::FirstToken {
-                    if let MarkLabel::Mark(m) = h.mark(toks[k].post) {
-                        if !m.is_pre() {
-                            label.post = Some(m);
-                        }
-                    }
-                } else if matches!(h.mark(toks[k].post), MarkLabel::Mark(_)) {
-                    // The word's last token runs into the next word.
-                    self.stats.inner_marks_dropped += 1;
-                }
-            }
-            if let Some(h) = &self.pre {
-                if let MarkLabel::Mark(m) = h.mark(toks[pick(h.position, true)].pre) {
-                    if m.is_pre() {
-                        label.pre = Some(m);
-                    }
-                }
-            }
-            if let Some(h) = &self.case {
-                label.case = if toks[first].chars.is_some() {
-                    char_case(&model_words[w], &enc.pieces[r.clone()], &toks[r.clone()])
-                } else {
-                    h.cases
-                        .get(toks[pick(h.position, true)].case as usize)
-                        .cloned()
-                        .unwrap_or_default()
-                };
-            }
-        }
-        labels
-    }
 }
 
 /// Per-character casing of one word from its tokens' flags: one flag per
 /// character when the pieces spell the word as the model saw it, else the
 /// first letter's flag only (SentencePiece's normalisation can change the
-/// characters, plan 16 section 3.3 rule 6).
-fn char_case(model_word: &str, pieces: &[String], toks: &[TokOut]) -> Case {
+/// characters, plan 16 section 3.3 rule 6). A token's flags count its
+/// stripped `▁` markers (`lead`) as characters, so letter `i` of a piece has
+/// flag `lead + i` (the spike's `punct.py` starts at index 1 for a piece
+/// that begins with `▁`).
+fn char_case(model_word: &str, pieces: &[String], lead: &[usize], toks: &[TokOut]) -> Case {
     let mut spelled = String::new();
     let mut flags = Vec::new();
-    for (piece, t) in pieces.iter().zip(toks) {
+    for ((piece, &lead), t) in pieces.iter().zip(lead).zip(toks) {
         let f = t.chars.as_deref().unwrap_or(&[]);
         for (i, ch) in piece.chars().enumerate() {
             spelled.push(ch);
-            flags.push(f.get(i).copied().unwrap_or(false));
+            flags.push(f.get(lead + i).copied().unwrap_or(false));
         }
     }
     if !flags.iter().any(|&f| f) {
@@ -852,10 +875,15 @@ impl Punctuator for OnnxPunctuator {
         };
         let enc = self.tokenizer.encode(&refs, sep)?;
         let opts = self.window_opts();
+        // One stream per call: the mic and loopback streams of a run are
+        // not batched together yet (`run_windows` takes several streams;
+        // the `Punctuator` trait gives one at a time). Later, review note 6.
         let toks = run_windows(&[&enc], &opts, cancel, &mut |batch| self.infer(batch))?
             .pop()
             .unwrap_or_default();
-        Ok(self.word_labels(&model_words, &enc, &toks))
+        Ok(self
+            .heads
+            .word_labels(&mut self.stats, &model_words, &enc, &toks))
     }
 
     fn options(&self) -> PunctOptions {
@@ -1014,6 +1042,7 @@ mod tests {
             char_case(
                 "paris",
                 &p(&["par", "is"]),
+                &[0, 0],
                 &[tok(&[true, false, false]), tok(&[false, false])]
             ),
             Case::First
@@ -1022,6 +1051,7 @@ mod tests {
             char_case(
                 "nasa",
                 &p(&["na", "sa"]),
+                &[0, 0],
                 &[tok(&[true, true]), tok(&[true, true])]
             ),
             Case::Upper
@@ -1030,18 +1060,127 @@ mod tests {
             char_case(
                 "iphone",
                 &p(&["iph", "one"]),
+                &[0, 0],
                 &[tok(&[false, true, false]), tok(&[false; 3])]
             ),
             Case::Chars(vec![false, true, false, false, false, false])
         );
         // The pieces do not spell the word (normalisation): first letter only.
         assert_eq!(
-            char_case("ﬁne", &p(&["fine"]), &[tok(&[true, false, false, false])]),
+            char_case(
+                "ﬁne",
+                &p(&["fine"]),
+                &[0],
+                &[tok(&[true, false, false, false])]
+            ),
             Case::First
         );
         assert_eq!(
-            char_case("the", &p(&["the"]), &[tok(&[false; 3])]),
+            char_case("the", &p(&["the"]), &[0], &[tok(&[false; 3])]),
             Case::Keep
+        );
+        // A second piece without a marker after one with it.
+        assert_eq!(
+            char_case(
+                "mcdonald",
+                &p(&["mc", "donald"]),
+                &[1, 0],
+                &[tok(&[true, true, false]), tok(&[true, false, false])]
+            ),
+            Case::Chars(vec![true, false, true, false, false, false, false, false])
+        );
+    }
+
+    /// C's description block as the spike wrote it (`punct-C`), its heads
+    /// only.
+    const C_HEADS: &str = r#"{
+        "tokenizer": "tokenizer.json", "input_casing": "lower", "max_tokens": 256,
+        "bos_id": 1, "eos_id": 2, "pad_id": 3, "inputs": {"ids": "input_ids"},
+        "heads": [
+            {"output": "pre_preds", "kind": "pre", "labels": ["<NULL>", "¿"], "position": "first_token", "values": "decisions"},
+            {"output": "post_preds", "kind": "post", "labels": ["<NULL>", "<ACRONYM>", ".", ",", "?"], "position": "per_subword", "values": "decisions"},
+            {"output": "cap_preds", "kind": "case", "position": "per_subword", "values": "decisions"},
+            {"output": "seg_preds", "kind": "boundary", "position": "per_subword", "values": "decisions"}
+        ],
+        "casing": "per_char"
+    }"#;
+
+    /// C's real `cap_preds` layout (the reviewer's `c_caps.py` on
+    /// `punct_cap_seg_en.onnx`, 16 flags per token): the `▁` of a piece is
+    /// flag 0, so "monday" is `[0, 1, 0, 0, 0, 0, 0]`. Read one place too
+    /// early, that gave "mOnday" and "JOhn".
+    #[test]
+    fn per_character_casing_counts_the_word_marker() {
+        let words = ["on", "monday", "in", "paris", "with", "john", "mcdonald"];
+        let flags: [&[u8]; 7] = [
+            &[0, 0, 0],
+            &[0, 1, 0, 0, 0, 0, 0],
+            &[0, 0, 0],
+            &[1, 1, 0, 0, 0, 0],
+            &[0, 0, 0, 0, 0],
+            &[1, 1, 0, 0, 0],
+            &[1, 1, 0, 1, 0, 0, 0, 0, 0],
+        ];
+        let mut enc = Encoded::default();
+        let mut toks = Vec::new();
+        for (w, (word, f)) in words.iter().zip(flags).enumerate() {
+            let piece = format!("\u{2581}{word}");
+            let (lead, text) = super::super::tokenize::strip_marker(&piece);
+            enc.ids.push(w as i64);
+            enc.word_of.push(w);
+            enc.ends_word.push(true);
+            enc.pieces.push(text.to_owned());
+            enc.lead.push(lead);
+            let mut f: Vec<bool> = f.iter().map(|&x| x != 0).collect();
+            f.resize(16, false);
+            toks.push(tok(&f));
+        }
+        let heads = Heads::of(&PunctSpec::from_json(C_HEADS).unwrap());
+        let model_words: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
+        let labels = heads.word_labels(&mut LabelStats::default(), &model_words, &enc, &toks);
+        assert_eq!(
+            labels.iter().map(|l| l.case.clone()).collect::<Vec<_>>(),
+            [
+                Case::Keep,
+                Case::First,
+                Case::Keep,
+                Case::First,
+                Case::Keep,
+                Case::First,
+                Case::Chars(vec![true, false, true, false, false, false, false, false]),
+            ]
+        );
+        // Through Diarist's label application (apply.rs).
+        let source: Vec<crate::transcript::TranscriptWord> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| crate::transcript::TranscriptWord {
+                channel: crate::types::Channel::Source,
+                start_ms: i as i64 * 400,
+                end_ms: i as i64 * 400 + 300,
+                text: (*w).to_owned(),
+                confidence: None,
+                speaker: "spk_0".into(),
+                raw_label: Some("spk_0".into()),
+                raw_text: None,
+            })
+            .collect();
+        let mut channels = vec![(crate::types::Channel::Source, source)];
+        let given = labels.clone();
+        let mut p = super::super::fixture::FixturePunctuator::new(move |_, _| Ok(given.clone()));
+        let report = super::super::punctuate_channels(
+            &mut channels,
+            Some(&mut p as &mut dyn Punctuator),
+            &PunctOptions::default(),
+            &super::super::RunLanguage::new("en"),
+            &|| false,
+        );
+        assert_eq!(report.rejected_words, Some(0), "{report:?}");
+        let shown: Vec<&str> = channels[0].1.iter().map(|w| w.text.as_str()).collect();
+        // "On" is the sentence-start rule; the rest is the model's casing.
+        assert_eq!(
+            shown,
+            ["On", "Monday", "in", "Paris", "with", "John", "McDonald"]
         );
     }
 
@@ -1234,6 +1373,52 @@ mod tests {
             report.marks_added.unwrap_or(0),
             report.case_upgrades.unwrap_or(0)
         );
+
+        // A model with a casing head (B, C) capitalises names inside a
+        // sentence, letter by letter (the `▁` offset of its flags).
+        if has_case {
+            let sentence = "hello i flew to paris with nasa engineers on monday and we met \
+                            john mcdonald at the united nations";
+            let words: Vec<&str> = sentence.split_whitespace().collect();
+            let mut channels = vec![(
+                crate::types::Channel::Source,
+                words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| crate::transcript::TranscriptWord {
+                        channel: crate::types::Channel::Source,
+                        start_ms: i as i64 * 400,
+                        end_ms: i as i64 * 400 + 300,
+                        text: (*w).to_owned(),
+                        confidence: None,
+                        speaker: "spk_0".into(),
+                        raw_label: Some("spk_0".into()),
+                        raw_text: None,
+                    })
+                    .collect::<Vec<_>>(),
+            )];
+            let report = super::super::punctuate_channels(
+                &mut channels,
+                Some(&mut p as &mut dyn Punctuator),
+                &opts,
+                &super::super::RunLanguage::new("en"),
+                &|| false,
+            );
+            assert_eq!(report.rejected_words, Some(0), "{report:?}");
+            let shown: Vec<String> = channels[0]
+                .1
+                .iter()
+                .map(|w| {
+                    w.text
+                        .trim_end_matches(|c: char| !c.is_alphanumeric())
+                        .to_owned()
+                })
+                .collect();
+            eprintln!("cased: {}", shown.join(" "));
+            for (at, want) in [(4, "Paris"), (9, "Monday"), (13, "John"), (14, "McDonald")] {
+                assert_eq!(shown[at], want, "{shown:?}");
+            }
+        }
 
         // Cancel is honoured.
         assert!(matches!(
