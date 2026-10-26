@@ -25,6 +25,13 @@ vram_mb_estimate: number | null,
  */
 file_right_context: number | null, 
 /**
+ * Decoder lookahead of the live server (`nemo-speech serve
+ * --asr.streaming.rnnt_right_context`, 80 ms frames), from the manifest
+ * entry or the `<file>.meet.json` sidecar. `None`: no flag, the
+ * runtime default (1 frame, 160 ms).
+ */
+live_right_context: number | null, 
+/**
  * Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
  * e.g. `v3-offline`), from the manifest entry or the sidecar. `None`: no
  * flag, the runtime's streaming default (which live keeps).
