@@ -272,15 +272,25 @@ pub(crate) fn punctuate(
                         MarkPolicy::Replace => w.with_core(strip_marks_str(w.core)),
                     })
                     .collect();
+                let mut excluded = 0u64;
                 let mut cores: Vec<String> = (0..parts.len())
                     .map(|k| match input_of[k] {
                         Some(input) => {
                             let script = Script::of_word(olds[k]).unwrap_or(hint.script);
-                            labelled(bases[k].core, input, &labels[k], script, &hint, opts)
+                            labelled(
+                                bases[k].core,
+                                input,
+                                &labels[k],
+                                script,
+                                &hint,
+                                opts,
+                                &mut excluded,
+                            )
                         }
                         None => bases[k].core.to_owned(),
                     })
                     .collect();
+                totals.marks_excluded += excluded;
                 sentence_starts(&mut cores, &hint);
                 // Rules 2 and 3, checked on every word at run time: a word
                 // that fails keeps the ASR's text.
@@ -320,6 +330,7 @@ pub(crate) fn punctuate(
     report.case_upgrades = Some(totals.case_upgrades);
     report.rejected_words = Some(totals.rejected_words);
     report.inner_marks_dropped = Some(totals.inner_marks_dropped);
+    report.marks_excluded = Some(totals.marks_excluded);
     report.streams_refused = Some(totals.streams_refused);
     report.wall_s = Some(round2(started.elapsed().as_secs_f64()));
     done(report)
@@ -408,6 +419,7 @@ struct Totals {
     case_upgrades: u64,
     rejected_words: u64,
     inner_marks_dropped: u64,
+    marks_excluded: u64,
     streams_refused: u64,
 }
 
@@ -577,6 +589,19 @@ fn strip_marks(old: &str) -> String {
     strip_marks_str(old).to_owned()
 }
 
+/// The mark a model label `mark` becomes in `language` (plan 16 section
+/// 3.13.7): `mark` itself where the language's list allows it; a sentence
+/// end (`?`, `!`) the list excludes becomes the language's period, so the
+/// sentence boundary stays, when the list has a period; anything else
+/// excluded (`,` `:` `-`, a pre-mark, a sentence end with no period
+/// allowed) is dropped: `None`, counted as `marks_excluded`.
+fn applied_mark(opts: &PunctOptions, language: Option<&str>, mark: Mark) -> Option<Mark> {
+    if allowed(opts, language, mark) {
+        return Some(mark);
+    }
+    (mark.ends_sentence() && allowed(opts, language, Mark::Period)).then_some(Mark::Period)
+}
+
 /// Whether `mark` may be applied in `language` (plan 16 section 3.4).
 fn allowed(opts: &PunctOptions, language: Option<&str>, mark: Mark) -> bool {
     let listed = language
@@ -695,7 +720,9 @@ fn raise_first(text: &str, language: Option<&str>) -> String {
 
 /// The display text of one word from its `base`, the `input` the model was
 /// given (a prefix of `base`) and its label: case upgrades first, then the
-/// marks. Validated by [`valid`] afterwards.
+/// marks, each as [`applied_mark`] makes it for the language; a mark the
+/// language excludes and that has no stand-in adds one to `excluded`.
+/// Validated by [`valid`] afterwards.
 fn labelled(
     base: &str,
     input: &str,
@@ -703,6 +730,7 @@ fn labelled(
     script: Script,
     hint: &LangHint,
     opts: &PunctOptions,
+    excluded: &mut u64,
 ) -> String {
     let language = hint.language.as_deref();
     let chars: Vec<char> = base.chars().collect();
@@ -741,17 +769,26 @@ fn labelled(
         // Devanagari nukta or virama, NFD Latin) or a symbol (an emoji)
         // takes a mark.
         let ends_in_punct = base.chars().last().is_some_and(is_punctuation);
-        if has_text && !ends_in_punct && allowed(opts, language, m) {
-            if let Some(r) = render(m, script, language) {
-                new.push_str(r);
+        if has_text && !ends_in_punct {
+            match applied_mark(opts, language, m) {
+                Some(m) => {
+                    if let Some(r) = render(m, script, language) {
+                        new.push_str(r);
+                    }
+                }
+                None => *excluded += 1,
             }
         }
     }
     if let Some(m) = label.pre.filter(|m| m.is_pre()) {
         let starts_with_punct = base.chars().next().is_some_and(is_punctuation);
-        if has_text && !starts_with_punct && allowed(opts, language, m) {
-            if let Some(r) = render(m, script, language) {
-                new.insert_str(0, r);
+        if has_text && !starts_with_punct {
+            if allowed(opts, language, m) {
+                if let Some(r) = render(m, script, language) {
+                    new.insert_str(0, r);
+                }
+            } else {
+                *excluded += 1;
             }
         }
     }
@@ -1212,22 +1249,124 @@ mod tests {
             &RunLanguage::new("es-US"),
         );
         assert_eq!(texts(&es[0].1), ["¿Qué", "tal?"]);
-        // Not in English.
+        // Not in English: the excluded pre-mark is dropped and counted.
         let mut en_ch = vec![(Channel::Source, stream(Channel::Source, "qué tal"))];
-        run(&mut en_ch, &mut p, &PunctOptions::default(), &en());
+        let r = run(&mut en_ch, &mut p, &PunctOptions::default(), &en());
         assert_eq!(texts(&en_ch[0].1), ["Qué", "tal?"]);
+        assert_eq!(r.marks_excluded, Some(1));
         // Colon only where listed; a listed language replaces the defaults.
         let mut ch = vec![(Channel::Source, stream(Channel::Source, "note this"))];
         let mut pc = FixturePunctuator::marks(&[("note", Mark::Colon), ("this", Mark::Period)]);
-        run(&mut ch, &mut pc, &PunctOptions::default(), &en());
+        let r = run(&mut ch, &mut pc, &PunctOptions::default(), &en());
         assert_eq!(texts(&ch[0].1), ["Note", "this."]);
+        assert_eq!(r.marks_excluded, Some(1));
         let opts = PunctOptions {
             marks_by_language: BTreeMap::from([("en".to_owned(), vec![Mark::Colon])]),
             ..PunctOptions::default()
         };
         let mut ch = vec![(Channel::Source, stream(Channel::Source, "note this"))];
-        run(&mut ch, &mut pc, &opts, &en());
+        let r = run(&mut ch, &mut pc, &opts, &en());
+        // No period in the list: the sentence end has no stand-in either.
         assert_eq!(texts(&ch[0].1), ["Note:", "this"]);
+        assert_eq!(r.marks_excluded, Some(1));
+    }
+
+    /// Plan 16 section 3.13.7: a sentence-final label the language's list
+    /// excludes becomes the language's period (the boundary and the next
+    /// sentence's capital stay); an excluded `,` `:` `-` is dropped and
+    /// counted in `marks_excluded`.
+    #[test]
+    fn an_excluded_sentence_end_becomes_the_period_and_other_marks_are_counted() {
+        // The shipped lists: `.` `,` `?` everywhere, no comma for hi, ja, zh;
+        // plus a test language whose list has no question mark.
+        let opts = PunctOptions {
+            marks_by_language: BTreeMap::from([
+                (
+                    "*".to_owned(),
+                    vec![Mark::Period, Mark::Comma, Mark::Question],
+                ),
+                ("hi".to_owned(), vec![Mark::Period, Mark::Question]),
+                ("ja".to_owned(), vec![Mark::Period, Mark::Question]),
+                ("de".to_owned(), vec![Mark::Period, Mark::Comma]),
+            ]),
+            ..PunctOptions::default()
+        };
+        // English: `-` and `:` are on no list.
+        let mut ch = vec![(
+            Channel::Source,
+            stream(Channel::Source, "well so note this is it"),
+        )];
+        let mut p = FixturePunctuator::marks(&[
+            ("well", Mark::Comma),
+            ("so", Mark::Dash),
+            ("note", Mark::Colon),
+            ("it", Mark::Question),
+        ]);
+        let r = run(&mut ch, &mut p, &opts, &en());
+        assert_eq!(
+            texts(&ch[0].1),
+            ["Well,", "so", "note", "this", "is", "it?"]
+        );
+        assert_eq!(
+            (r.marks_added, r.marks_excluded, r.rejected_words),
+            (Some(2), Some(2), Some(0))
+        );
+        // Hindi: the comma is dropped and counted, the period is the danda.
+        let mut hi = vec![(
+            Channel::Source,
+            stream(Channel::Source, "नमस्ते दोस्तों आप कैसे हैं"),
+        )];
+        let mut ph = FixturePunctuator::marks(&[
+            ("नमस्ते", Mark::Comma),
+            ("दोस्तों", Mark::Period),
+            ("हैं", Mark::Question),
+        ]);
+        let r = run(&mut hi, &mut ph, &opts, &RunLanguage::new("hi"));
+        assert_eq!(texts(&hi[0].1), ["नमस्ते", "दोस्तों।", "आप", "कैसे", "हैं?"]);
+        assert_eq!((r.marks_added, r.marks_excluded), (Some(2), Some(1)));
+        // Japanese: no `、`, the sentence ends stay.
+        let mut ja = vec![(Channel::Source, stream(Channel::Source, "はい そうです"))];
+        let mut pj =
+            FixturePunctuator::marks(&[("はい", Mark::Comma), ("そうです", Mark::Question)]);
+        let r = run(&mut ja, &mut pj, &opts, &RunLanguage::new("ja"));
+        assert_eq!(texts(&ja[0].1), ["はい", "そうです？"]);
+        assert_eq!(r.marks_excluded, Some(1));
+        // A list without `?` (and `!`): the question becomes the period,
+        // which still starts the next sentence; not counted as excluded.
+        let mut de = vec![(
+            Channel::Source,
+            stream(Channel::Source, "kommst du mit ja gern toll"),
+        )];
+        let mut pd = FixturePunctuator::marks(&[
+            ("mit", Mark::Question),
+            ("ja", Mark::Comma),
+            ("gern", Mark::Exclamation),
+            ("toll", Mark::Period),
+        ]);
+        let r = run(&mut de, &mut pd, &opts, &RunLanguage::new("de-DE"));
+        assert_eq!(
+            texts(&de[0].1),
+            ["Kommst", "du", "mit.", "Ja,", "gern.", "Toll."]
+        );
+        assert_eq!(
+            (r.marks_added, r.marks_excluded, r.rejected_words),
+            (Some(4), Some(0), Some(0))
+        );
+        // A word that already ends in a mark takes none, so nothing is
+        // counted for it (under KeepAsr the ASR's mark stays).
+        // One ASR mark in eleven words, under the asr_punctuates cut-off.
+        let mut asr = vec![(
+            Channel::Source,
+            stream(
+                Channel::Source,
+                "yes, right we can go now and then see what happens",
+            ),
+        )];
+        let mut pa = FixturePunctuator::marks(&[("yes", Mark::Dash)]);
+        let r = run(&mut asr, &mut pa, &opts, &en());
+        assert_eq!(r.channels.get("source"), Some(&PunctReason::Ok));
+        assert_eq!(texts(&asr[0].1)[..2], ["Yes,", "right"]);
+        assert_eq!(r.marks_excluded, Some(0));
     }
 
     #[test]

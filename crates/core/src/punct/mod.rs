@@ -608,6 +608,13 @@ pub struct PunctReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub inner_marks_dropped: Option<u64>,
+    /// Labels the language's mark list excludes, dropped (plan 16 section
+    /// 3.13.7): a `,` `:` `-` or pre-mark, or a sentence end in a language
+    /// whose list has no period either. An excluded `?` or `!` becomes the
+    /// language's period instead and is not counted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub marks_excluded: Option<u64>,
     /// Streams whose labels were refused (wrong length).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

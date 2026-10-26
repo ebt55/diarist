@@ -50,6 +50,13 @@ case_upgrades?: number,
  */
 rejected_words?: number, inner_marks_dropped?: number, 
 /**
+ * Labels the language's mark list excludes, dropped (plan 16 section
+ * 3.13.7): a `,` `:` `-` or pre-mark, or a sentence end in a language
+ * whose list has no period either. An excluded `?` or `!` becomes the
+ * language's period instead and is not counted here.
+ */
+marks_excluded?: number, 
+/**
  * Streams whose labels were refused (wrong length).
  */
 streams_refused?: number, wall_s?: number, threads?: number, 
