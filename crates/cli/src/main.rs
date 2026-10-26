@@ -258,10 +258,15 @@ enum ModelsCommand {
     Scan,
     /// Select a model for a role (asr, diarizer) by id, name or file name.
     Select { role: String, query: String },
-    /// Fetch models with `nemo-speech pull` (required ones by default).
+    /// Download models from the manifest (required ones by default), checked
+    /// against its SHA-256.
     Pull {
         /// Manifest names (nemotron-3.5, nemotron-3-diarization, nemotron-en, parakeet-tdt).
         names: Vec<String>,
+        /// Fetch with the runtime's `nemo-speech pull` (System32 curl.exe)
+        /// as before 0.1.0-beta.5; kept for one release.
+        #[arg(long)]
+        via_runtime: bool,
     },
 }
 
@@ -525,7 +530,7 @@ fn run(cli: &Cli) -> CliResult {
                 println!("{role}: selected {} ({})", f.display_name, f.path);
                 Ok(())
             }
-            ModelsCommand::Pull { names } => models_pull(&ctx, names),
+            ModelsCommand::Pull { names, via_runtime } => models_pull(&ctx, names, *via_runtime),
         },
         Command::Engine { command } => match command {
             EngineCommand::List => engine_list(&ctx),
@@ -1091,7 +1096,10 @@ fn models_scan(ctx: &Ctx) -> CliResult {
     engine_list(ctx)
 }
 
-fn models_pull(ctx: &Ctx, names: &[String]) -> CliResult {
+/// `models pull`: our own downloader (resume, size and SHA-256 against the
+/// manifest) into the manifest's layout, then a scan. `via_runtime` keeps
+/// the old `nemo-speech pull` path for one release.
+fn models_pull(ctx: &Ctx, names: &[String], via_runtime: bool) -> CliResult {
     let manifest = Manifest::load(&ctx.paths.root)?;
     let entries: Vec<&models::ModelEntry> = if names.is_empty() {
         manifest.required().collect()
@@ -1113,17 +1121,68 @@ fn models_pull(ctx: &Ctx, names: &[String]) -> CliResult {
             })
             .collect::<CliResult<_>>()?
     };
+    if via_runtime {
+        return models_pull_via_runtime(ctx, &manifest, &entries);
+    }
+    for e in entries {
+        if e.experimental {
+            eprintln!("note: {} is experimental", e.name);
+        }
+        eprintln!("downloading {} ({} MB)", e.name, e.size_bytes >> 20);
+        // Never called when the file is already there with the right hash.
+        let mut fetched = false;
+        let dest = models::download_model(e, &ctx.paths.models(), &mut |done, total| {
+            fetched = true;
+            if let Some(t) = total.filter(|t| *t > 0) {
+                eprint!(
+                    "\r{:>3}%  {} / {} MB   ",
+                    done * 100 / t,
+                    done >> 20,
+                    t >> 20
+                );
+            }
+        })
+        .inspect_err(|_| {
+            eprintln!();
+            manual_download_hint(
+                &e.url,
+                &e.sha256,
+                e.size_bytes,
+                &e.dest_dir(&ctx.paths.models()),
+                "put the file in",
+            );
+        })?;
+        if fetched {
+            eprintln!();
+        }
+        let how = if fetched {
+            "downloaded"
+        } else {
+            "already present"
+        };
+        println!("{}: {how}, SHA-256 verified ({})", e.name, dest.display());
+    }
+    models_scan(ctx)
+}
+
+/// `models pull --via-runtime`: the selected runtime's `nemo-speech pull`
+/// (its downloader is System32 `curl.exe`), as before 0.1.0-beta.5.
+fn models_pull_via_runtime(
+    ctx: &Ctx,
+    manifest: &Manifest,
+    entries: &[&models::ModelEntry],
+) -> CliResult {
     let engine = match models::selected_file(&*ctx.store, ModelRole::Engine)? {
         Some(e) => e,
         None => {
-            models::scan(&ctx.paths, &*ctx.store, &manifest)?;
+            models::scan(&ctx.paths, &*ctx.store, manifest)?;
             models::selected_file(&*ctx.store, ModelRole::Engine)?.ok_or_else(|| {
                 CliError::Failed("no engine installed; run `diarist-cli engine install`".into())
             })?
         }
     };
     let engine_dir = ctx.paths.absolute(&engine.path);
-    for e in entries {
+    for &e in entries {
         if e.experimental {
             eprintln!("note: {} is experimental", e.name);
         }
@@ -1137,6 +1196,9 @@ fn models_pull(ctx: &Ctx, names: &[String]) -> CliResult {
                     e.size_bytes,
                     &models::pull_dir(&ctx.paths.models(), e),
                     "put the file in",
+                );
+                eprintln!(
+                    "  (for --via-runtime the firewall must allow C:\\Windows\\System32\\curl.exe)"
                 );
                 return Err(err.into());
             }
@@ -1190,7 +1252,7 @@ fn manual_download_hint(url: &str, sha256: &str, size: u64, dest: &Path, what: &
     eprintln!("  sha256  {sha256}");
     eprintln!("  size    {size} bytes");
     eprintln!("  then {what} {}", dest.display());
-    eprintln!("  (a firewall such as simplewall may need to allow diarist-cli.exe, or curl.exe for model pulls)");
+    eprintln!("  (a firewall such as simplewall may need to allow diarist-cli.exe)");
 }
 
 fn engine_install(ctx: &Ctx, name: Option<&str>) -> CliResult {
@@ -1475,6 +1537,13 @@ mod tests {
             vec!["diarist-cli", "models", "scan"],
             vec!["diarist-cli", "models", "select", "asr", "nemotron-3.5"],
             vec!["diarist-cli", "models", "pull", "nemotron-en"],
+            vec![
+                "diarist-cli",
+                "models",
+                "pull",
+                "--via-runtime",
+                "nemotron-en",
+            ],
             vec!["diarist-cli", "engine", "list"],
             vec!["diarist-cli", "engine", "select", "0.2.0"],
             vec!["diarist-cli", "doctor"],

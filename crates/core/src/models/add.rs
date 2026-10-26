@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::download::{download_file, sha256_file, Progress};
+use super::download::{download_file, record_sha256, sha256_file, Progress};
 use super::paths::DataPaths;
 use crate::error::{CoreError, Result};
 
@@ -53,17 +53,6 @@ pub fn file_name_from_url(url: &str) -> Result<String> {
     Ok(name)
 }
 
-/// Writes the `.sha256` sidecar the scanner trusts (see `scan::own_sha`).
-fn record_sha(file: &Path, sha: &str) {
-    let mut side = file.as_os_str().to_owned();
-    side.push(".sha256");
-    let name = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let _ = std::fs::write(PathBuf::from(side), format!("{sha}  {name}\n"));
-}
-
 /// Downloads `url` into `models\user\`; with `sha256` the file must match
 /// it. A partial download resumes on the next call. Returns the file.
 pub fn add_from_url(
@@ -90,7 +79,7 @@ pub fn add_from_url(
         Some(s) => s,
         None => sha256_file(&dest)?,
     };
-    record_sha(&dest, &got);
+    record_sha256(&dest, &got);
     Ok(dest)
 }
 
