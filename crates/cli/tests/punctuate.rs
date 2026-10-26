@@ -99,4 +99,15 @@ fn without_a_model_punctuate_prints_the_reason_and_exits_0() {
         Some(1)
     );
     assert_eq!(cli(root.path(), &["punctuate"]).status.code(), Some(2));
+    // --remove works on one meeting; with --all-missing it is refused.
+    let out = cli(root.path(), &["punctuate", "--all-missing", "--remove"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--remove")
+            && stderr.contains("--all-missing")
+            && stderr.contains("cannot be used with"),
+        "{stderr}"
+    );
+    assert_eq!(store.list_runs(m).unwrap().len(), 1);
 }

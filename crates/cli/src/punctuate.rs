@@ -24,8 +24,10 @@ pub struct PunctuateArgs {
     /// Every finished meeting whose transcript has no punctuation yet.
     #[arg(long, group = "which")]
     pub all_missing: bool,
-    /// Remove punctuation instead (back to the speech model's text).
-    #[arg(long)]
+    /// Remove punctuation instead (back to the speech model's text), from
+    /// one meeting: --all-missing picks meetings without punctuation, so
+    /// the two do not go together.
+    #[arg(long, conflicts_with = "all_missing")]
     pub remove: bool,
 }
 
