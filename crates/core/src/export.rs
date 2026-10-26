@@ -324,6 +324,9 @@ struct JsonWord<'a> {
     text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_label: Option<&'a str>,
+    /// The ASR's text where `text` was punctuated (additive, plan 16).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_text: Option<&'a str>,
 }
 
 /// Pretty JSON with meeting facts, speakers, and segments with their words.
@@ -376,6 +379,7 @@ pub fn to_json(doc: &ExportDoc) -> String {
                                 end_ms: w.end_ms,
                                 text: &w.text,
                                 raw_label: w.raw_label.as_deref(),
+                                raw_text: w.raw_text.as_deref(),
                             })
                             .collect()
                     })
@@ -539,6 +543,13 @@ mod tests {
             raw_label: Some(if seg == 102 { "spk_1" } else { "spk_0" }.into()),
             margin: None,
             overlap: false,
+            // Punctuated words keep the ASR's text (plan 16 section 3.5).
+            raw_text: match t {
+                "Hello" => Some("hello".into()),
+                "team." => Some("team".into()),
+                "start?" => Some("start".into()),
+                _ => None,
+            },
         })
         .collect();
         ExportDoc {
@@ -676,6 +687,7 @@ mod tests {
                 raw_label: None,
                 margin: None,
                 overlap: false,
+                raw_text: None,
             }],
         };
         store.insert_transcript(run.id, &t).unwrap();

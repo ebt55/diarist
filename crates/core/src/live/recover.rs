@@ -22,6 +22,7 @@ use super::{
 };
 use crate::audio::wav::repair_header;
 use crate::error::Result;
+use crate::punct::rebuild::descends_from;
 use crate::settings;
 use crate::store::{RunStore, StoreError};
 use crate::transcript::SegmentOptions;
@@ -58,7 +59,10 @@ pub struct RecoveredMeeting {
     pub post_pass: Option<PostPassHandle>,
 }
 
-/// Makes sure the live run has its transcript, is finished and is current.
+/// Makes sure the live run has its transcript, is finished and is current,
+/// unless the current run is a copy of it (Restore, a punctuation rebuild):
+/// that stays current, so the post-pass carries its names over (plan 16
+/// section 3.9 step 7).
 fn settle_live_run(store: &dyn RunStore, meeting: MeetingId, run: RunId) -> Result<()> {
     match store.materialise_live_run(run, &SegmentOptions::default()) {
         Ok(()) | Err(StoreError::Conflict(_)) => {}
@@ -67,7 +71,13 @@ fn settle_live_run(store: &dyn RunStore, meeting: MeetingId, run: RunId) -> Resu
     if store.get_run(run)?.status == RunStatus::Running {
         store.finish_run(run, RunStatus::Done)?;
     }
-    store.set_current_run(meeting, run)?;
+    let copy = store
+        .get_meeting(meeting)?
+        .current_run
+        .is_some_and(|c| c.id != run && descends_from(store, &c, run));
+    if !copy {
+        store.set_current_run(meeting, run)?;
+    }
     Ok(())
 }
 
@@ -89,6 +99,7 @@ fn post_pass_job(
         transcribe: true,
         keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
         segment: SegmentOptions::default(),
+        punct: ctx.punct.clone(),
     })
 }
 

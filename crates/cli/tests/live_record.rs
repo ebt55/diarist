@@ -299,6 +299,7 @@ fn live_recording_end_to_end() {
         min_free_bytes: MIN_FREE_BYTES,
         live_engine_info: serde_json::json!({"runtime": "nemo-speech", "adapter": "nemo-ws"}),
         on_job_event: None,
+        punct: diarist_core::punct::PunctSource::None,
     };
     let sink = Arc::new(TestSink::default());
     let rec = Recorder::start(

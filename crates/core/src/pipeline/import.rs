@@ -9,9 +9,10 @@ use super::{CancelToken, ImportRequest};
 use crate::audio::Decoder;
 use crate::engine::{DiarPreset, DiarizeRunner, Engine, EngineEvent, EngineWord, FileJob};
 use crate::error::{CoreError, Result};
-use crate::models::{free_disk_bytes, languages};
+use crate::models::{free_disk_bytes, languages, DataPaths};
+use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
-use crate::store::{NewAudioTrack, NewMeeting, Store};
+use crate::store::{NewAudioTrack, NewMeeting, RunStore};
 use crate::transcript::{build_transcript, words_from_engine, SegmentOptions, UNKNOWN_LABEL};
 use crate::types::{
     AudioFormat, Channel, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, Source, TrackChannel,
@@ -22,8 +23,9 @@ use crate::views::{JobEvent, JobStage, Settings};
 pub const MIN_FREE_BYTES: u64 = 2 << 30;
 
 /// How an import runs: where, in which language, what to keep. Built from
-/// the effective settings with [`ImportOptions::new`]; fields can be
-/// overridden afterwards (the CLI's `--language`, `--keep-wav`, `--rttm`).
+/// the caller's data paths and the effective settings with
+/// [`ImportOptions::new`]; fields can be overridden afterwards (the CLI's
+/// `--language`, `--keep-wav`, `--rttm`).
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     /// The data root: the 16 kHz WAV, the engine JSON and logs go to
@@ -43,15 +45,19 @@ pub struct ImportOptions {
     /// meeting folder (setting `keep_diarization_segments`; needs a runner).
     pub run_diarize_pass: bool,
     pub segment: SegmentOptions,
+    /// The punctuator (plan 16 section 3.2): the selected model of the
+    /// caller's data paths, so `--models-dir` overrides apply.
+    pub punct: PunctSource,
 }
 
 impl ImportOptions {
-    /// Options for `data_root` from `settings` (stored values; defaults are
-    /// filled in here).
-    pub fn new(data_root: impl Into<PathBuf>, settings: &Settings) -> Self {
+    /// Options for the data root of `paths` from `settings` (stored values;
+    /// defaults are filled in here); punctuation from `paths`.
+    pub fn new(paths: &DataPaths, settings: &Settings) -> Self {
         let settings = settings::with_defaults(settings.clone());
         Self {
-            data_root: data_root.into(),
+            data_root: paths.root.clone(),
+            punct: PunctSource::Data(paths.clone()),
             language: settings::default_language(&settings),
             keep_intermediate: settings::get_bool(&settings, settings::KEEP_INTERMEDIATE_WAV),
             run_diarize_pass: settings::get_bool(&settings, settings::KEEP_DIARIZATION_SEGMENTS),
@@ -90,8 +96,11 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///    in `engine_info`), then `engine.transcribe_file` and drain its events
 ///    until `Done` or `Error`; a set `cancel` token (from the [`JobQueue`])
 ///    is forwarded to `engine.cancel`. Optionally the standalone diarize pass.
-/// 4. Build speakers, segments (`transcript` module) and words;
-///    `store.insert_transcript`, `finish_run(done)`, `set_current_run`,
+/// 4. Punctuate the words (`opts.punct`, plan 16 section 3.2; the report
+///    goes to the run's `engine_info.punctuation` through
+///    `set_run_engine_info`), build speakers, segments (`transcript`
+///    module) and words; `store.insert_transcript`, `finish_run(done)`,
+///    `set_current_run`,
 ///    status `done`; delete the 16 kHz intermediate unless kept.
 ///    Words that are mostly unknown-token markers are not stored: the job
 ///    fails with [`CoreError::UnknownTokens`] (the model cannot transcribe
@@ -104,7 +113,7 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///
 /// [`JobQueue`]: super::JobQueue
 pub fn import_file(
-    store: &dyn Store,
+    store: &dyn RunStore,
     engine: &dyn Engine,
     decoder: &dyn Decoder,
     req: ImportRequest,
@@ -218,7 +227,7 @@ pub fn import_file(
 
 #[allow(clippy::too_many_arguments)]
 fn run_import(
-    store: &dyn Store,
+    store: &dyn RunStore,
     engine: &dyn Engine,
     decoder: &dyn Decoder,
     req: &ImportRequest,
@@ -391,6 +400,26 @@ fn run_import(
     if languages::unknown_token_output(words.iter().map(|w| w.text.as_str())) {
         return Err(CoreError::UnknownTokens);
     }
+    // Punctuation: one channel, the diarized labels as they are; the
+    // session is dropped right after.
+    let mut channels = vec![(Channel::Source, words)];
+    let punctuation = {
+        let mut loaded = opts.punct.load(store);
+        punctuate_loaded(
+            &mut loaded,
+            &mut channels,
+            &opts.segment,
+            &RunLanguage::new(&opts.language),
+            &cancelled,
+        )
+    };
+    if cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    let words = channels.pop().map(|(_, w)| w).unwrap_or_default();
+    let mut info = run.engine_info.clone();
+    info["punctuation"] = punctuation.to_json();
+    store.set_run_engine_info(run.id, info)?;
     let transcript = build_transcript(&words, &opts.segment);
     store.insert_transcript(run.id, &transcript)?;
     store.finish_run(run.id, RunStatus::Done)?;
@@ -406,7 +435,7 @@ mod tests {
     use crate::audio::DecoderKind;
     use crate::engine::nemo_cli::{engine_words, file_events, parse_transcribe_json};
     use crate::engine::{EngineInfo, ErrorCode};
-    use crate::store::{RunStore, SqliteStore};
+    use crate::store::{RunStore, SqliteStore, Store};
     use crate::types::JobId;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{channel, Receiver};
@@ -573,7 +602,7 @@ mod tests {
         let events = Mutex::new(Vec::new());
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path(), &Settings::default())
+            ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
         };
         let id = import_file(
             &store,
@@ -596,6 +625,11 @@ mod tests {
         assert_eq!(info["diar_preset"], "runtime default");
         assert_eq!(info["decoder"], "other");
         assert_eq!(info["language"], "en");
+        // No punctuation model in this data root.
+        assert_eq!(
+            info["punctuation"],
+            serde_json::json!({"applied": false, "reason": "no_model"})
+        );
         assert_eq!(d.speakers.len(), 4);
         assert_eq!(store.get_words(id, 0, i64::MAX).unwrap().len(), 464);
         let segs = store.get_segments(id, 0, 10_000).unwrap();
@@ -632,6 +666,74 @@ mod tests {
     }
 
     #[test]
+    fn imports_are_punctuated_without_changing_a_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let src = input(dir.path());
+        let import = |punct: PunctSource| {
+            let opts = ImportOptions {
+                min_free_bytes: 0,
+                punct,
+                ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
+            };
+            import_file(
+                &store,
+                &FakeEngine::new(Mode::Fixture),
+                &FakeDecoder,
+                request(&src),
+                &opts,
+                &CancelToken::default(),
+                &|_| {},
+            )
+            .unwrap()
+        };
+        let plain = import(PunctSource::None);
+        let fixture = PunctSource::factory(|| {
+            crate::punct::fixture::FixturePunctuator::new(|words, _| {
+                Ok((0..words.len())
+                    .map(|i| match i % 12 {
+                        11 => crate::punct::WordLabel::post(crate::punct::Mark::Period),
+                        4 => crate::punct::WordLabel::post(crate::punct::Mark::Comma),
+                        _ => crate::punct::WordLabel::KEEP,
+                    })
+                    .collect())
+            })
+        });
+        let punctuated = import(fixture);
+        let words = |id| store.get_words(id, i64::MIN, i64::MAX).unwrap();
+        let (a, b) = (words(plain), words(punctuated));
+        assert_eq!(a.len(), 464);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!((x.start_ms, x.end_ms), (y.start_ms, y.end_ms));
+            assert_eq!(x.raw_label, y.raw_label);
+            assert_eq!(
+                crate::audio::echo::text::norm(&x.text),
+                crate::audio::echo::text::norm(&y.text)
+            );
+            assert_eq!(y.asr_text(), x.text);
+            assert_eq!(y.raw_text.is_some(), y.text != x.text);
+        }
+        assert!(b.iter().filter(|w| w.raw_text.is_some()).count() > 50);
+        // The report went in through `set_run_engine_info`.
+        let info = store
+            .get_meeting(punctuated)
+            .unwrap()
+            .current_run
+            .unwrap()
+            .engine_info;
+        let p = &info["punctuation"];
+        assert_eq!(p["applied"], true, "{p}");
+        assert_eq!(p["model"], "fixture");
+        assert_eq!(p["rejected_words"], 0);
+        assert_eq!(p["words"], 464);
+        assert_eq!(info["runtime"], "fake 1.0", "the rest of engine_info stays");
+        // Sentence ends split segments: more segments than without.
+        let segs = |id| store.get_segments(id, 0, 10_000).unwrap().len();
+        assert!(segs(punctuated) > segs(plain));
+    }
+
+    #[test]
     fn engine_failure_marks_meeting_and_run_failed() {
         let dir = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
@@ -643,7 +745,7 @@ mod tests {
         let events = Mutex::new(Vec::new());
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path(), &store.get_settings().unwrap())
+            ..ImportOptions::new(&DataPaths::at(dir.path()), &store.get_settings().unwrap())
         };
         assert!(opts.keep_intermediate);
         let err = import_file(
@@ -685,7 +787,7 @@ mod tests {
         let opts = ImportOptions {
             min_free_bytes: 0,
             language: "ml".into(),
-            ..ImportOptions::new(dir.path(), &Settings::default())
+            ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
         };
         let err = import_file(
             &store,
@@ -736,7 +838,7 @@ mod tests {
         });
         let opts = ImportOptions {
             min_free_bytes: 0,
-            ..ImportOptions::new(dir.path(), &Settings::default())
+            ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
         };
         let events = Mutex::new(Vec::new());
         let err = import_file(
@@ -769,7 +871,7 @@ mod tests {
         let engine = FakeEngine::new(Mode::Fixture);
         let opts = ImportOptions {
             min_free_bytes: u64::MAX,
-            ..ImportOptions::new(dir.path(), &Settings::default())
+            ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
         };
         let events = Mutex::new(Vec::new());
         let err = import_file(
@@ -799,7 +901,7 @@ mod tests {
             &engine,
             &FakeDecoder,
             request(&missing),
-            &ImportOptions::new(dir.path(), &Settings::default()),
+            &ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default()),
             &CancelToken::default(),
             &|_| {}
         )

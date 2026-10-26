@@ -84,6 +84,16 @@ pub struct TranscriptWord {
     pub speaker: String,
     /// Engine label before smoothing or edits (`words.raw_label`).
     pub raw_label: Option<String>,
+    /// The ASR's text where `text` holds display text that differs from it
+    /// (punctuation, `words.raw_text`); `None` when `text` is the ASR's.
+    pub raw_text: Option<String>,
+}
+
+impl TranscriptWord {
+    /// The ASR's text of the word: `raw_text`, else `text`.
+    pub fn asr_text(&self) -> &str {
+        self.raw_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// Converts engine words (microseconds) of one channel. Words without a
@@ -104,6 +114,7 @@ pub fn words_from_engine(
             confidence: w.conf,
             speaker: w.spk.clone().unwrap_or_else(|| default_label.to_owned()),
             raw_label: w.spk.clone(),
+            raw_text: None,
         })
         .collect()
 }
@@ -146,12 +157,28 @@ pub struct SegmentDraft {
     pub words: Range<usize>,
 }
 
-/// True when `text` ends a sentence (`.`, `?`, `!`, `…`, also before closing quotes).
+/// True when `text` ends a sentence (`.`, `?`, `!`, `…`, `。` `？` `！`, the
+/// Devanagari `।` `॥`, the Arabic `؟` `۔`, the Ethiopic `።` `፧` and the Greek
+/// question mark U+037E; also before closing quotes).
 pub fn ends_sentence(text: &str) -> bool {
     let trimmed = text.trim_end_matches(['"', '\'', ')', '”', '’', ']']);
     matches!(
         trimmed.chars().last(),
-        Some('.' | '?' | '!' | '…' | '。' | '？' | '！')
+        Some(
+            '.' | '?'
+                | '!'
+                | '…'
+                | '。'
+                | '？'
+                | '！'
+                | '।'
+                | '॥'
+                | '؟'
+                | '۔'
+                | '።'
+                | '፧'
+                | '\u{037E}'
+        )
     )
 }
 
@@ -285,6 +312,7 @@ impl TranscriptBuilder {
             raw_label: w.raw_label.clone(),
             margin: None,
             overlap: false,
+            raw_text: w.raw_text.clone(),
         }));
     }
 }
@@ -341,6 +369,7 @@ mod tests {
             confidence: None,
             speaker: spk.into(),
             raw_label: Some(spk.into()),
+            raw_text: None,
         }
     }
 
@@ -403,6 +432,12 @@ mod tests {
         assert_eq!(texts, ["Done. Next item?", "Yes okay"]);
         assert!(ends_sentence("end.\""));
         assert!(!ends_sentence("Dr"));
+        // Script sentence ends (plan 16 section 3.4).
+        for s in ["है।", "॥", "ماذا؟", "ہے۔", "ነው።", "፧", "τι\u{037E}", "好。"]
+        {
+            assert!(ends_sentence(s), "{s}");
+        }
+        assert!(!ends_sentence("،") && !ends_sentence("hello,"));
     }
 
     #[test]

@@ -12,8 +12,21 @@
 //! [`current`] builds the punctuator for the selected model (the ONNX
 //! runner, `onnx.rs`); [`load`] wraps it with the `transcript.punctuation`
 //! setting and turns every way of not having one into a report.
+//! [`apply::punctuate_channels`] applies a punctuator to a run's channels;
+//! the post-pass, imports and Restore call it through [`punctuate_loaded`],
+//! with the punctuator from a [`PunctSource`]. [`rebuild::rebuild_run`]
+//! adds or removes punctuation on a finished meeting as a new run.
+
+// Chunk A: label application, the test fixture and rebuilds.
+pub mod apply;
+pub mod fixture;
+pub mod rebuild;
+
+pub use apply::{punctuate_channels, RunLanguage};
+pub use rebuild::{rebuild_run, rebuild_run_with, RebuildReport, RebuildWhy};
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -22,7 +35,8 @@ use crate::error::{CoreError, Result};
 use crate::models::DataPaths;
 use crate::settings;
 use crate::store::{Store, StoreError};
-use crate::types::RunId;
+use crate::transcript::{SegmentOptions, TranscriptWord};
+use crate::types::{Channel, RunId};
 
 /// A punctuation model: labels whole streams of words.
 ///
@@ -712,6 +726,84 @@ pub fn load(
         Err(u) => {
             log::warn!("punctuation unavailable: {u}");
             Err(Box::new(PunctReport::not_applied_with(u.reason, u.message)))
+        }
+    }
+}
+
+/// A punctuator ready for a build, or the report to write without one
+/// ([`load`], [`PunctSource::load`]).
+pub type Loaded = std::result::Result<Box<dyn Punctuator>, Box<PunctReport>>;
+
+/// Builds a punctuator for a store (tests, a session shared by a batch).
+pub type PunctFactory = dyn Fn(&dyn Store) -> Loaded + Send + Sync;
+
+/// Where a build (the post-pass, an import, Restore, a rebuild) gets its
+/// punctuator: normally the selected model of the caller's data paths (the
+/// CLI's and the eval harness's `--models-dir` and `--engine-dir` overrides
+/// included), never a `DataPaths` rebuilt from a bare root.
+#[derive(Clone, Default)]
+pub enum PunctSource {
+    /// Nothing punctuates (`reason: "no_model"`): tools and tests that do not.
+    #[default]
+    None,
+    /// The selected punctuation model of these data paths ([`load`]).
+    Data(DataPaths),
+    /// Anything else, e.g. a [`fixture::FixturePunctuator`] in tests.
+    Factory(Arc<PunctFactory>),
+}
+
+impl PunctSource {
+    /// A source that builds a new punctuator with `f` for every build.
+    pub fn factory<P: Punctuator + 'static>(f: impl Fn() -> P + Send + Sync + 'static) -> Self {
+        PunctSource::Factory(Arc::new(move |_| Ok(Box::new(f()) as Box<dyn Punctuator>)))
+    }
+
+    /// The punctuator, or the report without one. `transcript.punctuation =
+    /// off` is honoured for every source.
+    pub fn load(&self, store: &dyn Store) -> Loaded {
+        match self {
+            PunctSource::None => Err(Box::new(PunctReport::not_applied(PunctReason::NoModel))),
+            PunctSource::Data(paths) => load(paths, store),
+            PunctSource::Factory(f) => {
+                if setting(store) == PunctSetting::Off {
+                    return Err(Box::new(PunctReport::not_applied(PunctReason::Off)));
+                }
+                f(store)
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for PunctSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PunctSource::None => f.write_str("PunctSource::None"),
+            PunctSource::Data(p) => f.debug_tuple("PunctSource::Data").field(&p.root).finish(),
+            PunctSource::Factory(_) => f.write_str("PunctSource::Factory"),
+        }
+    }
+}
+
+/// Punctuates the channels of a build with `loaded` (the model's options,
+/// streams broken at the run's `max_gap_ms`) and returns the report for
+/// `engine_info.punctuation`. Without a punctuator every word gets the
+/// ASR's text back and the report is the one `loaded` carries.
+pub fn punctuate_loaded(
+    loaded: &mut Loaded,
+    channels: &mut [(Channel, Vec<TranscriptWord>)],
+    segment: &SegmentOptions,
+    lang: &RunLanguage,
+    cancel: &dyn Fn() -> bool,
+) -> PunctReport {
+    match loaded {
+        Ok(p) => {
+            let mut opts = p.options();
+            opts.max_gap_ms = segment.max_gap_ms;
+            punctuate_channels(channels, Some(p.as_mut()), &opts, lang, cancel)
+        }
+        Err(report) => {
+            punctuate_channels(channels, None, &PunctOptions::default(), lang, cancel);
+            (**report).clone()
         }
     }
 }

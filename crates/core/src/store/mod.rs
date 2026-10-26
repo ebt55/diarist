@@ -137,6 +137,10 @@ pub struct NewWord {
     pub raw_label: Option<String>,
     pub margin: Option<f32>,
     pub overlap: bool,
+    /// The ASR's text where `text` (the display text) differs from it
+    /// (punctuation, plan 16 section 3.5); `None` when they are the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
 }
 
 /// One file as found by the model scanner, before it has a row.
@@ -335,6 +339,14 @@ pub trait RunStore: Store {
     /// run of the same meeting), atomically. Does not change the current run.
     /// Rules: `docs/02-data-model.md`, "Carry-over from the previous current run".
     fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport>;
+
+    /// Carries speakers from `from_run` to `to_run` by identity: `to_run`
+    /// was rebuilt from `from_run`'s words with the same labels (punctuation
+    /// added or removed, echo words restored), so speaker rows match by
+    /// `(channel, engine_label)` and keep name, colour, global id, merge,
+    /// `needs_review` and name anchor; then the meeting's `reassign` edits
+    /// are replayed. Atomic; does not change the current run.
+    fn carry_over_identity(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport>;
 
     /// Appends one revision of a live utterance (append-only; a later `rev`
     /// of the same `(channel, utt)` supersedes earlier ones). Word times are

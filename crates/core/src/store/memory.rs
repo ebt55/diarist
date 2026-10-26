@@ -9,7 +9,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::carry_over::{
-    carry_over, group_bounds, CarryBackend, CarryOverReport, OwnedWord, SpeakerUpdate,
+    carry_over, carry_over_identity, group_bounds, CarryBackend, CarryOverReport, OwnedWord,
+    SpeakerUpdate,
 };
 use super::live::{latest_revisions, live_row, transcript_from_live};
 use super::{
@@ -385,6 +386,7 @@ pub(super) fn synthesize_words(seg: &Segment, first_id: i64) -> Vec<Word> {
                 raw_label: None,
                 margin: None,
                 overlap: false,
+                raw_text: None,
             }
         })
         .collect()
@@ -448,6 +450,9 @@ impl CarryBackend for State {
         if let Some((a0, a1)) = u.anchor {
             sp.name_anchor_start_ms = Some(a0);
             sp.name_anchor_end_ms = Some(a1);
+        }
+        if let Some(m) = u.merged_into {
+            sp.merged_into = Some(m);
         }
         if let Some(c) = &u.color {
             sp.color = Some(c.clone());
@@ -791,6 +796,7 @@ impl MemoryStore {
                 raw_label: w.raw_label.clone(),
                 margin: w.margin,
                 overlap: w.overlap,
+                raw_text: w.raw_text.clone(),
             });
         }
         for ((i, seg), words) in t.segments.iter().enumerate().zip(words_by_segment) {
@@ -1375,6 +1381,11 @@ impl RunStore for MemoryStore {
     fn carry_over(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
         let mut st = self.lock()?;
         carry_over(&mut *st, from_run, to_run)
+    }
+
+    fn carry_over_identity(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
+        let mut st = self.lock()?;
+        carry_over_identity(&mut *st, from_run, to_run)
     }
 
     fn append_live_utterance(

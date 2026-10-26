@@ -13,6 +13,8 @@ use clap::{Parser, Subcommand};
 mod aec_probe;
 mod crash_test;
 mod record;
+// Plan 16 chunk A: `punctuate`.
+mod punctuate;
 use diarist_core::audio::capture::{self, DeviceFlow};
 use diarist_core::audio::{find_on_path, ChainDecoder};
 use diarist_core::engine::NemoCliEngine;
@@ -248,6 +250,10 @@ enum Command {
         #[arg(long, group = "what")]
         engine: bool,
     },
+    /// Add punctuation to a finished meeting (or every one without) as a
+    /// new run with the selected punctuation model; --remove takes it out.
+    /// The earlier runs stay.
+    Punctuate(punctuate::PunctuateArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -561,6 +567,7 @@ fn run(cli: &Cli) -> CliResult {
                 device: device.clone(),
             },
         ),
+        Command::Punctuate(args) => punctuate::punctuate(&ctx, args),
     }
 }
 
@@ -708,7 +715,7 @@ fn transcribe(
     }
     let engine = built.engine;
     let runner = built.diarize_runner;
-    let mut opts = ImportOptions::new(&ctx.paths.root, &ctx.store.get_settings()?);
+    let mut opts = ImportOptions::new(&ctx.paths, &ctx.store.get_settings()?);
     opts.language = language.to_owned();
     opts.keep_intermediate |= keep_wav;
     opts.run_diarize_pass |= rttm;

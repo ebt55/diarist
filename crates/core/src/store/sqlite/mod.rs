@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
-use super::carry_over::{carry_over, group_bounds, CarryOverReport};
+use super::carry_over::{carry_over, carry_over_identity, group_bounds, CarryOverReport};
 use super::{
     is_hex_color, pick_playback_track, NewAudioTrack, NewMeeting, NewTranscript, RunStore,
     ScannedModelFile, Store, StoreError, StoreResult,
@@ -59,6 +59,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0003_echo_dropped",
         include_str!("migrations/0003_echo_dropped.sql"),
+    ),
+    (
+        "0004_raw_text",
+        include_str!("migrations/0004_raw_text.sql"),
     ),
 ];
 
@@ -224,6 +228,14 @@ impl RunStore for SqliteStore {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let report = carry_over(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    fn carry_over_identity(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let report = carry_over_identity(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
         tx.commit()?;
         Ok(report)
     }
@@ -552,7 +564,7 @@ fn speaker_from_row(r: &Row<'_>) -> rusqlite::Result<Speaker> {
 
 const WORD_COLS: &str =
     "w.id, w.segment_id, w.meeting_id, w.start_ms, w.end_ms, w.text, w.confidence, \
-     w.raw_label, w.margin, w.overlap";
+     w.raw_label, w.margin, w.overlap, w.raw_text";
 
 fn word_from_row(r: &Row<'_>) -> rusqlite::Result<Word> {
     Ok(Word {
@@ -566,6 +578,7 @@ fn word_from_row(r: &Row<'_>) -> rusqlite::Result<Word> {
         raw_label: r.get(7)?,
         margin: r.get::<_, Option<f64>>(8)?.map(|v| v as f32),
         overlap: r.get(9)?,
+        raw_text: r.get(10)?,
     })
 }
 
@@ -1122,8 +1135,8 @@ fn write_transcript(
     }
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO words (segment_id, meeting_id, start_ms, end_ms, text, confidence, raw_label, margin, overlap)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO words (segment_id, meeting_id, start_ms, end_ms, text, confidence, raw_label, margin, overlap, raw_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for w in &t.words {
             stmt.execute(params![
@@ -1135,7 +1148,8 @@ fn write_transcript(
                 w.confidence.map(f64::from),
                 w.raw_label,
                 w.margin.map(f64::from),
-                w.overlap
+                w.overlap,
+                w.raw_text
             ])?;
         }
     }
@@ -1794,6 +1808,7 @@ mod tests {
                     raw_label: Some("spk_0".into()),
                     margin: None,
                     overlap: false,
+                    raw_text: None,
                 });
             }
         }
@@ -2008,7 +2023,7 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             conn.execute_batch(
                 "DROP TABLE counters; ALTER TABLE transcript_runs DROP COLUMN echo_dropped;
-                 PRAGMA user_version = 1;",
+                 ALTER TABLE words DROP COLUMN raw_text; PRAGMA user_version = 1;",
             )
             .unwrap();
         }
@@ -2049,6 +2064,84 @@ mod tests {
         assert_eq!((version, rows), (1, 2));
         drop(store);
         // Up to date: the next open makes no copy.
+        assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+    }
+
+    #[test]
+    fn migration_0004_from_beta4_adds_raw_text_after_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("diarist.db");
+        let a = {
+            let store = SqliteStore::open(&db).unwrap();
+            let a = meeting(&store, "Beta 4");
+            current(&store, a.id, &["kept words"]);
+            a.id
+        };
+        // Back to schema 3, as 0.1.0-beta.4 left it.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("ALTER TABLE words DROP COLUMN raw_text; PRAGMA user_version = 3;")
+                .unwrap();
+        }
+        let store = SqliteStore::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 4);
+        let bak = dir.path().join("diarist.db.bak-3");
+        assert_eq!(store.migration_backup(), Some(bak.as_path()));
+        // The copy is the beta.4 database: schema 3, no raw_text.
+        let copy = Connection::open(&bak).unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        assert!(copy.prepare("SELECT raw_text FROM words").is_err());
+        drop(copy);
+        // Old words read back with raw_text NULL; new ones keep theirs.
+        let words = store.get_words(a, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            ["kept", "words"]
+        );
+        assert!(words.iter().all(|w| w.raw_text.is_none()));
+        let m = meeting(&store, "Beta 5");
+        let run = store
+            .create_run(m.id, RunKind::File, serde_json::json!({}))
+            .unwrap();
+        let mut t = NewTranscript::default();
+        t.speakers.push(NewSpeaker {
+            channel: Channel::Source,
+            engine_label: "spk_0".into(),
+            display_name: None,
+            color: None,
+            needs_review: false,
+        });
+        t.segments.push(NewSegment {
+            speaker: 0,
+            start_ms: 0,
+            end_ms: 900,
+            text: "Hello there.".into(),
+        });
+        for (i, (text, raw)) in [("Hello", Some("hello")), ("there.", Some("there"))]
+            .into_iter()
+            .enumerate()
+        {
+            t.words.push(NewWord {
+                segment: 0,
+                start_ms: i as i64 * 500,
+                end_ms: i as i64 * 500 + 400,
+                text: text.into(),
+                confidence: None,
+                raw_label: Some("spk_0".into()),
+                margin: None,
+                overlap: false,
+                raw_text: raw.map(str::to_owned),
+            });
+        }
+        store.insert_transcript(run.id, &t).unwrap();
+        store.set_current_run(m.id, run.id).unwrap();
+        let words = store.get_words(m.id, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(words[1].raw_text.as_deref(), Some("there"));
+        assert_eq!(words[1].asr_text(), "there");
+        drop(store);
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
     }
 
