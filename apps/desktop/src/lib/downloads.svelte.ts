@@ -5,6 +5,7 @@
 import { api, errorText, onEvent } from "./api";
 import type { DownloadItem } from "./generated/DownloadItem";
 import type { DownloadProgress } from "./generated/DownloadProgress";
+import { downloadLinks } from "./links";
 
 export type ItemState = "waiting" | "running" | "done" | "failed";
 
@@ -164,10 +165,14 @@ export function failureHint(_kind: "engine" | "model", error: string | null): st
     : "Press Retry (a partial download resumes), or use Copy link to download the file with a browser, put it into the folder Open folder shows, and press Refresh: the hash is checked there.";
 }
 
-/** Puts the addresses of `items` on the clipboard, one per line. */
+/**
+ * Puts the addresses of `items` on the clipboard, one per line: every file
+ * of a multi-file download (a punctuation model). Resolves to the count.
+ */
 export async function copyLinks(items: DownloadItem[]): Promise<number> {
-  await navigator.clipboard.writeText(items.map((i) => `${i.url}\n`).join(""));
-  return items.length;
+  const links = downloadLinks(items);
+  await navigator.clipboard.writeText(links.map((u) => `${u}\n`).join(""));
+  return links.length;
 }
 
 export const downloads = new Downloads();

@@ -54,6 +54,13 @@
     ) ?? [],
   );
   const modelsBytes = $derived(models.reduce((n, m) => n + m.size_bytes, 0));
+  /** Required models besides the diarizer and the speech model (from beta.5, punctuation), by short name. */
+  const DIARIZER_MODEL = "nemotron-3-diarization";
+  const extras = $derived(
+    models
+      .filter((m) => m.name !== EN_MODEL && m.name !== MULTILINGUAL_MODEL && m.name !== DIARIZER_MODEL)
+      .map((m) => m.label.split(":")[0]?.trim() || m.name),
+  );
   const modelsMissing = $derived(models.filter((m) => !m.installed));
   const missingAll = $derived([...(engine && !engineInstalled ? [engine] : []), ...modelsMissing]);
   const gpu = $derived(status?.gpu ?? null);
@@ -283,9 +290,9 @@
             disabled={downloads.busy}
             title={engine && !engineInstalled ? "Installs the engine first: it fetches the models" : ""}
           >
-            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: diarizer and {english
-              ? "the EN model"
-              : "Nemotron 3.5"})
+            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: {extras.length > 0
+              ? `diarizer, ${english ? "the EN model" : "Nemotron 3.5"} and ${extras.join(", ")}`
+              : `diarizer and ${english ? "the EN model" : "Nemotron 3.5"}`})
           </button>
         {/if}
       </div>

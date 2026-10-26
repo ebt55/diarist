@@ -4,7 +4,7 @@
   // SHA-256 and size, and Open folder for a file fetched by hand.
   import type { Snippet } from "svelte";
   import { api, errorText } from "../lib/api";
-  import { downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
+  import { copyLinks, downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
   import { formatBytes } from "../lib/format";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
   import { app } from "../lib/state.svelte";
@@ -42,10 +42,30 @@
     return downloads.speed(item.name);
   });
 
+  /** The files of a multi-file download (a punctuation model), in download order; empty for one file. */
+  const files = $derived(item.files ?? []);
+
   async function copyLink() {
     try {
+      if (files.length > 0) {
+        const n = await copyLinks([item]);
+        app.toast(
+          "info",
+          `${n} links copied. Download each file with a browser into the folder its row shows (keep the subfolders), then press Refresh.`,
+        );
+        return;
+      }
       await navigator.clipboard.writeText(item.url);
       app.toast("info", "Link copied. Download it with a browser, put it into the folder Open folder shows, then press Refresh.");
+    } catch (e) {
+      app.error(`Could not copy the link (${errorText(e)}); select the address and copy it by hand`);
+    }
+  }
+
+  async function copyFileLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      app.toast("info", "Link copied. Download it with a browser into the folder its row shows, then press Refresh.");
     } catch (e) {
       app.error(`Could not copy the link (${errorText(e)}); select the address and copy it by hand`);
     }
@@ -99,7 +119,36 @@
       <p class="hint">{failureHint(item.kind, p.error)}</p>
     </div>
   {/if}
-  {#if !(installed && tidy)}
+  {#if !(installed && tidy) && files.length > 0}
+    <div class="fetch">
+      <span class="label">Files</span>
+      <span class="val">{files.length} files, {item.size_bytes.toLocaleString()} bytes in all → <code class="sel">{item.dest}</code></span>
+      <span class="buttons">
+        <button type="button" class="link" onclick={copyLink}>Copy all links</button>
+        <button type="button" class="link" onclick={open}>Open folder</button>
+      </span>
+    </div>
+    <ul class="files" aria-label="Files of {item.label}">
+      {#each files as f (f.path)}
+        <li class="fetch file">
+          <span class="label">File</span>
+          <span class="val"><code class="sel">{f.path}</code>{#if f.present} <span class="ok">✓ there</span>{/if}</span>
+          <span class="buttons">
+            <button type="button" class="link" onclick={() => copyFileLink(f.url)} aria-label="Copy link of {f.path}">Copy link</button>
+          </span>
+          <span class="label">Address</span>
+          <span class="val"><code class="sel" title={f.url}>{f.url}</code></span>
+          <span></span>
+          <span class="label">SHA-256</span>
+          <span class="val"><code class="sel">{f.sha256 || "not given (recorded after the download)"}</code></span>
+          <span></span>
+          <span class="label">Size</span>
+          <span class="val mono">{f.size_bytes.toLocaleString()} bytes → <code class="sel">{f.dest}</code></span>
+          <span></span>
+        </li>
+      {/each}
+    </ul>
+  {:else if !(installed && tidy)}
     <div class="fetch">
       <span class="label">Address</span>
       <span class="val"><code class="sel" title={item.url}>{item.url}</code></span>
@@ -207,5 +256,18 @@
   }
   .sel {
     user-select: all;
+  }
+  .files {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .file {
+    padding: 3px 0 3px 10px;
+    border-left: 2px solid var(--border);
+  }
+  .file + .file {
+    margin-top: 3px;
   }
 </style>
