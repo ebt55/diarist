@@ -98,14 +98,15 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens (creating if needed) the database at `path` and applies pending
     /// migrations. Meeting audio folders are expected in `audio/` next to it
-    /// (`docs/01` data layout); see [`SqliteStore::with_audio_root`].
+    /// (`docs/01` data layout); see [`SqliteStore::with_audio_root`]. A
+    /// long path works ([`sqlite_path`]); the store keeps `path` as given.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|e| StoreError::Backend(format!("create {}: {e}", parent.display())))?;
         }
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(sqlite_path(path))?;
         let audio_root = path.parent().map(|p| p.join("audio"));
         Self::init(conn, Some(path.to_owned()), audio_root)
     }
@@ -389,11 +390,19 @@ impl RunStore for SqliteStore {
         let _ = std::fs::remove_file(&tmp);
         {
             let conn = self.lock()?;
-            conn.backup(rusqlite::MAIN_DB, &tmp, None)?;
+            conn.backup(rusqlite::MAIN_DB, sqlite_path(&tmp), None)?;
         }
         std::fs::rename(&tmp, dest)
             .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))
     }
+}
+
+/// A database path as SQLite gets it: the extended-length form (`\\?\`)
+/// when it is long, since SQLite's Windows layer opens the plain form only
+/// below `MAX_PATH` ("unable to open database file"); short paths as they
+/// are. Only for the open call: never stored or shown.
+pub(crate) fn sqlite_path(path: &Path) -> PathBuf {
+    PathBuf::from(crate::engine::process::path_arg(path))
 }
 
 /// File name prefix of the pre-migration copies of `db` (`diarist.db.bak-`).
@@ -418,7 +427,8 @@ fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<P
     let dest = db.with_file_name(format!("{prefix}{current}"));
     let tmp = db.with_file_name(format!("{prefix}{current}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    conn.backup(rusqlite::MAIN_DB, &tmp, None).map_err(|e| {
+    let target = sqlite_path(&tmp);
+    conn.backup(rusqlite::MAIN_DB, &target, None).map_err(|e| {
         StoreError::Backend(format!(
             "cannot back up {} before upgrading it: {e}",
             db.display()

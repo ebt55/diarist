@@ -154,15 +154,10 @@ impl DataPaths {
             .unwrap_or_else(|| self.root.join("engine"))
     }
 
-    /// The SQLite database. A long one in the extended-length form
-    /// (`\\?\C:\...`, from 240 characters, as the engine gets its paths):
-    /// SQLite's Windows layer opens the plain form only below `MAX_PATH`
-    /// ("unable to open database file" in a 264-character data folder) and
-    /// the extended form at any length. Short paths are unchanged.
+    /// The SQLite database, in the plain form at any length (it is shown and
+    /// logged). `SqliteStore` converts a long one for SQLite itself.
     pub fn db(&self) -> PathBuf {
-        PathBuf::from(crate::engine::process::path_arg(
-            &self.root.join("diarist.db"),
-        ))
+        self.root.join("diarist.db")
     }
 
     /// `audio\`: `audio\<meeting uid>\...`.
@@ -407,35 +402,41 @@ mod tests {
     }
 
     /// A 264-character data folder (the KNOWN-ISSUES repro): the database
-    /// opens, migrates and answers.
+    /// opens, migrates and answers there, a backup into another long folder
+    /// (a data-folder move) reopens, and the path stays in the plain form
+    /// everywhere it is kept or shown.
     #[cfg(windows)]
     #[test]
-    fn the_database_opens_in_a_data_folder_longer_than_max_path() {
-        use crate::store::{SqliteStore, Store};
+    fn the_database_opens_and_backs_up_in_a_data_folder_longer_than_max_path() {
+        use crate::engine::process::long_test_dir;
+        use crate::store::{NewMeeting, RunStore, SqliteStore, Store};
+        use crate::types::{MeetingStatus, Source};
         let tmp = tempfile::tempdir().unwrap();
-        let mut root = std::path::absolute(tmp.path()).unwrap();
-        let mut i = 0;
-        while root.as_os_str().len() < 264 {
-            let left = 264 - root.as_os_str().len() - 1;
-            root.push(
-                format!("d{i}{}", "x".repeat(60))
-                    .chars()
-                    .take(left.clamp(1, 40))
-                    .collect::<String>(),
-            );
-            i += 1;
-        }
+        let root = long_test_dir(tmp.path(), 264);
         let p = DataPaths::at(&root);
-        assert_eq!(p.root.as_os_str().len(), 264);
-        assert!(
-            p.db().to_string_lossy().starts_with(r"\\?\"),
-            "{:?}",
-            p.db()
-        );
+        assert_eq!(p.db(), root.join("diarist.db"));
+        assert!(!p.db().to_string_lossy().starts_with(r"\\"), "{:?}", p.db());
         let store = SqliteStore::open(p.db()).unwrap();
-        assert!(store.list_meetings().unwrap().is_empty());
-        drop(store);
+        assert_eq!(store.path(), Some(p.db().as_path()));
+        assert_eq!(store.audio_dir("u"), Some(root.join("audio").join("u")));
+        store
+            .create_meeting(NewMeeting {
+                title: "Deep".into(),
+                source: Source::File,
+                source_path: None,
+                language: "en".into(),
+                diarize_mic: false,
+                started_at: 1_700_000_000_000,
+                status: MeetingStatus::Done,
+            })
+            .unwrap();
         assert!(root.join("diarist.db").is_file());
+
+        let to = long_test_dir(&tmp.path().join("to"), 270).join("diarist.db");
+        store.backup(&to).unwrap();
+        let copy = SqliteStore::open(&to).unwrap();
+        assert_eq!(copy.list_meetings().unwrap()[0].title, "Deep");
+        assert!(!PathBuf::from(format!("{}.tmp", to.display())).exists());
     }
 
     #[test]
