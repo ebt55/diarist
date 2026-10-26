@@ -9,6 +9,7 @@
   import type { ServeStatus } from "../lib/generated/ServeStatus";
   import { app } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
+  import LinkText from "./LinkText.svelte";
 
   let path = $state("");
   let text = $state("");
@@ -193,7 +194,7 @@
         {#each checks as c (c.id)}
           <li class="check st-{c.status}">
             <span class="mark" aria-hidden="true">{c.status === "pass" ? "✓" : c.status === "fail" ? "✕" : c.status === "warn" ? "!" : "–"}</span>
-            <span class="what"><strong>{c.label}</strong> <span class="sr-only">{c.status}</span><span class="detail">{c.detail}</span></span>
+            <span class="what"><strong>{c.label}</strong> <span class="sr-only">{c.status}</span><span class="detail"><LinkText text={c.detail} /></span></span>
             {#if c.fix}
               <button type="button" class="btn small" onclick={() => fix(c)} disabled={fixing !== null}>{fixing === c.id ? "…" : c.fix_label}</button>
             {/if}

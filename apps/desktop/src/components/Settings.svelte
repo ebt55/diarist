@@ -2,9 +2,25 @@
   import { onMount, tick } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { api, errorText, langApi, onEvent } from "../lib/api";
+  import { api, errorText, langApi, onEvent, punctApi } from "../lib/api";
   import { copyLinks, downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
+  import { downloadLinks } from "../lib/links";
+  import {
+    PUNCT_MODE_HELP,
+    PUNCT_MODES,
+    PUNCT_NONE_HELP,
+    PUNCT_RESTART_NOTE,
+    PUNCT_ROLE_HELP,
+    backfillConfirm,
+    backfillDoneText,
+    backfillHelp,
+    backfillLabel,
+    punctMode,
+    type PunctMode,
+    type PunctStatus,
+  } from "../lib/punctuation";
   import DownloadRow from "./DownloadRow.svelte";
+  import LinkText from "./LinkText.svelte";
   import RuntimeReleases from "./RuntimeReleases.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
@@ -41,7 +57,7 @@
     { role: "asr", label: "Speech to text", help: "One model serves live and file mode." },
     { role: "diarizer", label: "Speaker diarization", help: "Who spoke when, up to 8 speakers per recording." },
     { role: "embedder", label: "Speaker identity", help: "Cross-meeting voiceprints (later)." },
-    { role: "punctuation", label: "Punctuation", help: "Punctuation restoration (later)." },
+    { role: "punctuation", label: "Punctuation", help: PUNCT_ROLE_HELP },
     { role: "llm", label: "Language model", help: "Notes and summaries (optional, later)." },
   ];
   const SOURCES: Record<ModelSource, string> = {
@@ -84,6 +100,43 @@
     return [...groups].map(([base, regions]) => (regions.length ? `${base} (${regions.join(", ")})` : base)).join(", ");
   };
   const unknown = $derived(status?.models_by_role.unknown ?? []);
+
+  // Punctuation (plan 16 sections 3.8 and 3.9): the setting, the runtime's
+  // check row, and the bulk action for meetings made without punctuation.
+  let punct = $state.raw<PunctStatus | null>(null);
+  let backfillReport = $state<string | null>(null);
+  const punctOff = $derived(punctMode(app.setting("transcript.punctuation")) === "off");
+
+  async function loadPunct() {
+    try {
+      punct = await punctApi.status();
+    } catch (e) {
+      punct = null;
+      void api.log("warn", `punctuation status: ${errorText(e)}`);
+    }
+  }
+
+  async function setPunctMode(mode: PunctMode) {
+    if (!(await app.setSetting("transcript.punctuation", mode))) return;
+    app.toast(
+      "info",
+      mode === "off"
+        ? "Punctuation is off for new transcripts"
+        : "New transcripts get punctuation when a punctuation model covers their language",
+    );
+    void loadPunct();
+  }
+
+  async function backfill() {
+    const n = punct?.candidates ?? 0;
+    if (n === 0 || app.backfillRunning) return;
+    const ok = await app.confirm({ ...backfillConfirm(n), danger: false });
+    if (!ok) return;
+    backfillReport = null;
+    const o = await app.backfill();
+    if (o) backfillReport = backfillDoneText(o).text;
+    await loadPunct();
+  }
 
   let devices = $state.raw<AudioDevice[]>([]);
   let devicesError = $state<string | null>(null);
@@ -225,6 +278,7 @@
     void loadDevices();
     void loadStatus();
     void loadItems();
+    void loadPunct();
     void loadReclaim();
     api.dataRootInfo().then((r) => (root = r)).catch(() => {});
     getVersion().then((v) => (version = v)).catch(() => {});
@@ -400,6 +454,7 @@
     try {
       const files = await api.rescanModels();
       await loadStatus();
+      void loadPunct();
       app.toast("info", `Models folder scanned: ${plural(files.length, "file")}`);
     } catch (e) {
       app.error(`Rescan failed (${errorText(e)}); check the folder with Open models folder and press Refresh again`);
@@ -413,11 +468,12 @@
     if (role === "asr") return status.selected.asr;
     if (role === "diarizer") return status.selected.diarizer;
     if (role === "engine") return status.selected.engine;
+    if (role === "punctuation") return status.selected.punctuation;
     return null;
   }
 
   function selectable(role: ModelRole): boolean {
-    return role === "asr" || role === "diarizer" || role === "engine";
+    return role === "asr" || role === "diarizer" || role === "engine" || role === "punctuation";
   }
 
   async function select(role: ModelRole, id: number, name: string) {
@@ -425,6 +481,7 @@
       await api.selectModel(role, id);
       await loadStatus();
       app.toast("info", `${name} selected`);
+      if (role === "punctuation") void loadPunct();
     } catch (e) {
       app.error(`Could not select ${name} (${errorText(e)}); press Refresh and pick it again`);
     }
@@ -476,6 +533,7 @@
     const failed = await downloads.install(todo);
     await loadItems();
     await loadStatus();
+    void loadPunct();
     if (failed > 0) app.error(`${plural(failed, "download")} failed; see Models in Settings`);
     else app.toast("success", `${what} installed`);
   }
@@ -832,7 +890,7 @@
       </ul>
       <div class="row link-row">
         {#if missingAll.length > 0}
-          <button type="button" class="link" onclick={copyAll}>Copy all links ({missingAll.length})</button>
+          <button type="button" class="link" onclick={copyAll}>Copy all links ({downloadLinks(missingAll).length})</button>
         {/if}
         <button type="button" class="link" onclick={() => (app.route = "setup")}>Open the first-run screen</button>
       </div>
@@ -895,8 +953,8 @@
 
       {#each ROLES as { role, label, help } (role)}
         {@const files = status.models_by_role[role] ?? []}
-        {#if files.length > 0 || role === "asr" || role === "diarizer"}
-          <fieldset class="group">
+        {#if files.length > 0 || role === "asr" || role === "diarizer" || role === "punctuation"}
+          <fieldset class="group" class:punct-group={role === "punctuation"} id={role === "punctuation" ? "set-punctuation" : undefined}>
             <legend><span class="group-title">{label}</span> <span class="help inline">{help}</span></legend>
             {#if files.length === 0}
               <p class="help">No file for this role yet.</p>
@@ -928,6 +986,9 @@
                 </span>
               </label>
             {/each}
+            {#if role === "punctuation"}
+              {@render punctuationExtras(files.length > 0)}
+            {/if}
           </fieldset>
         {/if}
       {/each}
@@ -1031,7 +1092,52 @@
   </section>
 </div>
 
+{#snippet punctuationExtras(installed: boolean)}
+  <div class="punct-extra">
+    {#if !installed}<p class="help">{PUNCT_NONE_HELP}</p>{/if}
+    <p class="help">{PUNCT_RESTART_NOTE}</p>
+    {#if punct && (punct.check.status === "warn" || punct.check.status === "fail")}
+      <p class="help" class:error={punct.check.status === "fail"}>
+        {punct.check.label}: <LinkText text={punct.check.detail} />
+        <button type="button" class="link" onclick={() => (app.route = "diagnostics")}>Diagnostics</button>
+      </p>
+    {/if}
+    <div class="row radios" role="radiogroup" aria-label="Add punctuation to new transcripts">
+      {#each PUNCT_MODES as [value, label] (value)}
+        <label class="radio">
+          <input
+            type="radio"
+            name="punctuation_mode"
+            {value}
+            checked={punctMode(app.setting("transcript.punctuation")) === value}
+            onchange={() => setPunctMode(value)}
+          />
+          {label}{value === "auto" ? " (default)" : ""}
+        </label>
+      {/each}
+    </div>
+    <p class="help">{PUNCT_MODE_HELP}</p>
+    {#if punct && installed && !punctOff}
+      {#if punct.candidates > 0 || app.backfillRunning}
+        <div class="row">
+          <button type="button" class="btn" onclick={backfill} disabled={app.backfillRunning}>
+            {app.backfillRunning ? "Adding punctuation…" : backfillLabel(punct.candidates)}
+          </button>
+        </div>
+      {/if}
+      <p class="help">{backfillHelp(punct)}</p>
+    {/if}
+    {#if backfillReport}<p class="help" role="status">{backfillReport}</p>{/if}
+  </div>
+{/snippet}
+
 <style>
+  .punct-extra {
+    margin-top: 6px;
+  }
+  .punct-group .model:last-of-type {
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
   .page {
     height: 100%;
     overflow-x: hidden;
