@@ -601,7 +601,8 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Decoder lookahead (`rnnt_right_context`): {lookahead_of(cfg, any_meta)}",
         f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
         + "".join(f" {a}" for a in engine_arg_flags(cfg))
-        + "`, then `export --format rttm`",
+        + "`, then `export --format rttm`"
+        + (f" (sessions with their own language pass it instead: {', '.join(other_langs)})" if other_langs else ""),
         "- Engine command lines (from diarist-core's engine.log): "
         + "; ".join(f"`{c}`" for c in engine_commands(config, metas)),
         "- Word-to-speaker fusion: the runtime's own tags (start-anchored argmax); no app-side smoothing yet",

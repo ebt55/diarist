@@ -13,6 +13,10 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `nemo_direct.py` | Runs `nemo-speech transcribe` directly with the app's file-job flags plus extra flags (spikes on runtime options the app does not pass) |
 | `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
+| `public_data.py` | Shared helpers of the public-set fetch scripts: pinned curl downloads with SHA-256 checks, 16 kHz conversion, reference and session-list writing |
+| `ami_test_fetch.py`, `icsi_fetch.py`, `notsofar_fetch.py`, `earnings22_fetch.py`, `alimeeting_fetch.py`, `summre_fetch.py`, `indic_fetch.py` | One per public set (docs/05 "Extend"): fetch a pinned slice into `.work/public/<set>/` and write its references and session list |
+| `sessions.public.toml` | Committed session file of the public sets: includes the lists the fetch scripts write |
+| `smoke.py` | Clip smoke test: cuts 2 to 5 minutes of a session, runs the runtime on it via `nemo_direct.py`, scores it |
 | `sessions.example.toml` | Template for `sessions.toml` (gitignored, holds the private paths) |
 | `test_metrics.py` | Synthetic sanity checks for the metrics (no GPU, no private data) |
 
@@ -88,9 +92,33 @@ To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest 
 
 `fleurs_fetch.py` streams `data/<config>/audio/test.tar.gz` and `test.tsv` of `google/fleurs` and stops after about 10 minutes per language (de, es, fr, it, pt, hi, ja, en; one recording per sentence, joined with 1.5 s of silence) into `.work/fleurs/<lang>/`. The parquet conversion is not used: each language is a single row group whose audio column is one dictionary page, so any read downloads the whole file. `run.py --fleurs <langs>` transcribes each slice with `--no-diarize` and scores the whole slice: WER with the harness normaliser for en; for the other languages NFKC, casefold and punctuation and symbols removed, with combining marks kept; CER for ja. `--fleurs-language given` passes the tag the runtime honours (`ja-JP`, `es-US`, `pt-BR`; bare `de`, `fr`, `it`, `hi`, `en`), `short` the app's bare code, `auto` detection.
 
+## Public sets (docs/05 "Extend")
+
+Seven public slices with human references cover what the Zoom set lacks: open discussions with overlap, distant microphones, phone calls, other languages, and punctuated word references. Sources, licences and the reasons for each slice: `docs/research/20-public-eval-data.md`. Each fetch script downloads a pinned slice into `.work/public/<set>/` (SHA-256 checked), converts the audio to 16 kHz mono, writes SegLST and RTTM references (`words_pc` holds the source's punctuation and casing where it has them) and a `sessions.toml` that `sessions.public.toml` includes:
+
+```sh
+uv run python -I ami_test_fetch.py                         # 0.61 GB  AMI EN2002a-d, Mix-Headset and Array1-01
+uv run python -I icsi_fetch.py --prune                     # 0.47 GB  ICSI Bed004, Bed016, Bmr019, Bro018
+uv run python -I notsofar_fetch.py                         # 0.41 GB  NOTSOFAR-1, 32 meetings, single-channel devices
+uv run python -I earnings22_fetch.py --prune               # 0.07 GB  Earnings-22, eight calls
+uv run python -I alimeeting_fetch.py --prune               # 3.67 GB  AliMeeting Eval (Mandarin), headset mix and array ch0
+uv run python -I summre_fetch.py --prune                   # 4.44 GB  SUMM-RE ASRU subset (French), tracks summed
+uv run --with pyarrow==21.0.0 python -I indic_fetch.py     # 0.63 GB  Indic DiarBench Hindi, near and far field (range reads)
+```
+
+`--prune` deletes the downloads once a set's outputs are written. The sizes above are what is downloaded (10.3 GB in all); what stays is 3.6 GB for all seven. Every input is checked against a SHA-256 pinned in its script. Then run them like the private sessions, with the public session file; the report goes to `docs/eval/<date>-<config>-public.md`:
+
+```sh
+uv run python -I run.py --config shipped_n35 --sessions-file sessions.public.toml
+uv run python -I run.py --config shipped_en --sessions-file sessions.public.toml --groups pub-meeting,pub-far,pub-phone
+uv run python -I smoke.py --session nsf-mtg32000 --start 60 --dur 180    # one clip, no full run
+```
+
+Sessions carry their own `language` (zh-CN, fr, hi in `pub-lang`): it is passed to diarist-cli instead of the config's, an English-only ASR config skips those sessions, and their text is scored with the multilingual normaliser (Mandarin per character). Agents sharing the PC can set `DIARIST_EVAL_LOCKS` to the folder holding `quiet.lock`; large downloads then pause while it exists.
+
 ## Adding a session
 
-1. Add a table to `sessions.toml`: an id (`[sessions.sep4]`), a `label` in the docs/05 shorthand, `kind = "zoom"`, a `group` (`tuning`, `heldout`, `control`, `overlap`, `stress`) and the absolute `audio` (`*.m4a`) and `vtt` (`*.transcript.vtt`) paths.
+1. Add a table to `sessions.toml`: an id (`[sessions.sep4]`), a `label` in the docs/05 shorthand, `kind = "zoom"`, a `group` (`tuning`, `heldout`, `control`, `overlap`, `stress`) and the absolute `audio` (`*.m4a`) and `vtt` (`*.transcript.vtt`) paths. (Public sets are added by their fetch script instead; see above.)
 2. Check the reference converts cleanly (counts only are printed; names stay in the sidecar under `.work/refs`):
 
    ```sh
