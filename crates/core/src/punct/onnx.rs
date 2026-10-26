@@ -1827,6 +1827,8 @@ mod tests {
                 speaker: "spk_0".into(),
                 raw_label: Some("spk_0".into()),
                 raw_text: None,
+                margin: None,
+                overlap: false,
             })
             .collect();
         let mut channels = vec![(crate::types::Channel::Source, source)];
@@ -2014,6 +2016,8 @@ mod tests {
                 speaker: "spk_0".into(),
                 raw_label: Some("spk_0".into()),
                 raw_text: None,
+                margin: None,
+                overlap: false,
             })
             .collect();
         let mut channels = vec![(crate::types::Channel::Source, source.clone())];
@@ -2064,6 +2068,8 @@ mod tests {
                         speaker: "spk_0".into(),
                         raw_label: Some("spk_0".into()),
                         raw_text: None,
+                        margin: None,
+                        overlap: false,
                     })
                     .collect::<Vec<_>>(),
             )];
