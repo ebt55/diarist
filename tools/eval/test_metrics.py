@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import metrics as M  # noqa: E402
-from common import RttmRow, normalize_token, seglst_to_rttm  # noqa: E402
+from common import RttmRow, normalize_text, normalize_token, seglst_to_rttm  # noqa: E402
 
 TEXT = {
     "A": "so the budget for next quarter is mostly travel and hardware",
@@ -84,6 +84,24 @@ def test_normaliser_drops_fillers_and_punctuation():
     assert normalize_token("Um,") == ()
     assert normalize_token("Budget.") == ("budget",)
     assert normalize_token("OK") == ("okay",)
+
+
+def test_multilingual_normaliser():
+    assert normalize_text("Euh, j'ai vu ÇA !", "fr") == ["j", "ai", "vu", "ça"]
+    # Mandarin per character, a Latin run stays one unit, 嗯 is dropped
+    assert normalize_text("嗯，我们讨论AI。", "zh-CN") == ["我", "们", "讨", "论", "ai"]
+    # Devanagari vowel signs stay inside the word; the danda goes
+    assert normalize_text("आप कैसे हैं।", "hi") == ["आप", "कैसे", "हैं"]
+    assert normalize_text("Okay.", None) == normalize_text("Okay.", "en-US") == ["okay"]
+
+
+def test_mandarin_identical_text_scores_zero():
+    ref = [{"session_id": "x", "speaker": "A", "start_time": 0.0, "end_time": 2.0, "words": "我们今天开会。"},
+           {"session_id": "x", "speaker": "B", "start_time": 2.5, "end_time": 4.0, "words": "好的，没问题"}]
+    hyp = [dict(r, speaker={"A": "s0", "B": "s1"}[r["speaker"]]) for r in ref]
+    r = M.meeting_metrics([dict(x) for x in ref], seglst_to_rttm(ref, "x"), [dict(h) for h in hyp], words_of(hyp),
+                          seglst_to_rttm(hyp, "x"), None, "x", None, "zh-CN")
+    assert r["cpwer"] == 0 and r["wder"] == 0 and r["ref_words"] == 11
 
 
 if __name__ == "__main__":

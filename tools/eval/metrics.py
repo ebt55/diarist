@@ -11,7 +11,10 @@ Conventions
   hypothesis words whose midpoint falls outside it are dropped for the
   transcript metrics too.
 - Text: reference and hypothesis go through the same per-token normaliser
-  (common.normalize_token); fillers are dropped on both sides.
+  (common.normalize_token); fillers are dropped on both sides. Sessions in
+  another language use the multilingual normaliser (common.token_normalizer:
+  NFKC, casefold, punctuation removed); Mandarin and Japanese are scored per
+  character, so cpWER there is a speaker-attributed CER.
 - cpWER, tcpWER (collar 5 s), DI-cpWER and greedy ORC-WER (speaker-agnostic
   WER; exact ORC-WER does not fit in memory for a 20-minute meeting) via
   meeteval. DI-cpWER is computed with every hypothesis word as its own
@@ -254,7 +257,10 @@ def meeting_metrics(
     duration: float | None,
     session_id: str,
     region: tuple[float, float] | None = None,
+    lang: str | None = None,
 ) -> dict:
+    """lang: the session language; anything but English (or None) switches
+    the text normaliser to the multilingual one (common.token_normalizer)."""
     for rows in (ref_segs, hyp_segs, hyp_word_segs):
         for r in rows:
             r["session_id"] = session_id
@@ -266,10 +272,10 @@ def meeting_metrics(
     out: dict = {}
     if hyp_rttm is not None:
         out.update(diarization_metrics(ref_rttm, hyp_rttm, duration, region))
-    ref_n = normalize_seglst(ref_segs)
-    hyp_n = normalize_seglst(hyp_segs)
-    hyp_wn = normalize_seglst(hyp_word_segs)
-    out.update(wder(interpolate_words(ref_segs), interpolate_words(hyp_word_segs)))
+    ref_n = normalize_seglst(ref_segs, lang)
+    hyp_n = normalize_seglst(hyp_segs, lang)
+    hyp_wn = normalize_seglst(hyp_word_segs, lang)
+    out.update(wder(interpolate_words(ref_segs, lang), interpolate_words(hyp_word_segs, lang)))
     out.update(wer_metrics(ref_n, hyp_n, hyp_wn))
     # Speakers that actually carry words, for the transcript-level count.
     out["hyp_speakers_words"] = len({r["speaker"] for r in hyp_wn})
@@ -285,6 +291,7 @@ def main() -> None:
     ap.add_argument("--hyp-rttm", type=Path)
     ap.add_argument("--duration", type=float)
     ap.add_argument("--session-id", default="s")
+    ap.add_argument("--language", help="session language (default English normaliser)")
     a = ap.parse_args()
     doc = json.loads(a.hyp_json.read_text(encoding="utf-8"))
     segs, words = hyp_from_export(doc, a.session_id)
@@ -296,6 +303,7 @@ def main() -> None:
         read_rttm(a.hyp_rttm) if a.hyp_rttm else None,
         a.duration,
         a.session_id,
+        lang=a.language,
     )
     print(json.dumps(res, indent=2, default=str))
 
