@@ -18,11 +18,17 @@
 //!   [`ATTENUATION_DB`] over its level window and its level after the
 //!   canceller sits at least [`MARGIN_DB`] under the owner's level
 //!   ([`Guard::Level`]; the owner's level of the cancelled words, as
-//!   [`super::layers::CalibrationStats::owner_db`] defines it). The guards
-//!   protect the owner's words that the canceller recovered from double
-//!   talk, which overlap the raw transcript's echo words; (b) alone ships
-//!   ([`GUARD`]: it also protects the owner's words the raw gate itself
-//!   took for echo, which the canceller leaves untouched);
+//!   [`super::layers::CalibrationStats::owner`] defines it after the
+//!   canceller: from the words it left alone, and unknown when implausibly
+//!   close to the floor). With the owner's level unknown (b) is the floor
+//!   rule: cut by at least [`ATTENUATION_DB`] and at most
+//!   [`FLOOR_MARGIN_DB`] over the floor of the cancelled mic (plan 16
+//!   section 12.2.2; meeting 21, a talk with the owner nearly silent, where
+//!   the residue was the only speech in "me"). The guards protect the
+//!   owner's words that the canceller recovered from double talk, which
+//!   overlap the raw transcript's echo words; (b) alone ships ([`GUARD`]:
+//!   it also protects the owner's words the raw gate itself took for echo,
+//!   which the canceller leaves untouched);
 //! - a cancelled word with no raw word near it is kept: the canceller's
 //!   recognition gain stays where it exists.
 //!
@@ -32,7 +38,7 @@
 
 use serde::Serialize;
 
-use super::layers::{self, GateWord, LayerCounts, LayerOptions, LayerReport};
+use super::layers::{self, Context, GateWord, LayerCounts, LayerOptions, LayerReport};
 use super::text::FarIndex;
 use crate::types::EchoReason;
 
@@ -43,8 +49,19 @@ pub const OVERLAP_MS: i64 = 300;
 /// over `[start − 300 ms, end + 80 ms]` ...
 pub const ATTENUATION_DB: f32 = 3.0;
 /// ... and its level after the canceller sits at least this far (dB) under
-/// the owner's level.
+/// the owner's level ...
 pub const MARGIN_DB: f32 = 12.0;
+/// ... or, the owner's level unknown, at most this far (dB) over the floor
+/// of the cancelled mic (the floor rule; `f32::INFINITY` would be the cut
+/// alone). The largest of 9, 12, 15, 18 and infinite at which every
+/// owner-word bar held with the owner's level forced unknown
+/// (docs/eval/2026-10-26-echo-owner-level.md): the cut alone took the
+/// FLEURS fixture whose owner talks only over the far end from 10.4 to
+/// 15.6 percent WER; at 18 dB it gives 10.9, the spliced set 8.1. Meeting 21's residue sits 0 to 21 dB over
+/// the floor, the owner's own words mostly 18 dB and more; with a known
+/// owner's level the guard sits 15 to 18 dB over the floor on the canceller
+/// meetings 12, 14, 16, 17, 18 and 20.
+pub const FLOOR_MARGIN_DB: f32 = 18.0;
 
 /// What a candidate needs besides its raw counterpart's echo decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,6 +99,25 @@ impl Guard {
 /// error rate with either guard against 8.1 with this one).
 pub const GUARD: Guard = Guard::Level;
 
+/// The transfer's parameters: [`Rule::SHIPPED`], or the evaluation's
+/// variants ([`transfer_with`], [`gate_with`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rule {
+    pub guard: Guard,
+    /// [`OVERLAP_MS`].
+    pub overlap_ms: i64,
+    /// [`FLOOR_MARGIN_DB`].
+    pub floor_margin_db: f32,
+}
+
+impl Rule {
+    pub const SHIPPED: Self = Self {
+        guard: GUARD,
+        overlap_ms: OVERLAP_MS,
+        floor_margin_db: FLOOR_MARGIN_DB,
+    };
+}
+
 /// One raw-mic word with the raw gate's decision.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawWord<'a> {
@@ -109,11 +145,15 @@ pub struct TransferCounts {
     pub guarded: usize,
     /// Cancelled words with no raw word near them (kept).
     pub unmatched: usize,
+    /// Removed by the level guard's floor rule (the owner's level unknown;
+    /// in `engine_info.echo.transfer.floor_rule`, not beside the others).
+    #[serde(skip)]
+    pub floor: usize,
 }
 
 impl TransferCounts {
     pub fn removed(&self) -> usize {
-        self.text + self.level + self.plain
+        self.text + self.level + self.plain + self.floor
     }
 }
 
@@ -137,14 +177,36 @@ pub fn within_one_edit(a: &str, b: &str) -> bool {
 
 /// The transfer of the raw words' decisions (any order) onto the cancelled
 /// words (any order; levels and attenuation after the canceller), with the
-/// owner's level of the cancelled words: whether each cancelled word goes
-/// (see the module docs).
+/// owner's level of the cancelled words and the cancelled mic's floor:
+/// whether each cancelled word goes (see the module docs).
 pub fn transfer(
     cancelled: &[GateWord],
     raw: &[RawWord],
     owner_db: Option<f32>,
+    floor_db: Option<f32>,
     guard: Guard,
 ) -> (Vec<bool>, TransferCounts) {
+    transfer_with(
+        cancelled,
+        raw,
+        owner_db,
+        floor_db,
+        &Rule {
+            guard,
+            ..Rule::SHIPPED
+        },
+    )
+}
+
+/// [`transfer`] with every parameter in `rule`.
+pub fn transfer_with(
+    cancelled: &[GateWord],
+    raw: &[RawWord],
+    owner_db: Option<f32>,
+    floor_db: Option<f32>,
+    rule: &Rule,
+) -> (Vec<bool>, TransferCounts) {
+    let overlap = rule.overlap_ms;
     let mut order: Vec<usize> = (0..raw.len()).collect();
     order.sort_by_key(|&j| (raw[j].start_ms, raw[j].end_ms));
     let starts: Vec<i64> = order.iter().map(|&j| raw[j].start_ms).collect();
@@ -158,10 +220,7 @@ pub fn transfer(
     let out = cancelled
         .iter()
         .map(|c| {
-            let (lo, hi) = (
-                c.start_ms - OVERLAP_MS,
-                c.end_ms.max(c.start_ms) + OVERLAP_MS,
-            );
+            let (lo, hi) = (c.start_ms - overlap, c.end_ms.max(c.start_ms) + overlap);
             let a = starts.partition_point(|&s| s < lo - longest);
             let b = starts.partition_point(|&s| s <= hi);
             near.clear();
@@ -183,16 +242,29 @@ pub fn transfer(
                 && near
                     .iter()
                     .any(|&j| !raw[j].norm.is_empty() && within_one_edit(&c.norm, raw[j].norm));
+            // Guard (b): under the owner's level, or without it the floor
+            // rule.
             let level = c.presence.is_some_and(|p| {
                 p.attenuation_db.is_some_and(|a| a >= ATTENUATION_DB)
-                    && owner_db.is_some_and(|o| p.level_db <= o - MARGIN_DB)
+                    && match owner_db {
+                        Some(o) => p.level_db <= o - MARGIN_DB,
+                        None => {
+                            rule.floor_margin_db.is_infinite()
+                                || floor_db.is_some_and(|f| p.level_db <= f + rule.floor_margin_db)
+                        }
+                    }
             });
-            let slot = match guard {
+            let level_slot = if owner_db.is_some() {
+                &mut counts.level
+            } else {
+                &mut counts.floor
+            };
+            let slot = match rule.guard {
                 Guard::Plain => Some(&mut counts.plain),
                 Guard::Text => text.then_some(&mut counts.text),
-                Guard::Level => level.then_some(&mut counts.level),
+                Guard::Level => level.then_some(level_slot),
                 Guard::Either if text => Some(&mut counts.text),
-                Guard::Either => level.then_some(&mut counts.level),
+                Guard::Either => level.then_some(level_slot),
             };
             match slot {
                 Some(n) => {
@@ -244,8 +316,39 @@ pub fn gate(
     far: &FarIndex,
     guard: Guard,
 ) -> TransferReport {
+    gate_with(
+        raw,
+        raw_floor,
+        raw_opts,
+        cancelled,
+        floor,
+        opts,
+        far,
+        &Rule {
+            guard,
+            ..Rule::SHIPPED
+        },
+        &|_| {},
+    )
+}
+
+/// [`gate`] with every transfer parameter in `rule` and the post-canceller
+/// layers' parameters changed by `tweak` (the evaluation's sweeps; the
+/// transfer uses the owner's level and floor the layers used, after it).
+#[allow(clippy::too_many_arguments)]
+pub fn gate_with(
+    raw: &[GateWord],
+    raw_floor: Option<f32>,
+    raw_opts: &LayerOptions,
+    cancelled: &[GateWord],
+    floor: Option<f32>,
+    opts: &LayerOptions,
+    far: &FarIndex,
+    rule: &Rule,
+    tweak: &dyn Fn(&mut Context),
+) -> TransferReport {
     let raw_report = layers::gate(raw, far, raw_floor, raw_opts);
-    let after = layers::gate(cancelled, far, floor, opts);
+    let after = layers::gate_with(cancelled, far, floor, opts, tweak);
     let raw_words: Vec<RawWord> = raw
         .iter()
         .zip(&raw_report.reasons)
@@ -256,7 +359,8 @@ pub fn gate(
             echo: r.is_some(),
         })
         .collect();
-    let (moved, counts) = transfer(cancelled, &raw_words, after.owner_db, guard);
+    let (moved, counts) =
+        transfer_with(cancelled, &raw_words, after.owner_db, after.floor_db, rule);
     let reasons: Vec<Option<EchoReason>> = after
         .reasons
         .iter()
@@ -306,6 +410,7 @@ mod tests {
     }
 
     const OWNER: Option<f32> = Some(-20.0);
+    const FLOOR: Option<f32> = Some(-60.0);
 
     #[test]
     fn one_edit_apart() {
@@ -341,7 +446,7 @@ mod tests {
             // No raw word near it: kept.
             cw(20_000, "hello", -45.0, 12.0),
         ];
-        let (d, c) = transfer(&cancelled, &raw, OWNER, Guard::Either);
+        let (d, c) = transfer(&cancelled, &raw, OWNER, FLOOR, Guard::Either);
         assert_eq!(d, [true, true, false, true, false, false]);
         assert_eq!(
             c,
@@ -352,17 +457,19 @@ mod tests {
                 plain: 0,
                 guarded: 1,
                 unmatched: 1,
+                floor: 0,
             }
         );
-        let (d, _) = transfer(&cancelled, &raw, OWNER, Guard::Text);
+        let (d, _) = transfer(&cancelled, &raw, OWNER, FLOOR, Guard::Text);
         assert_eq!(d, [true, false, false, true, false, false]);
-        let (d, _) = transfer(&cancelled, &raw, OWNER, Guard::Level);
+        let (d, _) = transfer(&cancelled, &raw, OWNER, FLOOR, Guard::Level);
         assert_eq!(d, [true, true, false, false, false, false]);
-        let (d, c) = transfer(&cancelled, &raw, OWNER, Guard::Plain);
+        let (d, c) = transfer(&cancelled, &raw, OWNER, FLOOR, Guard::Plain);
         assert_eq!(d, [true, true, false, true, true, false]);
         assert_eq!((c.plain, c.removed()), (4, 4));
-        // Without the owner's level the level guard never fires.
-        let (d, _) = transfer(&cancelled, &raw, None, Guard::Level);
+        // Without the owner's level and the floor the level guard never
+        // fires.
+        let (d, _) = transfer(&cancelled, &raw, None, None, Guard::Level);
         assert_eq!(d, [false; 6]);
     }
 
@@ -377,10 +484,85 @@ mod tests {
             &[w(500), w(490), w(1_500), w(1_510)],
             &raw,
             OWNER,
+            FLOOR,
             Guard::Plain,
         );
         assert_eq!(d, [true, false, true, false]);
         assert_eq!(c.unmatched, 2);
+    }
+
+    /// Five candidates over one flagged raw word, cut by `att` dB, `over`
+    /// dB over the floor of −60 dBFS.
+    fn floor_case(cases: &[(f32, f32)]) -> Vec<GateWord> {
+        cases
+            .iter()
+            .enumerate()
+            .map(|(k, &(over, att))| cw(1_000 + 10 * k as i64, "x", -60.0 + over, att))
+            .collect()
+    }
+
+    fn rule(f: f32) -> Rule {
+        Rule {
+            floor_margin_db: f,
+            ..Rule::SHIPPED
+        }
+    }
+
+    #[test]
+    fn without_the_owners_level_the_floor_rule_decides() {
+        let raw = [rw(1_000, "echo", true)];
+        let cancelled = floor_case(&[
+            // Residue: cut and near the floor.
+            (5.0, 8.0),
+            // Exactly at the margin: goes.
+            (12.0, 8.0),
+            // Over it: stays.
+            (13.0, 8.0),
+            // Near the floor but not cut: stays.
+            (2.0, 1.0),
+            // Loud and cut (the owner over the far end): stays.
+            (25.0, 6.0),
+        ]);
+        let (d, c) = transfer_with(&cancelled, &raw, None, FLOOR, &rule(12.0));
+        assert_eq!(d, [true, true, false, false, false]);
+        assert_eq!(
+            (c.candidates, c.floor, c.level, c.guarded, c.removed()),
+            (5, 2, 0, 3, 2)
+        );
+        // Infinite: the cut alone, the floor not needed.
+        let (d, c) = transfer_with(&cancelled, &raw, None, FLOOR, &rule(f32::INFINITY));
+        assert_eq!(d, [true, true, true, false, true]);
+        assert_eq!(c.floor, 4);
+        let (d, _) = transfer_with(&cancelled, &raw, None, None, &rule(f32::INFINITY));
+        assert_eq!(d, [true, true, true, false, true]);
+        // A finite margin without the floor: nothing goes.
+        let (d, _) = transfer_with(&cancelled, &raw, None, None, &rule(12.0));
+        assert_eq!(d, [false; 5]);
+        // The shipped margin.
+        let (d, _) = transfer(&cancelled, &raw, None, FLOOR, Guard::Level);
+        let want: Vec<bool> = [
+            (5.0, 8.0),
+            (12.0, 8.0),
+            (13.0, 8.0),
+            (2.0, 1.0),
+            (25.0, 6.0),
+        ]
+        .iter()
+        .map(|&(over, att)| att >= ATTENUATION_DB && over <= FLOOR_MARGIN_DB)
+        .collect();
+        assert_eq!(d, want);
+    }
+
+    #[test]
+    fn with_the_owners_level_the_floor_rule_is_not_used() {
+        let raw = [rw(1_000, "echo", true)];
+        // The owner at −20 dBFS: 12 dB under it is −32, 28 dB over the floor.
+        let cancelled = floor_case(&[(5.0, 8.0), (27.0, 8.0), (29.0, 8.0), (5.0, 1.0)]);
+        for f in [9.0, 12.0, f32::INFINITY] {
+            let (d, c) = transfer_with(&cancelled, &raw, OWNER, FLOOR, &rule(f));
+            assert_eq!(d, [true, true, false, false], "{f}");
+            assert_eq!((c.level, c.floor), (2, 0));
+        }
     }
 
     #[test]

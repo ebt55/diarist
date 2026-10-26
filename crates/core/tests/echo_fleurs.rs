@@ -31,6 +31,19 @@
 //!   are the raw mic's transcription, as the post-pass makes it when the
 //!   live run has no mic words (the auto run's live run has none, so its
 //!   post-pass transcribes the raw mic once more).
+//!   Since plan 16 section 12.2 it also prints the owner's level of both
+//!   gates (`owner` lines: the estimator's sets, today's branch and the
+//!   shipped one), today's decision, the shipped one and the floor rule at
+//!   each F with the owner's level as estimated and forced unknown, and
+//!   histograms of the level over the cancelled mic's floor (`hist` lines).
+//! - `DIARIST_ECHO_UNKNOWN=a` (plan 16 section 12.2.3): the forced-unknown
+//!   fixture instead, about ten owner utterances
+//!   (`DIARIST_ECHO_UTTERANCES`, default 10), each placed over far-end
+//!   speech (from the start of its slot of the far end, the first place
+//!   where 80 percent of its frames carry the far end); `b` the same with
+//!   the owner at [`UNKNOWN_B_OWNER_DBFS`], about 21 dB over the floor by
+//!   the gate's level. `DIARIST_ECHO_OWNER_DBFS` sets the owner's RMS of
+//!   any variant (default −33).
 //! - `DIARIST_ECHO_CONTROL=0` skips the headphone control;
 //!   `DIARIST_ECHO_DUMP` (a scratch folder) writes every after-canceller
 //!   word's features with its text (local analysis; delete it after).
@@ -62,6 +75,83 @@ use diarist_core::settings;
 use diarist_core::store::{NewMeeting, RunStore, SqliteStore, Store};
 use diarist_core::transcript::SegmentOptions;
 use diarist_core::types::{Channel, JobId, MeetingStatus, RunKind, RunStatus, Source};
+
+/// The owner's RMS in the forced-unknown fixture (b): about 21 dB over the
+/// cancelled mic's floor by the gate's own level (plan 16 section 12.2.3;
+/// at −33 dBFS the words the canceller left alone sit 32.5 dB over it).
+const UNKNOWN_B_OWNER_DBFS: f32 = -44.5;
+
+/// The floor rule's F sweep (plan 16 section 12.2.2 step 3).
+const F_SWEEP: [f32; 5] = [9.0, 12.0, 15.0, 18.0, f32::INFINITY];
+
+/// Counts of `v` (dB over the floor) per 3 dB bin: under 0, 0 to 3, ...,
+/// 27 to 30, 30 and over.
+fn hist(v: &[f32]) -> String {
+    let mut bins = [0usize; 12];
+    for &x in v {
+        let k = if x < 0.0 {
+            0
+        } else {
+            ((x / 3.0).floor() as usize + 1).min(11)
+        };
+        bins[k] += 1;
+    }
+    let mut s = format!("n {}:", v.len());
+    for (k, n) in bins.iter().enumerate() {
+        let label = match k {
+            0 => "<0".to_owned(),
+            11 => ">=30".to_owned(),
+            _ => format!("{}-{}", 3 * (k - 1), 3 * k),
+        };
+        s.push_str(&format!(" {label} {n}"));
+    }
+    s
+}
+
+/// The owner's level of words in any order (plan 16 section 12.2.3, first
+/// step): the estimator's sets, today's branch and the shipped one; returns
+/// today's estimate.
+fn owner_line(
+    tag: &str,
+    gw: &[GateWord],
+    far: &FarIndex,
+    floor: Option<f32>,
+    canceller: bool,
+) -> Option<f32> {
+    let mut order: Vec<usize> = (0..gw.len()).collect();
+    order.sort_by_key(|&i| (gw[i].start_ms, gw[i].end_ms, i));
+    let sorted: Vec<GateWord> = order.iter().map(|&i| gw[i].clone()).collect();
+    let s = layers::CalibrationStats::of(
+        &sorted,
+        &layers::text_runs(&sorted, far, TextWindow::DEFAULT),
+    );
+    let c = s.owner_counts();
+    let today = s.owner(false, None);
+    let now = s.owner(canceller, floor);
+    let over = |o: Option<f32>| match (o, floor) {
+        (Some(o), Some(f)) => format!("{:+.1} dB over the floor", o - f),
+        _ => "-".into(),
+    };
+    let r1 = |v: Option<f32>| v.map(|x| (x * 10.0).round() / 10.0);
+    eprintln!(
+        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}); floor {:?}",
+        gw.len(),
+        c.quiet,
+        c.unmatched,
+        c.clean_quiet,
+        c.clean,
+        today.source.as_str(),
+        r1(today.db),
+        today.words,
+        over(today.db),
+        now.source.as_str(),
+        r1(now.db),
+        now.words,
+        over(now.db),
+        r1(floor)
+    );
+    today.db
+}
 
 fn find(dir: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
@@ -439,8 +529,85 @@ fn fleurs_owner_over_a_speaker_meeting() {
     };
     let mut owner = vec![0f32; n];
     let mut utts = Vec::new();
+    // `DIARIST_ECHO_UNKNOWN=a|b` (plan 16 section 12.2.3): about ten owner
+    // utterances, each placed over far-end speech; (b) with the owner
+    // quieter (`DIARIST_ECHO_OWNER_DBFS`), about 21 dB over the floor.
+    let unknown = std::env::var("DIARIST_ECHO_UNKNOWN")
+        .ok()
+        .filter(|v| v == "a" || v == "b");
+    let owner_dbfs: f32 = std::env::var("DIARIST_ECHO_OWNER_DBFS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if unknown.as_deref() == Some("b") {
+            UNKNOWN_B_OWNER_DBFS
+        } else {
+            -33.0
+        });
+    if let Some(v) = &unknown {
+        let want: usize = std::env::var("DIARIST_ECHO_UTTERANCES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let share = |a: usize, len: usize| {
+            let (f0, f1) = (a / 320, ((a + len) / 320).min(active.len()));
+            active[f0..f1].iter().filter(|x| **x).count() as f64 / (f1 - f0).max(1) as f64
+        };
+        let slot = n / want;
+        for r in &refs {
+            if utts.len() >= want {
+                break;
+            }
+            let a = (r["start"].as_f64().unwrap() * 16_000.0) as usize;
+            let b = ((r["end"].as_f64().unwrap() * 16_000.0) as usize).min(audio.len());
+            let len = b.saturating_sub(a);
+            if len == 0 || len + 16_000 > slot {
+                continue;
+            }
+            // From the start of its slot, the first place where 80 percent of
+            // its frames carry the far end, else the slot's best.
+            let lo = slot * utts.len() + 16_000;
+            let hi = (slot * (utts.len() + 1)).min(n) - len;
+            let mut best = (-1.0f64, lo);
+            let mut s = lo;
+            while s < hi {
+                let sh = share(s, len);
+                if sh > best.0 {
+                    best = (sh, s);
+                }
+                if sh >= 0.8 {
+                    break;
+                }
+                s += 4_000;
+            }
+            let t = best.1;
+            let seg: Vec<f32> = audio[a..b]
+                .iter()
+                .map(|&v| f32::from(v) / 32_768.0)
+                .collect();
+            let rms = (seg.iter().map(|v| v * v).sum::<f32>() / len as f32)
+                .sqrt()
+                .max(1e-6);
+            let g = 10f32.powf(owner_dbfs / 20.0) / rms;
+            for (o, v) in owner[t..t + len].iter_mut().zip(&seg) {
+                *o = v * g;
+            }
+            utts.push(Utt {
+                at: t,
+                len,
+                words: norm_words(r["transcription"].as_str().unwrap_or("")),
+                double_talk: share(t, len) > 0.3,
+            });
+        }
+        eprintln!(
+            "forced-unknown fixture ({v}): {} utterances over far-end speech at {owner_dbfs} dBFS, far-end share of their frames {:?}",
+            utts.len(),
+            utts.iter()
+                .map(|u| (share(u.at, u.len) * 100.0).round() / 100.0)
+                .collect::<Vec<_>>()
+        );
+    }
     let mut t = 16_000usize;
-    for r in &refs {
+    for r in refs.iter().filter(|_| unknown.is_none()) {
         let a = (r["start"].as_f64().unwrap() * 16_000.0) as usize;
         let b = ((r["end"].as_f64().unwrap() * 16_000.0) as usize).min(audio.len());
         let len = b.saturating_sub(a);
@@ -456,7 +623,7 @@ fn fleurs_owner_over_a_speaker_meeting() {
         let rms = (seg.iter().map(|v| v * v).sum::<f32>() / len as f32)
             .sqrt()
             .max(1e-6);
-        let g = 10f32.powf(-33.0 / 20.0) / rms;
+        let g = 10f32.powf(owner_dbfs / 20.0) / rms;
         for (o, v) in owner[t..t + len].iter_mut().zip(&seg) {
             *o = v * g;
         }
@@ -730,16 +897,18 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
             .collect();
         let s = score(utts, &kept);
         eprintln!(
-            "| {name} | {extra} | {} | {:.2} % | {:.2} % | {:.2} % | {} |",
+            "| {name} | {extra} | {} | {:.2} % | {:.2} % | {:.2} % | {} | {} | {:.2} % |",
             words.len() - kept.len(),
             s.wer,
             s.wer_double_talk,
             s.wer_clear,
-            s.echo_words
+            s.echo_words,
+            s.me_words,
+            100.0 * s.echo_words as f64 / s.me_words.max(1) as f64
         );
     };
-    eprintln!("| Transfer gate (FLEURS): guard | Raw echo, candidates, removed (text, level, plain) | Dropped | \"me\" WER | over the far end | in far-end pauses | Echo words left |");
-    eprintln!("|---|---|---|---|---|---|---|");
+    eprintln!("| Transfer gate (FLEURS): guard | Raw echo, candidates, removed (text, level, plain) | Dropped | \"me\" WER | over the far end | in far-end pauses | Echo words left | Kept | Echo share of kept |");
+    eprintln!("|---|---|---|---|---|---|---|---|---|");
     line(
         "canceller, no gate",
         &vec![None; words.len()],
@@ -782,6 +951,117 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
             ),
         );
     }
+    // Plan 16 section 12.2: the owner's level of both gates; today's
+    // decision (today's owner's level on the cancelled words), the shipped
+    // one, the floor rule at each F with the owner's level as estimated and
+    // forced unknown; histograms of the level over the cancelled mic's floor.
+    let today = owner_line("FLEURS cancelled", &gw, &fi, floor, true);
+    owner_line("FLEURS raw (off run)", &raw_gw, &fi, raw_floor, false);
+    let decide = |rule: transfer::Rule, owner: Option<Option<f32>>| {
+        transfer::gate_with(
+            &raw_gw,
+            raw_floor,
+            &raw_opts,
+            &gw,
+            floor,
+            &after,
+            &fi,
+            &rule,
+            &move |c: &mut layers::Context| {
+                if let Some(o) = owner {
+                    c.owner_db = o;
+                }
+            },
+        )
+    };
+    let rule_line = |name: &str, t: &transfer::TransferReport| {
+        let c = t.transfer;
+        line(
+            name,
+            &t.reasons,
+            format!(
+                "owner {:?} ({}); removed {} (level {}, floor rule {}), guarded {}; {:?}",
+                t.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
+                t.after.owner_source.as_str(),
+                c.removed(),
+                c.level,
+                c.floor,
+                c.guarded,
+                t.counts
+            ),
+        );
+    };
+    let t_today = decide(transfer::Rule::SHIPPED, Some(today));
+    rule_line("today (today's owner's level)", &t_today);
+    rule_line(
+        &format!("shipped (F {} dB)", transfer::FLOOR_MARGIN_DB),
+        &decide(transfer::Rule::SHIPPED, None),
+    );
+    for f in F_SWEEP {
+        let rule = transfer::Rule {
+            floor_margin_db: f,
+            ..transfer::Rule::SHIPPED
+        };
+        rule_line(&format!("F {f} as estimated"), &decide(rule, None));
+        rule_line(&format!("F {f} forced unknown"), &decide(rule, Some(None)));
+    }
+    let raw_words: Vec<transfer::RawWord> = raw_gw
+        .iter()
+        .zip(&t_today.raw.reasons)
+        .map(|(w, r)| transfer::RawWord {
+            start_ms: w.start_ms,
+            end_ms: w.end_ms,
+            norm: &w.norm,
+            echo: r.is_some(),
+        })
+        .collect();
+    let (cand, _) = transfer::transfer(&gw, &raw_words, None, None, Guard::Plain);
+    let inside = |w: &(i64, i64, String)| {
+        utts.iter().any(|u| {
+            let (a, b) = (
+                (u.at as f64 / 16.0) as i64 - 200,
+                ((u.at + u.len) as f64 / 16.0) as i64 + 400,
+            );
+            (a..b).contains(&((w.0 + w.1) / 2))
+        })
+    };
+    let over = |i: usize| gw[i].presence.zip(floor).map(|(p, f)| p.level_db - f);
+    let cut = |i: usize| {
+        gw[i]
+            .presence
+            .and_then(|p| p.attenuation_db)
+            .is_some_and(|a| a >= transfer::ATTENUATION_DB)
+    };
+    let h = |sel: &dyn Fn(usize) -> bool| -> String {
+        let v: Vec<f32> = (0..gw.len()).filter(|&i| sel(i)).filter_map(over).collect();
+        hist(&v)
+    };
+    eprintln!(
+        "hist FLEURS: owner's words (in the utterances), candidates cut 3 dB or more: {}",
+        h(&|i| inside(&words[i]) && cand[i] && cut(i))
+    );
+    eprintln!(
+        "hist FLEURS: owner's words, cut 3 dB or more: {}",
+        h(&|i| inside(&words[i]) && cut(i))
+    );
+    eprintln!(
+        "hist FLEURS: owner's words, cut under 3 dB: {}",
+        h(&|i| inside(&words[i]) && !cut(i))
+    );
+    eprintln!(
+        "hist FLEURS: echo words kept today, candidates cut 3 dB or more: {}",
+        h(&|i| !inside(&words[i]) && t_today.reasons[i].is_none() && cand[i] && cut(i))
+    );
+    let mut own_clean: Vec<f32> = (0..gw.len())
+        .filter(|&i| inside(&words[i]) && !cut(i))
+        .filter_map(over)
+        .collect();
+    own_clean.sort_by(f32::total_cmp);
+    eprintln!(
+        "FLEURS: the owner's words the canceller left alone sit {:?} dB over the floor (median of {})",
+        own_clean.get(own_clean.len() / 2),
+        own_clean.len()
+    );
 }
 
 /// The after-canceller variants of the layered gate (`DIARIST_ECHO_AEC_SWEEP=1`):

@@ -805,6 +805,14 @@ fn gate_mic(
                 {
                     o.extend(cs);
                 }
+                // The raw gate's owner's level and floor, and the level
+                // guard's floor rule (plan 16 section 12.2.2 step 4).
+                info["owner_db"] = serde_json::json!(t.raw.owner_db.map(super::round3));
+                info["floor_db"] = serde_json::json!(t.raw.floor_db.map(super::round3));
+                info["floor_rule"] = serde_json::json!({
+                    "f_db": super::round3(transfer::FLOOR_MARGIN_DB),
+                    "removed": c.floor,
+                });
                 transfer_info = Some(info);
                 transfer_log = format!(
                     "; transfer from the {} mic words ({} of {} echo, {:.1} s): {} of {} candidates (text {}, level {}, plain {}), {} beyond the layers, {} without a raw word",
@@ -820,6 +828,13 @@ fn gate_mic(
                     t.counts.transfer,
                     c.unmatched
                 );
+                if c.floor > 0 {
+                    transfer_log.push_str(&format!(
+                        " (floor rule at {} dB: {})",
+                        transfer::FLOOR_MARGIN_DB,
+                        c.floor
+                    ));
+                }
                 let mut r = t.after;
                 r.reasons = t.reasons;
                 r.counts = t.counts;
@@ -874,6 +889,11 @@ fn gate_mic(
     });
     if let Some(r) = &report {
         layer_summary(&mut summary, r, correlation);
+    }
+    // Where the owner's level came from (plan 16 section 12.2.2 step 4).
+    if let Some(r) = &report {
+        summary["owner_source"] = serde_json::json!(r.owner_source);
+        summary["owner_words"] = serde_json::json!(r.owner_words);
     }
     if let Some(t) = transfer_info {
         summary["transfer"] = t;
