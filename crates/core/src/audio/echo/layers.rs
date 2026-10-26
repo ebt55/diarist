@@ -32,9 +32,21 @@
 //!    [`POCKET_WORDS`] words next to a flagged word (within [`POCKET_GAP_MS`])
 //!    while the far end is active, unless its level shows the owner.
 //!
-//! The owner's level ([`CalibrationStats::owner_db`]) is the median level
-//! of the words in no text run spoken while the far end was silent (else of
-//! all words in no text run), from at least [`OWNER_MIN_WORDS`].
+//! The owner's level ([`CalibrationStats::owner`], its source in
+//! [`OwnerSource`]) is the median level of words in no text run, from at
+//! least [`OWNER_MIN_WORDS`] of them:
+//!
+//! - before the canceller (the raw gate of the transfer, the live gate and
+//!   Stop): of those spoken while the far end was silent, else of all words
+//!   in no run, else unknown;
+//! - after the canceller only of words it left alone (cut by under
+//!   [`super::transfer::ATTENUATION_DB`]: its residue is cut, the owner's own
+//!   words are not), the far end silent, else any, else unknown; and unknown
+//!   when the estimate sits under the floor plus [`OWNER_PLAUSIBLE_DB`]. On
+//!   meeting 21 (a talk on speakers, the owner nearly silent) the words in no
+//!   run were the canceller's residue and read 11.2 dB over the floor, the
+//!   owner sits 21 to 30 dB over it on meetings 13 and 15 to 20; the transfer
+//!   gate then uses its floor rule (plan 16 section 12.2.2).
 //!
 //! After the post-pass canceller the decision also runs on the raw mic's
 //! words and is carried over to the cancelled ones ([`super::transfer`],
@@ -73,6 +85,9 @@ pub const POCKET_WORDS: usize = 2;
 pub const POCKET_GAP_MS: i64 = 300;
 /// Words the owner's level needs.
 pub const OWNER_MIN_WORDS: usize = 20;
+/// After the canceller an owner's level under the floor plus this (dB) is
+/// unknown (module docs).
+pub const OWNER_PLAUSIBLE_DB: f32 = 15.0;
 /// Text-matched words with a coefficient the calibration needs.
 pub const CALIBRATE_MIN_MATCHED: usize = 20;
 /// Owner-level words with a coefficient the keep bound needs.
@@ -338,6 +353,64 @@ pub struct CalibrationStats {
     quiet: Vec<f32>,
     /// ... and of all words in no run, with their coefficients.
     unmatched: Vec<(f32, Option<f32>)>,
+    /// After the canceller: levels of the words in no run it cut by under
+    /// [`super::transfer::ATTENUATION_DB`], the far end silent ...
+    clean_quiet: Vec<f32>,
+    /// ... and of all of them.
+    clean: Vec<f32>,
+}
+
+/// Where the owner's level came from ([`CalibrationStats::owner`];
+/// `engine_info.echo.owner_source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerSource {
+    /// Words in no text run spoken while the far end was silent (after the
+    /// canceller: of them, those it left alone).
+    Quiet,
+    /// After the canceller: any word in no run it left alone.
+    Clean,
+    /// Before the canceller: any word in no run.
+    Unmatched,
+    /// Too few words, or after the canceller an implausible estimate.
+    None,
+}
+
+impl OwnerSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet",
+            Self::Clean => "clean",
+            Self::Unmatched => "unmatched",
+            Self::None => "none",
+        }
+    }
+}
+
+/// The owner's level and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OwnerLevel {
+    /// dBFS (`None`: unknown).
+    pub db: Option<f32>,
+    pub source: OwnerSource,
+    /// The words of the set it came from; when unknown, of the last set
+    /// tried (too few, or with a median under the floor plus
+    /// [`OWNER_PLAUSIBLE_DB`]).
+    pub words: usize,
+}
+
+/// How many settled words each set of [`CalibrationStats::owner`] holds
+/// (evaluation).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnerCounts {
+    /// Words in no run, the far end silent.
+    pub quiet: usize,
+    /// Words in no run.
+    pub unmatched: usize,
+    /// Words in no run the canceller cut by under 3 dB, the far end silent.
+    pub clean_quiet: usize,
+    /// Words in no run the canceller cut by under 3 dB.
+    pub clean: usize,
 }
 
 /// The band the correlation layer uses.
@@ -368,6 +441,14 @@ impl CalibrationStats {
                 self.quiet.push(p.level_db);
             }
             self.unmatched.push((p.level_db, w.score.coefficient()));
+            if p.attenuation_db
+                .is_some_and(|a| a < super::transfer::ATTENUATION_DB)
+            {
+                if !p.far_active {
+                    self.clean_quiet.push(p.level_db);
+                }
+                self.clean.push(p.level_db);
+            }
         }
     }
 
@@ -395,16 +476,60 @@ impl CalibrationStats {
         evidence(self.run3 + run3, self.words + words)
     }
 
-    /// The owner's level (module docs).
+    /// The owner's level before the canceller (module docs; the live view's).
     pub fn owner_db(&self) -> Option<f32> {
-        let mut v = if self.quiet.len() >= OWNER_MIN_WORDS {
-            self.quiet.clone()
-        } else if self.unmatched.len() >= OWNER_MIN_WORDS {
-            self.unmatched.iter().map(|u| u.0).collect()
+        self.owner(false, None).db
+    }
+
+    /// The owner's level (module docs): `canceller` when the words were
+    /// transcribed from the canceller's output, `floor_db` the floor of
+    /// what was transcribed (the plausibility check, after the canceller).
+    pub fn owner(&self, canceller: bool, floor_db: Option<f32>) -> OwnerLevel {
+        let unmatched: Vec<f32>;
+        let sets: [(&[f32], OwnerSource); 2] = if canceller {
+            [
+                (&self.clean_quiet, OwnerSource::Quiet),
+                (&self.clean, OwnerSource::Clean),
+            ]
         } else {
-            return None;
+            unmatched = self.unmatched.iter().map(|u| u.0).collect();
+            [
+                (&self.quiet, OwnerSource::Quiet),
+                (&unmatched, OwnerSource::Unmatched),
+            ]
         };
-        percentile(&mut v, 0.5)
+        let Some(&(set, source)) = sets.iter().find(|s| s.0.len() >= OWNER_MIN_WORDS) else {
+            return OwnerLevel {
+                db: None,
+                source: OwnerSource::None,
+                words: sets[1].0.len(),
+            };
+        };
+        let db = percentile(&mut set.to_vec(), 0.5);
+        let implausible =
+            canceller && matches!((db, floor_db), (Some(o), Some(f)) if o < f + OWNER_PLAUSIBLE_DB);
+        if implausible {
+            return OwnerLevel {
+                db: None,
+                source: OwnerSource::None,
+                words: set.len(),
+            };
+        }
+        OwnerLevel {
+            db,
+            source,
+            words: set.len(),
+        }
+    }
+
+    /// The sizes of the owner's level's sets (evaluation).
+    pub fn owner_counts(&self) -> OwnerCounts {
+        OwnerCounts {
+            quiet: self.quiet.len(),
+            unmatched: self.unmatched.len(),
+            clean_quiet: self.clean_quiet.len(),
+            clean: self.clean.len(),
+        }
     }
 
     /// The correlation band: the drop bound at the 10th percentile of the
@@ -522,8 +647,13 @@ pub struct LayerReport {
     pub run3: usize,
     pub run2: usize,
     pub calibration: Calibration,
+    /// The owner's level and the floor the decision used.
     pub owner_db: Option<f32>,
     pub floor_db: Option<f32>,
+    /// Where the owner's level came from, and from how many words
+    /// ([`OwnerLevel`]).
+    pub owner_source: OwnerSource,
+    pub owner_words: usize,
 }
 
 impl LayerReport {
@@ -545,7 +675,8 @@ pub fn gate(
 }
 
 /// [`gate`] with the decision's parameters changed by `tweak` (the
-/// evaluation's sweeps).
+/// evaluation's sweeps; the report's owner's level and floor are the ones
+/// the decision used, after `tweak`).
 pub fn gate_with(
     words: &[GateWord],
     far: &FarIndex,
@@ -558,7 +689,8 @@ pub fn gate_with(
     let sorted: Vec<GateWord> = order.iter().map(|&i| words[i].clone()).collect();
     let r = text_runs(&sorted, far, opts.window);
     let stats = CalibrationStats::of(&sorted, &r);
-    let owner_db = stats.owner_db();
+    let owner = stats.owner(opts.canceller, floor_db);
+    let owner_db = owner.db;
     let calibration = if opts.correlation && opts.calibrate {
         stats.band(owner_db, opts.fixed, opts.threshold)
     } else {
@@ -588,8 +720,10 @@ pub fn gate_with(
         run3: r.count3(),
         run2: r.count2(),
         calibration,
-        owner_db,
-        floor_db,
+        owner_db: ctx.owner_db,
+        floor_db: ctx.floor_db,
+        owner_source: owner.source,
+        owner_words: owner.words,
     }
 }
 
