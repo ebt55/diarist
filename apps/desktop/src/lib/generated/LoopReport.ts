@@ -16,7 +16,7 @@ export type LoopReport = {
  */
 applied: boolean, 
 /**
- * Loops collapsed.
+ * Bursts collapsed (the details call them repeated-token loops).
  */
 runs: number, 
 /**

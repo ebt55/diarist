@@ -15,25 +15,42 @@
 //! [`LOOP_FRAME_MS`] (one frame), or exactly three words that start in the
 //! same frame (within half a frame of each other: equal on the runtime's
 //! 80 ms grid, whatever the clock map's rounding; three words one frame
-//! apart are within the base rate of distinct words and stay). A loop
-//! becomes its first word, ending where the piece's last word ends and
-//! carrying the last word's trailing ASR mark; its start, speaker, engine
-//! label, confidence and fusion fields are the first word's, and its text is
-//! the ASR's (`raw_text` cleared: punctuation runs after the collapse).
-//! Never collapsed: pairs, pieces at human pace, words whose `norm` is
-//! empty or digits only, and words with Han, Kana or Thai characters
-//! (continuous scripts, where grammatical triples are common and the
-//! runtime's word units are large). Every other word keeps its count, order
-//! and times.
+//! apart are within the base rate of distinct words and stay). That is the
+//! rule of plan 16 section 12.3, and it decides only which pieces are
+//! loops. What goes is narrower: within a loop, the bursts, the maximal
+//! sub-runs whose consecutive starts are at most [`LOOP_FRAME_MS`] apart,
+//! and of those only the ones that meet the rule on their own (four or more
+//! words, or exactly three in one frame). Each such burst becomes its first
+//! word, ending where the burst's last word ends and carrying the last
+//! word's trailing ASR mark; its start, speaker, engine label, confidence
+//! and fusion fields are the first word's, and its text is the ASR's
+//! (`raw_text` cleared: punctuation runs after the collapse). The words of
+//! a loop at human pace around a burst stay as they are, so five copies in
+//! one frame followed by the same word at 300, 600 and 900 ms keep the three
+//! real ones (the piece's median alone would take all eight), and a train
+//! of bursts a few frames apart keeps one word per burst. This is strictly
+//! more conservative than the plan's rule: it never removes a word that the
+//! plan's rule keeps. Never collapsed: pairs, pieces at human pace, words
+//! whose `norm` is empty or digits only, and words with Han, Kana or Thai
+//! characters (continuous scripts, where grammatical triples are common and
+//! the runtime's word units are large). Every other word keeps its count,
+//! order and times.
 //!
 //! Where it runs: every build that makes words, after the echo gate (which
 //! keeps seeing the raw words) and the unknown-token check, before
 //! punctuation and segmentation: the post-pass (both channels), the
 //! promoted live run, imports, Restore (the words in `echo_dropped` are raw,
-//! so a loop removed as echo comes back whole) and punctuation rebuilds.
-//! Behind `transcript.collapse_loops` (default on; [`enabled`]). Counts
-//! only reach the database ([`LoopReport`], `engine_info.loops`); the
-//! engine's words JSON in the meeting folder keeps the originals. No live
+//! so a loop removed as echo comes back whole) and punctuation rebuilds,
+//! Remove punctuation included. Behind `transcript.collapse_loops` (default
+//! on; [`enabled`]). Counts only reach the database ([`LoopReport`],
+//! `engine_info.loops`); the removed words are not stored with the run.
+//! Where the originals survive depends on the path: the file engine's words
+//! JSON in the meeting folder (`<wav stem>.words.json`) for the post-pass
+//! and imports; the earlier run, which stays, for Restore and rebuilds; the
+//! live run for a promoted one, which the post-pass keeps whenever the
+//! collapse removed a word (the live engine writes no words JSON). Turning
+//! the setting off later does not bring collapsed words back into a run;
+//! only that earlier run or a new transcription has them. No live
 //! collapse: the live view's words are replaced by the post-pass.
 
 use std::collections::BTreeMap;
@@ -49,9 +66,11 @@ use crate::store::Store;
 use crate::types::Channel;
 
 /// A piece of this many identical words or more is a loop when its median
-/// start-to-start gap is at most [`LOOP_FRAME_MS`].
+/// start-to-start gap is at most [`LOOP_FRAME_MS`]; a burst inside it of
+/// this many words or more goes.
 pub const LOOP_MIN_RUN: usize = 4;
-/// One encoder frame: Nemotron stamps word starts on an 80 ms grid.
+/// One encoder frame: Nemotron stamps word starts on an 80 ms grid. The
+/// median gap of a loop, and the largest gap inside a burst.
 pub const LOOP_FRAME_MS: i64 = 80;
 /// A run is split where two consecutive starts are more than this apart
 /// (a pause inside a run of identical words is a new piece).
@@ -61,9 +80,9 @@ pub const LOOP_SPLIT_MS: i64 = 400;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ChannelLoops {
-    /// Loops collapsed (one word kept of each).
+    /// Bursts collapsed (one word kept of each).
     pub runs: u64,
-    /// Words removed (each loop's words but the one kept).
+    /// Words removed (each burst's words but the one kept).
     pub words_removed: u64,
 }
 
@@ -107,7 +126,7 @@ impl Default for LoopRule {
 pub struct LoopReport {
     /// The collapse ran on this build (`transcript.collapse_loops` on).
     pub applied: bool,
-    /// Loops collapsed.
+    /// Bursts collapsed (the details call them repeated-token loops).
     pub runs: u64,
     /// Words removed.
     pub words_removed: u64,
@@ -155,15 +174,35 @@ pub fn enabled(store: &dyn Store) -> bool {
 /// Collapses the loops of every channel when `on`; the report for
 /// `engine_info.loops` (with `applied: false` and nothing touched when off).
 pub fn collapse_channels(channels: &mut [(Channel, Vec<TranscriptWord>)], on: bool) -> LoopReport {
+    collapse_channels_marked(channels, on, &mut []).0
+}
+
+/// [`collapse_channels`] with a mark per word: `marks[i]` for the words of
+/// `channels[i]` ([`collapse_channel_marked`]; a channel past the end of
+/// `marks` has none marked). Also returns how many marked words the
+/// collapse removed (0 when off, which touches neither words nor marks).
+pub fn collapse_channels_marked(
+    channels: &mut [(Channel, Vec<TranscriptWord>)],
+    on: bool,
+    marks: &mut [Vec<bool>],
+) -> (LoopReport, u64) {
     let mut report = LoopReport {
         applied: on,
         ..LoopReport::default()
     };
     if !on {
-        return report;
+        return (report, 0);
     }
-    for (channel, words) in channels.iter_mut() {
-        let c = collapse_channel(words);
+    let mut marked = 0;
+    for (i, (channel, words)) in channels.iter_mut().enumerate() {
+        let c = match marks.get_mut(i) {
+            Some(m) => {
+                let (c, removed) = collapse_channel_marked(words, m);
+                marked += removed;
+                c
+            }
+            None => collapse_channel(words),
+        };
         report.runs += c.runs;
         report.words_removed += c.words_removed;
         report
@@ -172,7 +211,7 @@ pub fn collapse_channels(channels: &mut [(Channel, Vec<TranscriptWord>)], on: bo
             .or_default()
             .add(c);
     }
-    report
+    (report, marked)
 }
 
 /// Collapses the loops of one channel's words in place (see the module
@@ -180,9 +219,80 @@ pub fn collapse_channels(channels: &mut [(Channel, Vec<TranscriptWord>)], on: bo
 /// with the same start keep their order).
 pub fn collapse_channel(words: &mut Vec<TranscriptWord>) -> ChannelLoops {
     words.sort_by_key(|w| w.start_ms);
+    apply(words, None).0
+}
+
+/// [`collapse_channel`] with a mark per word (`marks[i]` belongs to
+/// `words[i]` and moves with it through the sort and the collapse): also
+/// returns how many marked words the collapse removed. A marked word that
+/// is a burst's first, the one kept, is not counted. Restore marks the words
+/// it puts back, so it can say how many of them merged into a loop.
+pub fn collapse_channel_marked(
+    words: &mut Vec<TranscriptWord>,
+    marks: &mut Vec<bool>,
+) -> (ChannelLoops, u64) {
+    marks.resize(words.len(), false);
+    let mut paired: Vec<(TranscriptWord, bool)> = std::mem::take(words)
+        .into_iter()
+        .zip(marks.drain(..))
+        .collect();
+    paired.sort_by_key(|(w, _)| w.start_ms);
+    for (w, m) in paired {
+        words.push(w);
+        marks.push(m);
+    }
+    apply(words, Some(marks))
+}
+
+/// Collapses the bursts of `words` (in time order), keeping `marks` in step;
+/// the counts and the marked words removed.
+fn apply(words: &mut Vec<TranscriptWord>, marks: Option<&mut Vec<bool>>) -> (ChannelLoops, u64) {
+    let bursts = bursts(words);
+    let mut stats = ChannelLoops::default();
+    if bursts.is_empty() {
+        return (stats, 0);
+    }
+    let old = std::mem::take(words);
+    let old_marks = marks.as_ref().map(|m| m.to_vec());
+    let mut new_marks = Vec::new();
+    let mut marked_removed = 0;
+    let mut next = bursts.iter().peekable();
+    let mut k = 0;
+    while k < old.len() {
+        match next.peek() {
+            Some(&&(a, b)) if a == k => {
+                words.push(collapsed(&old[a..=b]));
+                if let Some(m) = &old_marks {
+                    new_marks.push(m[a]);
+                    marked_removed += m[a + 1..=b].iter().filter(|&&x| x).count() as u64;
+                }
+                stats.runs += 1;
+                stats.words_removed += (b - a) as u64;
+                next.next();
+                k = b + 1;
+            }
+            _ => {
+                words.push(old[k].clone());
+                if let Some(m) = &old_marks {
+                    new_marks.push(m[k]);
+                }
+                k += 1;
+            }
+        }
+    }
+    if let Some(m) = marks {
+        *m = new_marks;
+    }
+    (stats, marked_removed)
+}
+
+/// The bursts to collapse in `words` (in time order) as (first, last)
+/// indices, in order: within each piece that the plan's rule takes for a
+/// loop ([`is_loop`]), the frame-level sub-runs that are loops on their own
+/// ([`is_burst`]).
+fn bursts(words: &[TranscriptWord]) -> Vec<(usize, usize)> {
     let norms: Vec<String> = words.iter().map(|w| norm(w.asr_text())).collect();
-    // Collapsed pieces as (first, last) indices, in order.
-    let mut loops: Vec<(usize, usize)> = Vec::new();
+    let mut out: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < words.len() {
         let mut j = i;
@@ -196,49 +306,56 @@ pub fn collapse_channel(words: &mut Vec<TranscriptWord>) -> ChannelLoops {
         for k in i + 1..=j + 1 {
             if k > j || words[k].start_ms - words[k - 1].start_ms > LOOP_SPLIT_MS {
                 if is_loop(&words[a..k], &norms[a]) {
-                    loops.push((a, k - 1));
+                    let mut s = a;
+                    for t in a + 1..=k {
+                        if t == k || words[t].start_ms - words[t - 1].start_ms > LOOP_FRAME_MS {
+                            if is_burst(&words[s..t]) {
+                                out.push((s, t - 1));
+                            }
+                            s = t;
+                        }
+                    }
                 }
                 a = k;
             }
         }
         i = j + 1;
     }
-    let mut stats = ChannelLoops::default();
-    if loops.is_empty() {
-        return stats;
-    }
-    let old = std::mem::take(words);
-    let mut next = loops.iter().peekable();
-    let mut k = 0;
-    while k < old.len() {
-        match next.peek() {
-            Some(&&(a, b)) if a == k => {
-                words.push(collapsed(&old[a..=b]));
-                stats.runs += 1;
-                stats.words_removed += (b - a) as u64;
-                next.next();
-                k = b + 1;
-            }
-            _ => {
-                words.push(old[k].clone());
-                k += 1;
-            }
-        }
-    }
-    stats
+    out
 }
 
 /// Whether a piece (identical normalised text `n`, one speaker, starts in
-/// order, no gap over [`LOOP_SPLIT_MS`]) is a loop.
+/// order, no gap over [`LOOP_SPLIT_MS`]) is a loop by the plan's rule:
+/// [`LOOP_MIN_RUN`] or more words at a median start gap of at most
+/// [`LOOP_FRAME_MS`], or exactly three in one frame.
 fn is_loop(piece: &[TranscriptWord], n: &str) -> bool {
     if !eligible(n) {
         return false;
     }
     match piece.len() {
         len if len >= LOOP_MIN_RUN => median_gap_at_most(piece, LOOP_FRAME_MS),
-        3 => piece[2].start_ms - piece[0].start_ms < LOOP_FRAME_MS / 2,
+        3 => in_one_frame(piece),
         _ => false,
     }
+}
+
+/// Whether a sub-run of a loop (consecutive starts at most
+/// [`LOOP_FRAME_MS`] apart) is a burst that meets the rule on its own:
+/// [`LOOP_MIN_RUN`] or more words (their median gap is at most one frame
+/// by construction), or exactly three in one frame.
+fn is_burst(sub: &[TranscriptWord]) -> bool {
+    match sub.len() {
+        len if len >= LOOP_MIN_RUN => true,
+        3 => in_one_frame(sub),
+        _ => false,
+    }
+}
+
+/// Three words that start in the same frame: within half a frame of the
+/// first (equal on the runtime's 80 ms grid, whatever the clock map's
+/// rounding).
+fn in_one_frame(words: &[TranscriptWord]) -> bool {
+    words[words.len() - 1].start_ms - words[0].start_ms < LOOP_FRAME_MS / 2
 }
 
 /// A token the collapse may touch: a non-empty `norm` that is not digits
@@ -337,10 +454,10 @@ mod tests {
     #[test]
     fn a_burst_of_24_becomes_one_word_spanning_it_with_the_last_mark() {
         let mut words = vec![w(0, "so", "spk_0"), w(400, "it's", "spk_0")];
-        // 24 copies: bursts of 8 in one frame, 160 ms between bursts.
+        // 24 copies in one frame.
         let mut burst: Vec<TranscriptWord> = (0..24)
             .map(|k| {
-                let mut x = w(1_000 + (k / 8) * 160, "the", "spk_0");
+                let mut x = w(1_000, "the", "spk_0");
                 x.confidence = Some(k as f32 / 100.0);
                 x.raw_label = Some(format!("raw{k}"));
                 x
@@ -373,6 +490,88 @@ mod tests {
         assert_eq!(out[0], words[0]);
         assert_eq!(out[1], words[1]);
         assert_eq!(out[3], words[words.len() - 1]);
+    }
+
+    #[test]
+    fn a_train_of_bursts_keeps_one_word_per_burst() {
+        // 24 copies: bursts of 8 in one frame, 160 ms between bursts. The
+        // plan's rule takes the piece for a loop (median gap 0) and would
+        // keep one word; only the frame-level bursts go, one word each.
+        let mut words: Vec<TranscriptWord> = (0..24)
+            .map(|k| w(1_000 + (k / 8) * 160, "the", "spk_0"))
+            .collect();
+        words[7].text = "the,".into();
+        words[23].text = "the.".into();
+        let (out, c) = collapse(&words);
+        assert_eq!(
+            c,
+            ChannelLoops {
+                runs: 3,
+                words_removed: 21
+            }
+        );
+        assert_eq!(texts(&out), ["the,", "the", "the."]);
+        assert_eq!(
+            out.iter()
+                .map(|x| (x.start_ms, x.end_ms))
+                .collect::<Vec<_>>(),
+            [(1_000, 1_080), (1_160, 1_240), (1_320, 1_400)]
+        );
+    }
+
+    #[test]
+    fn real_repeats_after_a_burst_stay() {
+        // Five in one frame, then the same word at human pace: the burst
+        // goes, the three real ones stay (the piece's median, 0 ms, would
+        // have taken all eight).
+        let mut words = run(0, 0, 5, "no");
+        words.extend([300, 600, 900].map(|t| w(t, "no", "spk_0")));
+        let (out, c) = collapse(&words);
+        assert_eq!((c.runs, c.words_removed), (1, 4));
+        assert_eq!(
+            out.iter().map(|x| x.start_ms).collect::<Vec<_>>(),
+            [0, 300, 600, 900]
+        );
+        assert_eq!(out[0].end_ms, 80, "the burst's end, not the piece's");
+        assert_eq!(&out[1..], &words[5..]);
+        // Three in one frame and a real one 250 ms later: two words.
+        let mut words = run(0, 0, 3, "I");
+        words.push(w(250, "I", "spk_0"));
+        let (out, c) = collapse(&words);
+        assert_eq!((texts(&out), c.words_removed), (vec!["I", "I"], 2));
+        assert_eq!(out[1], words[3]);
+        // Four one frame apart with one gap jittered to 81 ms: the plan's
+        // median (80) takes the piece for a loop, but its frame-level
+        // sub-runs are pairs, so every word stays; at 81 ms throughout the
+        // plan's rule keeps them too.
+        for starts in [[0, 80, 161, 241], [0, 81, 162, 243]] {
+            let words: Vec<TranscriptWord> = starts.iter().map(|&t| w(t, "and", "spk_0")).collect();
+            let (out, c) = collapse(&words);
+            assert_eq!((out, c), (words, ChannelLoops::default()), "{starts:?}");
+        }
+    }
+
+    #[test]
+    fn the_marked_words_removed_are_counted() {
+        // A burst of four whose first and third are marked, put in time
+        // order with the rest: the first is kept, so one marked word went.
+        let mut words = vec![w(500, "end", "spk_0"), w(0, "go", "spk_0")];
+        words.extend(run(100, 0, 4, "go"));
+        let mut marks = vec![true, false, true, false, true, false];
+        let (c, removed) = collapse_channel_marked(&mut words, &mut marks);
+        assert_eq!((c.words_removed, removed), (3, 1));
+        assert_eq!(texts(&words), ["go", "go", "end"]);
+        assert_eq!(
+            marks,
+            [false, true, true],
+            "the marks moved with their words"
+        );
+        // Without a loop only the order changes.
+        let mut words = vec![w(300, "b", "spk_0"), w(100, "a", "spk_0")];
+        let mut marks = vec![true, false];
+        let (c, removed) = collapse_channel_marked(&mut words, &mut marks);
+        assert_eq!((c, removed), (ChannelLoops::default(), 0));
+        assert_eq!((texts(&words), marks), (vec!["a", "b"], vec![false, true]));
     }
 
     #[test]
@@ -414,25 +613,34 @@ mod tests {
     }
 
     #[test]
-    fn the_median_decides_for_four_or_more() {
-        // Gaps 0, 0, 160, 160: the median is 80, a loop.
-        let words: Vec<TranscriptWord> = [0, 0, 0, 160, 320]
-            .into_iter()
-            .map(|t| w(t, "we", "spk_0"))
-            .collect();
-        assert_eq!(collapse(&words).1.words_removed, 4);
-        // Gaps 0, 80, 160, 160: the median is 120, not a loop.
-        let words: Vec<TranscriptWord> = [0, 0, 80, 240, 400]
-            .into_iter()
-            .map(|t| w(t, "we", "spk_0"))
-            .collect();
+    fn the_median_decides_the_loop_and_the_bursts_what_goes() {
+        let at = |starts: &[i64]| -> Vec<TranscriptWord> {
+            starts.iter().map(|&t| w(t, "we", "spk_0")).collect()
+        };
+        // Gaps 0, 0, 160, 160: the median is 80, a loop; of it the three in
+        // one frame go to one word, the two at 160 ms steps stay.
+        let words = at(&[0, 0, 0, 160, 320]);
+        let (out, c) = collapse(&words);
+        assert_eq!(c.words_removed, 2);
+        assert_eq!(&out[1..], &words[3..]);
+        // Gaps 0, 80, 160, 160: the median is 120, not a loop, so its burst
+        // of three one frame apart stays too.
+        let words = at(&[0, 0, 80, 240, 400]);
         assert_eq!(collapse(&words).0, words);
-        // Gaps 240, 0, 0: the median is 0, a loop despite the first gap.
-        let words: Vec<TranscriptWord> = [0, 240, 240, 240]
-            .into_iter()
-            .map(|t| w(t, "we", "spk_0"))
-            .collect();
-        assert_eq!(collapse(&words).0.len(), 1);
+        // Gaps 0, 0, 0, 160: a loop; a burst of four one frame wide.
+        let words = at(&[0, 0, 0, 80, 240]);
+        let (out, c) = collapse(&words);
+        assert_eq!((c.words_removed, out.len()), (3, 2));
+        assert_eq!(out[0].end_ms, 160);
+        // Gaps 240, 0, 0: the median is 0, a loop despite the first gap; the
+        // first word stays, the three in one frame become one.
+        let words = at(&[0, 240, 240, 240]);
+        let (out, _) = collapse(&words);
+        assert_eq!(out.iter().map(|x| x.start_ms).collect::<Vec<_>>(), [0, 240]);
+        // A burst inside a piece the plan's rule keeps never goes: four in
+        // one frame, then five at 300 ms steps (median gap 300), all stay.
+        let words = at(&[0, 0, 0, 0, 300, 600, 900, 1_200, 1_500]);
+        assert_eq!(collapse(&words).0, words);
     }
 
     #[test]
@@ -464,16 +672,44 @@ mod tests {
         assert_eq!(c.words_removed, 3);
         assert_eq!(out.iter().map(|w| w.start_ms).collect::<Vec<_>>(), [0, 401]);
         assert_eq!(out[0].end_ms, 80, "the piece's end, not the next word's");
-        // Exactly 400 ms is not a pause: one piece of five, median 0.
+        // Exactly 400 ms is not a pause: one piece of five, median 0, a
+        // loop; its burst of four goes, the word 400 ms later stays.
         let mut words = run(0, 0, 4, "you");
         words.push(w(400, "you", "spk_0"));
-        let (out, _) = collapse(&words);
-        assert_eq!((out.len(), out[0].end_ms), (1, 480));
+        let (out, c) = collapse(&words);
+        assert_eq!((out.len(), out[0].end_ms, c.words_removed), (2, 80, 3));
         // A pause splits a slow run into pieces that are judged alone:
         // three in one frame, a pause, three in one frame.
         let mut words = run(0, 0, 3, "uh");
         words.extend(run(1_000, 0, 3, "uh"));
         assert_eq!(collapse(&words).0.len(), 2);
+    }
+
+    /// The echo gate's `norm` on combining vowel signs, tone marks, control
+    /// characters and odd spaces; `tools/eval/test_metrics.py`
+    /// (`test_loop_norm_is_the_rust_norm`) checks `levers.py`'s
+    /// `loop_norm` against the same pairs, so the measurement and the app
+    /// see the same tokens.
+    const NORM_PAIRS: [(&str, &str); 9] = [
+        ("नहीं", "नहीं"),
+        ("ที่", "ที"),
+        ("தமிழ்", "தமிழ"),
+        ("Ко-ко,", "коко"),
+        ("a\u{1c}b", "ab"),
+        ("İ", "i"),
+        ("Ⅻ", "ⅻ"),
+        (" ok\u{a0}", "ok"),
+        ("đâu?", "đâu"),
+    ];
+
+    #[test]
+    fn norm_matches_the_measurement_script() {
+        for (text, want) in NORM_PAIRS {
+            assert_eq!(norm(text), want, "{text:?}");
+        }
+        // Devanagari collapses (a script with spaces), Thai never.
+        assert_eq!(collapse(&run(0, 0, 4, "नहीं")).0.len(), 1);
+        assert_eq!(collapse(&run(0, 0, 4, "ที่")).0.len(), 4);
     }
 
     #[test]

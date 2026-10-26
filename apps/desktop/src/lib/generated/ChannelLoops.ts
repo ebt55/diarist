@@ -5,10 +5,10 @@
  */
 export type ChannelLoops = { 
 /**
- * Loops collapsed (one word kept of each).
+ * Bursts collapsed (one word kept of each).
  */
 runs: number, 
 /**
- * Words removed (each loop's words but the one kept).
+ * Words removed (each burst's words but the one kept).
  */
 words_removed: number, };
