@@ -87,6 +87,31 @@ pub fn loaded_runtime() -> Option<LoadedRuntime> {
     }
 }
 
+/// What this process did with ONNX Runtime so far (Diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    /// Nothing loaded yet (it loads at the first punctuated run).
+    NotLoaded,
+    Ready(LoadedRuntime),
+    /// Loaded, but a check failed; punctuation is off until a restart.
+    Broken {
+        path: PathBuf,
+        message: String,
+    },
+}
+
+/// [`RuntimeStatus`] now.
+pub fn runtime_status() -> RuntimeStatus {
+    match &*STATE.lock().unwrap_or_else(|p| p.into_inner()) {
+        None => RuntimeStatus::NotLoaded,
+        Some(Attempt::Ready { runtime, .. }) => RuntimeStatus::Ready(runtime.clone()),
+        Some(Attempt::Broken { path, message }) => RuntimeStatus::Broken {
+            path: path.clone(),
+            message: message.clone(),
+        },
+    }
+}
+
 /// Loads (once) and checks the library at `dll`; see the module docs.
 pub fn ensure_runtime(
     dll: &Path,
@@ -480,12 +505,16 @@ impl OnnxPunctuator {
         let tokenizer = HfTokenizer::load(&rel_path(&root, &spec.tokenizer))
             .map_err(|e| model_err("tokenizer", e))?;
         let threads = threads.max(1);
+        let opt_err =
+            |e: ort::Error<ort::session::builder::SessionBuilder>| model_err("session options", e);
         let session = Session::builder(&env)
             .map_err(|e| model_err("session", e))?
             .with_optimization_level(GraphOptimizationLevel::All)
-            .and_then(|b| b.with_intra_threads(threads as usize))
-            .and_then(|b| b.with_inter_threads(1))
-            .map_err(|e| model_err("session options", e))?
+            .map_err(opt_err)?
+            .with_intra_threads(threads as usize)
+            .map_err(opt_err)?
+            .with_inter_threads(1)
+            .map_err(opt_err)?
             .commit_from_file(model)
             .map_err(|e| model_err(&model.display().to_string(), e))?;
         let has_input = |n: &str| session.inputs().iter().any(|i| i.name() == n);
@@ -598,10 +627,9 @@ impl OnnxPunctuator {
                     head.output
                 )));
             }
-            for (r, w) in batch.iter().enumerate() {
-                for p in 0..w.len() {
+            for (r, row) in out.iter_mut().enumerate() {
+                for (p, o) in row.iter_mut().enumerate() {
                     let at = r * t + off + p;
-                    let o = &mut out[r][p];
                     match (&values, slot) {
                         (HeadOut::Classes(v), 0) => o.post = v[at],
                         (HeadOut::Classes(v), 1) => o.pre = v[at],

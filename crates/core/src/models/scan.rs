@@ -176,7 +176,7 @@ fn sidecar_path(path: &Path) -> PathBuf {
 
 /// The file's SHA-256 from the `.sha256` cache, else computed (seconds for
 /// a model) and cached. `None` when the file cannot be read.
-fn own_sha(path: &Path) -> Option<String> {
+pub(crate) fn own_sha(path: &Path) -> Option<String> {
     let side = sidecar_path(path);
     let fresh = match (std::fs::metadata(path), std::fs::metadata(&side)) {
         (Ok(f), Ok(s)) => match (f.modified(), s.modified()) {

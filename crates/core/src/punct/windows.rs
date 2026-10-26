@@ -137,6 +137,10 @@ pub fn spans(word_of: &[usize], opts: &WindowOpts) -> Vec<Span> {
     out
 }
 
+/// The model call of [`run_windows`]: a batch of token slices in, one output
+/// per token of each out.
+pub type Infer<'a, R> = dyn FnMut(&[&[i64]]) -> Result<Vec<Vec<R>>> + 'a;
+
 /// Runs `infer` over every window of every stream and returns each token's
 /// output, taken from the window whose core holds it. `infer` gets a batch
 /// of token slices (special tokens not added) and returns one output per
@@ -145,7 +149,7 @@ pub fn run_windows<R: Clone + Default>(
     streams: &[&Encoded],
     opts: &WindowOpts,
     cancel: &dyn Fn() -> bool,
-    infer: &mut dyn FnMut(&[&[i64]]) -> Result<Vec<Vec<R>>>,
+    infer: &mut Infer<'_, R>,
 ) -> Result<Vec<Vec<R>>> {
     let mut windows: Vec<(usize, Span)> = Vec::new();
     for (s, e) in streams.iter().enumerate() {

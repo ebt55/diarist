@@ -1132,7 +1132,10 @@ fn models_pull(ctx: &Ctx, names: &[String], via_runtime: bool) -> CliResult {
         eprintln!("downloading {} ({} MB)", e.name, e.size_bytes >> 20);
         // Never called when the file is already there with the right hash.
         let mut fetched = false;
-        let dest = models::download_model(e, &ctx.paths.models(), &mut |done, total| {
+        // fetch_entry replaces download_model here: every file of a
+        // multi-file entry (a punctuation model), the others first and the
+        // primary file last.
+        let dest = models::fetch_entry(e, &ctx.paths, &mut |done, total| {
             fetched = true;
             if let Some(t) = total.filter(|t| *t > 0) {
                 eprint!(
@@ -1145,13 +1148,25 @@ fn models_pull(ctx: &Ctx, names: &[String], via_runtime: bool) -> CliResult {
         })
         .inspect_err(|_| {
             eprintln!();
-            manual_download_hint(
-                &e.url,
-                &e.sha256,
-                e.size_bytes,
-                &e.dest_dir(&ctx.paths.models()),
-                "put the file in",
-            );
+            let parts = models::setup::entry_files(e, &ctx.paths.models());
+            if parts.is_empty() {
+                manual_download_hint(
+                    &e.url,
+                    &e.sha256,
+                    e.size_bytes,
+                    &e.dest_dir(&ctx.paths.models()),
+                    "put the file in",
+                );
+            }
+            for p in parts.iter().filter(|p| !p.present) {
+                manual_download_hint(
+                    &p.url,
+                    &p.sha256,
+                    p.size_bytes,
+                    Path::new(&p.dest),
+                    "save it as",
+                );
+            }
         })?;
         if fetched {
             eprintln!();

@@ -143,6 +143,36 @@ Other requirements:
 - `engine.file_diar_preset`, the same kind of setting for the diarizer: empty or `model` (the default) uses each diarizer's value; `streaming` passes no preset flag, so file jobs tag speakers like live; any other text is passed as the preset name for every diarizer, e.g. `v3-streaming`. It is set like `engine.file_lookahead` below.
 - The escape hatch, a setting with no switch in the app, `engine.file_lookahead`: empty or `model` (the default) uses each model's value; `low` passes no lookahead flag, so file jobs run like live (for a 4 GB card that runs out of memory on imports, or to compare in a bug report); a number, e.g. `6`, uses that value for every model. Settings are stored in `diarist.db` in the data folder; with Diarist closed, `sqlite3 "<data folder>\diarist.db" "INSERT OR REPLACE INTO settings (key, value) VALUES ('engine.file_lookahead', 'low')"` sets it, and deleting the row restores the default.
 
+### Punctuation models (`.onnx`)
+
+A punctuation model is a token classifier in ONNX format that Diarist runs itself on the CPU, through ONNX Runtime, after Stop and on imports; it only labels the words (a mark after a word, `¿` `¡` before one, capitals), and Diarist applies the labels with checks, so it can never change a word, a time or a speaker. The runner is generic: a description block tells it what the model's inputs, outputs and labels are. The recommended model carries its block in the manifest; a model you add needs a `<file>.meet.json` sidecar next to its `.onnx` file with a `punctuation` key. An `.onnx` file without a valid block is listed as unrecognised with the note "needs a `.meet.json` that describes its labels", and an unrecognised file can never be selected for punctuation.
+
+To add one, for example a Hugging Face folder:
+
+1. Copy the folder anywhere under `models\` (the Hugging Face layout works as it is: `onnx\model_quantized.onnx` with `tokenizer.json` at the top).
+2. Put ONNX Runtime into the same folder as `diarist-onnxruntime.dll`: take `lib\onnxruntime.dll` from Microsoft's `onnxruntime-win-x64-<version>.zip` (the GitHub releases of `microsoft/onnxruntime`; 1.31.0 or newer) and rename it. The new name keeps Windows from confusing it with another copy, such as the old `onnxruntime.dll` in `C:\Windows\System32`. One copy for several models can go under `engine\onnxruntime-<version>\` instead (as `diarist-onnxruntime.dll`, `onnxruntime.dll` or `lib\onnxruntime.dll`); the model's own folder is searched first. ONNX Runtime needs the Microsoft Visual C++ Redistributable (x64); Diagnostics, "Punctuation runtime", says when it is missing.
+3. Write `<file>.meet.json` next to the `.onnx` file (`manifests/punctuation-sidecar.example.json` in the repository is a complete one), press Refresh, and select the file under Punctuation.
+
+The sidecar's keys: `role` (`"punctuation"`, optional), `display_name`, `languages` (primary subtags such as `["en", "de"]`, or `["*"]`; a model that lists none is not checked), and `punctuation`, the block:
+
+| Key | Meaning |
+|---|---|
+| `tokenizer` | the tokenizer file, relative to the model's folder (required). The model's folder is the nearest one, from the `.onnx` file's own folder up to three folders above it (never above `models\`), that holds this file. No `..`, no drive |
+| `tokenizer_kind` | `hf_json` (a Hugging Face `tokenizer.json`; the default and the only kind). Convert a SentencePiece `.model` into one first |
+| `input_casing` | `keep` (default) or `lower` for models trained on lower-case text |
+| `max_tokens` | tokens per window, the special tokens included (required) |
+| `context_tokens` | tokens of context on each side of a window, whose labels are discarded (default an eighth of `max_tokens`, at most 64) |
+| `batch` | windows per inference call (default 8) |
+| `bos_id`, `eos_id`, `pad_id` | the token put before and after every window (leave out when none) and the padding token (default 0) |
+| `inputs` | `{"ids": "input_ids", "mask": "attention_mask"}`: the input tensors' names; leave `mask` out for a model without one |
+| `heads` | the outputs to read, at least one `post` or `case` head: `output` (tensor name), `kind` (`post`: a mark after the word; `pre`: before it; `case`: capitals; `boundary`: read by nothing), `labels` (each class in the output's order: a mark such as `.` `,` `?` `!` `:` `-` `¿` `¡` or its script forms `。` `，` `、` `।` `،` `؟` `？`, a name such as `period`, `""`, `0`, `O` or any `<...>` token for nothing, `<ACRONYM>` (never applied); for a `case` head `lower`, `cap` or `upper`, none for per-character casing), `position` (`last_token`: the word's last subword carries its label; `first_token`; `per_subword`: every subword is labelled, a mark inside a word is dropped and counted) and `values` (`logits`: float scores per class; `decisions`: class ids, or `[batch, tokens, characters]` flags for per-character casing). A `;` label is refused as ambiguous: write `question` for the Greek question mark or `""` |
+| `casing` | `none` (default: only the sentence-start rule), `first_letter` or `per_char` |
+| `marks_by_language` | marks allowed per language, e.g. `{"*": ["period", "comma", "question"], "es": ["period", "comma", "question", "inverted_question"]}` |
+| `unit`, `policy` | `stream` (default) or `turn` windows; `keep_asr` (default: a mark the speech model wrote stays) or `replace` |
+| `runtime`, `runtime_version` | the ONNX Runtime file in the model's folder (default `diarist-onnxruntime.dll`) and the version its version string must start with, e.g. `1.31.0` |
+
+ONNX Runtime is loaded once per run of Diarist: a model whose folder has another ONNX Runtime version takes effect after a restart. The punctuation model runs on the CPU only (4 threads; `transcript.punctuation_threads` changes it) and is unloaded after each job. `transcript.punctuation` set to `off` turns punctuation off.
+
 ## 6. Languages
 
 - Diarization is language-independent (Nemotron 3 Diarization).

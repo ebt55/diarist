@@ -822,11 +822,12 @@ fn recommended_backend_now() -> &'static str {
 }
 
 /// Fetches a manifest model and verifies it, then rescans. Every entry goes
-/// through our own downloader (`models::download_model`: resume, size and
-/// SHA-256, the `.sha256` cache) into the manifest's layout
-/// (`<repo>\<revision>\<file>`, where `nemo-speech pull` put files before
-/// 0.1.0-beta.5, so those are found; `user\` for `models.user.json`
-/// entries). No engine is needed. Returns the file.
+/// through our own downloader (`models::fetch_entry`: every file of a
+/// multi-file entry, the others first and the primary file last, each with
+/// resume, size and SHA-256 and the `.sha256` cache) into the manifest's
+/// layout (`<repo>\<revision>\<file>`, where `nemo-speech pull` put files
+/// before 0.1.0-beta.5, so those are found; the entry's `dir`; `user\` for
+/// `models.user.json` entries). No engine is needed. Returns the file.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn pull_model(
     app: AppHandle,
@@ -860,7 +861,9 @@ pub async fn pull_model(
         progress(0, false, None);
         // The downloader reports every 256 KiB; the UI needs four a second.
         let mut last = Instant::now() - Duration::from_secs(1);
-        let result = models::download_model(&entry, &data_paths.models(), &mut |done, _| {
+        // fetch_entry replaces download_model here: it also fetches the other
+        // files of a multi-file entry (a punctuation model), primary last.
+        let result = models::fetch_entry(&entry, &data_paths, &mut |done, _| {
             if last.elapsed() >= Duration::from_millis(250) {
                 last = Instant::now();
                 progress(done, false, None);
@@ -1980,6 +1983,8 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         echo_mode,
         last_recording_echo(store).as_ref(),
     ));
+    // 8d. Punctuation: the model's ONNX Runtime library and its VC++ runtime.
+    out.push(diagnostics::punctuation_check(paths, store));
 
     // 9. Live server reachable when it should be.
     let live = crate::live::status(app);

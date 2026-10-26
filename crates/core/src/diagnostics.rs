@@ -712,6 +712,119 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
     out
 }
 
+/// The "Punctuation runtime" row (docs/plans/16 section 3.7): whether the
+/// selected punctuation model's ONNX Runtime library is there, has its
+/// Visual C++ runtime, and loaded and passed its checks in this process.
+/// `skip` when punctuation is off or no model is installed (nothing gates
+/// on it); a missing redistributable names the DLL and Microsoft's page.
+pub fn punctuation_check(paths: &DataPaths, store: &dyn Store) -> HealthCheck {
+    use crate::punct::onnx::{self, RuntimeStatus};
+    let (id, label) = ("punctuation", "Punctuation runtime");
+    if crate::punct::setting(store) == crate::punct::PunctSetting::Off {
+        return HealthCheck::new(
+            id,
+            label,
+            "skip",
+            "Punctuation is off (transcript.punctuation): transcripts keep the speech model's \
+             own punctuation.",
+        );
+    }
+    let file = match selected_file(store, ModelRole::Punctuation) {
+        Ok(Some(f)) => f,
+        _ => {
+            let row = HealthCheck::new(
+                id,
+                label,
+                "skip",
+                "No punctuation model is installed: transcripts keep the speech model's own \
+                 punctuation.",
+            );
+            let entry = crate::models::Manifest::load(&paths.root)
+                .ok()
+                .and_then(|m| {
+                    m.models
+                        .iter()
+                        .find(|e| e.role == ModelRole::Punctuation && !e.experimental)
+                        .map(|e| e.name.clone())
+                });
+            return match entry {
+                Some(name) => row.fix(format!("download:{name}"), "Download"),
+                None => row,
+            };
+        }
+    };
+    let fail = |detail: String| HealthCheck::new(id, label, "fail", detail);
+    let Some(spec) = file.capabilities.punctuation.clone() else {
+        return fail(format!(
+            "{} has no punctuation description. Press Refresh in Settings, Models.",
+            file.display_name
+        ))
+        .fix("rescan", "Refresh");
+    };
+    let model = paths.absolute(&file.path);
+    let dll = match spec
+        .model_root(&model, &paths.models())
+        .map_err(|e| e.to_string())
+        .and_then(|root| onnx::find_runtime(&root, &spec, paths).map_err(|u| u.message))
+    {
+        Ok(p) => p,
+        Err(e) => {
+            return fail(format!(
+                "{e}. Download the punctuation model again, or put the library into its folder."
+            ))
+            .fix("open_models", "Open models folder")
+        }
+    };
+    if let Some(d) = onnx::missing_dependency() {
+        return fail(format!(
+            "{d} is missing: ONNX Runtime needs the Microsoft Visual C++ Redistributable (x64). \
+             Install it from {}, then restart Diarist.",
+            onnx::VC_REDIST_URL
+        ));
+    }
+    let rel = paths.relative(&dll);
+    match onnx::runtime_status() {
+        RuntimeStatus::NotLoaded => HealthCheck::new(
+            id,
+            label,
+            "pass",
+            format!("ONNX Runtime at {rel}; it loads at the first punctuated transcript."),
+        ),
+        RuntimeStatus::Ready(rt) if same_path(&rt.path, &dll) => HealthCheck::new(
+            id,
+            label,
+            "pass",
+            format!(
+                "ONNX Runtime {} loaded from {} (CPU).",
+                rt.version,
+                paths.relative(&rt.path)
+            ),
+        ),
+        RuntimeStatus::Ready(rt) => HealthCheck::new(
+            id,
+            label,
+            "warn",
+            format!(
+                "ONNX Runtime {} is loaded from {}; restart Diarist to use {rel}.",
+                rt.version,
+                paths.relative(&rt.path)
+            ),
+        ),
+        RuntimeStatus::Broken { path, message } => fail(format!(
+            "{} ({}). Restart Diarist after fixing it.",
+            message,
+            paths.relative(&path)
+        )),
+    }
+}
+
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1175,53 @@ mod tests {
         assert_eq!(scrub_path(r"C:\Users\Jürgen\x", r"C:\Users\Jürgen"), r"~\x");
         assert_eq!(scrub_path(r"C:\x", "C:"), r"C:\x");
         assert_eq!(scrub_path("", p), "");
+    }
+
+    #[test]
+    fn the_punctuation_row_skips_without_a_model_and_names_a_missing_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let c = punctuation_check(&paths, &store);
+        assert_eq!((c.id.as_str(), c.status.as_str()), ("punctuation", "skip"));
+        assert!(c.detail.contains("No punctuation model"), "{}", c.detail);
+        store
+            .set_setting(crate::settings::TRANSCRIPT_PUNCTUATION, "off")
+            .unwrap();
+        assert!(punctuation_check(&paths, &store).detail.contains("is off"));
+        store
+            .set_setting(crate::settings::TRANSCRIPT_PUNCTUATION, "auto")
+            .unwrap();
+
+        // A dropped-in model without its ONNX Runtime library.
+        let root = paths.models().join("punct");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model.onnx"), b"x").unwrap();
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(
+            root.join("model.onnx.meet.json"),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 64,
+                "heads": [{"output": "logits", "kind": "post", "labels": ["", "."],
+                           "position": "last_token", "values": "logits"}]}}"#,
+        )
+        .unwrap();
+        crate::models::scan(&paths, &store, &crate::models::Manifest::builtin()).unwrap();
+        let c = punctuation_check(&paths, &store);
+        assert_eq!(c.status, "fail", "{}", c.detail);
+        assert!(c.detail.contains("diarist-onnxruntime.dll"), "{}", c.detail);
+        assert_eq!(c.fix.as_deref(), Some("open_models"));
+        // With a library file there (not loaded in this test process).
+        std::fs::write(root.join("diarist-onnxruntime.dll"), b"MZ").unwrap();
+        let c = punctuation_check(&paths, &store);
+        if crate::punct::onnx::missing_dependency().is_none()
+            && crate::punct::onnx::runtime_status() == crate::punct::onnx::RuntimeStatus::NotLoaded
+        {
+            assert_eq!(c.status, "pass", "{}", c.detail);
+            assert!(
+                c.detail.contains("models/punct/diarist-onnxruntime.dll"),
+                "{}",
+                c.detail
+            );
+        }
     }
 }

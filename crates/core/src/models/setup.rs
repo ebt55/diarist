@@ -124,8 +124,9 @@ pub fn download_items(
 }
 
 /// Every file of a multi-file entry in download order (the other files,
-/// then the primary one), with where it lands and whether a file of the
-/// expected size is there. Empty for a single-file entry.
+/// then the primary one), with where it lands and whether it is there with
+/// the expected size and SHA-256 (from the `<file>.sha256` cache while it is
+/// fresh, else hashed once and cached). Empty for a single-file entry.
 pub fn entry_files(m: &ModelEntry, models_dir: &Path) -> Vec<DownloadFile> {
     if m.files.is_empty() {
         return Vec::new();
@@ -133,12 +134,17 @@ pub fn entry_files(m: &ModelEntry, models_dir: &Path) -> Vec<DownloadFile> {
     let root = m.dest_dir(models_dir);
     let part = |path: &str, url: &str, size: u64, sha: &str| {
         let dest = rel_path(&root, path);
+        let sized = std::fs::metadata(&dest).is_ok_and(|md| md.is_file() && md.len() == size);
+        let hashed = || {
+            sha.trim().is_empty()
+                || super::scan::own_sha(&dest).is_some_and(|h| h.eq_ignore_ascii_case(sha.trim()))
+        };
         DownloadFile {
             path: path.to_owned(),
             url: url.to_owned(),
             size_bytes: size,
             sha256: sha.to_owned(),
-            present: std::fs::metadata(&dest).is_ok_and(|md| md.is_file() && md.len() == size),
+            present: sized && hashed(),
             dest: dest.display().to_string(),
         }
     };

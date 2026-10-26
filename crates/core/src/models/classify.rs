@@ -331,6 +331,18 @@ mod tests {
         assert!(e.contains("heads"), "{e}");
     }
 
+    /// `manifests/punctuation-sidecar.example.json` (docs/04 section 5) is a
+    /// valid sidecar.
+    #[test]
+    fn the_sidecar_example_parses() {
+        let sc: Sidecar = serde_json::from_str(include_str!(
+            "../../../../manifests/punctuation-sidecar.example.json"
+        ))
+        .unwrap();
+        assert_eq!(sc.role, Some(ModelRole::Punctuation));
+        sc.punctuation.unwrap().validate().unwrap();
+    }
+
     fn unknown_onnx() -> Classification {
         Classification {
             role: ModelRole::Unknown,

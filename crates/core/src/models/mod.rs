@@ -15,6 +15,8 @@
 //!   ([`download_model`]); [`pull`]: the old `nemo-speech pull` path, kept
 //!   for one release behind `diarist-cli models pull --via-runtime`;
 //!   [`doctor`]: runtime version and GPU.
+//! - [`fetch`]: every file of a manifest entry, the other files first and
+//!   the primary one last ([`fetch_entry`], plan 16 section 3.6).
 //! - [`add`]: "Add from URL" and "Add from file" for models no manifest lists.
 //! - [`releases`]: newer runtimes from the NeMo-Speech.cpp GitHub releases.
 //! - [`setup`]: the first-run check (engine, models, GPU, disk) and the
@@ -36,6 +38,7 @@ pub mod classify;
 pub mod device;
 pub mod doctor;
 pub mod download;
+pub mod fetch;
 pub mod gguf;
 pub mod languages;
 pub mod legacy;
@@ -60,6 +63,7 @@ pub use doctor::{doctor, DoctorReport};
 pub use download::{
     download_file, download_model, install_engine, model_dest, sha256_file, verify_file,
 };
+pub use fetch::fetch_entry;
 pub use gguf::{read_header, GgufHeader, GgufValue};
 pub use manifest::{EngineEntry, Manifest, ModelEntry, TESTED_ENGINE_VERSIONS};
 pub use paths::{free_disk_bytes, DataPaths, DataRootSource};
