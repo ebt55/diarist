@@ -9,7 +9,7 @@ from Git Bash or PowerShell.
 
 | Tool | Version | Notes |
 |---|---|---|
-| Rust (MSVC) | 1.90+ (workspace `rust-version`; Tauri 2.12 needs it) | `rustup update stable` |
+| Rust (MSVC) | 1.92+ (workspace `rust-version`; Tauri 2.12 needs 1.90, `ort` 2.0.0-rc.15 1.92) | `rustup update stable` |
 | VS Build Tools 2022 | C++ workload | linker and Windows SDK |
 | bun | 1.2 | package manager and script runner for `apps/desktop` |
 | Node | 22.12+ | Vite 8 runs on Node |
@@ -128,7 +128,7 @@ files in `crates/core/tests/golden/`.
 
 `.cargo/config.toml` turns on the MSRV-aware resolver
 (`incompatible-rust-versions = "fallback"`), so `cargo update` picks dependency
-versions that support the workspace `rust-version` (1.90) when they exist.
+versions that support the workspace `rust-version` (1.92) when they exist.
 
 ### Core/UI seam
 
