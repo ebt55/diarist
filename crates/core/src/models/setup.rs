@@ -412,12 +412,19 @@ mod tests {
         );
         for f in &item.files {
             assert!(!f.present, "{}", f.path);
-            assert!(f.url.starts_with("https://") && f.url.ends_with(&f.path), "{}", f.url);
+            assert!(
+                f.url.starts_with("https://") && f.url.ends_with(&f.path),
+                "{}",
+                f.url
+            );
             assert_eq!(f.sha256.len(), 64, "{}", f.path);
             assert_eq!(f.dest, rel_path(&folder, &f.path).display().to_string());
         }
         let last = item.files.last().unwrap();
-        assert_eq!((last.url.as_str(), last.sha256.as_str()), (item.url.as_str(), item.sha256.as_str()));
+        assert_eq!(
+            (last.url.as_str(), last.sha256.as_str()),
+            (item.url.as_str(), item.sha256.as_str())
+        );
         // The setup screen is still about the engine, ASR and diarizer only.
         assert!(s.needs_setup && !s.engine_ready && !s.asr_ready && !s.diarizer_ready);
         assert!(s.disk_needed_bytes > 107_012_128 + 699_872_960 + PUNCTUATION_BYTES);

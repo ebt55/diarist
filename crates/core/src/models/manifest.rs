@@ -483,11 +483,7 @@ mod tests {
         // veto `required` here without a code change).
         assert_eq!(
             required,
-            [
-                "nemotron-3-diarization",
-                "nemotron-en",
-                PUNCTUATION_MODEL
-            ]
+            ["nemotron-3-diarization", "nemotron-en", PUNCTUATION_MODEL]
         );
         let parakeet = m.model("parakeet-tdt").unwrap();
         assert!(parakeet.experimental && !parakeet.required);
@@ -756,7 +752,10 @@ mod tests {
         );
         assert_eq!(e.primary_size_bytes(), 268_414_381);
         assert!(e.licence.starts_with("Apache-2.0") && e.licence.ends_with("base model MIT"));
-        assert_eq!(e.dir.as_deref(), Some("horizon-labs/punctuation-restoration-small"));
+        assert_eq!(
+            e.dir.as_deref(),
+            Some("horizon-labs/punctuation-restoration-small")
+        );
         assert_eq!(
             e.dest_dir(Path::new("M")),
             Path::new("M")
