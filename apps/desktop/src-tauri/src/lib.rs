@@ -315,6 +315,7 @@ pub fn run() {
             live::recording_status,
             live::live_snapshot,
             live::rerun_post_pass,
+            live::process_again_check,
             live::turn_off_echo_for_recording,
             commands::echo_dropped,
             commands::restore_echo_dropped,
