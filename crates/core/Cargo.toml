@@ -45,6 +45,14 @@ flac-codec = { version = "1", default-features = false }
 # Free VRAM for the live start gate (docs/01 "Capture robustness"): loads the
 # driver's nvml.dll at run time; `nemo-speech doctor` is the fallback.
 nvml-wrapper = "0.13"
+# Punctuation (docs/plans/16 section 3.7): ONNX Runtime on the CPU, loaded at
+# run time by absolute path from the model's folder (`load-dynamic`; no
+# build-time download, no copied DLL). `api-31` is named because without the
+# default features the API baseline falls to 17, and Windows' own 1.17 copy
+# in System32 would then load instead of failing.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-31"] }
+# The punctuation model's `tokenizer.json` (token ids and offsets per word).
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [target.'cfg(windows)'.dependencies]
 # Diagnostics_Debug, Kernel, Memory, ProcessStatus, Threading: the native
@@ -57,6 +65,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
+    # The punctuation runtime's module identity check (punct/onnx.rs).
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_Power",
