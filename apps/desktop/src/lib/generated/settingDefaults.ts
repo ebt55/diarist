@@ -12,6 +12,7 @@ export const SETTING_DEFAULTS = {
   "selected_engine": "",
   "selected_model.asr": "",
   "selected_model.diarizer": "",
+  "selected_model.punctuation": "",
   "record.mic_device": "",
   "record.loopback_device": "",
   "record.diarize_mic": "false",
@@ -29,6 +30,8 @@ export const SETTING_DEFAULTS = {
   "setup.language_seeded": "false",
   "playback.volume": "1.0",
   "playback.normalize": "true",
+  "transcript.punctuation": "auto",
+  "transcript.punctuation_threads": "4",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

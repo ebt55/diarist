@@ -25,6 +25,7 @@ pub mod live;
 pub mod models;
 pub mod pipeline;
 pub mod protocol;
+pub mod punct;
 pub mod retention;
 pub mod settings;
 pub mod store;

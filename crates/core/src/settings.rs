@@ -80,9 +80,17 @@ pub const PLAYBACK_VOLUME: &str = "playback.volume";
 /// (from the waveform peaks, at most +24 dB, with a limiter); the stored
 /// audio does not change.
 pub const PLAYBACK_NORMALIZE: &str = "playback.normalize";
+/// Punctuation of the post-pass, imports, Restore and rebuilds (plan 16
+/// section 3.8): `auto` (when a punctuation model is selected, installed and
+/// covers the run's language) or `off` ([`crate::punct::setting`]).
+pub const TRANSCRIPT_PUNCTUATION: &str = "transcript.punctuation";
+/// ONNX Runtime intra-op threads of the punctuation model, no UI; clamped
+/// to 1 to the machine's cores ([`crate::punct::threads`]).
+pub const TRANSCRIPT_PUNCTUATION_THREADS: &str = "transcript.punctuation_threads";
 
 /// Every known key with its default. Selections (`selected_engine`,
-/// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
+/// `selected_model.asr`, `selected_model.diarizer`,
+/// `selected_model.punctuation`) default to "" (none;
 /// the model scan picks the recommended files).
 pub const DEFAULTS: &[(&str, &str)] = &[
     (AUDIO_RETENTION_DAYS, "30"),
@@ -95,6 +103,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("selected_engine", ""),
     ("selected_model.asr", ""),
     ("selected_model.diarizer", ""),
+    ("selected_model.punctuation", ""),
     (RECORD_MIC_DEVICE, ""),
     (RECORD_LOOPBACK_DEVICE, ""),
     (RECORD_DIARIZE_MIC, "false"),
@@ -112,6 +121,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (SETUP_LANGUAGE_SEEDED, "false"),
     (PLAYBACK_VOLUME, "1.0"),
     (PLAYBACK_NORMALIZE, "true"),
+    (TRANSCRIPT_PUNCTUATION, "auto"),
+    (TRANSCRIPT_PUNCTUATION_THREADS, "4"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -323,6 +334,10 @@ mod tests {
         assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
         assert!(get_bool(&s, PLAYBACK_NORMALIZE));
         assert_eq!(get(&s, PLAYBACK_VOLUME), "1.0");
+        // Punctuation: on when a model is installed, 4 threads, no selection.
+        assert_eq!(get(&s, TRANSCRIPT_PUNCTUATION), "auto");
+        assert_eq!(get_u64(&s, TRANSCRIPT_PUNCTUATION_THREADS), 4);
+        assert_eq!(get(&s, &selection_key(ModelRole::Punctuation)), "");
         // Echo handling: on detection, at 0.5; clamped, unreadable is 0.5.
         assert_eq!(
             (echo_mode(&s), echo_gate_threshold(&s)),
