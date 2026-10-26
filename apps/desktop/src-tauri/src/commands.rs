@@ -2582,6 +2582,10 @@ pub async fn recommended_downloads_notice(
         &store,
         move |s| -> diarist_core::Result<Option<DownloadsNotice>> {
             let stored = settings::effective(s)?;
+            // Answered: no need to list (and hash) the downloads at every launch.
+            if settings::get_bool(&stored, MODELS_NOTICE_KEY) {
+                return Ok(None);
+            }
             let manifest = Manifest::load(&data_paths.root)?;
             let files = s.list_model_files()?;
             let items =
