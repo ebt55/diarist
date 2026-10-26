@@ -25,7 +25,11 @@
 //! current run's `echo_dropped` copied. Nothing is deleted. No run is made
 //! when nothing would change, and "Add" makes none when the model did not
 //! run (no model, a language it does not cover, a failure): an earlier
-//! punctuation is never stripped by it.
+//! punctuation is never stripped by it. Before punctuation the words'
+//! repeated-token loops are collapsed with the current
+//! `transcript.collapse_loops` (plan 16 section 12.3), so a rebuild of an
+//! older meeting collapses its loops too; `engine_info.loops` is replaced
+//! (its counts include the current run's).
 //!
 //! A crash between creating such a run and switching to it leaves a
 //! non-current run in `running`; [`sweep_interrupted_rebuilds`] deletes
@@ -37,6 +41,7 @@ use super::{punctuate_loaded, Loaded, PunctReason, PunctReport, PunctSource, Run
 use crate::error::{CoreError, Result};
 use crate::live::{check_idle, segment_options};
 use crate::store::{CarryOverReport, NewSpeaker, NewTranscript, RunStore, StoreError};
+use crate::transcript::loops::{self, collapse_channels};
 use crate::transcript::{build_transcript_channels, SegmentOptions, TranscriptWord};
 use crate::types::{
     Channel, EchoDroppedWord, MeetingId, MeetingStatus, RunId, RunKind, RunStatus, SegmentId,
@@ -337,6 +342,12 @@ pub fn rebuild_run_with(
     let source = source_run(store, current.id)?;
     let mut channels = source.channels.clone();
     let before = texts_of(&channels);
+    // Loops collapse at rebuild time with the current setting (plan 16
+    // section 12.3), so Add punctuation on an older meeting collapses its
+    // loops too; the counts include the current run's.
+    let loops = collapse_channels(&mut channels, loops::enabled(store));
+    let collapsed = loops.words_removed;
+    let loops = loops.on_top_of(&current.engine_info);
     let segment = segment_options(&current.engine_info);
     let lang = run_language(&detail.meeting.language, &current.engine_info);
     let mut report = match why {
@@ -352,6 +363,7 @@ pub fn rebuild_run_with(
     let after = texts_of(&channels);
     let was_applied = PunctReport::of_engine_info(&current.engine_info).is_some_and(|r| r.applied);
     report.rebuilt_from = Some(root);
+    // A collapsed loop is a change too (the word list is shorter).
     let changed = before != after;
     // Add makes a run only when the model ran (no model, a language it
     // does not cover or a failure never strips an earlier punctuation);
@@ -381,6 +393,7 @@ pub fn rebuild_run_with(
         info = serde_json::json!({});
     }
     info["punctuation"] = report.to_json();
+    info["loops"] = loops.to_json();
     let dropped = store.echo_dropped(current.id)?;
     let (new, carry) = store_rebuild(
         store,
@@ -392,7 +405,7 @@ pub fn rebuild_run_with(
         &transcript,
     )?;
     log::info!(
-        "meeting {meeting}: punctuation {why:?} as run {new} from run {} (root {root}, kept): {} ({} marks, {} capitals)",
+        "meeting {meeting}: punctuation {why:?} as run {new} from run {} (root {root}, kept): {} ({} marks, {} capitals; {collapsed} words of repeated-token loops collapsed)",
         current.id,
         report.reason.as_str(),
         report.marks_added.unwrap_or(0),
@@ -1246,6 +1259,101 @@ mod tests {
     #[test]
     fn the_startup_sweep_deletes_only_half_built_copies() {
         both(sweep);
+    }
+
+    /// Plan 16 section 12.3: a rebuild collapses the repeated-token loops of
+    /// a run made before the collapse ("Add punctuation" on an older
+    /// meeting) with the current setting, and reports them.
+    fn rebuild_collapses_loops(store: &dyn RunStore) {
+        let older = |store: &dyn RunStore| {
+            let m = new_meeting(store, Source::Live, false);
+            let mut lb = vec![tw(Channel::Loopback, 0, "so", "spk_0", Some("spk_0"))];
+            lb.extend((0..5).map(|_| tw(Channel::Loopback, 400, "we", "spk_0", Some("spk_0"))));
+            lb.push(tw(Channel::Loopback, 900, "start", "spk_0", Some("spk_0")));
+            let mic = vec![tw(Channel::Mic, 5_000, "ok", ME_LABEL, None)];
+            let t = build_transcript_channels(
+                vec![(Channel::Mic, mic), (Channel::Loopback, lb)],
+                &SegmentOptions::default(),
+            );
+            (m, add_run(store, m, RunKind::PostPass, &t))
+        };
+        let count = |m: MeetingId| store.get_words(m, i64::MIN, i64::MAX).unwrap().len();
+        let (m, first) = older(store);
+        store
+            .rename_speaker(
+                speaker(store, first, Channel::Loopback, "spk_0"),
+                "Alice",
+                None,
+            )
+            .unwrap();
+        // Without a model "Add" makes no run, so nothing is collapsed either
+        // (and no earlier punctuation is stripped).
+        let none = rebuild_run(store, &PunctSource::None, m, RebuildWhy::Add, &|| false).unwrap();
+        assert_eq!((none.run, count(m)), (None, 8));
+        let added = add(store, m);
+        assert_eq!(count(m), 4, "one \"we\" of five");
+        let we = store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.asr_text() == "we")
+            .unwrap();
+        assert_eq!(
+            (we.start_ms, we.end_ms, we.text.as_str()),
+            (400, 700, "We.")
+        );
+        let info = store.get_run(added).unwrap().engine_info;
+        assert_eq!(info["loops"]["applied"], true);
+        assert_eq!(
+            (
+                info["loops"]["runs"].as_u64(),
+                info["loops"]["words_removed"].as_u64()
+            ),
+            (Some(1), Some(4))
+        );
+        assert_eq!(info["loops"]["per_channel"]["loopback"]["words_removed"], 4);
+        assert_eq!(rows(store, first), rows(store, added), "speaker rows");
+        // Again: nothing changes, no run.
+        let again = rebuild_run(store, &periods(), m, RebuildWhy::Add, &|| false).unwrap();
+        assert_eq!(again.run, None);
+        // Remove keeps the collapse (the words are the collapsed ones) and
+        // its counts.
+        let removed = rebuild_run(store, &periods(), m, RebuildWhy::Remove, &|| false)
+            .unwrap()
+            .run
+            .unwrap();
+        assert_eq!(count(m), 4);
+        let info = store.get_run(removed).unwrap().engine_info;
+        assert_eq!(
+            (
+                info["loops"]["runs"].as_u64(),
+                info["loops"]["words_removed"].as_u64()
+            ),
+            (Some(1), Some(4))
+        );
+        // With the setting off a rebuild keeps every word.
+        store
+            .set_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let (m2, _) = older(store);
+        let off = add(store, m2);
+        assert_eq!(count(m2), 8);
+        let info = store.get_run(off).unwrap().engine_info;
+        assert_eq!(
+            (
+                info["loops"]["applied"].as_bool(),
+                info["loops"]["runs"].as_u64()
+            ),
+            (Some(false), Some(0))
+        );
+        store
+            .remove_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_rebuild_collapses_the_loops_of_an_older_run() {
+        both(rebuild_collapses_loops);
     }
 
     #[test]
