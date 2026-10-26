@@ -13,6 +13,7 @@ import {
   backfillDoneText,
   backfillHelp,
   backfillLabel,
+  changedText,
   modelCovers,
   punctErrorText,
   punctJobName,
@@ -204,6 +205,7 @@ describe("after Add or Remove", () => {
     run: 9,
     punctuation: report({ applied: true, reason: "ok", marks_added: 40, case_upgrades: 12 }),
     error: null,
+    changed: false,
     cancelled: false,
     ...patch,
   });
@@ -227,6 +229,16 @@ describe("after Add or Remove", () => {
       kind: "info",
       text: "Add punctuation was cancelled; the transcript is as it was.",
     });
+  });
+
+  test("the meeting changed meanwhile: said plainly, with Try again", () => {
+    const changed = outcome({ run: null, punctuation: null, changed: true, error: changedText(false) });
+    expect(punctOutcomeText(changed, false)).toEqual({
+      kind: "error",
+      text: "This meeting changed while punctuation was being added. Try again.",
+      retry: true,
+    });
+    expect(changedText(true)).toBe("This meeting changed while punctuation was being removed. Try again.");
   });
 
   test("an error says what did not work (the toast offers Try again)", () => {
@@ -262,6 +274,7 @@ describe("the bulk action", () => {
     run: meeting_id + 100,
     punctuation: report({ applied: true, reason: "ok" }),
     error: null,
+    changed: false,
     cancelled: false,
     ...patch,
   });
@@ -276,7 +289,7 @@ describe("the bulk action", () => {
       outcomes: [
         o(1, {}),
         o(2, { run: null, punctuation: report({ reason: "language" }) }),
-        o(3, { run: null, punctuation: null, error: "The meeting changed meanwhile; try again." }),
+        o(3, { run: null, punctuation: null, changed: true, error: changedText(false) }),
         o(4, { run: null, punctuation: report({ reason: "asr_punctuates" }) }),
       ],
     });
@@ -284,8 +297,8 @@ describe("the bulk action", () => {
       kind: "info",
       text:
         "Punctuation added to 1 of 4 meetings; the earlier versions stay. 2 meetings stayed as they were (the model " +
-        "does not cover the language, or the speech model punctuates it). 1 meeting could not be changed now (The " +
-        "meeting changed meanwhile; try again); try again later.",
+        "does not cover the language, or the speech model punctuates it). 1 meeting could not be changed now (it " +
+        "changed while this ran); try again later.",
     });
     expect(backfillDoneText(done({ total: 5, outcomes: [o(1, {})], cancelled: true })).text).toBe(
       "Stopped: punctuation added to 1 of 5 meetings; the earlier versions stay.",

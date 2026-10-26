@@ -2184,8 +2184,18 @@ pub struct PunctOutcome {
     /// Why the meeting was left as it was (it records, it is being
     /// finalized, it changed meanwhile), as the user should read it.
     pub error: Option<String>,
+    /// The meeting's transcript changed while the rebuild ran (an edit, a
+    /// Restore, another rebuild finished first), so nothing was switched
+    /// (`punct::rebuild::is_meeting_changed`): worth another try.
+    pub changed: bool,
     pub cancelled: bool,
 }
+
+/// What a rebuild that lost a race to another change of the meeting says.
+const PUNCT_CHANGED_ADD: &str =
+    "This meeting changed while punctuation was being added. Try again.";
+const PUNCT_CHANGED_REMOVE: &str =
+    "This meeting changed while punctuation was being removed. Try again.";
 
 impl PunctOutcome {
     fn of(r: RebuildReport) -> Self {
@@ -2194,6 +2204,7 @@ impl PunctOutcome {
             run: r.run,
             punctuation: Some(r.punctuation),
             error: None,
+            changed: false,
             cancelled: false,
         }
     }
@@ -2204,7 +2215,20 @@ impl PunctOutcome {
             run: None,
             punctuation: None,
             error: Some(error),
+            changed: false,
             cancelled: false,
+        }
+    }
+
+    /// The meeting changed while the rebuild ran ([`PunctOutcome::changed`]).
+    fn changed(meeting_id: MeetingId, why: RebuildWhy) -> Self {
+        let text = match why {
+            RebuildWhy::Add => PUNCT_CHANGED_ADD,
+            RebuildWhy::Remove => PUNCT_CHANGED_REMOVE,
+        };
+        Self {
+            changed: true,
+            ..Self::failed(meeting_id, text.to_owned())
         }
     }
 
@@ -2313,6 +2337,12 @@ pub async fn punctuate_meeting(
                 Ok(PunctOutcome::of(rep))
             }
             Err(CoreError::Cancelled) => Ok(PunctOutcome::cancelled(meeting_id)),
+            Err(e) if punct::rebuild::is_meeting_changed(&e) => {
+                log::info!(
+                    "punctuation {why:?} for meeting {meeting_id}: the meeting changed meanwhile"
+                );
+                Ok(PunctOutcome::changed(meeting_id, why))
+            }
             Err(e) => {
                 log::warn!("punctuation {why:?} for meeting {meeting_id} failed: {e}");
                 Err(user_error(e))
@@ -2377,11 +2407,21 @@ pub async fn punctuation_backfill(
                 out.cancelled = true;
                 break;
             }
-            match punct::rebuild_run_with(s, &mut loaded, m, RebuildWhy::Add, &cancel) {
+            // A meeting that changed while it ran (an edit finished first)
+            // gets one more try.
+            let mut r = punct::rebuild_run_with(s, &mut loaded, m, RebuildWhy::Add, &cancel);
+            if r.as_ref().is_err_and(punct::rebuild::is_meeting_changed) && loaded.is_ok() {
+                r = punct::rebuild_run_with(s, &mut loaded, m, RebuildWhy::Add, &cancel);
+            }
+            match r {
                 Ok(rep) => out.outcomes.push(PunctOutcome::of(rep)),
                 Err(CoreError::Cancelled) => {
                     out.cancelled = true;
                     break;
+                }
+                Err(e) if punct::rebuild::is_meeting_changed(&e) => {
+                    log::info!("punctuation for meeting {m} skipped: it changed meanwhile, twice");
+                    out.outcomes.push(PunctOutcome::changed(m, RebuildWhy::Add));
                 }
                 Err(e) => {
                     log::warn!("punctuation for meeting {m} skipped: {e}");

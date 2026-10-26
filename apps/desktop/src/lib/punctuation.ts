@@ -22,8 +22,14 @@ export interface PunctOutcome {
   run: RunId | null;
   /** `engine_info.punctuation` of the new run, or what it would have been. */
   punctuation: PunctReport | null;
-  /** Why the meeting was left as it was (the bulk action only; a single meeting's command rejects). */
+  /**
+   * Why the meeting was left as it was: it changed meanwhile (`changed`), or,
+   * in the bulk action only, any other error (a single meeting's command
+   * rejects with it).
+   */
   error: string | null;
+  /** The transcript changed while the job ran (an edit finished first); nothing was switched. Worth another try. */
+  changed: boolean;
   cancelled: boolean;
 }
 
@@ -273,14 +279,22 @@ export function punctLine(r: PunctReport | null, ctx: PunctContext): PunctLine |
 // ---- After Add or Remove -----------------------------------------------------------
 
 export interface Notice {
-  kind: "info" | "success";
+  kind: "info" | "success" | "error";
   text: string;
+  /** Offer Try again. */
+  retry?: boolean;
+}
+
+/** What a rebuild that lost a race says (commands.rs `PUNCT_CHANGED_*`). */
+export function changedText(remove: boolean): string {
+  return `This meeting changed while punctuation was being ${remove ? "removed" : "added"}. Try again.`;
 }
 
 /** The toast after Add (or Remove) punctuation on one meeting. */
 export function punctOutcomeText(o: PunctOutcome, remove: boolean, files: readonly ModelFile[] = []): Notice {
   const what = remove ? REMOVE_LABEL : ADD_LABEL;
   if (o.cancelled) return { kind: "info", text: `${what} was cancelled; the transcript is as it was.` };
+  if (o.changed) return { kind: "error", text: o.error ?? changedText(remove), retry: true };
   const r = o.punctuation;
   if (remove) {
     return o.run !== null
@@ -360,7 +374,7 @@ export function backfillDoneText(o: BackfillOutcome): Notice {
   // No new run: settled (a language the model does not cover, the speech
   // model punctuates) or failed (the model, the runtime, the meeting).
   const why = (x: PunctOutcome): string | null =>
-    x.error ??
+    (x.changed ? "it changed while this ran" : x.error) ??
     (x.run === null && x.punctuation && !x.punctuation.applied && FAILED.includes(x.punctuation.reason)
       ? failureText(x.punctuation)
       : null);

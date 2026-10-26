@@ -595,11 +595,12 @@ class AppState {
       const files = await api.listModelFiles().catch(() => []);
       const t = punctOutcomeText(o, remove, files);
       const elsewhere = this.openId !== meetingId || this.route !== "library";
-      this.toast(
-        t.kind,
-        elsewhere ? `"${title || "Untitled meeting"}": ${t.text}` : t.text,
-        elsewhere ? { label: "Open", run: () => this.open(meetingId), meetingId } : undefined,
-      );
+      const action = t.retry
+        ? { label: TRY_AGAIN, run: () => void this.punctuate(meetingId, title, remove), meetingId }
+        : elsewhere
+          ? { label: "Open", run: () => this.open(meetingId), meetingId }
+          : undefined;
+      this.toast(t.kind, elsewhere ? `"${title || "Untitled meeting"}": ${t.text}` : t.text, action);
       return o;
     } catch (e) {
       const msg = errorText(e);
