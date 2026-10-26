@@ -86,8 +86,8 @@ class Downloads {
 
   /**
    * Downloads the items that are not installed, one after another, engine
-   * first. Resolves to the number that failed. A failed engine stops the
-   * rest (model pulls need it).
+   * first. Resolves to the number that failed. A failed item does not stop
+   * the rest: since 0.1.0-beta.5 models download without the engine.
    */
   async install(items: DownloadItem[]): Promise<number> {
     this.#listen();
@@ -111,13 +111,6 @@ class Downloads {
           failed++;
           this.#set(d.name, { state: "failed", error: errorText(e) });
           void api.log("error", `download ${d.name} failed: ${errorText(e)}`);
-          if (d.kind === "engine") {
-            for (const rest of todo.slice(i + 1)) {
-              failed++;
-              this.#set(rest.name, { state: "failed", error: "Needs the engine, which did not install." });
-            }
-            break;
-          }
         }
       }
     } finally {
