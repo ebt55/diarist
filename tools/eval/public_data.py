@@ -278,9 +278,8 @@ def ref_stats(rows: list[dict], rttm: list[RttmRow]) -> dict:
         "speakers": len({r.speaker for r in rttm}),
         "rows": len(rows),
         "words": sum(len(str(r["words"]).split()) for r in rows),
-        "rows_with_punctuation": sum(
-            1 for r in rows if any(unicodedata.category(c)[0] == "P" for c in str(r.get("words_pc") or ""))
-        ),
+        # rows whose source form carries a leading or trailing mark (. , ? -)
+        "rows_with_punctuation": sum(1 for r in rows if r.get("words_pc") and strip_punct(r["words_pc"]) != r["words_pc"]),
         "interp_rows": sum(1 for r in rows if r.get("timing") == "interp"),
         "speech_s": round(speech, 1),
         "overlap_share_of_speech": round(ov / speech, 3) if speech else None,
