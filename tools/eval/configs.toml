@@ -68,12 +68,16 @@ diarizer = "nemotron-3-diarization"
 language = "en"
 engine_args = ["--asr.streaming.rnnt_right_context", "-1"]
 
+# n35_rc_6 also names the diarizer preset since beta.5: plan 12 ran it before
+# the manifest's file_preset existed, so the runtime default (v3-streaming)
+# applied; a rebuilt diarist-cli would otherwise pass v3-offline. It is one of
+# the live lookahead configs below.
 [n35_rc_6]
-description = "Nemotron 3.5, rnnt_right_context 6 (560 ms)"
+description = "Nemotron 3.5, rnnt_right_context 6 (560 ms), diarizer preset v3-streaming (as live)"
 asr = "nemotron-3.5"
 diarizer = "nemotron-3-diarization"
 language = "en"
-engine_args = ["--asr.streaming.rnnt_right_context", "6"]
+engine_args = ["--asr.streaming.rnnt_right_context", "6", "--asr.diar.preset", "v3-streaming"]
 
 [n35_rc_13]
 description = "Nemotron 3.5, rnnt_right_context 13 (1.12 s, the model card's largest setting)"
@@ -81,6 +85,34 @@ asr = "nemotron-3.5"
 diarizer = "nemotron-3-diarization"
 language = "en"
 engine_args = ["--asr.streaming.rnnt_right_context", "13"]
+
+# --- Live lookahead (0.1.0-beta.5, docs/plans/16 section 5) ---
+# The live server's setting on the file path: the same cache-aware decoder at
+# lookahead R, the diarizer on the live geometry (v3-streaming), both passed
+# explicitly because a rebuilt diarist-cli otherwise applies the manifest's
+# file_right_context 13 and file_preset v3-offline. R 1 is what live runs
+# today (the runtime default), R 6 the candidate; n35_rc_6 is above.
+
+[en_rc_1]
+description = "Nemotron EN, rnnt_right_context 1 (160 ms, the live default), diarizer preset v3-streaming (as live)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "1", "--asr.diar.preset", "v3-streaming"]
+
+[n35_rc_1]
+description = "Nemotron 3.5, rnnt_right_context 1 (160 ms, the live default), diarizer preset v3-streaming (as live)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "1", "--asr.diar.preset", "v3-streaming"]
+
+[en_rc_6]
+description = "Nemotron EN, rnnt_right_context 6 (560 ms, the live candidate), diarizer preset v3-streaming (as live)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+engine_args = ["--asr.streaming.rnnt_right_context", "6", "--asr.diar.preset", "v3-streaming"]
 
 # --- Diarizer geometry in the fused pass (plan 12, measurement 2) ---
 # `--asr.diar.preset v3-offline` is still AOSC streaming, with the runtime's

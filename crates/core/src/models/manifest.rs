@@ -586,13 +586,20 @@ mod tests {
     }
 
     #[test]
-    fn live_lookahead_is_unset_until_measured_and_trained_when_set() {
+    fn live_lookahead_is_six_for_both_nemotron_models_and_trained() {
         let m = Manifest::builtin();
-        // docs/plans/16 section 5: no live flag until the measurement passes
-        // (chunk F part 2 sets 6 for both Nemotron models here).
-        for name in ["nemotron-en", "nemotron-3.5", "nemotron-3-diarization"] {
-            assert_eq!(m.model(name).unwrap().live_right_context, None, "{name}");
+        // docs/plans/16 section 5: the measurement passed for both models
+        // (docs/eval/2026-10-27-live-lookahead.md), so both run live at 6;
+        // the diarizer has no decoder lookahead.
+        for name in ["nemotron-en", "nemotron-3.5"] {
+            assert_eq!(m.model(name).unwrap().live_right_context, Some(6), "{name}");
         }
+        assert_eq!(
+            m.model("nemotron-3-diarization")
+                .unwrap()
+                .live_right_context,
+            None
+        );
         // Whatever the manifest sets is a value the model was trained for.
         for e in &m.models {
             if let Some(n) = e.live_right_context {
@@ -609,13 +616,17 @@ mod tests {
             Some(&[0, 1, 3, 6, 13][..])
         );
         assert_eq!(trained_live_right_contexts("parakeet-tdt"), None);
-        // Round trip: left out where unset, read back where set.
+        // Round trip: written where set, left out where unset.
         let json = serde_json::to_string(&m.models).unwrap();
-        assert!(!json.contains("live_right_context"), "{json}");
+        assert_eq!(json.matches(r#""live_right_context":6"#).count(), 2);
+        assert_eq!(json.matches("live_right_context").count(), 2);
         let mut en = m.model("nemotron-en").unwrap().clone();
-        en.live_right_context = Some(6);
         let text = serde_json::to_string(&en).unwrap();
         assert!(text.contains(r#""live_right_context":6"#), "{text}");
+        assert_eq!(serde_json::from_str::<ModelEntry>(&text).unwrap(), en);
+        en.live_right_context = None;
+        let text = serde_json::to_string(&en).unwrap();
+        assert!(!text.contains("live_right_context"), "{text}");
         assert_eq!(serde_json::from_str::<ModelEntry>(&text).unwrap(), en);
     }
 

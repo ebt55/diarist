@@ -63,14 +63,14 @@ pub const SETUP_LATER: &str = "setup.later";
 pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
 /// Decoder lookahead of file jobs and the post-pass, no UI (docs/04 section
 /// 5): "" or `model` = the ASR model's own value, `low` = none (the runtime
-/// default, the low-latency setting live keeps), a number = that many 80 ms
-/// frames for every model ([`file_lookahead`]).
+/// default, 1 frame), a number = that many 80 ms frames for every model
+/// ([`file_lookahead`]).
 pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
 /// Decoder lookahead of the live server, no UI (docs/plans/16 section 5):
-/// "" or `model` = the ASR model's own `live_right_context` (none today, so
-/// the runtime default), `low` = none (the runtime default, 1 frame), a
-/// number = that many 80 ms frames where the model was trained for it
-/// ([`live_lookahead`], [`crate::models::live_right_context`]).
+/// "" or `model` = the ASR model's own `live_right_context` (6 for both
+/// Nemotron models since 0.1.0-beta.5), `low` = none (the runtime default,
+/// 1 frame), a number = that many 80 ms frames where the model was trained
+/// for it ([`live_lookahead`], [`crate::models::live_right_context`]).
 pub const ENGINE_LIVE_LOOKAHEAD: &str = "engine.live_lookahead";
 /// Diarizer preset of file jobs and the post-pass, no UI (docs/04 section
 /// 5): "" or `model` = the diarizer's own value, `streaming` = none (the
