@@ -46,6 +46,9 @@ struct Ears {
     /// Runs when the job with the given index starts (the test's hand in
     /// the middle of a post-pass).
     on_job: Mutex<Option<OnJob>>,
+    /// A repeated-token loop on diarized jobs: this many `so` in the frame
+    /// at 2.95 s (between `q2` and `q3`).
+    burst: Mutex<Option<usize>>,
 }
 
 /// A job index and what to do when that job starts.
@@ -109,7 +112,7 @@ impl Engine for Ears {
             });
             return Ok(rx);
         }
-        let words = (0..frames / 16_000)
+        let mut words: Vec<EngineWord> = (0..frames / 16_000)
             .map(|s| EngineWord {
                 t0_us: s * 1_000_000 + 50_000,
                 t1_us: s * 1_000_000 + 900_000,
@@ -122,6 +125,16 @@ impl Engine for Ears {
                 spk: job.diarize.then(|| "spk_0".to_owned()),
             })
             .collect();
+        if let Some(n) = job.diarize.then(|| *self.burst.lock().unwrap()).flatten() {
+            words.extend((0..n).map(|_| EngineWord {
+                t0_us: 2_950_000,
+                t1_us: 3_030_000,
+                text: "so".into(),
+                conf: Some(0.5),
+                spk: Some("spk_0".into()),
+            }));
+            words.sort_by_key(|w| w.t0_us);
+        }
         tx.send(EngineEvent::Utterance {
             job_id: job.job_id.clone(),
             channel: Channel::Source,
@@ -279,6 +292,7 @@ fn finished(keep_live: bool) -> Finished {
         min_free_vram_mb: 0,
         min_free_bytes: 0,
         live_engine_info: serde_json::json!({"runtime": "fake live"}),
+        live_right_context: None,
         on_job_event: Some(Arc::new(move |e| sink.lock().unwrap().push(e))),
         punct: crate::punct::PunctSource::None,
     };
@@ -1013,6 +1027,73 @@ fn processing_again_keeps_the_live_run_with_keep_live_runs_off() {
     f.no_wavs_left();
 }
 
+/// Plan 16 sections 12.3 and 12.5 J together: Process again builds its run
+/// as every transcribing post-pass does, so the loop collapse and
+/// punctuation run on the new words with the setting and the punctuator of
+/// now, and its `engine_info` holds `echo`, `punctuation` and `loops` side
+/// by side.
+#[test]
+fn processing_again_collapses_loops_and_punctuates_the_new_run() {
+    let mut f = finished(true);
+    let first_words = words_of(&*f.store, f.first);
+    let first_info = f.store.get_run(f.first).unwrap().engine_info;
+    assert_eq!(first_info["loops"]["words_removed"], 0);
+    // This time the engine writes a loop of five, and a punctuator is there.
+    *f.ears.burst.lock().unwrap() = Some(5);
+    f.ctx.punct = crate::punct::PunctSource::factory(|| {
+        crate::punct::fixture::FixturePunctuator::marks(&[("so", crate::punct::Mark::Period)])
+    });
+    let before = f.untouched();
+    let report = f.wait(rerun_post_pass(&f.ctx, f.meeting).unwrap()).unwrap();
+    assert_eq!(f.untouched(), before);
+    f.no_wavs_left();
+    assert_eq!(f.current(), report.current_run);
+    assert!(!report.live_run_deleted);
+
+    // The loop is one word on the new run, punctuated from the ASR's text.
+    let new_words = words_of(&*f.store, report.current_run);
+    assert_eq!(new_words.len(), first_words.len() + 1);
+    let so: Vec<&Word> = new_words
+        .iter()
+        .filter(|w| w.0 == Channel::Loopback && w.2.raw_text.as_deref() == Some("so"))
+        .map(|w| &w.2)
+        .collect();
+    assert_eq!(so.len(), 1, "{new_words:?}");
+    assert_eq!(so[0].text, "so.");
+    let info = f.store.get_run(report.current_run).unwrap().engine_info;
+    let loops = crate::transcript::loops::LoopReport::of_engine_info(&info).unwrap();
+    assert_eq!(
+        (loops.applied, loops.runs, loops.words_removed),
+        (true, 1, 4)
+    );
+    assert_eq!(loops.per_channel["loopback"].words_removed, 4);
+    // Punctuation saw the collapsed words (one `so`, not five).
+    let p = crate::punct::PunctReport::of_engine_info(&info).unwrap();
+    assert!(p.applied, "{info}");
+    assert_eq!(p.words, Some(new_words.len() as u64));
+    assert!(p.marks_added.unwrap_or(0) >= 1);
+    // The echo summary is the first run's (the gate saw the same raw words;
+    // the collapse and punctuation come after it).
+    assert!(info["echo"].is_object(), "{info}");
+    assert_eq!(echo_without_walls(&info), echo_without_walls(&first_info));
+    // The earlier run is as it was.
+    assert_eq!(words_of(&*f.store, f.first), first_words);
+    assert_eq!(f.store.get_run(f.first).unwrap().engine_info, first_info);
+
+    // With the collapse off now, the next run keeps the loop whole.
+    f.store
+        .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+        .unwrap();
+    let report = f.wait(rerun_post_pass(&f.ctx, f.meeting).unwrap()).unwrap();
+    assert_eq!(
+        words_of(&*f.store, report.current_run).len(),
+        first_words.len() + 5
+    );
+    let info = f.store.get_run(report.current_run).unwrap().engine_info;
+    assert_eq!(info["loops"]["applied"], false);
+    assert_eq!(info["loops"]["words_removed"], 0);
+}
+
 #[test]
 fn a_run_from_the_flac_needs_room_for_the_decoded_audio() {
     let f = finished(true);
@@ -1231,6 +1312,11 @@ fn a_stored_meeting_runs_again_from_its_flac_exactly() {
     let tracks = store.list_audio_tracks(id).unwrap();
     let old_words = words_of(&*store, old.id);
     let old_dropped = store.echo_dropped(old.id).unwrap();
+    // The stored runs predate the loop collapse too (beta.4), so the copy
+    // runs without it (plan 16 section 12.3).
+    store
+        .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+        .unwrap();
     let ctx = LiveContext {
         store: store.clone(),
         queue: Arc::new(JobQueue::new()),
@@ -1242,6 +1328,7 @@ fn a_stored_meeting_runs_again_from_its_flac_exactly() {
         min_free_vram_mb: 0,
         min_free_bytes: 0,
         live_engine_info: serde_json::json!({}),
+        live_right_context: None,
         on_job_event: None,
         // The stored runs predate punctuation (beta.4).
         punct: crate::punct::PunctSource::None,

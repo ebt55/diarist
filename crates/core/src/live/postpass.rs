@@ -1723,6 +1723,7 @@ mod loop_tests {
             keep_live_runs: false,
             segment: SegmentOptions::default(),
             punct: PunctSource::None,
+            from_flac: false,
         }
     }
 
