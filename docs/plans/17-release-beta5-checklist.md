@@ -145,5 +145,5 @@ From docs/plans/16 section 12.9 (iii) 4. Neither case touches Diarist's own MIT 
 
 The owner's Zoom recordings, transcripts, meeting titles and participant names never go into the repository.
 
-- [ ] Before each push (the integration branch, `main`, `updater/latest.json`): run the scan of every file changed since the last pushed commit against the private needle lists (`meta.txt` and `ngrams.txt` in the scratch privscan folder; matched case-insensitively, counts and line numbers only). Known false positives on `main`: "revision" and "provisional" (needle 119), "meets", and "logistics presentation" in docs/05.
+- [ ] Before each push (the integration branch, `main`, `updater/latest.json`): run the scan of every file changed since the last pushed commit against the private needle lists (`meta.txt` and `ngrams.txt` in the scratch privscan folder; matched case-insensitively, counts and line numbers only). The scan prints needle numbers, never the text; the known false positives on `main` are needles 119 and 129 inside common English words and needle 92 in docs/05. Any other hit stops the push.
 - [ ] Never commit `tools/eval/sessions.toml`, `tools/eval/.work`, run folders or audio.
