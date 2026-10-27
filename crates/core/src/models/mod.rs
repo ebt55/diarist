@@ -401,8 +401,9 @@ pub fn asr_live_right_context(
 /// The decoder lookahead the live server runs `file` at (docs/plans/16
 /// section 5): `low` gives none; a number gives that value; `model` (the
 /// default) and an unreadable setting give the model's own
-/// `live_right_context` (its `<file>.meet.json`, else its manifest entry;
-/// none today, so no flag). A value the model was not trained for
+/// `live_right_context` (its `<file>.meet.json`, else its manifest entry:
+/// 6 for both Nemotron models since 0.1.0-beta.5; none gives no flag). A
+/// value the model was not trained for
 /// ([`manifest::trained_live_right_contexts`]: EN {0, 1, 6, 13}, 3.5
 /// {0, 1, 3, 6, 13}) is refused, because the runtime would take it without
 /// an error: a setting falls back to the model's own value, the model's own
@@ -1370,16 +1371,24 @@ mod tests {
         };
         let en = file(Some("nemotron-en"), None);
         let n35 = file(Some("nemotron-3.5"), None);
-        // The default: no flag (the shipped manifest sets none yet).
-        assert_eq!(pick(&en, L::Model, Some(&builtin)), flag(None));
+        // The default: the shipped manifest's 6 for both Nemotron models
+        // (docs/eval/2026-10-27-live-lookahead.md); no flag without one.
+        assert_eq!(pick(&en, L::Model, Some(&builtin)), flag(Some(6)));
+        assert_eq!(pick(&n35, L::Model, Some(&builtin)), flag(Some(6)));
         assert_eq!(pick(&n35, L::Model, None), flag(None));
+        let mut unset = Manifest::builtin();
+        for e in &mut unset.models {
+            e.live_right_context = None;
+        }
+        assert_eq!(pick(&en, L::Model, Some(&unset)), flag(None));
         // A number the model was trained for; `low` is none.
         assert_eq!(pick(&en, L::Frames(6), Some(&builtin)), flag(Some(6)));
         assert_eq!(pick(&en, L::Frames(0), Some(&builtin)), flag(Some(0)));
         assert_eq!(pick(&n35, L::Frames(3), Some(&builtin)), flag(Some(3)));
         assert_eq!(pick(&en, L::Low, Some(&builtin)), flag(None));
-        // 3 is not an EN value: refused, with the reason, back to the model's.
-        let got = pick(&en, L::Frames(3), Some(&builtin));
+        // 3 is not an EN value: refused, with the reason, back to the model's
+        // (none in a manifest without a value).
+        let got = pick(&en, L::Frames(3), Some(&unset));
         assert_eq!(got.right_context, None);
         let why = got.refused.unwrap();
         assert!(why.contains("engine.live_lookahead 3"), "{why}");
@@ -1389,35 +1398,30 @@ mod tests {
         );
         assert!(why.contains("using runtime default"), "{why}");
         assert_eq!(pick(&n35, L::Frames(20), None).right_context, None);
-        // The manifest's own value (as chunk F part 2 would ship it), for a
-        // row scanned before the field existed; `low` still drops it, and a
-        // refused setting falls back to it.
-        let mut part2 = Manifest::builtin();
-        for e in &mut part2.models {
-            if e.name.starts_with("nemotron-") && e.role == ModelRole::Asr {
-                e.live_right_context = Some(6);
-            }
-        }
-        assert_eq!(pick(&en, L::Model, Some(&part2)), flag(Some(6)));
-        assert_eq!(pick(&n35, L::Low, Some(&part2)), flag(None));
-        let got = pick(&en, L::Frames(3), Some(&part2));
+        // The shipped manifest's own value, for a row scanned before the
+        // field existed; `low` still drops it, and a refused setting falls
+        // back to it.
+        let shipped = Manifest::builtin();
+        assert_eq!(pick(&en, L::Model, Some(&shipped)), flag(Some(6)));
+        assert_eq!(pick(&n35, L::Low, Some(&shipped)), flag(None));
+        let got = pick(&en, L::Frames(3), Some(&shipped));
         assert_eq!(got.right_context, Some(6));
         assert!(got.refused.unwrap().ends_with("using 6"));
         // The sidecar's value wins over the manifest's, and is checked too.
         let own1 = file(Some("nemotron-en"), Some(1));
-        assert_eq!(pick(&own1, L::Model, Some(&part2)), flag(Some(1)));
+        assert_eq!(pick(&own1, L::Model, Some(&shipped)), flag(Some(1)));
         let own3 = file(Some("nemotron-en"), Some(3));
-        let got = pick(&own3, L::Model, Some(&part2));
+        let got = pick(&own3, L::Model, Some(&shipped));
         assert_eq!(got.right_context, None);
         assert!(got.refused.unwrap().contains("own live lookahead 3"));
         // Unreadable text: the model's value, with the text in the reason.
-        let got = pick(&en, L::Unreadable("high".into()), Some(&part2));
+        let got = pick(&en, L::Unreadable("high".into()), Some(&shipped));
         assert_eq!(got.right_context, Some(6));
         assert!(got.refused.unwrap().contains(r#""high""#));
         // A model dropped in by hand is not checked: the user's number or
         // its sidecar's goes through.
         let mine = file(None, Some(4));
-        assert_eq!(pick(&mine, L::Model, Some(&part2)), flag(Some(4)));
+        assert_eq!(pick(&mine, L::Model, Some(&shipped)), flag(Some(4)));
         assert_eq!(pick(&mine, L::Frames(20), None), flag(Some(20)));
 
         // Through the store: the stored setting; never for the cascade.
@@ -1428,24 +1432,31 @@ mod tests {
         tdt.capabilities.streaming = false;
         assert_eq!(
             asr_live_right_context(&paths, &store, &en).unwrap(),
-            flag(None)
+            flag(Some(6))
         );
         store
-            .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "6")
+            .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "1")
             .unwrap();
         assert_eq!(
             asr_live_right_context(&paths, &store, &en).unwrap(),
-            flag(Some(6))
+            flag(Some(1))
         );
         assert_eq!(
             asr_live_right_context(&paths, &store, &tdt).unwrap(),
             flag(None)
         );
         store
+            .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "low")
+            .unwrap();
+        assert_eq!(
+            asr_live_right_context(&paths, &store, &en).unwrap(),
+            flag(None)
+        );
+        store
             .set_setting(settings::ENGINE_LIVE_LOOKAHEAD, "3")
             .unwrap();
         let got = asr_live_right_context(&paths, &store, &en).unwrap();
-        assert!(got.right_context.is_none() && got.refused.is_some());
+        assert!(got.right_context == Some(6) && got.refused.is_some());
     }
 
     #[test]
