@@ -59,6 +59,16 @@
 //!   meetings 13 and 15 to 20. With the level unknown the transfer gate uses
 //!   its floor rule ([`super::transfer`]).
 //!
+//! After the canceller [`OwnerLevel::high`] (`engine_info.echo.owner_high`)
+//! counts the words in no run it left alone that sit at least
+//! [`OWNER_HIGH_DB`] over the floor, whatever the estimate: the direct
+//! signature of a talking owner. The owner's uncut words sit that high in
+//! 94 to 100 percent of cases on every meeting and fixture, and in 90
+//! percent on the FLEURS fixture whose owner talks only over loud far-end
+//! speech 23 dB over the floor; residue the canceller left alone sits at
+//! the floor (docs/eval/2026-10-26-echo-owner-level.md, sections 2 and 3).
+//! It decides whether the transfer's floor rule may use its silent tier.
+//!
 //! After the post-pass canceller the decision also runs on the raw mic's
 //! words and is carried over to the cancelled ones ([`super::transfer`],
 //! reason [`EchoReason::Transfer`]).
@@ -102,6 +112,9 @@ pub const OWNER_PLAUSIBLE_DB: f32 = PRESENCE_DB;
 /// After the canceller an owner's level under the floor plus this (dB) is
 /// trusted and marked low (module docs).
 pub const OWNER_LOW_DB: f32 = 15.0;
+/// After the canceller a word in no run that it left alone at least this
+/// far (dB) over the floor counts toward [`OwnerLevel::high`] (module docs).
+pub const OWNER_HIGH_DB: f32 = 18.0;
 /// Text-matched words with a coefficient the calibration needs.
 pub const CALIBRATE_MIN_MATCHED: usize = 20;
 /// Owner-level words with a coefficient the keep bound needs.
@@ -417,6 +430,10 @@ pub struct OwnerLevel {
     /// After the canceller: the estimate sits under the floor plus
     /// [`OWNER_LOW_DB`] (trusted, module docs).
     pub low: bool,
+    /// After the canceller: the words in no run it left alone (the `clean`
+    /// set) at least [`OWNER_HIGH_DB`] over the floor, whatever the source;
+    /// 0 before the canceller or without a floor (module docs).
+    pub high: usize,
 }
 
 /// How many settled words each set of [`CalibrationStats::owner`] holds
@@ -522,6 +539,12 @@ impl CalibrationStats {
         };
         // The floor the estimate is checked against (after the canceller).
         let check = floor_db.filter(|_| canceller);
+        let high = check.map_or(0, |f| {
+            self.clean
+                .iter()
+                .filter(|&&l| l >= f + OWNER_HIGH_DB)
+                .count()
+        });
         let mut implausible: Option<usize> = None;
         for &(set, source) in sets.iter().filter(|s| s.0.len() >= OWNER_MIN_WORDS) {
             let db = percentile(&mut set.to_vec(), 0.5);
@@ -535,6 +558,7 @@ impl CalibrationStats {
                 source,
                 words: set.len(),
                 low: over.is_some_and(|d| d < OWNER_LOW_DB),
+                high,
             };
         }
         match implausible {
@@ -543,12 +567,14 @@ impl CalibrationStats {
                 source: OwnerSource::Implausible,
                 words,
                 low: false,
+                high,
             },
             None => OwnerLevel {
                 db: None,
                 source: OwnerSource::TooFew,
                 words: sets[1].0.len(),
                 low: false,
+                high,
             },
         }
     }
@@ -686,6 +712,8 @@ pub struct LayerReport {
     pub owner_source: OwnerSource,
     pub owner_words: usize,
     pub owner_low: bool,
+    /// [`OwnerLevel::high`].
+    pub owner_high: usize,
 }
 
 impl LayerReport {
@@ -757,6 +785,7 @@ pub fn gate_with(
         owner_source: owner.source,
         owner_words: owner.words,
         owner_low: owner.low,
+        owner_high: owner.high,
     }
 }
 

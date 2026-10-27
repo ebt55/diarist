@@ -902,6 +902,9 @@ fn gate_mic(
         summary["owner_source"] = serde_json::json!(r.owner_source);
         summary["owner_words"] = serde_json::json!(r.owner_words);
         summary["owner_low"] = serde_json::json!(r.owner_low);
+        // The words the canceller left alone high over the floor, the
+        // floor rule's talking-owner guard (plan 16 section 12.8).
+        summary["owner_high"] = serde_json::json!(r.owner_high);
     }
     if let Some(t) = transfer_info {
         summary["transfer"] = t;

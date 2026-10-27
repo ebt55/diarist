@@ -644,7 +644,7 @@ fn owner_line(
     };
     let r1 = |v: Option<f32>| v.map(|x| (x * 10.0).round() / 10.0);
     eprintln!(
-        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}); floor {:?}",
+        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}; high {}); floor {:?}",
         gw.len(),
         c.quiet,
         c.unmatched,
@@ -658,6 +658,7 @@ fn owner_line(
         r1(now.db),
         now.words,
         over(now.db),
+        now.high,
         r1(floor)
     );
     today.db
@@ -1452,7 +1453,7 @@ fn transfer_rows(
             }
             if guard == transfer::GUARD {
                 eprintln!(
-                    "share {} {name}: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); owner {:?} ({}, {} words, low {}); floor rule {:?}",
+                    "share {} {name}: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); owner {:?} ({}, {} words, low {}, high {}); floor rule {:?}",
                     m.uid,
                     t.raw.dropped(),
                     raw.len(),
@@ -1462,6 +1463,7 @@ fn transfer_rows(
                     t.after.owner_source.as_str(),
                     t.after.owner_words,
                     t.after.owner_low,
+                    t.after.owner_high,
                     t.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
                 );
             }

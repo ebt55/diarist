@@ -147,7 +147,7 @@ fn owner_line(
     };
     let r1 = |v: Option<f32>| v.map(|x| (x * 10.0).round() / 10.0);
     eprintln!(
-        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}); floor {:?}",
+        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}; high {}); floor {:?}",
         gw.len(),
         c.quiet,
         c.unmatched,
@@ -161,6 +161,7 @@ fn owner_line(
         r1(now.db),
         now.words,
         over(now.db),
+        now.high,
         r1(floor)
     );
     today.db
@@ -1226,7 +1227,7 @@ fn transfer_sweep(
     );
     let shipped = decide(transfer::Rule::SHIPPED, None);
     eprintln!(
-        "share FLEURS: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); shipped: owner {:?} ({}, {} words, low {}), floor rule {:?}",
+        "share FLEURS: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); shipped: owner {:?} ({}, {} words, low {}, high {}), floor rule {:?}",
         shipped.raw.dropped(),
         raw_gw.len(),
         100.0 * shipped.raw_echo_share,
@@ -1235,6 +1236,7 @@ fn transfer_sweep(
         shipped.after.owner_source.as_str(),
         shipped.after.owner_words,
         shipped.after.owner_low,
+        shipped.after.owner_high,
         shipped.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
     );
     let true_level = {

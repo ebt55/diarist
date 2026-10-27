@@ -1909,6 +1909,9 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         (Some("quiet"), Some(false), true),
         "{e}"
     );
+    // The owner's words the canceller left alone sit high over the floor
+    // (plan 16 section 12.8).
+    assert!(e["owner_high"].as_u64().is_some_and(|n| n >= 20), "{e}");
     let (owner, floor) = (
         e["owner_db"].as_f64().unwrap(),
         e["floor_db"].as_f64().unwrap(),
@@ -2026,6 +2029,9 @@ fn a_silent_owner_leaves_the_owners_level_unknown_and_the_floor_rule_in_force() 
             (Some("implausible"), None, Some(false), true),
             "{e}"
         );
+        // None of the words the canceller left alone sits high over the
+        // floor: no talking owner (plan 16 section 12.8).
+        assert_eq!(e["owner_high"].as_u64(), Some(0), "{e}");
         let t = &e["transfer"];
         assert!(t["raw_owner_db"].as_f64().is_some(), "{e}");
         assert!(t["raw_floor_db"].as_f64().is_some(), "{e}");
