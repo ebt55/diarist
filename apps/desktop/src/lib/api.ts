@@ -142,6 +142,9 @@ export const api = {
   recordingStatus: () => invoke<LiveStatusView>("recording_status"),
   liveSnapshot: (meeting_id: MeetingId) => invoke<WordsUpdate[]>("live_snapshot", { meeting_id }),
   rerunPostPass: (meeting_id: MeetingId) => invoke<JobId>("rerun_post_pass", { meeting_id }),
+  /** Whether "Process again" can run now, and from which audio (plan 16 section 12.5 J). */
+  processAgainCheck: (meeting_id: MeetingId) =>
+    invoke<import("./generated/RerunCheck").RerunCheck>("process_again_check", { meeting_id }),
   /** The echo banner's "Turn off for this recording"; false when there was nothing to turn off. */
   turnOffEchoForRecording: () => invoke<boolean>("turn_off_echo_for_recording"),
   /** The mic words the echo gate removed from a run (read on demand only). */

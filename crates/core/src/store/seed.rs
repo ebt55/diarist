@@ -367,6 +367,7 @@ impl MemoryStore {
                     channels: 2,
                     duration_ms: Some(duration_ms),
                     size_bytes: Some(duration_ms * 25),
+                    channel_frames: None,
                 },
             );
 

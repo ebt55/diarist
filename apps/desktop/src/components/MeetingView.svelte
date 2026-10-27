@@ -7,6 +7,7 @@
   import type { MeetingDetail } from "../lib/generated/MeetingDetail";
   import type { MeetingId } from "../lib/generated/MeetingId";
   import type { ModelFile } from "../lib/generated/ModelFile";
+  import type { RerunCheck } from "../lib/generated/RerunCheck";
   import type { SegmentId } from "../lib/generated/SegmentId";
   import type { SegmentView } from "../lib/generated/SegmentView";
   import type { SpeakerId } from "../lib/generated/SpeakerId";
@@ -612,6 +613,75 @@
     }
     e.preventDefault();
   }
+
+  // ---- Process again (plan 16 section 12.5 J) -------------------------------
+
+  /**
+   * "Process again": the post-pass once more over the stored audio (the
+   * meeting's playback.flac, which it only reads, or the WAVs a cancelled
+   * post-pass left), offered for a finished live meeting whose live
+   * transcript is kept. Asked of the backend whenever the meeting's status
+   * or current run changes.
+   */
+  let again = $state.raw<{ meeting: MeetingId; check: RerunCheck } | null>(null);
+  let againBusy = $state(false);
+  const processAgain = $derived(
+    !isLive &&
+      !finalizing &&
+      meeting?.source === "live" &&
+      meeting.status === "done" &&
+      again?.meeting === meetingId &&
+      again.check.audio !== null &&
+      again.check.blocked === null,
+  );
+
+  $effect(() => {
+    const id = meetingId;
+    const ask = meeting?.source === "live" && meeting.status === "done" && !isLive && !finalizing;
+    void detail?.current_run?.id;
+    if (!ask) return;
+    untrack(() => {
+      api.processAgainCheck(id).then(
+        (check) => {
+          if (id === meetingId) again = { meeting: id, check };
+        },
+        () => (again = null), // Not offered then; the meeting still opens.
+      );
+    });
+  });
+
+  async function startAgain() {
+    const m = meeting;
+    const audio = again?.meeting === meetingId ? again.check.audio : null;
+    if (!m || againBusy || !audio) return;
+    const minutes = Math.max(1, Math.round((m.duration_ms ?? 0) / 60_000));
+    const ok = await app.confirm({
+      title: "Process again?",
+      message:
+        `The post-pass runs again over this meeting's stored audio (${minutes} min) with today's models and ` +
+        `settings, on the GPU, after any job already queued. It needs that audio and the live transcript, which ` +
+        `Settings, "Keep the live transcript", keeps. The new transcript becomes the one shown; this one and ` +
+        `every earlier transcript, the live one too, stay. ` +
+        (detail?.current_run?.kind === "live"
+          ? "Names given on it carry over."
+          : "Names given while recording carry over; names given on this transcript do not."),
+      confirmLabel: "Process again",
+      danger: false,
+    });
+    if (!ok) return;
+    againBusy = true;
+    try {
+      const job = await api.rerunPostPass(meetingId);
+      // How it ends is told once, by the app (open meeting or not).
+      app.trackPostPass(job, meetingId, m.title, audio);
+      await refreshAll(transcript?.anchorMs() ?? null);
+    } catch (e) {
+      again = null;
+      app.error(`Process again did not start (${errorText(e)}); the transcript stays as it is`);
+    } finally {
+      againBusy = false;
+    }
+  }
 </script>
 
 <svelte:window {onkeydown} />
@@ -730,6 +800,20 @@
           {/if}
         </div>
       {/if}
+      {#if processAgain}
+        <div class="echo-line">
+          <span>The stored audio and the live transcript are kept.</span>
+          <button
+            type="button"
+            class="link"
+            disabled={againBusy}
+            onclick={startAgain}
+            title="Run the post-pass again over the stored audio; this transcript stays as an earlier run"
+          >
+            {againBusy ? "Queuing…" : "Process again"}
+          </button>
+        </div>
+      {/if}
     </header>
 
     <SpeakerLegend
@@ -758,7 +842,8 @@
             <strong>Finalizing.</strong>
             <span>
               {job ? STAGE_TEXT[job.stage] : "Waiting for the post-pass"}{pct !== null ? ` · ${pct}%` : ""}.
-              This is the live transcript; the post-pass replaces it when it finishes.
+              {detail?.current_run?.kind === "live" ? "This is the live transcript" : "This is the transcript from before"};
+              the post-pass replaces it when it finishes.
             </span>
             <div class="bar" role="progressbar" aria-label="Finalizing" aria-valuenow={pct ?? undefined} aria-valuemin={0} aria-valuemax={100}>
               <div class="bar-fill" class:indeterminate={pct === null} style="width: {pct ?? 30}%"></div>
@@ -766,14 +851,14 @@
           </div>
           {#if job}<span class="mono elapsed">{formatClock(now - job.startedAt)}</span>{/if}
           {#if postPass}
-            <button type="button" class="link" onclick={() => app.cancelJob(postPass.job_id)} title="Keep the live transcript">Cancel</button>
+            <button type="button" class="link" onclick={() => app.cancelJob(postPass.job_id)} title={detail?.current_run?.kind === "live" ? "Keep the live transcript" : "Keep the current transcript"}>Cancel</button>
           {/if}
         </div>
       {:else if postPassError}
         <div class="banner error" role="alert">
           <div class="b-main">
             <strong>Finalizing failed.</strong>
-            <span>{postPassError} The live transcript stays.</span>
+            <span>{postPassError} {detail?.current_run?.kind === "live" ? "The live transcript stays." : "The current transcript stays."}</span>
           </div>
           <button type="button" class="btn" disabled={retrying} onclick={retryPostPass}>{retrying ? "Queuing…" : "Retry"}</button>
         </div>

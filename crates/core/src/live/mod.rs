@@ -63,8 +63,11 @@ pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
-pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
-pub use rerun::rerun_post_pass;
+pub use recover::{needs_recovery, recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
+pub use rerun::{
+    rerun_check, rerun_post_pass, RerunAudio, RerunCheck, AUDIO_GONE, LEFTOVERS, NO_LIVE_RUN,
+    RERUN_MARKER,
+};
 pub(crate) use restore::{check_idle, segment_options};
 pub use restore::{remove_restored_echo, restore_echo_dropped, EchoRestore};
 pub use snapshot::{snapshot, snapshot_except};
@@ -1094,6 +1097,7 @@ impl Recorder {
             keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
             segment: SegmentOptions::default(),
             punct: self.ctx.punct.clone(),
+            from_flac: false,
         };
         let post_pass = submit_post_pass(&self.ctx, job, true);
         Ok(StopOutcome {
@@ -1161,6 +1165,7 @@ fn register_wavs(
             channels: 1,
             duration_ms: Some(duration_ms),
             size_bytes: std::fs::metadata(&path).ok().map(|m| m.len() as i64),
+            channel_frames: None,
         })?;
     }
     Ok(())
@@ -1175,6 +1180,13 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
     let on_event = ctx.on_job_event.clone();
     let job_id = job.job_id.clone();
     let transcribe = job.transcribe;
+    // Run again from the stored audio, a job that does not finish leaves the
+    // transcript the meeting had, which is complete (plan 16 section 12.5 J).
+    let failed = if job.from_flac {
+        MeetingStatus::Done
+    } else {
+        MeetingStatus::Failed
+    };
     let run = move |token: &crate::pipeline::CancelToken| {
         let emit = |e: JobEvent| {
             if let Some(f) = &on_event {
@@ -1188,7 +1200,8 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
                 meeting_id: job.meeting,
             }),
             Err(CoreError::Cancelled) => {
-                // The live transcript stays; the WAVs stay for a later run.
+                // The live transcript stays; the WAVs stay for a later run
+                // (decoded from the FLAC, they went with the job).
                 let _ = store.set_meeting_status(job.meeting, MeetingStatus::Done);
                 emit(JobEvent::Cancelled {
                     job_id: job.job_id.clone(),
@@ -1196,7 +1209,7 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
                 });
             }
             Err(e) => {
-                let _ = store.set_meeting_status(job.meeting, MeetingStatus::Failed);
+                let _ = store.set_meeting_status(job.meeting, failed);
                 emit(JobEvent::Error {
                     job_id: job.job_id.clone(),
                     meeting_id: Some(job.meeting),

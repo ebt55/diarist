@@ -79,6 +79,20 @@
 //! mic stays ungated, `engine_info.echo` is `{"error": "<message>"}` and the
 //! error is logged; a canceller that fails leaves the raw mic to be
 //! transcribed and gated, with `aec_error` in `engine_info.echo`.
+//!
+//! Run again from the stored audio ([`PostPassJob::from_flac`], plan 16
+//! section 12.5 J): the job first writes its marker and decodes the
+//! registered `playback.flac` into the two WAVs
+//! ([`crate::audio::flac::decode_stereo_to_wavs`]: `.part` files first,
+//! never over WAVs that are there, each channel cut back to its stored
+//! length), then runs as above, and never encodes, moves or deletes the
+//! FLAC or touches its row. Every step that can fail comes before its run
+//! becomes current, and no earlier run is deleted (the live run neither);
+//! the decoded WAVs go when the job ends, whatever happens, then the
+//! marker ([`super::rerun`]). No post-pass encodes over a registered
+//! `playback.flac`, and WAVs beside one go only once it is seen to hold
+//! them. Any post-pass that fails deletes the run it made, unless that run
+//! had already become current.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -105,7 +119,7 @@ use crate::pipeline::CancelToken;
 use crate::punct::rebuild::{descends_from, rebuild_transcript, source_run, texts_of};
 use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
-use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
+use crate::store::{CarryOverReport, NewAudioTrack, RunStore, StoreError};
 use crate::transcript::{
     build_transcript_channels, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
     UNKNOWN_LABEL,
@@ -134,6 +148,13 @@ pub struct PostPassJob {
     pub segment: SegmentOptions,
     /// Where the punctuator comes from (the context's data paths).
     pub punct: PunctSource,
+    /// Run again from the stored audio (plan 16 section 12.5 J,
+    /// [`super::rerun_post_pass`]): the WAVs are decoded from the meeting's
+    /// registered `playback.flac` when the job starts and deleted when it
+    /// ends, whatever happens; the FLAC and its track row are never touched
+    /// and no earlier run is deleted (`keep_live_runs` aside). Needs
+    /// `transcribe`.
+    pub from_flac: bool,
 }
 
 impl PostPassJob {
@@ -190,6 +211,51 @@ impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// A post-pass run being built: deleted when this drops unless it became
+/// current, so a post-pass that fails leaves no run nobody has seen.
+struct NewRun<'a> {
+    store: &'a dyn RunStore,
+    run: RunId,
+    current: bool,
+}
+
+impl Drop for NewRun<'_> {
+    fn drop(&mut self) {
+        if !self.current {
+            if let Err(e) = self.store.delete_run(self.run) {
+                log::warn!(
+                    "post-pass: cannot delete run {} it did not finish ({e})",
+                    self.run
+                );
+            }
+        }
+    }
+}
+
+/// `(channel, engine label, display name)` of a run's speakers.
+type Speakers = Vec<(Channel, String, Option<String>)>;
+
+fn speakers_of(store: &dyn RunStore, run: RunId) -> Result<Speakers> {
+    Ok(store
+        .run_speakers(run)?
+        .into_iter()
+        .map(|s| (s.channel, s.engine_label, s.display_name))
+        .collect())
+}
+
+/// Deletes the meeting's `mic` and `loopback` WAV track rows (the WAVs are
+/// gone, or go right after).
+fn delete_wav_rows(store: &dyn RunStore, meeting: MeetingId) -> Result<()> {
+    for t in store.list_audio_tracks(meeting)? {
+        if t.format == AudioFormat::Wav
+            && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
+        {
+            store.delete_audio_track(t.id)?;
+        }
+    }
+    Ok(())
 }
 
 /// What a finished post-pass did.
@@ -1031,6 +1097,25 @@ pub fn run_post_pass(
         })
     };
     let (mic, lb) = (job.mic_wav(), job.loopback_wav());
+    if job.from_flac && !job.transcribe {
+        return Err(StoreError::Invalid(
+            "a run from the stored audio transcribes it (transcribe = true)".into(),
+        )
+        .into());
+    }
+    // Run again from the stored audio (plan 16 section 12.5 J): the WAVs
+    // are decoded from `playback.flac` first and go when this returns,
+    // whatever happens.
+    let mut decoded = if job.from_flac {
+        Some(super::rerun::decode_wavs(store, job, &|done, total| {
+            progress(JobStage::Decoding, done, total)
+        })?)
+    } else {
+        None
+    };
+    // A run from the FLAC: its size, the current run's speakers and word
+    // count, taken before the new run becomes current (below).
+    let mut from_flac_tail: Option<(u64, Speakers, usize)> = None;
     let mic_frames = wav_frames(&mic)?;
     let lb_frames = wav_frames(&lb)?;
     let wav_bytes = std::fs::metadata(&mic)?.len() + std::fs::metadata(&lb)?.len();
@@ -1261,6 +1346,17 @@ pub fn run_post_pass(
                 "punctuation": punctuation.to_json(),
             }),
         )?;
+        // Until it is current: a post-pass that fails leaves no run nobody
+        // has seen (a run from the FLAC also names it in its marker, for
+        // crash recovery).
+        let mut new_run = NewRun {
+            store,
+            run: run.id,
+            current: false,
+        };
+        if let Some(d) = decoded.as_mut() {
+            d.record_run(run.id)?;
+        }
         if let Some(e) = &echo {
             let mut info = run.engine_info.clone();
             info["echo"] = e.summary.clone();
@@ -1269,10 +1365,7 @@ pub fn run_post_pass(
                 store.set_echo_dropped(run.id, &e.dropped)?;
             }
         }
-        if let Err(e) = store.insert_transcript(run.id, &transcript) {
-            let _ = store.finish_run(run.id, RunStatus::Failed);
-            return Err(e.into());
-        }
+        store.insert_transcript(run.id, &transcript)?;
         store.finish_run(run.id, RunStatus::Done)?;
         // From the live run, or from a copy of it the user named speakers
         // on (Restore, a punctuation rebuild).
@@ -1295,7 +1388,28 @@ pub fn run_post_pass(
             unplaced
         );
         carry = Some(report);
+        if job.from_flac {
+            // Run again from the stored audio: every step that can fail
+            // comes before the switch, so a run that fails leaves the
+            // transcript the meeting had. Nothing is encoded; WAV rows
+            // (none are registered for a run from the FLAC) go.
+            let bytes = std::fs::metadata(job.flac())
+                .map_err(|e| {
+                    CoreError::Io(std::io::Error::other(format!(
+                        "cannot look at {}: {e}",
+                        job.flac().display()
+                    )))
+                })?
+                .len();
+            delete_wav_rows(store, job.meeting)?;
+            from_flac_tail = Some((
+                bytes,
+                speakers_of(store, run.id)?,
+                store.run_words(run.id)?.len(),
+            ));
+        }
         store.set_current_run(job.meeting, run.id)?;
+        new_run.current = true;
         run.id
     } else {
         store.set_current_run(job.meeting, job.live_run)?;
@@ -1318,55 +1432,95 @@ pub fn run_post_pass(
         }
     };
 
-    // The playback track: stereo FLAC, then the WAVs go. A post-pass that
-    // was interrupted after registering its FLAC left a row to replace.
+    // The playback track: stereo FLAC, then the WAVs go. A registered
+    // `playback.flac` is the meeting's audio and is never encoded again
+    // (plan 16 section 12.5 J, review B4): a job run again from it decoded
+    // these WAVs from it (a decode or encode bug must not be able to destroy
+    // the only copy), and a post-pass interrupted after registering it had
+    // encoded it from these same WAVs, which then go only once it is seen
+    // to hold them. Its row stays. A row whose file is gone (`NotFound`,
+    // nothing else) is replaced; a FLAC that cannot be looked at fails the
+    // post-pass, the WAVs kept.
     let flac = job.flac();
-    let info = encode_stereo(&mic, &lb, &flac)?;
-    for t in store.list_audio_tracks(job.meeting)? {
-        if t.channel == TrackChannel::Playback {
-            store.delete_audio_track(t.id)?;
-        }
-    }
-    let rel = |p: &Path| -> String {
-        p.strip_prefix(&job.data_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| p.display().to_string())
+    let kept = match &from_flac_tail {
+        Some((bytes, _, _)) => Some(*bytes),
+        None => match super::rerun::playback_flac(store, &job.data_root, job.meeting, &flac)? {
+            Some(track) => {
+                super::rerun::flac_holds(&flac, &track, [Some(&mic), Some(&lb)]).map_err(
+                    |why| {
+                        CoreError::Io(std::io::Error::other(format!(
+                            "{} is this meeting's registered audio and is kept, but it does not \
+                             hold what mic.wav and loopback.wav hold ({why}), so they stay too",
+                            flac.display()
+                        )))
+                    },
+                )?;
+                Some(std::fs::metadata(&flac)?.len())
+            }
+            None => None,
+        },
     };
-    store.add_audio_track(NewAudioTrack {
-        meeting_id: job.meeting,
-        channel: TrackChannel::Playback,
-        path: rel(&flac),
-        format: AudioFormat::Flac,
-        sample_rate: 16_000,
-        channels: 2,
-        duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
-        size_bytes: Some(info.bytes as i64),
-    })?;
-    for t in store.list_audio_tracks(job.meeting)? {
-        if t.format == AudioFormat::Wav
-            && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
-        {
-            store.delete_audio_track(t.id)?;
+    let (flac_frames, flac_bytes) = if let Some(bytes) = kept {
+        (mic_frames.max(lb_frames), bytes)
+    } else {
+        let info = encode_stereo(&mic, &lb, &flac)?;
+        for t in store.list_audio_tracks(job.meeting)? {
+            if t.channel == TrackChannel::Playback {
+                store.delete_audio_track(t.id)?;
+            }
         }
-    }
-    let _ = std::fs::remove_file(&mic);
-    let _ = std::fs::remove_file(&lb);
+        let rel = |p: &Path| -> String {
+            p.strip_prefix(&job.data_root)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.display().to_string())
+        };
+        store.add_audio_track(NewAudioTrack {
+            meeting_id: job.meeting,
+            channel: TrackChannel::Playback,
+            path: rel(&flac),
+            format: AudioFormat::Flac,
+            sample_rate: 16_000,
+            channels: 2,
+            duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
+            size_bytes: Some(info.bytes as i64),
+            // Each channel's own length, for a run from the FLAC later.
+            channel_frames: Some(info.channel_frames.to_vec()),
+        })?;
+        (info.frames, info.bytes)
+    };
     let _ = std::fs::remove_file(job.mic_aec_wav());
-
-    // A live run with a name nobody in the new run received stays, as if
-    // `keep_live_runs` were on for this meeting.
-    if replaced_live && !job.keep_live_runs && unplaced == 0 {
-        store.delete_run(job.live_run)?;
-        live_deleted = true;
-    }
-    store.set_meeting_status(job.meeting, MeetingStatus::Done)?;
-
-    let speakers = store
-        .run_speakers(current_run)?
-        .into_iter()
-        .map(|s| (s.channel, s.engine_label, s.display_name))
-        .collect();
-    let words = store.get_words(job.meeting, i64::MIN, i64::MAX)?.len();
+    let (speakers, words) = match from_flac_tail {
+        // A run from the FLAC: its new run is current and nothing fails
+        // any more. The decoded copies go (only those), then the marker,
+        // then the meeting is done; every earlier run stays, the live run
+        // too (the dialog promises it, and the next run needs it).
+        Some((_, speakers, words)) => {
+            drop(decoded.take());
+            if let Err(e) = store.set_meeting_status(job.meeting, MeetingStatus::Done) {
+                log::warn!(
+                    "post-pass meeting {}: run {current_run} is current but the meeting could not be marked done ({e}); the next start finishes it",
+                    job.meeting
+                );
+            }
+            (speakers, words)
+        }
+        None => {
+            delete_wav_rows(store, job.meeting)?;
+            let _ = std::fs::remove_file(&mic);
+            let _ = std::fs::remove_file(&lb);
+            // A live run with a name nobody in the new run received stays,
+            // as if `keep_live_runs` were on for this meeting.
+            if replaced_live && !job.keep_live_runs && unplaced == 0 {
+                store.delete_run(job.live_run)?;
+                live_deleted = true;
+            }
+            store.set_meeting_status(job.meeting, MeetingStatus::Done)?;
+            (
+                speakers_of(store, current_run)?,
+                store.get_words(job.meeting, i64::MIN, i64::MAX)?.len(),
+            )
+        }
+    };
     Ok(PostPassReport {
         meeting: job.meeting,
         current_run,
@@ -1377,8 +1531,8 @@ pub fn run_post_pass(
         carry_over: carry,
         unplaced_names: unplaced,
         flac_path: flac,
-        flac_frames: info.frames,
-        flac_bytes: info.bytes,
+        flac_frames,
+        flac_bytes,
         wav_bytes,
         drift_ppm,
         transcribe_wall,

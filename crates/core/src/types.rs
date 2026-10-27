@@ -406,6 +406,11 @@ pub struct AudioTrack {
     pub channels: u16,
     pub duration_ms: Option<i64>,
     pub size_bytes: Option<i64>,
+    /// Sample frames of each channel before the shorter one was padded
+    /// (`[mic, loopback]` for a live meeting's playback FLAC, registered
+    /// since beta.5); `None` when unknown (older tracks, imports).
+    #[serde(default)]
+    pub channel_frames: Option<Vec<u64>>,
 }
 
 /// Live alignment anchor: one per channel per second (`clock_anchors`).

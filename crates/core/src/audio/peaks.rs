@@ -357,6 +357,7 @@ mod tests {
             channels: 2,
             duration_ms: None,
             size_bytes: None,
+            channel_frames: None,
         };
         assert_eq!(
             cache_path(root, "U1", &track, Path::new("C:/rec/a.m4a")),

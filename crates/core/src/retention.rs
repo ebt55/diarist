@@ -282,6 +282,7 @@ mod tests {
                 channels: if format == AudioFormat::Flac { 2 } else { 1 },
                 duration_ms: Some(1_000),
                 size_bytes: Some(bytes as i64),
+                channel_frames: None,
             })
             .unwrap();
     }
@@ -351,6 +352,7 @@ mod tests {
                 channels: 2,
                 duration_ms: None,
                 size_bytes: None,
+                channel_frames: None,
             })
             .unwrap();
 

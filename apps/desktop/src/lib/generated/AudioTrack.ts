@@ -11,4 +11,10 @@ export type AudioTrack = { id: TrackId, meeting_id: MeetingId, channel: TrackCha
 /**
  * Relative to the data root, or absolute for `original`.
  */
-path: string, format: AudioFormat, sample_rate: number, channels: number, duration_ms: number | null, size_bytes: number | null, };
+path: string, format: AudioFormat, sample_rate: number, channels: number, duration_ms: number | null, size_bytes: number | null, 
+/**
+ * Sample frames of each channel before the shorter one was padded
+ * (`[mic, loopback]` for a live meeting's playback FLAC, registered
+ * since beta.5); `None` when unknown (older tracks, imports).
+ */
+channel_frames: Array<number> | null, };

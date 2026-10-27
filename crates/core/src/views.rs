@@ -504,6 +504,10 @@ pub struct RecoveredItem {
     pub was: String,
     /// What recovery did, for the user.
     pub action: String,
+    /// Why recovery left the meeting `failed` as it was (the meeting's
+    /// banner shows it); `None` when it did not.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// What the app found and fixed at launch (crash recovery, a finished

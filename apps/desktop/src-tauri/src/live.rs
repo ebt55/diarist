@@ -45,7 +45,7 @@ use diarist_core::models::{self, DataPaths, ResolvedSelection, SelectedEngine};
 use diarist_core::pipeline::JobQueue;
 use diarist_core::settings;
 use diarist_core::store::{RunStore, StoreError};
-use diarist_core::types::{Channel, JobId, MeetingId, MeetingStatus, ModelRole, RunId, Source};
+use diarist_core::types::{Channel, JobId, MeetingId, MeetingStatus, ModelRole, RunId};
 use diarist_core::views::{JobEvent, RecoveredItem};
 use diarist_core::CoreError;
 use serde::Serialize;
@@ -1143,21 +1143,17 @@ pub(crate) fn startup(app: &AppHandle) {
 
 /// Recovers interrupted live meetings; returns what it did, for the user.
 fn recover_meetings(app: &AppHandle) -> CmdResult<Vec<RecoveredItem>> {
-    let (store, _, _, demo) = app_parts(app);
+    let (store, paths, _, demo) = app_parts(app);
     if demo {
         return Ok(Vec::new());
     }
+    // Recording or processing, or finished with files of an interrupted
+    // post-pass beside the recording (`live::needs_recovery`).
     let pending: Vec<_> = store
         .list_meetings()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|m| {
-            m.source == Source::Live
-                && matches!(
-                    m.status,
-                    MeetingStatus::Recording | MeetingStatus::Processing
-                )
-        })
+        .filter(|m| live::needs_recovery(&*store, &paths.root, m))
         .collect();
     if pending.is_empty() {
         return Ok(Vec::new());
@@ -1198,14 +1194,26 @@ fn recover_meetings(app: &AppHandle) -> CmdResult<Vec<RecoveredItem>> {
                     "The recording was saved ({} s); the transcript is being finalized.",
                     r.mic_frames.max(r.loopback_frames) / 16_000
                 ),
-                RecoveryAction::Finished => "The final transcript was already saved.".into(),
+                RecoveryAction::Finished => match &r.note {
+                    Some(n) => format!("The final transcript was already saved. {n}"),
+                    None => "The final transcript was already saved.".into(),
+                },
                 RecoveryAction::PromotedLive => {
                     "The recorded audio was gone, so the live transcript is the final one.".into()
                 }
                 RecoveryAction::Failed => {
                     "Neither audio nor a transcript was left; the meeting is marked failed.".into()
                 }
+                RecoveryAction::Untouched => format!(
+                    "Left as it was and marked failed: {}",
+                    r.note
+                        .as_deref()
+                        .unwrap_or("recovery could not tell what to do.")
+                ),
             },
+            error: (r.action == RecoveryAction::Untouched)
+                .then(|| r.note.clone())
+                .flatten(),
         });
         log::info!(
             "recovered meeting {} (was {}): {:?}; mic {} / loopback {} frames, post-pass {}",
@@ -1259,9 +1267,13 @@ fn offline_context(
     })
 }
 
-/// Queues the post-pass of a live meeting again (after it failed or was
-/// cancelled) through `live::rerun_post_pass`: the recorded WAVs must still
-/// be there.
+/// Queues the post-pass of a live meeting again through
+/// `live::rerun_post_pass`: after it failed or was cancelled, from the
+/// recorded WAVs; on a finished meeting ("Process again", plan 16 section
+/// 12.5 J), from its stored `playback.flac`, which the job only reads. A
+/// meeting with neither gets `live::AUDIO_GONE` (the recorded audio is gone,
+/// the transcript stays as it is), one without its live run
+/// `live::NO_LIVE_RUN`.
 pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResult<JobId> {
     let live = handle(app);
     if lock(&live.slot)
@@ -1297,6 +1309,31 @@ pub(crate) fn requeue_post_pass(app: &AppHandle, meeting: MeetingId) -> CmdResul
     log::info!("post-pass queued again for meeting {meeting} (job {job_id})");
     emit_state(app);
     Ok(job_id)
+}
+
+/// Whether the post-pass of `meeting` can run again now, and from which
+/// audio (`live::rerun_check`; MeetingView's "Process again"). A recording
+/// of it or a post-pass of it this window queued blocks it too, as in
+/// [`requeue_post_pass`].
+pub(crate) fn rerun_check(app: &AppHandle, meeting: MeetingId) -> CmdResult<live::RerunCheck> {
+    let live = handle(app);
+    let (store, paths, _, _) = app_parts(app);
+    let mut check = live::rerun_check(&*store, &paths.root, meeting).map_err(|e| e.to_string())?;
+    if check.blocked.is_none() {
+        if lock(&live.slot)
+            .session
+            .as_ref()
+            .is_some_and(|s| s.meeting_id == meeting)
+        {
+            check.blocked = Some("This meeting is still recording.".into());
+        } else if lock(&live.post_passes)
+            .values()
+            .any(|p| p.meeting_id == Some(meeting))
+        {
+            check.blocked = Some("A post-pass for this meeting is already queued.".into());
+        }
+    }
+    Ok(check)
 }
 
 /// The title of the meeting whose post-pass is job `job` (`None`: not a
@@ -1484,6 +1521,15 @@ pub async fn live_snapshot(app: AppHandle, meeting_id: MeetingId) -> CmdResult<V
 #[tauri::command(rename_all = "snake_case")]
 pub async fn rerun_post_pass(app: AppHandle, meeting_id: MeetingId) -> CmdResult<JobId> {
     blocking(move || requeue_post_pass(&app, meeting_id)).await
+}
+
+/// "Process again" (plan 16 section 12.5 J): see [`rerun_check`].
+#[tauri::command(rename_all = "snake_case")]
+pub async fn process_again_check(
+    app: AppHandle,
+    meeting_id: MeetingId,
+) -> CmdResult<live::RerunCheck> {
+    blocking(move || rerun_check(&app, meeting_id)).await
 }
 
 /// "Turn off for this recording" on the echo banner (see [`turn_off_echo`]).

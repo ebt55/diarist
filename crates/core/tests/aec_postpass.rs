@@ -639,6 +639,7 @@ fn post_pass(
         keep_live_runs: true,
         segment: SegmentOptions::default(),
         punct: diarist_core::punct::PunctSource::None,
+        from_flac: false,
     };
     let report = run_post_pass(&store, engine, &job, &CancelToken::default(), &|_| {}).unwrap();
     assert!(!folder.join("mic-aec.wav").exists(), "mic-aec.wav was left");

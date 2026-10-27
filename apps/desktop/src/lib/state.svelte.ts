@@ -12,6 +12,8 @@ import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
 import type { MissingPart } from "./generated/MissingPart";
 import type { PostPassView } from "./generated/PostPassView";
+import type { RerunAudio } from "./generated/RerunAudio";
+import { againEndText } from "./processAgain";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
 import type { StartupReport } from "./generated/StartupReport";
@@ -196,6 +198,8 @@ class AppState {
     if (this.#startupShown) return;
     this.#startupShown = true;
     const details = { label: "Details", run: () => (this.route = "diagnostics") };
+    // A meeting recovery left failed as it was: its banner says why.
+    for (const x of r.recovered) if (x.error) this.#noteFailure(x.meeting_id, x.error);
     if (r.recovered.length > 0) {
       const what = r.recovered.map((x) => `"${x.title || "Untitled"}"`).join(", ");
       this.toast("info", `Recovered after an unexpected exit: ${what}`, details);
@@ -393,8 +397,15 @@ class AppState {
     }
   }
 
-  /** Registers a post-pass the app just queued (Stop, Retry). */
-  trackPostPass(jobId: string, meetingId: MeetingId, title: string): void {
+  /** Process-again jobs (plan 16 section 12.5 J) and the audio each reads, until they end. */
+  #againJobs = new Map<string, RerunAudio>();
+
+  /**
+   * Registers a post-pass the app just queued (Stop, Retry; `again`: "Process again" from that
+   * audio, whose end is told in its own words, once, open meeting or not).
+   */
+  trackPostPass(jobId: string, meetingId: MeetingId, title: string, again?: RerunAudio): void {
+    if (again) this.#againJobs.set(jobId, again);
     this.#upsertJob(jobId, { kind: "postpass", meetingId, name: title || "Recording" });
     if (this.postPassErrors.has(meetingId)) {
       const next = new Map(this.postPassErrors);
@@ -481,8 +492,10 @@ class AppState {
     }
     this.jobs = this.jobs.filter((j) => j.id !== e.job_id);
     const pp = this.postPasses.find((p) => p.job_id === e.job_id);
-    if (job?.kind === "postpass" || pp) {
-      this.#postPassEnded(e, job?.meetingId ?? pp?.meeting_id ?? null, pp?.title || job?.name || "Recording");
+    const again = this.#againJobs.get(e.job_id) ?? null;
+    this.#againJobs.delete(e.job_id);
+    if (job?.kind === "postpass" || pp || again) {
+      this.#postPassEnded(e, job?.meetingId ?? pp?.meeting_id ?? null, pp?.title || job?.name || "Recording", again);
       return;
     }
     if (e.type === "done") {
@@ -515,11 +528,23 @@ class AppState {
     this.postPassErrors = next;
   }
 
-  #postPassEnded(e: JobEvent, meetingId: MeetingId | null, title: string): void {
+  /**
+   * How a post-pass ended, told once. `again`: a "Process again" job and the audio it read; from
+   * the FLAC the meeting stays done with its current transcript whatever happens (the new run
+   * becomes current only once nothing can fail), so it is said even with the meeting open.
+   */
+  #postPassEnded(e: JobEvent, meetingId: MeetingId | null, title: string, again: RerunAudio | null = null): void {
     void this.refreshMeetings();
     const id = e.type === "done" ? e.meeting_id : (meetingId ?? ("meeting_id" in e ? e.meeting_id : null));
     if (e.type === "error" && id !== null) this.#noteFailure(id, e.message);
     const open = id !== null && this.openId === id && this.route === "library";
+    const openAction = !open && id !== null ? { label: "Open", run: () => this.open(id), meetingId: id } : undefined;
+    if (again && e.type !== "progress") {
+      if (e.type === "error") void api.log("error", `process again of ${title} failed: ${e.message}`);
+      const t = againEndText(e.type, title, again, e.type === "error" ? e.message : "", open);
+      if (t) this.toast(t.kind, t.text, openAction);
+      return;
+    }
     if (e.type === "done") {
       if (!open && id !== null) {
         this.toast("success", `"${title}" is final`, { label: "Open", run: () => this.open(id), meetingId: id });
