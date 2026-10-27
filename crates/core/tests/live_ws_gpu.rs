@@ -74,8 +74,12 @@ fn percentile(v: &[f64], p: f64) -> Option<f64> {
 }
 
 /// Knobs for the live lookahead measurement (docs/plans/16 section 5);
-/// unset, the test runs as the app does today:
-/// - `DIARIST_LIVE_RIGHT_CONTEXT`: `ServeConfig::right_context` (no flag);
+/// unset, each takes the value in brackets:
+/// - `DIARIST_LIVE_RIGHT_CONTEXT`: `ServeConfig::right_context` (no flag:
+///   the runtime default, 1 frame, as the app ran live up to 0.1.0-beta.4).
+///   The app ships 6 since 0.1.0-beta.5 (both Nemotron entries'
+///   `live_right_context`), so `DIARIST_LIVE_RIGHT_CONTEXT=6` tests what
+///   it ships;
 /// - `DIARIST_LIVE_SECONDS`: seconds of AMI from 0:56 (30);
 /// - `DIARIST_LIVE_SESSIONS=2`: a second, undiarized session on the mic
 ///   channel fed the same audio, as a recording runs two (1);

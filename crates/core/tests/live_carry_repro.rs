@@ -31,8 +31,10 @@
 //!   seconds), `REPRO_RENAME_AT` (fraction of the audio, default 0.5).
 //! - `DIARIST_LIVE_RIGHT_CONTEXT` (optional): the live server's lookahead
 //!   (`ServeConfig::right_context`, docs/plans/16 section 5); unset: no
-//!   flag, as shipped. The live run's `engine_info.live_right_context`
-//!   says which.
+//!   flag, the runtime default (1 frame), as shipped up to 0.1.0-beta.4.
+//!   The app ships 6 since 0.1.0-beta.5 (both Nemotron entries'
+//!   `live_right_context`), so `DIARIST_LIVE_RIGHT_CONTEXT=6` replays as
+//!   shipped. The live run's `engine_info.live_right_context` says which.
 //! - `REPRO_RESUME=1`: reuse `REPRO_OUT`'s database: finish a replay whose
 //!   stream stopped early, or run the post-pass and carry-over again on the
 //!   stored live run (earlier post-pass runs are deleted after their word
