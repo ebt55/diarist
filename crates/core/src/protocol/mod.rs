@@ -225,6 +225,11 @@ pub struct JobStats {
     /// Wall-clock processing time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
+    /// The languages the runtime reported for a file job (`transcribe
+    /// --json`'s `languages`, such as `en-US`); empty when it reports none
+    /// (the EN model, Parakeet, live sessions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
 }
 
 #[cfg(test)]

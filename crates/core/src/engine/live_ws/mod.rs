@@ -583,6 +583,7 @@ async fn reader_task(
                     speakers: Some(tr.speakers()),
                     audio_ms: Some(audio_ms),
                     wall_ms: Some(wall_ms),
+                    languages: Vec::new(),
                 },
             });
         }

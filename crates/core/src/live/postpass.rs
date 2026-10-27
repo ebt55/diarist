@@ -304,18 +304,18 @@ fn wav_frames(p: &Path) -> Result<u64> {
 }
 
 /// Runs one file job to completion; returns the latest revision of every
-/// utterance's words, in order.
+/// utterance's words, in order, and the languages the runtime detected.
 fn transcribe(
     engine: &dyn Engine,
     job: FileJob,
     cancel: &CancelToken,
     on_progress: &dyn Fn(u64, Option<u64>),
-) -> Result<Vec<EngineWord>> {
+) -> Result<(Vec<EngineWord>, Vec<String>)> {
     let job_id = job.job_id.clone();
     let rx = engine.transcribe_file(job)?;
     let mut utterances: BTreeMap<u32, (u32, Vec<EngineWord>)> = BTreeMap::new();
     let mut cancel_sent = false;
-    loop {
+    let languages = loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(EngineEvent::Progress {
                 done_ms, total_ms, ..
@@ -328,7 +328,7 @@ fn transcribe(
                     *e = (rev, words);
                 }
             }
-            Ok(EngineEvent::Done { .. }) => break,
+            Ok(EngineEvent::Done { stats, .. }) => break stats.languages,
             Ok(EngineEvent::Error { code, message, .. }) => {
                 if cancel_sent || code == ErrorCode::Cancelled {
                     return Err(CoreError::Cancelled);
@@ -348,8 +348,11 @@ fn transcribe(
                 ))
             }
         }
-    }
-    Ok(utterances.into_values().flat_map(|(_, w)| w).collect())
+    };
+    Ok((
+        utterances.into_values().flat_map(|(_, w)| w).collect(),
+        languages,
+    ))
 }
 
 /// How many distinct display names of `live_run` (as the user sees them: a
@@ -1261,6 +1264,9 @@ pub fn run_post_pass(
     let mut kept_for_loops = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
+        // The languages the runtime detected, per channel (its first job:
+        // the raw mic's extra pass for the echo transfer adds nothing).
+        let detected: std::cell::RefCell<BTreeMap<Channel, Vec<String>>> = Default::default();
         // One channel through the file engine, on meeting time; `part`:
         // the `k`-th of `n` equal parts of the progress.
         let transcribe_channel = |(k, n): (u64, u64),
@@ -1273,7 +1279,7 @@ pub fn run_post_pass(
                 return Err(CoreError::Cancelled);
             }
             let base = k * audio_ms;
-            let words = transcribe(
+            let (words, languages) = transcribe(
                 engine,
                 FileJob {
                     job_id: JobId::new(),
@@ -1285,6 +1291,7 @@ pub fn run_post_pass(
                 cancel,
                 &|done, _| progress(JobStage::Transcribing, (base + done) / n, total_ms),
             )?;
+            detected.borrow_mut().entry(ch).or_insert(languages);
             let default = if ch == Channel::Mic && !diarize {
                 ME_LABEL
             } else {
@@ -1421,14 +1428,25 @@ pub fn run_post_pass(
         // (plan 16 section 12.3).
         let loops = loops::collapse_channels(&mut channels, loops::enabled(store));
         // Punctuation after the echo gate, before segmentation; the
-        // session is dropped right after.
+        // session is dropped right after. In `auto` it takes the language
+        // the runtime detected most often, the loopback's on a tie.
+        let detected = {
+            let d = detected.borrow();
+            RunLanguage::most_detected(
+                [Channel::Loopback, Channel::Mic]
+                    .iter()
+                    .filter_map(|c| d.get(c))
+                    .flatten()
+                    .map(String::as_str),
+            )
+        };
         let punctuation = {
             let mut loaded = job.punct.load(store);
             punctuate_loaded(
                 &mut loaded,
                 &mut channels,
                 &job.segment,
-                &RunLanguage::new(&job.language),
+                &RunLanguage::new(&job.language).with_detected(detected.clone()),
                 &|| cancel.is_cancelled(),
             )
         };
@@ -1437,10 +1455,7 @@ pub fn run_post_pass(
         }
         let transcript = build_transcript_channels(channels, &job.segment);
         let info = engine.info();
-        let run = store.create_run(
-            job.meeting,
-            RunKind::PostPass,
-            serde_json::json!({
+        let mut run_info = serde_json::json!({
                 "runtime": info.runtime,
                 "models": info.models,
                 "device": info.device,
@@ -1457,8 +1472,12 @@ pub fn run_post_pass(
                 },
                 "punctuation": punctuation.to_json(),
                 "loops": loops.to_json(),
-            }),
-        )?;
+        });
+        if let Some(d) = detected {
+            // For a later "Add punctuation" (`punct::rebuild::run_language`).
+            run_info["detected_language"] = serde_json::Value::String(d);
+        }
+        let run = store.create_run(job.meeting, RunKind::PostPass, run_info)?;
         // Until it is current: a post-pass that fails leaves no run nobody
         // has seen (a run from the FLAC also names it in its marker, for
         // crash recovery).
@@ -1692,6 +1711,7 @@ mod loop_tests {
                 words.clone(),
                 3_000_000,
                 Duration::from_millis(1),
+                Vec::new(),
             ) {
                 tx.send(ev).unwrap();
             }

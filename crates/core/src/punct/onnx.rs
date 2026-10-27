@@ -2283,6 +2283,7 @@ mod tests {
                     self.words.clone(),
                     self.audio_us,
                     std::time::Duration::from_secs(1),
+                    Vec::new(),
                 ) {
                     tx.send(ev).unwrap();
                 }

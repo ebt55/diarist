@@ -331,7 +331,9 @@ fn run_import(
     })?;
     let mut utterances: BTreeMap<(Channel, u32), (u32, Vec<EngineWord>)> = BTreeMap::new();
     let mut cancel_sent = false;
-    loop {
+    // The runtime's detected languages (Nemotron 3.5), for punctuation in
+    // `auto` (plan 16 section 3.8).
+    let detected = loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(EngineEvent::Progress { done_ms, .. }) => {
                 progress(JobStage::Transcribing, done_ms, total_ms)
@@ -350,7 +352,7 @@ fn run_import(
                     *e = (rev, words);
                 }
             }
-            Ok(EngineEvent::Done { .. }) => break,
+            Ok(EngineEvent::Done { stats, .. }) => break stats.languages,
             Ok(EngineEvent::Error { code, message, .. }) => {
                 if cancel_sent || code == crate::engine::ErrorCode::Cancelled {
                     return Err(CoreError::Cancelled);
@@ -370,7 +372,7 @@ fn run_import(
                 ))
             }
         }
-    }
+    };
 
     // 3. Optional standalone diarization pass, kept for the eval harness.
     if let (true, true, Some(runner)) = (opts.run_diarize_pass, req.diarize, &opts.diarize_runner) {
@@ -411,14 +413,16 @@ fn run_import(
     let mut channels = vec![(Channel::Source, words)];
     let loops = loops::collapse_channels(&mut channels, loops::enabled(store));
     // Punctuation: one channel, the diarized labels as they are; the
-    // session is dropped right after.
+    // session is dropped right after. In `auto` it takes the language the
+    // runtime detected.
+    let detected = RunLanguage::most_detected(detected.iter().map(String::as_str));
     let punctuation = {
         let mut loaded = opts.punct.load(store);
         punctuate_loaded(
             &mut loaded,
             &mut channels,
             &opts.segment,
-            &RunLanguage::new(&opts.language),
+            &RunLanguage::new(&opts.language).with_detected(detected.clone()),
             &cancelled,
         )
     };
@@ -427,6 +431,10 @@ fn run_import(
     }
     let words = channels.pop().map(|(_, w)| w).unwrap_or_default();
     let mut info = run.engine_info.clone();
+    if let Some(d) = detected {
+        // For a later "Add punctuation" (`punct::rebuild::run_language`).
+        info["detected_language"] = serde_json::Value::String(d);
+    }
     info["punctuation"] = punctuation.to_json();
     info["loops"] = loops.to_json();
     store.set_run_engine_info(run.id, info)?;
@@ -489,6 +497,8 @@ mod tests {
         mode: Mode,
         cancelled: Arc<AtomicBool>,
         seen_wav: Mutex<Option<PathBuf>>,
+        /// What `Mode::Fixture`'s `Done` reports as detected.
+        languages: Vec<String>,
     }
 
     impl FakeEngine {
@@ -497,6 +507,7 @@ mod tests {
                 mode,
                 cancelled: Arc::default(),
                 seen_wav: Mutex::new(None),
+                languages: Vec::new(),
             }
         }
     }
@@ -526,6 +537,7 @@ mod tests {
                         engine_words(&out),
                         300_032_000,
                         Duration::from_secs(11),
+                        self.languages.clone(),
                     ) {
                         tx.send(ev).unwrap();
                     }
@@ -552,6 +564,7 @@ mod tests {
                         words,
                         300_032_000,
                         Duration::from_secs(1),
+                        Vec::new(),
                     ) {
                         tx.send(ev).unwrap();
                     }
@@ -578,6 +591,7 @@ mod tests {
                         words,
                         300_032_000,
                         Duration::from_secs(1),
+                        Vec::new(),
                     ) {
                         tx.send(ev).unwrap();
                     }
@@ -769,6 +783,67 @@ mod tests {
         // Sentence ends split segments: more segments than without.
         let segs = |id| store.get_segments(id, 0, 10_000).unwrap().len();
         assert!(segs(punctuated) > segs(plain));
+    }
+
+    /// Plan 16 section 3.8: in `auto`, punctuation takes the language the
+    /// runtime detected (`JobStats.languages`), and the run records it for
+    /// a later rebuild; a meeting's own language comes first.
+    #[test]
+    fn an_auto_import_is_punctuated_in_the_detected_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let src = input(dir.path());
+        let import = |language: &str, detected: &[&str], covers: &'static [&'static str]| {
+            let opts = ImportOptions {
+                min_free_bytes: 0,
+                language: language.into(),
+                punct: PunctSource::factory(move || {
+                    crate::punct::fixture::FixturePunctuator::marks(&[]).languages(covers)
+                }),
+                ..ImportOptions::new(&DataPaths::at(dir.path()), &Settings::default())
+            };
+            let mut engine = FakeEngine::new(Mode::Fixture);
+            engine.languages = detected.iter().map(|l| (*l).to_owned()).collect();
+            let id = import_file(
+                &store,
+                &engine,
+                &FakeDecoder,
+                request(&src),
+                &opts,
+                &CancelToken::default(),
+                &|_| {},
+            )
+            .unwrap();
+            store
+                .get_meeting(id)
+                .unwrap()
+                .current_run
+                .unwrap()
+                .engine_info
+        };
+        let info = import("auto", &["de-DE"], &["de"]);
+        let p = &info["punctuation"];
+        assert_eq!(p["applied"], true, "{p}");
+        assert_eq!(
+            (&p["language"], &p["language_source"]),
+            (&"de".into(), &"detected".into())
+        );
+        assert_eq!(info["detected_language"], "de-DE");
+        // A model without the detected language leaves the run alone, where
+        // the script alone (Latin) would have let a French model punctuate.
+        let p = import("auto", &["de-DE"], &["fr"])["punctuation"].clone();
+        assert_eq!(p["reason"], "language", "{p}");
+        assert_eq!(p["language"], "de");
+        // Nothing detected (the EN model): the script decides.
+        let info = import("auto", &[], &["fr"]);
+        assert_eq!(info["punctuation"]["language_source"], "script");
+        assert!(info.get("detected_language").is_none());
+        // The meeting's language outranks the detected one.
+        let p = import("en", &["de-DE"], &["en"])["punctuation"].clone();
+        assert_eq!(
+            (&p["language"], &p["language_source"]),
+            (&"en".into(), &"meeting".into())
+        );
     }
 
     /// Plan 16 section 12.3: the loop becomes one word spanning it, the

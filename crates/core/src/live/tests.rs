@@ -168,6 +168,8 @@ struct FakeFile {
     fail_next: AtomicBool,
     /// Jobs return runs of `<unk>` (a language the model cannot transcribe).
     unknown: AtomicBool,
+    /// What every job's `Done` reports as detected (`JobStats.languages`).
+    languages: Mutex<Vec<String>>,
 }
 impl Engine for FakeFile {
     fn transcribe_file(&self, job: FileJob) -> crate::error::Result<Receiver<EngineEvent>> {
@@ -213,7 +215,10 @@ impl Engine for FakeFile {
         .unwrap();
         tx.send(EngineEvent::Done {
             job_id: job.job_id,
-            stats: JobStats::default(),
+            stats: JobStats {
+                languages: self.languages.lock().unwrap().clone(),
+                ..JobStats::default()
+            },
         })
         .unwrap();
         Ok(rx)
@@ -258,6 +263,7 @@ fn context(dir: &Path, vram: Option<u32>) -> (LiveContext, Arc<SqliteStore>, Arc
         jobs: Mutex::new(Vec::new()),
         fail_next: AtomicBool::new(false),
         unknown: AtomicBool::new(false),
+        languages: Mutex::new(Vec::new()),
     });
     let sources: Arc<SourceFactory> = Arc::new(|cfg: CaptureConfig, ring| {
         let hz = if cfg.channel == Channel::Mic {
@@ -2453,6 +2459,49 @@ fn the_post_pass_punctuates_after_the_echo_gate_and_before_segmentation() {
     );
     let words = word_texts(&*store, m2.id);
     assert_eq!(words[0], ("p0".to_owned(), None));
+}
+
+/// Plan 16 section 3.8: a post-pass in `auto` punctuates in the language
+/// the runtime detected and records it for a later rebuild.
+#[test]
+fn an_auto_post_pass_is_punctuated_in_the_detected_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_ctx, store, file) = context(dir.path(), None);
+    *file.languages.lock().unwrap() = vec!["es-ES".to_owned()];
+    let run = |title: &str, covers: &'static [&'static str]| {
+        let (m, live) = interrupted_meeting(&store, dir.path(), title, true);
+        let mut job = punct_job(
+            dir.path(),
+            &m,
+            live,
+            true,
+            crate::punct::PunctSource::factory(move || {
+                crate::punct::fixture::FixturePunctuator::marks(&[]).languages(covers)
+            }),
+        );
+        job.language = "auto".into();
+        let report = run_post_pass(
+            &*store,
+            &*file,
+            &job,
+            &crate::pipeline::CancelToken::default(),
+            &|_| {},
+        )
+        .unwrap();
+        store.get_run(report.current_run).unwrap().engine_info
+    };
+    let info = run("Spanish", &["es"]);
+    let p = &info["punctuation"];
+    assert_eq!(p["applied"], true, "{p}");
+    assert_eq!(p["language"], "es");
+    assert_eq!(p["language_source"], "detected");
+    assert_eq!(info["detected_language"], "es-ES");
+    // Not the script's guess: a French-only model is not used for it.
+    let p = run("Spanish again", &["fr"])["punctuation"].clone();
+    assert_eq!(
+        (&p["reason"], &p["language"]),
+        (&"language".into(), &"es".into())
+    );
 }
 
 #[test]

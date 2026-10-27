@@ -56,6 +56,30 @@ impl RunLanguage {
         self
     }
 
+    /// The language the runtime detected most often over `languages`
+    /// (every job's `JobStats.languages` of a run, in order), the first
+    /// seen of equals; `None` when it reported none. For
+    /// [`Self::with_detected`] and the run's `engine_info.detected_language`.
+    pub fn most_detected<'a>(languages: impl IntoIterator<Item = &'a str>) -> Option<String> {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for l in languages.into_iter().map(str::trim) {
+            if l.is_empty() || is_auto(l) {
+                continue;
+            }
+            match counts.iter_mut().find(|(k, _)| *k == l) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((l, 1)),
+            }
+        }
+        let mut best: Option<(&str, usize)> = None;
+        for (l, n) in counts {
+            if best.is_none_or(|(_, b)| n > b) {
+                best = Some((l, n));
+            }
+        }
+        best.map(|(l, _)| l.to_owned())
+    }
+
     /// The primary subtag to punctuate in and where it came from
     /// (`meeting` or `detected`); `None` when only the script can decide.
     fn resolve(&self) -> Option<(String, &'static str)> {
@@ -1485,6 +1509,21 @@ mod tests {
         run(&mut ch, &mut p, &PunctOptions::default(), &en());
         assert_eq!(p.calls(), [vec!["a", "b"]]);
         assert_eq!(texts(&ch[0].1), ["b.", "A"]);
+    }
+
+    #[test]
+    fn the_most_detected_language_wins_and_the_first_on_a_tie() {
+        let most = |l: &[&str]| RunLanguage::most_detected(l.iter().copied());
+        assert_eq!(most(&[]), None);
+        assert_eq!(most(&["", " ", "auto"]), None);
+        assert_eq!(most(&["de-DE"]).as_deref(), Some("de-DE"));
+        assert_eq!(most(&["fr-FR", "de-DE", "de-DE"]).as_deref(), Some("de-DE"));
+        // Equal counts: the first reported (the loopback's in the post-pass).
+        assert_eq!(most(&["es-ES", "en-US"]).as_deref(), Some("es-ES"));
+        assert_eq!(
+            most(&[" en-US ", "en-US", "es-ES"]).as_deref(),
+            Some("en-US")
+        );
     }
 
     #[test]

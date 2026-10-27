@@ -294,12 +294,16 @@ pub(crate) fn store_rebuild(
 }
 
 /// The language to punctuate a stored run in: the meeting's, and for `auto`
-/// the language an earlier build of this run detected, if any.
+/// the language an earlier build of this run detected, if any: the one
+/// its punctuation used, else the runtime's `engine_info.detected_language`
+/// (recorded by imports and the post-pass since 0.1.0-beta.5, also when no
+/// punctuation model was installed then).
 pub fn run_language(meeting_language: &str, engine_info: &serde_json::Value) -> RunLanguage {
     let p = &engine_info["punctuation"];
     let detected = (p["language_source"].as_str() == Some("detected"))
         .then(|| p["language"].as_str().map(str::to_owned))
-        .flatten();
+        .flatten()
+        .or_else(|| engine_info["detected_language"].as_str().map(str::to_owned));
     RunLanguage::new(meeting_language).with_detected(detected)
 }
 
@@ -1491,6 +1495,24 @@ mod tests {
                 &serde_json::json!({"punctuation": {"language": "latin", "language_source": "script"}})
             ),
             RunLanguage::new("auto")
+        );
+        // A run built without a punctuation model: the runtime's language.
+        assert_eq!(
+            run_language(
+                "auto",
+                &serde_json::json!({"detected_language": "es-ES",
+                                    "punctuation": {"applied": false, "reason": "no_model"}})
+            ),
+            RunLanguage::new("auto").with_detected(Some("es-ES".into()))
+        );
+        // What the punctuation used comes first.
+        assert_eq!(
+            run_language(
+                "auto",
+                &serde_json::json!({"detected_language": "es-ES",
+                                    "punctuation": {"language": "de", "language_source": "detected"}})
+            ),
+            RunLanguage::new("auto").with_detected(Some("de".into()))
         );
     }
 }
