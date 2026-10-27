@@ -763,4 +763,60 @@ mod tests {
         restore_collapses_a_dropped_loop(&SqliteStore::open_in_memory().unwrap());
         restore_collapses_a_dropped_loop(&MemoryStore::new());
     }
+
+    /// Restore with a punctuator and a loop among the dropped words: the
+    /// loop is collapsed before punctuation (which sees one word for it),
+    /// `restored_merged` counts the merged words, and the new run's
+    /// `engine_info` holds `echo`, `punctuation` and `loops` side by side.
+    fn restore_merged_with_punctuation(store: &dyn RunStore) {
+        let (m, run) = meeting(store);
+        let dropped: Vec<EchoDroppedWord> = (0..4)
+            .map(|_| EchoDroppedWord {
+                start_ms: 2_080,
+                end_ms: 2_160,
+                text: "one".into(),
+                coefficient: 0.8,
+                reason: None,
+            })
+            .chain(std::iter::once(EchoDroppedWord {
+                start_ms: 2_470,
+                end_ms: 2_700,
+                text: "two".into(),
+                coefficient: 0.77,
+                reason: None,
+            }))
+            .collect();
+        store.set_echo_dropped(run, &dropped).unwrap();
+        let r = restore_echo_dropped(store, &punct(), run).unwrap();
+        assert_eq!((r.restored, r.merged), (5, 3));
+        assert_eq!(mic_texts(store, m), ["Hello", "one", "two.", "Bye."]);
+        let info = store.get_run(r.run).unwrap().engine_info;
+        let e = &info["echo"];
+        assert_eq!(
+            (
+                e["restored_words"].as_u64(),
+                e["restored_merged"].as_u64(),
+                e["dropped"].as_u64()
+            ),
+            (Some(5), Some(3), Some(0))
+        );
+        assert_eq!(e["coupling"].as_f64(), Some(0.72));
+        // Punctuation counted the collapsed words: 4 on the mic, 3 on the
+        // loopback.
+        let p = crate::punct::PunctReport::of_engine_info(&info).unwrap();
+        assert!(p.applied, "{info}");
+        assert_eq!(p.words, Some(7));
+        let loops = crate::transcript::loops::LoopReport::of_engine_info(&info).unwrap();
+        assert_eq!(
+            (loops.applied, loops.runs, loops.words_removed),
+            (true, 1, 3)
+        );
+        assert_eq!(loops.per_channel["mic"].words_removed, 3);
+    }
+
+    #[test]
+    fn restore_counts_merged_words_with_punctuation_on() {
+        restore_merged_with_punctuation(&SqliteStore::open_in_memory().unwrap());
+        restore_merged_with_punctuation(&MemoryStore::new());
+    }
 }
