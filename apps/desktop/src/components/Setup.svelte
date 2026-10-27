@@ -54,6 +54,13 @@
     ) ?? [],
   );
   const modelsBytes = $derived(models.reduce((n, m) => n + m.size_bytes, 0));
+  /** Required models besides the diarizer and the speech model (from beta.5, punctuation), by short name. */
+  const DIARIZER_MODEL = "nemotron-3-diarization";
+  const extras = $derived(
+    models
+      .filter((m) => m.name !== EN_MODEL && m.name !== MULTILINGUAL_MODEL && m.name !== DIARIZER_MODEL)
+      .map((m) => m.label.split(":")[0]?.trim() || m.name),
+  );
   const modelsMissing = $derived(models.filter((m) => !m.installed));
   const missingAll = $derived([...(engine && !engineInstalled ? [engine] : []), ...modelsMissing]);
   const gpu = $derived(status?.gpu ?? null);
@@ -281,11 +288,11 @@
             class="btn btn-primary"
             onclick={() => install(engine && !engineInstalled ? [engine, ...models] : models)}
             disabled={downloads.busy}
-            title={engine && !engineInstalled ? "Installs the engine first: it fetches the models" : ""}
+            title={engine && !engineInstalled ? "Installs the engine first, then the models" : ""}
           >
-            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: diarizer and {english
-              ? "the EN model"
-              : "Nemotron 3.5"})
+            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: {extras.length > 0
+              ? `diarizer, ${english ? "the EN model" : "Nemotron 3.5"} and ${extras.join(", ")}`
+              : `diarizer and ${english ? "the EN model" : "Nemotron 3.5"}`})
           </button>
         {/if}
       </div>
@@ -328,9 +335,8 @@
         </p>
       {/if}
       <p class="help">
-        A per-app firewall such as simplewall asks about <code>diarist.exe</code> (the engine download) and
-        <code>curl.exe</code> (the engine's model downloader) on the first download; allow both, or fetch the files by hand
-        with Copy link.
+        A per-app firewall such as simplewall asks about <code>diarist.exe</code> on the first download (it fetches the
+        engine and the models); allow it, or fetch the files by hand with Copy link.
       </p>
     </section>
   {:else if !error}

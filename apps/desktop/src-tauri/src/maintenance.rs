@@ -32,6 +32,7 @@ pub(crate) fn recover_imports(store: &dyn RunStore, report: &mut StartupReport) 
                     title,
                     was: "import".into(),
                     action: "The import was interrupted. Import the file again.".into(),
+                    error: None,
                 });
             }
         }

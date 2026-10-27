@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import tomllib
 import unicodedata
 import warnings
@@ -39,17 +40,20 @@ CUE_TIMING_NOTE = (
 class Session:
     id: str
     label: str
-    kind: str  # "zoom" or "ami"
-    group: str  # tuning | heldout | control | stress | overlap
+    kind: str  # "zoom", or "ami" / "ref" (prebuilt SegLST + RTTM references)
+    group: str  # tuning | heldout | control | stress | overlap | pub-*
     audio: Path
     vtt: Path | None = None
     ref_rttm: Path | None = None
     ref_seglst: Path | None = None
     note: str = ""
+    language: str | None = None  # overrides the config's language (public non-English sets)
     extra: dict = field(default_factory=dict)
 
 
-GROUP_ORDER = ["tuning", "heldout", "control", "overlap", "stress"]
+# The owner's gate groups, then the public sets (docs/05 "Extend").
+PUBLIC_GROUPS = ["pub-meeting", "pub-far", "pub-phone", "pub-lang"]
+GROUP_ORDER = ["tuning", "heldout", "control", "overlap", "stress", *PUBLIC_GROUPS]
 
 
 def _path(v: str | None) -> Path | None:
@@ -68,12 +72,19 @@ def _path(v: str | None) -> Path | None:
     return p if p.is_absolute() else (REPO / p)
 
 
-def load_sessions(path: Path) -> dict[str, Session]:
-    """Reads sessions.toml (gitignored; see sessions.example.toml)."""
+def load_sessions(path: Path, _seen: set | None = None) -> dict[str, Session]:
+    """Reads sessions.toml (gitignored; see sessions.example.toml).
+
+    A top-level `include = [...]` lists further session files (relative to
+    the repo root; glob patterns allowed), such as the per-set lists the
+    public fetch scripts write. An include that matches nothing is skipped
+    with a note, so a set that has not been fetched does not stop a run."""
     if not path.is_file():
         raise SystemExit(
             f"{path} not found: copy sessions.example.toml to sessions.toml and fill in the paths"
         )
+    seen = _seen if _seen is not None else set()
+    seen.add(path.resolve())
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     out: dict[str, Session] = {}
     for sid, s in data.get("sessions", {}).items():
@@ -87,8 +98,22 @@ def load_sessions(path: Path) -> dict[str, Session]:
             ref_rttm=_path(s.get("ref_rttm")),
             ref_seglst=_path(s.get("ref_seglst")),
             note=s.get("note", ""),
+            language=s.get("language"),
             extra={k: v for k, v in s.items()},
         )
+    for pattern in data.get("include", []):
+        import glob
+
+        matches = [Path(m) for m in sorted(glob.glob(str(_path(pattern)))) if Path(m).is_file()]
+        if not matches:
+            print(f"note: {pattern} (included from {path.name}) matches no file; skipped", file=sys.stderr)
+        for m in matches:
+            if m.resolve() in seen:
+                continue
+            for sid, sess in load_sessions(m, seen).items():
+                if sid in out:
+                    raise SystemExit(f"session id {sid!r} appears twice ({m})")
+                out[sid] = sess
     return out
 
 
@@ -201,10 +226,92 @@ def normalize_token(tok: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def normalize_text(text: str) -> list[str]:
+def multilingual_tokens(text: str) -> list[str]:
+    """Non-English normaliser: NFKC, casefold, every punctuation or symbol
+    character (Unicode P*, S*) becomes a space. Combining marks (Devanagari
+    vowel signs, Japanese voicing marks) are kept, unlike whisper's
+    BasicTextNormalizer, which splits Hindi words at every vowel sign."""
+    s = unicodedata.normalize("NFKC", text).casefold()
+    s = "".join(" " if unicodedata.category(c)[0] in "PS" else c for c in s)
+    return s.split()
+
+
+# Languages scored per character (CER): a Han, kana or hangul character is one
+# unit, a run of other letters or digits (an English word in a Mandarin
+# sentence) is one unit.
+CER_LANGS = {"zh", "ja"}
+# Hesitations dropped on both sides, as the English fillers are. Mandarin:
+# 嗯 and 呃 are only ever interjections (啊 is also a sentence particle, kept).
+_ML_FILLERS = {
+    "fr": {"euh", "heu", "hum", "hm", "mh", "mm", "mhm"},
+    "zh": {"嗯", "呃"},
+}
+
+
+def lang_base(lang: str | None) -> str:
+    return (lang or "en").replace("_", "-").split("-")[0].lower()
+
+
+def _is_cjk(c: str) -> bool:
+    o = ord(c)
+    return (
+        0x3040 <= o <= 0x30FF  # hiragana, katakana
+        or 0x3400 <= o <= 0x4DBF
+        or 0x4E00 <= o <= 0x9FFF  # CJK unified ideographs
+        or 0xF900 <= o <= 0xFAFF
+        or 0xAC00 <= o <= 0xD7AF  # hangul syllables
+        or 0x20000 <= o <= 0x2FA1F
+    )
+
+
+def cjk_units(tok: str) -> list[str]:
+    out, run = [], ""
+    for c in tok:
+        if _is_cjk(c):
+            if run:
+                out.append(run)
+                run = ""
+            out.append(c)
+        else:
+            run += c
+    if run:
+        out.append(run)
+    return out
+
+
+@lru_cache(maxsize=200_000)
+def _ml_token(base: str, tok: str) -> tuple[str, ...]:
+    fill = _ML_FILLERS.get(base, set())
+    out: list[str] = []
+    for t in multilingual_tokens(tok):
+        units = cjk_units(t) if base in CER_LANGS else [t]
+        out.extend(u for u in units if u not in fill)
+    return tuple(out)
+
+
+def token_normalizer(lang: str | None = None):
+    """The per-token normaliser for a session language: the English one for
+    en (and no language), the multilingual one otherwise."""
+    base = lang_base(lang)
+    if base == "en":
+        return normalize_token
+    return lambda tok: _ml_token(base, tok)
+
+
+def normalizer_name(lang: str | None = None) -> str:
+    base = lang_base(lang)
+    if base == "en":
+        return NORMALIZER_NAME
+    unit = "characters (CER) for Han and kana, words otherwise" if base in CER_LANGS else "words"
+    fill = ", hesitations " + " ".join(sorted(_ML_FILLERS[base])) + " dropped" if base in _ML_FILLERS else ""
+    return f"NFKC, casefold, punctuation and symbols removed, combining marks kept; units: {unit}{fill}"
+
+
+def normalize_text(text: str, lang: str | None = None) -> list[str]:
+    norm = token_normalizer(lang)
     out: list[str] = []
     for tok in text.split():
-        out.extend(normalize_token(tok))
+        out.extend(norm(tok))
     return out
 
 
@@ -220,10 +327,11 @@ class Word:
     end: float
 
 
-def interpolate_words(segs: list[dict]) -> list[Word]:
+def interpolate_words(segs: list[dict], lang: str | None = None) -> list[Word]:
     """Segments -> normalised words. Raw tokens get a share of the segment's
     span proportional to their length; a raw token that normalises to several
     words shares its span equally."""
+    to_words = token_normalizer(lang)
     words: list[Word] = []
     for s in segs:
         toks = str(s.get("words", "")).split()
@@ -236,7 +344,7 @@ def interpolate_words(segs: list[dict]) -> list[Word]:
             a = t0 + (t1 - t0) * acc / total
             acc += len(tok) + 1
             b = t0 + (t1 - t0) * acc / total
-            norm = normalize_token(tok)
+            norm = to_words(tok)
             for k, w in enumerate(norm):
                 ka = a + (b - a) * k / len(norm)
                 kb = a + (b - a) * (k + 1) / len(norm)
@@ -245,11 +353,11 @@ def interpolate_words(segs: list[dict]) -> list[Word]:
     return words
 
 
-def normalize_seglst(segs: list[dict]) -> list[dict]:
+def normalize_seglst(segs: list[dict], lang: str | None = None) -> list[dict]:
     """Copy of segments with normalised words (empty ones dropped)."""
     out = []
     for s in segs:
-        ws = normalize_text(str(s.get("words", "")))
+        ws = normalize_text(str(s.get("words", "")), lang)
         if not ws:
             continue
         r = {k: s[k] for k in ("session_id", "speaker", "start_time", "end_time")}

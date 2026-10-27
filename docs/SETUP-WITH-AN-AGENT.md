@@ -80,7 +80,8 @@ How to run the commands:
 - Downloads use Windows' own `C:\Windows\System32\curl.exe`, called by its
   full path. Plain `curl` in Windows PowerShell is an alias for
   `Invoke-WebRequest`, and another `curl.exe` earlier on the PATH would
-  trigger a different firewall prompt than the one the app's downloads use.
+  trigger a different firewall prompt than the one these blocks expect (the
+  app itself downloads with `diarist.exe` since 0.1.0-beta.5).
 - The model downloads are 100 to 750 MB each. Give those commands a long
   timeout (10 minutes or more), or run them in the background and wait.
 
@@ -236,7 +237,7 @@ up runs everything.
 
 Now tell the user the plan and wait for a yes. For example:
 
-> I'll install Diarist 0.1.0-beta.4 (7 MB, per user, no administrator
+> I'll install Diarist 0.1.0-beta.5 (7 MB, per user, no administrator
 > rights) into `%LOCALAPPDATA%\Diarist`, then download the CUDA runtime
 > (98 MB, from NVIDIA's GitHub releases) and two models from Hugging Face,
 > Nemotron 3 Diarization (102 MB) and Nemotron Speech Streaming EN 0.6B
@@ -245,7 +246,7 @@ Now tell the user the plan and wait for a yes. For example:
 > Go ahead?
 
 Take the version from step 4a's output and the sizes from step 5a's if you
-want them exact; the numbers above are for 0.1.0-beta.4.
+want them exact; the numbers above are for 0.1.0-beta.5.
 
 ## 4. Install Diarist
 
@@ -351,7 +352,7 @@ Expected: exit code `0`, `diarist.exe present: True`, and the release's
 version. The program folder holds `diarist.exe` and `uninstall.exe`. The
 installer does not start the app. If WebView2 is missing (rare on Windows
 10 and 11), the installer fetches it from Microsoft. The installer contains
-only the app; as of 0.1.0-beta.4 there is no command-line tool to call.
+only the app; as of 0.1.0-beta.5 there is no command-line tool to call.
 
 ## 5. Place the runtime and models
 
@@ -385,9 +386,12 @@ $models | Select-Object name, role, required, experimental, @{ n = 'MB'; e = { [
 ```
 
 The two tables list every runtime package and model with its size, rounded
-as the app shows it. For 0.1.0-beta.4: `cuda` 98, `vulkan` 19, `cpu` 6;
+as the app shows it. For 0.1.0-beta.5: `cuda` 98, `vulkan` 19, `cpu` 6;
 `nemotron-3-diarization` 102, `nemotron-en` 668, `nemotron-3.5` 708,
-`parakeet-tdt` 681. The names in the `name` column are the ones step 3 uses.
+`parakeet-tdt` 681, `punctuation-horizon-small` 306. The names in the `name`
+column are the ones step 3 uses. The punctuation model is seven files in
+one folder, so step 5c does not place it; leave it to the app, which offers
+it once at its first start (Download / Later) and in Settings, Models.
 
 ### 5b. The runtime
 
@@ -440,7 +444,7 @@ if (Test-Path "$target\bin\nemo-speech.exe") {
 ```
 
 The last command asks the runtime about this PC. In its JSON, `version` is
-the runtime version (`0.2.0` for 0.1.0-beta.4). For the CUDA package,
+the runtime version (`0.2.0` for 0.1.0-beta.5). For the CUDA package,
 `driver_runtime_compatible` must be `true` and `devices` must list the GPU
 with `"type": "gpu"`; if not, the driver is too old or the GPU is not
 supported, and the Vulkan package is the fallback. If Windows refuses to run

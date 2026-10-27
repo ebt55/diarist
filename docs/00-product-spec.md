@@ -13,7 +13,7 @@ Primarily the author, on one machine: Windows 11, RTX 3080 10 GB, 32 GB RAM. Sec
 ## What it must do (v1 + v2)
 
 1. **Post-hoc transcription (v1).** Drop an audio/video file in. Get a transcript where every word carries a speaker label and a timestamp. Up to 8 speakers. Runs on the GPU. A one-hour meeting should finish in well under five minutes.
-2. **Live transcription (v2).** Press Record. The app captures the microphone and the system loopback (what the user hears from Teams, Zoom, Meet, browser). Transcript appears within about a second, speaker labels appear and may be revised for a few seconds, then settle. The mic channel is "me"; the loopback channel is diarized into "them".
+2. **Live transcription (v2).** Press Record. The app captures the microphone and the system loopback (what the user hears from Teams, Zoom, Meet, browser). Transcript appears within about a second (a word about half a second after it is spoken, measured: docs/eval/2026-10-27-live-lookahead.md), speaker labels appear and may be revised for a few seconds, then settle. The mic channel is "me"; the loopback channel is diarized into "them".
 3. **Speaker separation quality is the headline feature.** Use the strongest open, locally runnable diarizer available, and measure it on the user's own recordings, not just published benchmarks.
 4. **Local database.** Every meeting, segment, word, speaker and rename lands in SQLite with full-text search. The DB is the product; the UI is a window onto it.
 5. **Speaker management.** Rename "Speaker 2" to "Alice". Merge two labels. Later: recognize Alice across meetings via voice embeddings.

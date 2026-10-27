@@ -1,0 +1,32 @@
+{
+  "role": "punctuation",
+  "display_name": "Punctuation restoration small (Horizon-Labs, int8 embeddings)",
+  "languages": ["*"],
+  "punctuation": {
+    "tokenizer": "tokenizer.json",
+    "tokenizer_kind": "hf_json",
+    "input_casing": "lower",
+    "max_tokens": 512,
+    "context_tokens": 48,
+    "batch": 8,
+    "bos_id": 2,
+    "eos_id": 1,
+    "pad_id": 0,
+    "inputs": { "ids": "input_ids", "mask": "attention_mask" },
+    "heads": [
+      {
+        "output": "logits",
+        "kind": "post",
+        "labels": ["", ".", ",", "?", "-", ":"],
+        "position": "last_token",
+        "values": "logits"
+      }
+    ],
+    "casing": "none",
+    "marks_by_language": { "*": ["period", "comma", "question"] },
+    "unit": "turn",
+    "policy": "keep_asr",
+    "runtime": "diarist-onnxruntime.dll",
+    "runtime_version": "1.31.0"
+  }
+}

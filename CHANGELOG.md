@@ -2,6 +2,139 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## [0.1.0-beta.5] - 2026-10-27
+
+The fifth beta pre-release. Transcripts get punctuation and sentence
+capitals after Stop and on imports, from a small model on the CPU that
+never changes a word. The EN model's bursts of one repeated word are
+collapsed, the live view runs with more lookahead and makes fewer
+mistakes, the echo gate removes far more of a loud echo's residue when
+you say almost nothing, and a finished recording can be processed again
+from its stored audio. Models now come through Diarist's own downloader.
+On the evaluation set (36 recordings, 28 hours) word error falls from
+11.01 to 10.85 percent with the EN model and stays at 11.30 with
+Nemotron 3.5; no recording got worse. Measured on one PC.
+
+- Added: punctuation and capitals. After Stop (on both channels) and on
+  every import, a punctuation model reads the finished words and adds
+  `.` `,` and `?` (in the script's own forms, such as `।` for Hindi and
+  `。` `？` for Japanese and Chinese), and Diarist raises the first letter
+  of each turn and of every word after a sentence end. Lines of the
+  transcript now end at sentence ends where the pause allows. Words, their
+  times and their speakers never change: on the evaluation set word and
+  speaker error are identical with and without it, with both speech
+  models, and Diarist's own checks rejected none of its 533,000 words. A
+  mark the speech model wrote itself stays. The model is Horizon-Labs
+  punctuation-restoration-small (35 languages; no commas for Hindi,
+  Japanese and Chinese; Thai is not punctuated), a 306 MB download that
+  the first-run screen fetches with the other models and that installed
+  copies offer once ("New: punctuation", Download or Later). It runs in
+  Diarist's own process through ONNX Runtime 1.31.0 (installed beside the
+  model as `diarist-onnxruntime.dll`): about 5 to 6 seconds of CPU per
+  hour of audio (5.3 to 5.6 on the evaluation set), 0.65 GB of RAM while
+  it runs, no VRAM. The speech model's own text is kept with each changed
+  word, so "Remove punctuation" on a meeting goes back to it exactly and
+  "Add punctuation" adds it again. Settings, Models, Punctuation shows the
+  model, "New transcripts: Add automatically" or Off, and "Add punctuation
+  to N older meetings", which builds a punctuated copy of each and keeps
+  the earlier transcripts; meetings from earlier versions stay as they are
+  until you ask. Diagnostics gains a "Punctuation runtime" row, and
+  `diarist-cli punctuate <meeting>` (or `--all-missing`, `--remove`) does
+  the same from the command line. The JSON export gives each changed word
+  its `raw_text`. The live view stays unpunctuated. About two in three of
+  its periods and question marks, and four in five of its commas, are
+  where Zoom's own transcripts put them, but it writes about half as many
+  commas as Zoom does (docs/KNOWN-ISSUES.md).
+- Added: Process again. A finished recording whose live transcript was
+  kept (Settings, "Keep the live transcript") can be processed again from
+  its stored `playback.flac`, with today's models and settings: the
+  meeting details offer "Process again". The FLAC is only read, never
+  rewritten; the two WAVs decoded from it are deleted when the job ends,
+  whatever happens. The new transcript becomes the one shown and every
+  earlier one stays; names given while recording carry over. On copies of
+  three of the author's meetings it reproduced the stored words (1,191,
+  2,192 and 11,596 of as many), the removed echo words and the echo
+  summary exactly. Recordings made with the earlier echo handling get
+  today's this way, one click each.
+- Changed: the EN model sometimes writes one word many times in a burst
+  ("the the the the ..."), several copies on one 80 ms frame. After Stop,
+  on imports, on Restore and when punctuation is added or removed, each
+  burst is now kept as one word spanning it. Repeats at speaking pace
+  ("no no no no", a stutter, laughter), pairs, numbers and Chinese,
+  Japanese and Thai words stay. On the evaluation set it removed 438 words
+  with the EN model (10 with Nemotron 3.5), word error fell on 21 of the
+  36 recordings and rose on none; on the author's own meetings it removed
+  215 words, at least 89 percent of them insertions that Whisper and
+  Nemotron 3.5 do not have. The meeting details say how many bursts were
+  collapsed. On by default; `transcript.collapse_loops = off` keeps every
+  word in transcripts built afterwards (no switch in the app, docs/DEV.md).
+- Changed: live recording runs both Nemotron models with 560 ms of
+  lookahead (6 frames) instead of the runtime's 160 ms. The live text has
+  fewer errors (word error at the live setting on the hand-labelled AMI
+  meeting from 19.75 to 18.03 percent with the EN model and from 23.05 to
+  21.55 with Nemotron 3.5, and lower on all six Zoom meetings measured)
+  and live words sit closer to their real times; the first words of an
+  utterance show about half a second after they are spoken (median 0.48
+  to 0.52 s, against 0.14 s). VRAM is unchanged. The setting
+  `engine.live_lookahead = low` goes back to the runtime default.
+- Changed: recording with speakers when you say almost nothing. After the
+  echo canceller, the gate took your level from the words left over, and
+  on a long talk where you hardly speak those are what is left of the
+  echo, so its level check sat below the microphone's noise floor and the
+  residue stayed in "me" (on one 52-minute talk, 288 words, about 250 of
+  them echo). Your level now comes only from words the canceller left
+  alone, and only when it sits at least 6 dB over the noise floor. When
+  it cannot be read, a word that the gate on the raw microphone takes for
+  echo and that the canceller cut by 3 dB or more goes when it is at most
+  12 dB over the floor, or 18 dB when the recording shows a silent owner
+  (no readable level, at most 10 of the words the canceller left alone 18
+  dB or more over the floor, and at least 99.8 percent of the raw
+  microphone's words judged echo). On that talk "me" now keeps 77 words,
+  and the ones that look like echo went from 253 to 42; every other
+  recording and test fixture comes out exactly as before. The run's details record where
+  the level came from (`engine_info.echo.owner_source`, `owner_low`,
+  `owner_high`, and `floor_rule` under `transfer`). Stored meetings change
+  only with Process again.
+- Changed: models are downloaded by Diarist itself, no longer by the
+  runtime through Windows' `curl.exe`, which failed on networks that block
+  certificate revocation checks (`CRYPT_E_REVOCATION_OFFLINE`). It is the
+  downloader the engine install already used: https only, resumes an
+  interrupted download where it stopped (only from the same address and
+  for the same hash), checks size and SHA-256 against the manifest, and
+  gives up on a connection that stays silent for two minutes. The
+  firewall now sees `diarist.exe` for every download (docs/INSTALL.md).
+  Models fetched by earlier versions stay where they are. A model of
+  several files lists each file's address, hash and Copy link on the
+  first-run screen and in Settings. `diarist-cli models pull --via-runtime`
+  keeps the old path for this release.
+- Changed: the first start upgrades the database (schema 3 to 5) and
+  keeps a copy of the old one as `diarist.db.bak-3` next to it.
+  0.1.0-beta.4 cannot open the upgraded database, so going back to it
+  means restoring that copy.
+- Fixed: imports and recordings failed in a data folder with a long path
+  ("path not found", os error 3, once the runtime's path reached 260
+  characters), and so did the database ("unable to open database file").
+  Diarist now hands long paths to the engine, to SQLite and to ONNX
+  Runtime in Windows' extended-length form, also for a folder on a
+  network share; checked with a 264-character data folder.
+- Fixed: Restore carries the speakers over by their label instead of by
+  the times they speak, so a speaker with only a few words keeps their
+  name and colour instead of coming back as "new label". Names given on
+  a restored or punctuated copy of the transcript, or on a live
+  transcript that was kept as the final one, are kept when the meeting is
+  processed again.
+- Fixed: a failed engine install no longer marks the queued model
+  downloads as failed. Add from URL takes https links only, and says so.
+  Engine errors show paths in their plain form instead of `\\?\C:\...`.
+  A `.meet.json` sidecar that does not parse shows its error in Settings,
+  and `models.json` and `models.user.json` entries with an unsafe path
+  (`..`, an absolute path, a device name) or a file without a hash are
+  refused, naming the entry and the field.
+- Known: after the echo canceller, your own words spoken entirely over
+  loud speech from the other side can still be removed (about one in four
+  on a test fixture); headphones avoid it. docs/KNOWN-ISSUES.md has this
+  and the other open rows.
+
 ## [0.1.0-beta.4] - 2026-10-22
 
 The fourth beta pre-release. Diarist can now record a meeting played on

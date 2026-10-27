@@ -130,9 +130,11 @@ pub fn plan_legacy_move(from: &Path, to: &Path) -> Result<MovePlan> {
 /// copy to the current schema, and checks that it has as many meetings as
 /// the original. `src` is only read.
 pub fn copy_legacy_database(src: &Path, dest: &Path) -> Result<()> {
+    // SQLite gets long paths in the extended-length form (`path_arg`).
+    let sqlite = |p: &Path| PathBuf::from(crate::engine::process::path_arg(p));
     let sql = |e: rusqlite::Error| err(format!("{}: {e}", src.display()));
-    let conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .or_else(|_| Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_WRITE))
+    let conn = Connection::open_with_flags(sqlite(src), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .or_else(|_| Connection::open_with_flags(sqlite(src), OpenFlags::SQLITE_OPEN_READ_WRITE))
         .map_err(sql)?;
     let want: i64 = conn
         .query_row("SELECT count(*) FROM meetings", [], |r| r.get(0))
@@ -141,12 +143,13 @@ pub fn copy_legacy_database(src: &Path, dest: &Path) -> Result<()> {
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     let _ = std::fs::remove_file(&tmp);
-    conn.backup(rusqlite::MAIN_DB, &tmp, None).map_err(sql)?;
+    conn.backup(rusqlite::MAIN_DB, sqlite(&tmp), None)
+        .map_err(sql)?;
     drop(conn);
     std::fs::rename(&tmp, dest)?;
     // Runs the schema migrations on the copy.
     drop(crate::store::SqliteStore::open(dest)?);
-    let copy = Connection::open_with_flags(dest, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let copy = Connection::open_with_flags(sqlite(dest), OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| err(format!("{}: {e}", dest.display())))?;
     let got: i64 = copy
         .query_row("SELECT count(*) FROM meetings", [], |r| r.get(0))
@@ -314,5 +317,20 @@ mod tests {
         );
         assert!(old.join(LEGACY_DB_FILE).is_file());
         assert!(old.join("audio/01ABC/playback.flac").is_file());
+    }
+
+    /// Both roots longer than `MAX_PATH`: the old database is read and
+    /// copied, and the copy is migrated and checked, there.
+    #[cfg(windows)]
+    #[test]
+    fn copies_the_old_database_between_folders_longer_than_max_path() {
+        use crate::engine::process::long_test_dir;
+        let dir = tempfile::tempdir().unwrap();
+        let old = long_test_dir(&dir.path().join("old"), 264);
+        let new = long_test_dir(&dir.path().join("new"), 270);
+        old_root(&old);
+        copy_legacy_database(&old.join(LEGACY_DB_FILE), &new.join(DB_FILE)).unwrap();
+        let copy = SqliteStore::open(new.join(DB_FILE)).unwrap();
+        assert_eq!(copy.list_meetings().unwrap().len(), 2);
     }
 }

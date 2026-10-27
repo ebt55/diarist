@@ -235,6 +235,16 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
     }
     let mut cfg = ServeConfig::new(&sel.engine_dir, ctx.paths.models(), &sel.asr, &sel.diarizer);
     cfg.device = device.clone();
+    // `engine.live_lookahead` or the model's own (docs/plans/16 section 5).
+    let lookahead = models::asr_live_right_context(&ctx.paths, &*ctx.store, &sel.asr_file)?;
+    if let Some(why) = &lookahead.refused {
+        eprintln!("warning: live lookahead: {why}");
+    }
+    cfg.right_context = lookahead.right_context;
+    eprintln!(
+        "live lookahead {}",
+        diarist_core::protocol::lookahead_text(cfg.right_context.map(i64::from))
+    );
     cfg.idle_timeout = None;
     cfg.log_path = Some(ctx.paths.logs().join("serve.log"));
     let supervisor = ServeSupervisor::new(cfg);
@@ -265,6 +275,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
             "models": {"asr": sel.asr_file.display_name, "diarizer": sel.diarizer_file.display_name},
             "device": device,
         }),
+        live_right_context: supervisor.config().right_context,
         on_job_event: Some(Arc::new(|e| {
             if let JobEvent::Progress {
                 stage: JobStage::Transcribing,
@@ -280,6 +291,7 @@ pub fn record(ctx: &Ctx, args: RecordArgs) -> CliResult {
                 );
             }
         })),
+        punct: diarist_core::punct::PunctSource::Data(ctx.paths.clone()),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let s2 = Arc::clone(&stop);

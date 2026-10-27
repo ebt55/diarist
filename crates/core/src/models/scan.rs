@@ -176,7 +176,7 @@ fn sidecar_path(path: &Path) -> PathBuf {
 
 /// The file's SHA-256 from the `.sha256` cache, else computed (seconds for
 /// a model) and cached. `None` when the file cannot be read.
-fn own_sha(path: &Path) -> Option<String> {
+pub(crate) fn own_sha(path: &Path) -> Option<String> {
     let side = sidecar_path(path);
     let fresh = match (std::fs::metadata(path), std::fs::metadata(&side)) {
         (Ok(f), Ok(s)) => match (f.modified(), s.modified()) {
@@ -225,12 +225,14 @@ fn scan_model(
     let is_gguf = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let mut problem = None;
+    // Every problem is kept, in order: a sidecar that does not parse names
+    // its field first, the punctuation hint follows.
+    let mut problems: Vec<String> = Vec::new();
     let mut c = if is_gguf {
         match read_header(path) {
             Ok(h) => classify(&h, size),
             Err(e) => {
-                problem = Some(e.to_string());
+                problems.push(e.to_string());
                 unknown()
             }
         }
@@ -240,7 +242,7 @@ fn scan_model(
     match Sidecar::read(path) {
         Ok(Some(sc)) => sc.apply(&mut c),
         Ok(None) => {}
-        Err(e) => problem = Some(e.to_string()),
+        Err(e) => problems.push(e.to_string()),
     }
     let file_name = path
         .file_name()
@@ -259,7 +261,7 @@ fn scan_model(
         got.is_some_and(|h| h.eq_ignore_ascii_case(&m.sha256))
     });
     if let (Some(m), None) = (candidate, entry) {
-        problem = Some(format!(
+        problems.push(format!(
             "{}: same name and size as {} but SHA-256 {} instead of {}; not used as {}",
             path.display(),
             m.name,
@@ -283,12 +285,31 @@ fn scan_model(
         if c.capabilities.file_right_context.is_none() {
             c.capabilities.file_right_context = m.file_right_context;
         }
+        if c.capabilities.live_right_context.is_none() {
+            c.capabilities.live_right_context = m.live_right_context;
+        }
         if c.capabilities.file_preset.is_none() {
             c.capabilities.file_preset = m.file_preset.clone();
         }
-        if c.role == ModelRole::Unknown {
+        if c.capabilities.punctuation.is_none() {
+            c.capabilities.punctuation = m.punctuation.clone();
+        }
+        if !is_gguf && c.capabilities.languages.is_empty() {
+            c.capabilities.languages = m.languages.clone();
+        }
+        // Not for punctuation: an `.onnx` is a punctuation file only with a
+        // description block that checks out (below), so a partial download
+        // is never a selectable model.
+        if c.role == ModelRole::Unknown && m.role != ModelRole::Punctuation {
             c.role = m.role;
         }
+        // An `.onnx` file has no header name: the manifest's label.
+        if !is_gguf && c.display_name.is_none() {
+            c.display_name = Some(m.label.clone().unwrap_or_else(|| m.name.clone()));
+        }
+    }
+    if let Err(note) = punctuation_role(&mut c, path, is_gguf, &paths.models()) {
+        problems.push(format!("{}: {note}", path.display()));
     }
     let source = if verified.is_some() {
         ModelSource::Pull
@@ -310,8 +331,49 @@ fn scan_model(
             capabilities: c.capabilities,
             manifest_name: entry.map(|m| m.name.clone()),
         },
-        problem,
+        (!problems.is_empty()).then(|| problems.join("; ")),
     ))
+}
+
+/// What a file not described as punctuation lacks.
+pub const PUNCT_NOTE: &str = "needs a `.meet.json` that describes its labels (docs/04 section 5)";
+
+/// The punctuation rule of the scanner (docs/plans/16 section 3.6): an
+/// `.onnx` file with a description block (sidecar, or its manifest entry)
+/// that validates and whose tokenizer is in the model's folder is a
+/// `punctuation` file; any other `.onnx` file, or a file a sidecar calls
+/// `punctuation` without a valid block, is `unknown`. `Err` is the note.
+/// An `.onnx` file a sidecar gives another role keeps it (the user forced it).
+fn punctuation_role(
+    c: &mut Classification,
+    path: &Path,
+    is_gguf: bool,
+    models_dir: &Path,
+) -> std::result::Result<(), String> {
+    let wanted = c.role == ModelRole::Punctuation;
+    if is_gguf && !wanted {
+        return Ok(());
+    }
+    if !is_gguf && !(wanted || c.role == ModelRole::Unknown) {
+        return Ok(());
+    }
+    let checked = if is_gguf {
+        Err("a punctuation model must be an `.onnx` file".to_owned())
+    } else {
+        match &c.capabilities.punctuation {
+            None => Err(PUNCT_NOTE.to_owned()),
+            Some(spec) => spec
+                .validate()
+                .map_err(|e| format!("punctuation description: {e}"))
+                .and_then(|()| spec.model_root(path, models_dir).map(|_| ())),
+        }
+    };
+    c.role = if checked.is_ok() {
+        ModelRole::Punctuation
+    } else {
+        ModelRole::Unknown
+    };
+    checked
 }
 
 fn unknown() -> Classification {
@@ -444,8 +506,11 @@ pub fn recommended<'a>(
     }
 }
 
-/// Makes sure the engine, ASR and diarizer selections point at present files
-/// of the right role, falling back to [`recommended`]. Returns notes.
+/// Makes sure the engine, ASR, diarizer and punctuation selections point at
+/// present files of the right role, falling back to [`recommended`].
+/// Returns notes. An unrecognised file a user forced stays selected for ASR
+/// and the diarizer, never for the engine or punctuation (the runner needs
+/// the description block an unknown file lacks).
 pub fn ensure_selections(
     store: &dyn Store,
     files: &[ModelFile],
@@ -453,7 +518,12 @@ pub fn ensure_selections(
 ) -> Result<Vec<String>> {
     let settings = store.get_settings()?;
     let mut notes = Vec::new();
-    for role in [ModelRole::Engine, ModelRole::Asr, ModelRole::Diarizer] {
+    for role in [
+        ModelRole::Engine,
+        ModelRole::Asr,
+        ModelRole::Diarizer,
+        ModelRole::Punctuation,
+    ] {
         let key = selection_key(role);
         let current = settings
             .0
@@ -461,12 +531,9 @@ pub fn ensure_selections(
             .and_then(|v| v.parse::<i64>().ok())
             .map(ModelFileId);
         let valid = current.is_some_and(|id| {
-            files.iter().any(|f| {
-                f.id == id
-                    && (f.role == role
-                        || (f.role == ModelRole::Unknown && role != ModelRole::Engine))
-                    && !f.missing
-            })
+            files
+                .iter()
+                .any(|f| f.id == id && super::role_accepts(role, f.role) && !f.missing)
         });
         if valid {
             continue;
@@ -551,7 +618,11 @@ mod tests {
             vram_mb: Some(100),
             vram_note: None,
             file_right_context: None,
+            live_right_context: None,
             file_preset: None,
+            files: vec![],
+            dir: None,
+            punctuation: None,
         };
         let manifest = Manifest {
             models: vec![entry],
@@ -690,6 +761,7 @@ mod tests {
         manifest.models[0].size_bytes = bytes.len() as u64;
         manifest.models[0].file = "tiny.gguf".into();
         manifest.models[0].file_preset = Some("v3-offline".into());
+        manifest.models[0].live_right_context = Some(6);
         let p = paths
             .models()
             .join("nvidia")
@@ -718,17 +790,19 @@ mod tests {
             f.sha256.as_deref(),
             Some(manifest.models[0].sha256.as_str())
         );
-        // The manifest's file lookahead and preset reach the capabilities; a
-        // sidecar wins.
+        // The manifest's file and live lookaheads and preset reach the
+        // capabilities; a sidecar wins.
         assert_eq!(f.capabilities.file_right_context, Some(13));
+        assert_eq!(f.capabilities.live_right_context, Some(6));
         assert_eq!(f.capabilities.file_preset.as_deref(), Some("v3-offline"));
         std::fs::write(
             Sidecar::path_for(&p),
-            r#"{"file_right_context": 6, "file_preset": "v3-streaming"}"#,
+            r#"{"file_right_context": 6, "live_right_context": 1, "file_preset": "v3-streaming"}"#,
         )
         .unwrap();
         let r = scan(&paths, &store, &manifest).unwrap();
         assert_eq!(r.files[0].capabilities.file_right_context, Some(6));
+        assert_eq!(r.files[0].capabilities.live_right_context, Some(1));
         assert_eq!(
             r.files[0].capabilities.file_preset.as_deref(),
             Some("v3-streaming")
@@ -861,6 +935,231 @@ mod tests {
         let files = vec![mk(1, "0.1.0"), mk(2, "0.2.0"), mk(3, "0.9.0")];
         let pick = recommended(ModelRole::Engine, &files, &Manifest::builtin()).unwrap();
         assert_eq!(pick.id, ModelFileId(2));
+    }
+
+    const PUNCT_BLOCK: &str = r#"{
+        "tokenizer": "tokenizer.json", "max_tokens": 512, "context_tokens": 48,
+        "bos_id": 2, "eos_id": 1,
+        "inputs": {"ids": "input_ids", "mask": "attention_mask"},
+        "heads": [{"output": "logits", "kind": "post", "labels": ["", ".", ",", "?"],
+                   "position": "last_token", "values": "logits"}]
+    }"#;
+
+    fn file_at<'a>(r: &'a ScanReport, suffix: &str) -> &'a ModelFile {
+        r.files
+            .iter()
+            .find(|f| f.path.ends_with(suffix))
+            .unwrap_or_else(|| panic!("{suffix} not in {:?}", r.files))
+    }
+
+    #[test]
+    fn onnx_files_are_punctuation_only_with_a_valid_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let manifest = Manifest::builtin();
+        // A Hugging Face folder dropped in with a sidecar: the tokenizer is
+        // at the folder's root, the model under onnx\.
+        let hf = paths.models().join("punct-small");
+        let model = hf.join("onnx").join("model_quantized.onnx");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"onnx").unwrap();
+        std::fs::write(hf.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(
+            Sidecar::path_for(&model),
+            format!(
+                r#"{{"display_name": "Punctuation small", "languages": ["en", "de"], "punctuation": {PUNCT_BLOCK}}}"#
+            ),
+        )
+        .unwrap();
+        // An .onnx without a description.
+        let bare = paths.models().join("other").join("model.onnx");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        std::fs::write(&bare, b"onnx").unwrap();
+        // A sidecar that says punctuation without the block.
+        let said = paths.models().join("said").join("m.onnx");
+        std::fs::create_dir_all(said.parent().unwrap()).unwrap();
+        std::fs::write(&said, b"onnx").unwrap();
+        std::fs::write(Sidecar::path_for(&said), r#"{"role": "punctuation"}"#).unwrap();
+        // A sidecar that does not parse (no `heads`).
+        let broken = paths.models().join("broken").join("m.onnx");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, b"onnx").unwrap();
+        std::fs::write(
+            Sidecar::path_for(&broken),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 512}}"#,
+        )
+        .unwrap();
+
+        let r = scan(&paths, &store, &manifest).unwrap();
+        // Its parse error names the field, and the hint follows it.
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.contains("broken"))
+            .unwrap_or_else(|| panic!("{:?}", r.errors));
+        let (field, hint) = (e.find("heads").unwrap(), e.find(PUNCT_NOTE).unwrap());
+        assert!(field < hint, "{e}");
+        assert!(e.contains(".meet.json:"), "{e}");
+        assert_eq!(file_at(&r, "broken/m.onnx").role, ModelRole::Unknown);
+        let p = file_at(&r, "punct-small/onnx/model_quantized.onnx");
+        assert_eq!(p.role, ModelRole::Punctuation, "{:?}", r.errors);
+        assert_eq!(p.capabilities.languages, ["en", "de"]);
+        assert_eq!(p.display_name, "Punctuation small");
+        assert_eq!(p.capabilities.punctuation.as_ref().unwrap().max_tokens, 512);
+        for unknown in ["other/model.onnx", "said/m.onnx"] {
+            assert_eq!(file_at(&r, unknown).role, ModelRole::Unknown, "{unknown}");
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.contains(unknown.split('/').next().unwrap())
+                        && e.contains(PUNCT_NOTE)),
+                "{unknown}: {:?}",
+                r.errors
+            );
+        }
+        // The first scan selects the punctuation file.
+        let sel = store.get_settings().unwrap().0["selected_model.punctuation"].clone();
+        assert_eq!(sel, p.id.to_string());
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.starts_with("punctuation: selected")));
+
+        // A broken block (a `..` path) makes it unknown with the field named,
+        // and the selection moves off it: never an unknown file for the role.
+        std::fs::write(
+            Sidecar::path_for(&model),
+            format!(
+                r#"{{"punctuation": {}}}"#,
+                PUNCT_BLOCK.replace(r#""tokenizer.json""#, r#""../tokenizer.json""#)
+            ),
+        )
+        .unwrap();
+        let r = scan(&paths, &store, &manifest).unwrap();
+        assert_eq!(
+            file_at(&r, "punct-small/onnx/model_quantized.onnx").role,
+            ModelRole::Unknown
+        );
+        assert!(
+            r.errors.iter().any(|e| e.contains("tokenizer:")),
+            "{:?}",
+            r.errors
+        );
+        assert_eq!(
+            store.get_settings().unwrap().0["selected_model.punctuation"],
+            ""
+        );
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.contains("punctuation") && n.contains("gone")));
+        // Forcing the unknown file for the role is refused.
+        let id = file_at(&r, "punct-small/onnx/model_quantized.onnx").id;
+        let e = crate::models::select_by_id(&store, ModelRole::Punctuation, id).unwrap_err();
+        assert!(e.to_string().contains(".meet.json"), "{e}");
+    }
+
+    #[test]
+    fn a_manifest_onnx_needs_its_tokenizer_and_gets_the_manifest_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let body = b"not really an onnx model".to_vec();
+        let tok_sha: String = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(b"{}")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let mut entry: crate::models::ModelEntry = serde_json::from_value(serde_json::json!({
+            "name": "punct-small", "label": "Punctuation (small)", "role": "punctuation",
+            "direct": true, "required": true,
+            "repo": "Horizon-Labs/punctuation-restoration-small", "revision": "ee31fdf",
+            "file": "onnx/model_quantized.onnx",
+            "url": "https://example.invalid/model_quantized.onnx",
+            "size_bytes": body.len() as u64 + 2,
+            "sha256": "",
+            "files": [{"path": "tokenizer.json", "url": "https://example.invalid/tokenizer.json",
+                       "size_bytes": 2, "sha256": tok_sha}],
+            "dir": "Horizon-Labs/punctuation-restoration-small/ee31fdf",
+            "languages": ["*"],
+            "punctuation": serde_json::from_str::<serde_json::Value>(PUNCT_BLOCK).unwrap(),
+        }))
+        .unwrap();
+        let root = entry.dest_dir(&paths.models());
+        let model = root.join("onnx").join("model_quantized.onnx");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, &body).unwrap();
+        entry.sha256 = crate::models::download::sha256_file(&model).unwrap();
+        let manifest = Manifest {
+            models: vec![entry],
+            engines: vec![],
+        };
+        // The tokenizer is not there yet (a partial download): unknown, and
+        // the manifest's role does not make it a punctuation file.
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = file_at(&r, "onnx/model_quantized.onnx");
+        assert_eq!(f.manifest_name.as_deref(), Some("punct-small"));
+        assert_eq!(f.role, ModelRole::Unknown);
+        assert!(
+            r.errors.iter().any(|e| e.contains("tokenizer.json")),
+            "{:?}",
+            r.errors
+        );
+        assert_eq!(
+            store
+                .get_settings()
+                .unwrap()
+                .0
+                .get("selected_model.punctuation")
+                .map(String::as_str)
+                .unwrap_or(""),
+            ""
+        );
+        // With it: punctuation, the manifest's block, languages and label.
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = file_at(&r, "onnx/model_quantized.onnx");
+        assert_eq!(f.role, ModelRole::Punctuation, "{:?}", r.errors);
+        assert_eq!(f.source, ModelSource::Manifest);
+        assert_eq!(f.capabilities.languages, ["*"]);
+        assert_eq!(f.display_name, "Punctuation (small)");
+        assert_eq!(
+            f.capabilities.punctuation,
+            manifest.models[0].punctuation.clone()
+        );
+        let sel = store.get_settings().unwrap().0["selected_model.punctuation"].clone();
+        assert_eq!(sel, f.id.to_string());
+        // The download list says every file is there.
+        let items = crate::models::download_items(&paths, &manifest, &r.files, "cuda");
+        let item = items.iter().find(|i| i.name == "punct-small").unwrap();
+        assert!(item.installed);
+        assert_eq!(item.files.len(), 2);
+        assert_eq!(
+            item.files[1].path, "onnx/model_quantized.onnx",
+            "primary last"
+        );
+        assert!(item.files.iter().all(|p| p.present));
+        // A file the entry gives no hash for is never present, even with the
+        // right size (Manifest::load refuses such an entry anyway).
+        let mut unhashed = manifest.models[0].clone();
+        unhashed.files[0].sha256 = String::new();
+        assert!(unhashed
+            .validate()
+            .unwrap_err()
+            .starts_with("files[0].sha256"));
+        assert!(!crate::models::setup::entry_files(&unhashed, &paths.models())[0].present);
+        std::fs::remove_file(root.join("tokenizer.json")).unwrap();
+        let items = crate::models::download_items(&paths, &manifest, &r.files, "cuda");
+        assert!(
+            !items
+                .iter()
+                .find(|i| i.name == "punct-small")
+                .unwrap()
+                .installed
+        );
     }
 
     /// The real data layout when `DIARIST_MODELS_DIR` and

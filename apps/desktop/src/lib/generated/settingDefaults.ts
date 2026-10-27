@@ -12,6 +12,7 @@ export const SETTING_DEFAULTS = {
   "selected_engine": "",
   "selected_model.asr": "",
   "selected_model.diarizer": "",
+  "selected_model.punctuation": "",
   "record.mic_device": "",
   "record.loopback_device": "",
   "record.diarize_mic": "false",
@@ -24,11 +25,15 @@ export const SETTING_DEFAULTS = {
   "engine.idle_minutes": "10",
   "engine.low_vram": "false",
   "engine.file_lookahead": "",
+  "engine.live_lookahead": "",
   "engine.file_diar_preset": "",
   "setup.later": "false",
   "setup.language_seeded": "false",
   "playback.volume": "1.0",
   "playback.normalize": "true",
+  "transcript.punctuation": "auto",
+  "transcript.punctuation_threads": "4",
+  "transcript.collapse_loops": "on",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

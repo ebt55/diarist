@@ -3,8 +3,15 @@
 #
 # kind   zoom: audio = the Zoom *.m4a, vtt = the matching *.transcript.vtt
 #        ami:  audio = 16 kHz WAV, ref_rttm + ref_seglst (from ami_fetch.py)
-# group  tuning | heldout | control | overlap | stress  (report sections)
+#        ref:  the same for the public sets (from their *_fetch.py), with
+#              ref_source naming the reference type in the report
+# group  tuning | heldout | control | overlap | stress  (report sections);
+#        pub-meeting | pub-far | pub-phone | pub-lang for the public sets
 # uem    optional scored region: "ref" (annotated span) or [start_s, end_s]
+# language  optional: overrides the config's language for this session
+#        (the public zh-CN, fr and hi sets); English-only ASR configs skip it
+# include   optional, top-level, before the first [sessions.*] table: more
+#        session files (glob patterns allowed), as sessions.public.toml does
 # Relative paths are resolved from the repo root.
 
 [sessions.aug2]
@@ -58,3 +65,93 @@ audio = 'data\samples\ES2002a.Mix-Headset.wav'
 ref_rttm = 'data\samples\ES2002a.rttm'
 ref_seglst = 'data\samples\ami\ES2002a.ref.seglst.jsonl'
 uem = "ref"
+
+# --- Public sets (docs/05 "Extend", docs/research/20) ---
+# Not listed here: tools/eval/sessions.public.toml includes the session list
+# each fetch script writes (tools/eval/.work/public/<set>/sessions.toml), and
+# runs with --sessions-file sessions.public.toml. One example entry per set,
+# as the fetch scripts write them:
+#
+# [sessions.ami-en2002a-arr1]          # ami_test_fetch.py: EN2002a-d x Mix-Headset (pub-meeting), Array1-01 (pub-far)
+# label = "AMI EN2002a Array1-01"
+# kind = "ref"
+# group = "pub-far"
+# set = "ami"
+# language = "en"
+# ref_source = "ami-word"
+# uem = "ref"
+# audio = "tools/eval/.work/public/ami/audio/EN2002a.Array1-01.wav"
+# ref_rttm = "tools/eval/.work/public/ami/refs/EN2002a.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/ami/refs/EN2002a.ref.seglst.jsonl"
+#
+# [sessions.icsi-bmr019]               # icsi_fetch.py: Bed004, Bed016, Bmr019, Bro018
+# label = "ICSI Bmr019"
+# kind = "ref"
+# group = "pub-meeting"
+# set = "icsi"
+# language = "en"
+# ref_source = "icsi-word"
+# uem = "ref"
+# audio = "tools/eval/.work/public/icsi/audio/Bmr019.wav"
+# ref_rttm = "tools/eval/.work/public/icsi/refs/Bmr019.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/icsi/refs/Bmr019.ref.seglst.jsonl"
+#
+# [sessions.nsf-mtg32000]              # notsofar_fetch.py: 32 meetings, one single-channel device each
+# label = "NOTSOFAR MTG_32000 sc_meetup_0"
+# kind = "ref"
+# group = "pub-far"
+# set = "notsofar"
+# language = "en"
+# ref_source = "notsofar-word"
+# uem = "ref"
+# audio = "tools/eval/.work/public/notsofar/audio/MTG_32000.sc_meetup_0.wav"
+# ref_rttm = "tools/eval/.work/public/notsofar/refs/nsf-mtg32000.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/notsofar/refs/nsf-mtg32000.ref.seglst.jsonl"
+#
+# [sessions.e22-4481221]               # earnings22_fetch.py: eight calls
+# label = "Earnings-22 4481221 (India)"
+# kind = "ref"
+# group = "pub-phone"
+# set = "earnings22"
+# language = "en"
+# ref_source = "earnings22-aligned"
+# uem = "ref"
+# audio = "tools/eval/.work/public/earnings22/audio/4481221.wav"
+# ref_rttm = "tools/eval/.work/public/earnings22/refs/e22-4481221.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/earnings22/refs/e22-4481221.ref.seglst.jsonl"
+#
+# [sessions.ali-r8008_m8013-near]      # alimeeting_fetch.py: 8 meetings x headset mix and array ch0
+# label = "AliMeeting R8008_M8013 headset mix"
+# kind = "ref"
+# group = "pub-lang"
+# set = "alimeeting"
+# language = "zh-CN"
+# ref_source = "alimeeting-segment"
+# uem = "ref"
+# audio = "tools/eval/.work/public/alimeeting/audio/R8008_M8013.near.wav"
+# ref_rttm = "tools/eval/.work/public/alimeeting/refs/ali-r8008_m8013-near.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/alimeeting/refs/ali-r8008_m8013-near.ref.seglst.jsonl"
+#
+# [sessions.summre-018a_earz]          # summre_fetch.py: 10 meetings, tracks summed
+# label = "SUMM-RE 018a_EARZ (Zoom)"
+# kind = "ref"
+# group = "pub-lang"
+# set = "summre"
+# language = "fr"
+# ref_source = "summre-word"
+# uem = "ref"
+# audio = "tools/eval/.work/public/summre/audio/018a_EARZ.wav"
+# ref_rttm = "tools/eval/.work/public/summre/refs/summre-018a_earz.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/summre/refs/summre-018a_earz.ref.seglst.jsonl"
+#
+# [sessions.idb-hindi-075]             # indic_fetch.py: 10 near-field and 10 far-field Hindi clips
+# label = "Indic DiarBench hindi_075 (near field)"
+# kind = "ref"
+# group = "pub-lang"
+# set = "indic"
+# language = "hi"
+# ref_source = "indic-turn"
+# uem = "ref"
+# audio = "tools/eval/.work/public/indic/audio/hindi_075.wav"
+# ref_rttm = "tools/eval/.work/public/indic/refs/idb-hindi-075.ref.rttm"
+# ref_seglst = "tools/eval/.work/public/indic/refs/idb-hindi-075.ref.seglst.jsonl"

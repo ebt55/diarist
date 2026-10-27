@@ -121,13 +121,15 @@ pub fn engine_words(out: &TranscribeOutput) -> Vec<EngineWord> {
 
 /// The event sequence of a finished file job: one `Utterance` (rev 0) per
 /// contiguous same-speaker stretch, then `TextFinalUntil` and
-/// `SpeakersFinalUntil` at the end of the audio, then `Done`.
+/// `SpeakersFinalUntil` at the end of the audio, then `Done` with the
+/// runtime's detected `languages` in its stats.
 pub fn file_events(
     job_id: &JobId,
     channel: Channel,
     words: Vec<EngineWord>,
     audio_us: u64,
     wall: Duration,
+    languages: Vec<String>,
 ) -> Vec<EngineEvent> {
     let speakers = words
         .iter()
@@ -184,6 +186,7 @@ pub fn file_events(
             speakers: Some(speakers),
             audio_ms: Some(audio_ms),
             wall_ms: Some(wall_ms),
+            languages,
         },
     });
     events
@@ -257,7 +260,9 @@ pub fn map_failure(exit_code: Option<i32>, stderr: &str) -> (ErrorCode, String) 
     } else {
         format!("{head}\n{tail}")
     };
-    (code, message)
+    // The runtime echoes the `\\?\` paths it was given; the message is
+    // shown and stored with the plain ones.
+    (code, process::plain_paths(&message))
 }
 
 /// Parses RTTM lines (`SPEAKER <rec> 1 <start> <dur> <NA> <NA> speaker_<N> <NA> <NA>`).
@@ -358,7 +363,7 @@ fn run_child(
     let mut child = cmd.spawn().map_err(|e| {
         RunFailure::Failed(
             ErrorCode::Crash,
-            format!("cannot start {:?}: {e}", cmd.get_program()),
+            format!("cannot start {}: {e}", process::program_shown(&cmd)),
         )
     })?;
     let stderr = child.stderr.take();
@@ -691,6 +696,7 @@ impl Engine for NemoCliEngine {
                                     engine_words(&out),
                                     audio_us,
                                     started.elapsed(),
+                                    out.languages.clone(),
                                 ) {
                                     let _ = tx.send(ev);
                                 }
@@ -1003,12 +1009,14 @@ impl Engine for NemoCascadeEngine {
                                 .collect()
                         };
                         let audio_us = total.unwrap_or_else(|| secs_to_us(duration));
+                        // Parakeet reports no languages.
                         for ev in file_events(
                             &id,
                             Channel::Source,
                             engine_words,
                             audio_us,
                             started.elapsed(),
+                            Vec::new(),
                         ) {
                             let _ = tx.send(ev);
                         }
@@ -1106,6 +1114,7 @@ mod tests {
             words.clone(),
             300_032_000,
             Duration::from_secs(12),
+            vec!["en-US".into()],
         );
         let utterances: Vec<&Vec<EngineWord>> = events
             .iter()
@@ -1139,6 +1148,7 @@ mod tests {
         assert_eq!(stats.speakers, Some(4));
         assert_eq!(stats.audio_ms, Some(300_320));
         assert!((stats.rtf.unwrap() - 0.04).abs() < 0.001);
+        assert_eq!(stats.languages, ["en-US"]);
     }
 
     #[test]
@@ -1152,6 +1162,7 @@ mod tests {
             words,
             0,
             Duration::ZERO,
+            out.languages.clone(),
         );
         // One utterance: no speaker changes.
         assert_eq!(

@@ -4,17 +4,20 @@
 //! GPU; what the downloads are (URL, hash, folder); does the disk fit. No
 //! check is a gate: the UI shows what is missing next to a one-click fix.
 
+use std::path::Path;
+
 use serde::Serialize;
 use ts_rs::TS;
 
-use super::manifest::Manifest;
+use super::manifest::{Manifest, ModelEntry};
 use super::paths::{free_disk_bytes, DataPaths};
 use super::selected_file;
 use crate::error::Result;
 use crate::gpu::{recommended_backend, GpuAdapter, GpuInfo};
+use crate::punct::spec::rel_path;
 use crate::store::Store;
 use crate::types::{ModelFile, ModelRole};
-use crate::views::{DownloadItem, DownloadKind};
+use crate::views::{DownloadFile, DownloadItem, DownloadKind};
 
 /// What the first-run screen shows (`setup_status`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -86,11 +89,16 @@ pub fn download_items(
             licence: e.licence.clone(),
             backend: Some(e.backend.clone()),
             tested: e.tested,
+            files: Vec::new(),
         });
     }
     let mut models: Vec<_> = manifest.models.iter().collect();
     models.sort_by_key(|m| (!m.required, m.experimental));
     for m in models {
+        let parts = entry_files(m, &paths.models());
+        let primary = files
+            .iter()
+            .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str()));
         items.push(DownloadItem {
             kind: DownloadKind::Model,
             name: m.name.clone(),
@@ -99,9 +107,8 @@ pub fn download_items(
                 .clone()
                 .unwrap_or_else(|| format!("{} ({})", m.name, m.role)),
             size_bytes: m.size_bytes,
-            installed: files
-                .iter()
-                .any(|f| !f.missing && f.manifest_name.as_deref() == Some(m.name.as_str())),
+            // A multi-file model is installed only with every file there.
+            installed: primary && parts.iter().all(|p| p.present),
             required: m.required,
             experimental: m.experimental,
             url: m.url.clone(),
@@ -110,9 +117,49 @@ pub fn download_items(
             licence: m.licence.clone(),
             backend: None,
             tested: true,
+            files: parts,
         });
     }
     items
+}
+
+/// Every file of a multi-file entry in download order (the other files,
+/// then the primary one), with where it lands and whether it is there with
+/// the expected size and SHA-256 (from the `<file>.sha256` cache while it is
+/// fresh, else hashed once and cached). A file the entry gives no hash for
+/// is never present (`Manifest::load` refuses such an entry). Empty for a
+/// single-file entry.
+pub fn entry_files(m: &ModelEntry, models_dir: &Path) -> Vec<DownloadFile> {
+    if m.files.is_empty() {
+        return Vec::new();
+    }
+    let root = m.dest_dir(models_dir);
+    let part = |path: &str, url: &str, size: u64, sha: &str| {
+        let dest = rel_path(&root, path);
+        let sized = std::fs::metadata(&dest).is_ok_and(|md| md.is_file() && md.len() == size);
+        let hashed = || {
+            !sha.trim().is_empty()
+                && super::scan::own_sha(&dest).is_some_and(|h| h.eq_ignore_ascii_case(sha.trim()))
+        };
+        DownloadFile {
+            path: path.to_owned(),
+            url: url.to_owned(),
+            size_bytes: size,
+            sha256: sha.to_owned(),
+            present: sized && hashed(),
+            dest: dest.display().to_string(),
+        }
+    };
+    m.files
+        .iter()
+        .map(|f| part(&f.path, &f.url, f.size_bytes, &f.sha256))
+        .chain(std::iter::once(part(
+            &m.file,
+            &m.url,
+            m.primary_size_bytes(),
+            &m.sha256,
+        )))
+        .collect()
 }
 
 /// The first-run state from the scanned `files` (scan first), with `gpu`
@@ -320,6 +367,69 @@ mod tests {
         }
     }
 
+    /// Every file of the shipped punctuation model together (plan 16
+    /// section 3.13.7); a required download, never a setup gate.
+    const PUNCTUATION_BYTES: u64 = 320_389_931;
+
+    /// A fresh data root's first-run items list the punctuation model as a
+    /// required download with every file: the other files first, the
+    /// primary file last, each with its address, hash and place.
+    #[test]
+    fn first_run_items_list_the_punctuation_model_with_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let manifest = Manifest::builtin();
+        let s = setup_status(&paths, &manifest, &[], Some(nvidia(true)), vec![]);
+        let item = s
+            .items
+            .iter()
+            .find(|i| i.name == "punctuation-horizon-small")
+            .unwrap();
+        assert_eq!(item.kind, DownloadKind::Model);
+        assert!(item.required && !item.installed && !item.experimental);
+        assert_eq!(item.size_bytes, PUNCTUATION_BYTES);
+        let folder = paths
+            .models()
+            .join("horizon-labs")
+            .join("punctuation-restoration-small");
+        assert_eq!(item.dest, folder.display().to_string());
+        let names: Vec<&str> = item.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "tokenizer.json",
+                "LICENSE-Apache-2.0.txt",
+                "NOTICE-punctuation.txt",
+                "onnxruntime-LICENSE.txt",
+                "onnxruntime-ThirdPartyNotices.txt",
+                "diarist-onnxruntime.dll",
+                "onnx/model_quantized.onnx",
+            ]
+        );
+        assert_eq!(
+            item.files.iter().map(|f| f.size_bytes).sum::<u64>(),
+            PUNCTUATION_BYTES
+        );
+        for f in &item.files {
+            assert!(!f.present, "{}", f.path);
+            assert!(
+                f.url.starts_with("https://") && f.url.ends_with(&f.path),
+                "{}",
+                f.url
+            );
+            assert_eq!(f.sha256.len(), 64, "{}", f.path);
+            assert_eq!(f.dest, rel_path(&folder, &f.path).display().to_string());
+        }
+        let last = item.files.last().unwrap();
+        assert_eq!(
+            (last.url.as_str(), last.sha256.as_str()),
+            (item.url.as_str(), item.sha256.as_str())
+        );
+        // The setup screen is still about the engine, ASR and diarizer only.
+        assert!(s.needs_setup && !s.engine_ready && !s.asr_ready && !s.diarizer_ready);
+        assert!(s.disk_needed_bytes > 107_012_128 + 699_872_960 + PUNCTUATION_BYTES);
+    }
+
     #[test]
     fn first_run_until_engine_asr_and_diarizer_are_present() {
         let dir = tempfile::tempdir().unwrap();
@@ -353,10 +463,11 @@ mod tests {
             .filter(|i| i.required)
             .map(|i| i.name.as_str())
             .collect();
-        assert_eq!(required.len(), 3, "{required:?}");
+        assert_eq!(required.len(), 4, "{required:?}");
         assert!(required.contains(&"nemotron-en") && required.contains(&"nemotron-3-diarization"));
+        assert!(required.contains(&"punctuation-horizon-small"));
         assert!(s.items.last().unwrap().experimental, "Parakeet last");
-        let models: u64 = 107_012_128 + 699_872_960;
+        let models: u64 = 107_012_128 + 699_872_960 + PUNCTUATION_BYTES;
         assert!(
             s.disk_needed_bytes > models + 102_183_465 * 2,
             "{}",
@@ -407,7 +518,7 @@ mod tests {
         );
         assert!(s.needs_setup && s.engine_ready && s.diarizer_ready && !s.asr_ready);
         assert!(s.items[0].installed);
-        assert_eq!(s.disk_needed_bytes, 699_872_960);
+        assert_eq!(s.disk_needed_bytes, 699_872_960 + PUNCTUATION_BYTES);
 
         // Any ASR file will do, not only the recommended one.
         store

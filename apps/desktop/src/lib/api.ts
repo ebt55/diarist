@@ -42,6 +42,7 @@ import type { Waveform } from "./generated/Waveform";
 import type { Word } from "./generated/Word";
 import type { WordId } from "./generated/WordId";
 import type { WordsUpdate } from "./generated/WordsUpdate";
+import type { BackfillOutcome, DownloadsNotice, PunctOutcome, PunctStatus } from "./punctuation";
 
 export type { Waveform };
 
@@ -141,6 +142,9 @@ export const api = {
   recordingStatus: () => invoke<LiveStatusView>("recording_status"),
   liveSnapshot: (meeting_id: MeetingId) => invoke<WordsUpdate[]>("live_snapshot", { meeting_id }),
   rerunPostPass: (meeting_id: MeetingId) => invoke<JobId>("rerun_post_pass", { meeting_id }),
+  /** Whether "Process again" can run now, and from which audio (plan 16 section 12.5 J). */
+  processAgainCheck: (meeting_id: MeetingId) =>
+    invoke<import("./generated/RerunCheck").RerunCheck>("process_again_check", { meeting_id }),
   /** The echo banner's "Turn off for this recording"; false when there was nothing to turn off. */
   turnOffEchoForRecording: () => invoke<boolean>("turn_off_echo_for_recording"),
   /** The mic words the echo gate removed from a run (read on demand only). */
@@ -181,4 +185,19 @@ export const langApi = {
     invoke<Readiness>("check_ready", { action, language }),
   prepareRecording: (language: string) => invoke<void>("prepare_recording", { language }),
   languageTable: () => invoke<import("./generated/LanguageEntry").LanguageEntry[]>("language_table"),
+};
+
+/**
+ * Punctuation (plan 16 sections 3.8 and 3.9) and the "recommended downloads"
+ * notice (4.3): the commands in src-tauri/src/commands.rs, their result types
+ * in `lib/punctuation.ts`. Add, Remove and the bulk action run as jobs and
+ * resolve when they are done; `job_id` is chosen here so the job list knows
+ * the job before it starts.
+ */
+export const punctApi = {
+  punctuateMeeting: (meeting_id: MeetingId, remove: boolean, job_id: JobId) =>
+    invoke<PunctOutcome>("punctuate_meeting", { meeting_id, remove, job_id }),
+  backfill: (job_id: JobId) => invoke<BackfillOutcome>("punctuation_backfill", { job_id }),
+  status: () => invoke<PunctStatus>("punctuation_status"),
+  downloadsNotice: () => invoke<DownloadsNotice | null>("recommended_downloads_notice"),
 };

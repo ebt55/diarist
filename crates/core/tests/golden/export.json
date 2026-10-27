@@ -43,7 +43,8 @@
           "start_ms": 1200,
           "end_ms": 1700,
           "text": "Hello",
-          "raw_label": "spk_0"
+          "raw_label": "spk_0",
+          "raw_text": "hello"
         },
         {
           "start_ms": 1800,
@@ -55,7 +56,8 @@
           "start_ms": 2500,
           "end_ms": 3400,
           "text": "team.",
-          "raw_label": "spk_0"
+          "raw_label": "spk_0",
+          "raw_text": "team"
         }
       ]
     },
@@ -83,7 +85,8 @@
           "start_ms": 4300,
           "end_ms": 4500,
           "text": "start?",
-          "raw_label": "spk_0"
+          "raw_label": "spk_0",
+          "raw_text": "start"
         }
       ]
     },

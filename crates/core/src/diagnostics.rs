@@ -425,8 +425,14 @@ fn last_echo_note(e: &serde_json::Value) -> String {
     if e["restored"].as_bool() == Some(true) {
         let r = n("restored_words");
         let were = if r == 1 { "was" } else { "were" };
+        // Restore collapses repeated-token loops again (plan 16 section
+        // 12.3): restored copies of a burst show as one word.
+        let merged = match n("restored_merged") {
+            0 => String::new(),
+            m => format!(" ({m} merged into repeated-token loops)"),
+        };
         format!(
-            "{heard}; its {r} removed {} {were} put back with Restore.",
+            "{heard}; its {r} removed {} {were} put back with Restore{merged}.",
             words(r)
         )
     } else if e["user_off"].as_bool() == Some(true) {
@@ -710,6 +716,143 @@ fn report_text(paths: &DataPaths, store: &dyn Store, input: &DiagnosticsInput) -
         }
     }
     out
+}
+
+/// The "Punctuation runtime" row (docs/plans/16 section 3.7): whether the
+/// selected punctuation model's ONNX Runtime library is there, has its
+/// Visual C++ runtime, and loaded and passed its checks in this process.
+/// `skip` when punctuation is off or no model is installed (nothing gates
+/// on it); a missing redistributable names the DLL and Microsoft's page.
+pub fn punctuation_check(paths: &DataPaths, store: &dyn Store) -> HealthCheck {
+    use crate::punct::onnx::{self, RuntimeStatus};
+    let (id, label) = ("punctuation", "Punctuation runtime");
+    if crate::punct::setting(store) == crate::punct::PunctSetting::Off {
+        return HealthCheck::new(
+            id,
+            label,
+            "skip",
+            "Punctuation is off (transcript.punctuation): transcripts keep the speech model's \
+             own punctuation.",
+        );
+    }
+    let file = match selected_file(store, ModelRole::Punctuation) {
+        Ok(Some(f)) => f,
+        _ => {
+            let row = HealthCheck::new(
+                id,
+                label,
+                "skip",
+                "No punctuation model is installed: transcripts keep the speech model's own \
+                 punctuation.",
+            );
+            let entry = crate::models::Manifest::load(&paths.root)
+                .ok()
+                .and_then(|m| {
+                    m.models
+                        .iter()
+                        .find(|e| e.role == ModelRole::Punctuation && !e.experimental)
+                        .map(|e| e.name.clone())
+                });
+            return match entry {
+                Some(name) => row.fix(format!("download:{name}"), "Download"),
+                None => row,
+            };
+        }
+    };
+    let fail = |detail: String| HealthCheck::new(id, label, "fail", detail);
+    let Some(spec) = file.capabilities.punctuation.clone() else {
+        return fail(format!(
+            "{} has no punctuation description. Press Refresh in Settings, Models.",
+            file.display_name
+        ))
+        .fix("rescan", "Refresh");
+    };
+    let model = paths.absolute(&file.path);
+    let manifest = crate::models::Manifest::load(&paths.root)
+        .unwrap_or_else(|_| crate::models::Manifest::builtin());
+    let entry = file
+        .manifest_name
+        .as_deref()
+        .and_then(|n| manifest.model(n));
+    let plan = match onnx::plan_runtime(&model, &spec, paths, entry) {
+        Ok(p) => p,
+        Err(u) => {
+            return fail(format!(
+                "{}. Download the punctuation model again, or put the library into its folder.",
+                u.message
+            ))
+            .fix("open_models", "Open models folder")
+        }
+    };
+    let rel = onnx::recorded_path(paths, &plan.dll);
+    let status = onnx::runtime_status();
+    // What a load would check first: the Visual C++ runtime and, for a
+    // manifest model, the library's hash. Not again once it is loaded.
+    if !matches!(&status, RuntimeStatus::Ready(rt) if same_path(&rt.path, &plan.dll)) {
+        if let Err(u) = onnx::before_load(
+            &plan.dll,
+            plan.want.sha256.as_deref(),
+            &onnx::missing_dependency,
+        ) {
+            return fail(format!("{}.", u.message));
+        }
+    }
+    match status {
+        RuntimeStatus::NotLoaded => HealthCheck::new(
+            id,
+            label,
+            "pass",
+            format!("ONNX Runtime at {rel}; it loads at the first punctuated transcript."),
+        ),
+        RuntimeStatus::Ready(rt) if same_path(&rt.path, &plan.dll) => HealthCheck::new(
+            id,
+            label,
+            "pass",
+            format!(
+                "ONNX Runtime {} loaded from {} (CPU).",
+                rt.version,
+                onnx::recorded_path(paths, &rt.path)
+            ),
+        ),
+        // Another folder's copy of the same release: the loaded one serves it.
+        RuntimeStatus::Ready(rt)
+            if onnx::version_matches(&rt.version, plan.want.version.as_deref()) =>
+        {
+            HealthCheck::new(
+                id,
+                label,
+                "pass",
+                format!(
+                    "ONNX Runtime {} loaded from {} (CPU); this model uses it instead of {rel}.",
+                    rt.version,
+                    onnx::recorded_path(paths, &rt.path)
+                ),
+            )
+        }
+        RuntimeStatus::Ready(rt) => HealthCheck::new(
+            id,
+            label,
+            "warn",
+            format!(
+                "ONNX Runtime {} is loaded from {}; this model needs {}: restart Diarist to use {rel}.",
+                rt.version,
+                onnx::recorded_path(paths, &rt.path),
+                plan.want.version.as_deref().unwrap_or("another release")
+            ),
+        ),
+        RuntimeStatus::Broken { path, message } => fail(format!(
+            "{} ({}). Restart Diarist after fixing it.",
+            message,
+            onnx::recorded_path(paths, &path)
+        )),
+    }
+}
+
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -1020,6 +1163,16 @@ mod tests {
             restored.ends_with("(coupling 0.70); its 1 removed word was put back with Restore."),
             "{restored}"
         );
+        let merged = note(serde_json::json!({
+            "coupled": true, "coupling": 0.7, "restored": true, "restored_words": 5,
+            "restored_merged": 3, "dropped": 0
+        }));
+        assert!(
+            merged.ends_with(
+                "its 5 removed words were put back with Restore (3 merged into repeated-token loops)."
+            ),
+            "{merged}"
+        );
         let user_off = note(serde_json::json!({
             "coupled": true, "coupling": 0.7, "user_off": true, "dropped": 0
         }));
@@ -1062,5 +1215,53 @@ mod tests {
         assert_eq!(scrub_path(r"C:\Users\Jürgen\x", r"C:\Users\Jürgen"), r"~\x");
         assert_eq!(scrub_path(r"C:\x", "C:"), r"C:\x");
         assert_eq!(scrub_path("", p), "");
+    }
+
+    #[test]
+    fn the_punctuation_row_skips_without_a_model_and_names_a_missing_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let c = punctuation_check(&paths, &store);
+        assert_eq!((c.id.as_str(), c.status.as_str()), ("punctuation", "skip"));
+        assert!(c.detail.contains("No punctuation model"), "{}", c.detail);
+        store
+            .set_setting(crate::settings::TRANSCRIPT_PUNCTUATION, "off")
+            .unwrap();
+        assert!(punctuation_check(&paths, &store).detail.contains("is off"));
+        store
+            .set_setting(crate::settings::TRANSCRIPT_PUNCTUATION, "auto")
+            .unwrap();
+
+        // A dropped-in model without its ONNX Runtime library.
+        let root = paths.models().join("punct");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model.onnx"), b"x").unwrap();
+        std::fs::write(root.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(
+            root.join("model.onnx.meet.json"),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 64,
+                "heads": [{"output": "logits", "kind": "post", "labels": ["", "."],
+                           "position": "last_token", "values": "logits"}]}}"#,
+        )
+        .unwrap();
+        crate::models::scan(&paths, &store, &crate::models::Manifest::builtin()).unwrap();
+        let c = punctuation_check(&paths, &store);
+        assert_eq!(c.status, "fail", "{}", c.detail);
+        assert!(c.detail.contains("diarist-onnxruntime.dll"), "{}", c.detail);
+        assert_eq!(c.fix.as_deref(), Some("open_models"));
+        // With a library file there (not loaded in this test process).
+        std::fs::write(root.join("diarist-onnxruntime.dll"), b"MZ").unwrap();
+        let c = punctuation_check(&paths, &store);
+        if crate::punct::onnx::missing_dependency(&root.join("diarist-onnxruntime.dll")).is_none()
+            && crate::punct::onnx::runtime_status() == crate::punct::onnx::RuntimeStatus::NotLoaded
+        {
+            assert_eq!(c.status, "pass", "{}", c.detail);
+            assert!(
+                c.detail.contains("models/punct/diarist-onnxruntime.dll"),
+                "{}",
+                c.detail
+            );
+        }
     }
 }

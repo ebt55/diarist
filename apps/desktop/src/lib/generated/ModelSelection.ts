@@ -4,4 +4,9 @@ import type { ModelFileId } from "./ModelFileId";
 /**
  * The selected file per role (stored in settings under [`selection_key`]).
  */
-export type ModelSelection = { engine: ModelFileId | null, asr: ModelFileId | null, diarizer: ModelFileId | null, };
+export type ModelSelection = { engine: ModelFileId | null, asr: ModelFileId | null, diarizer: ModelFileId | null, 
+/**
+ * The punctuation model (docs/plans/16 section 3.8); never an
+ * unrecognised file.
+ */
+punctuation: ModelFileId | null, };

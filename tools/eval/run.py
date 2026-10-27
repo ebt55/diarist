@@ -41,11 +41,15 @@ from common import (  # noqa: E402
     EVAL_DIR,
     GROUP_ORDER,
     NORMALIZER_NAME,
+    PUBLIC_GROUPS,
     REFS_OVERRIDE,
     REPO,
     WORK,
     Session,
+    lang_base,
     load_sessions,
+    multilingual_tokens,
+    normalizer_name,
     read_rttm,
     read_seglst,
     seglst_to_rttm,
@@ -120,6 +124,67 @@ def cli(data: Path, *args: str, capture: bool = True) -> subprocess.CompletedPro
     return p
 
 
+def punctuation_of(cfg: dict) -> bool:
+    """configs.toml `punctuation = true`: the config's data root punctuates
+    (transcript.punctuation = auto); every other root runs with it off, so
+    the accuracy tables keep measuring the speech model and the diarizer
+    (docs/plans/16 section 3.5)."""
+    return bool(cfg.get("punctuation", False))
+
+
+def punctuation_model(cfg: dict) -> str:
+    """The punctuation model a `punctuation = true` config selects: its
+    `punctuation_model` key, else the manifest's required punctuation entry."""
+    if cfg.get("punctuation_model"):
+        return str(cfg["punctuation_model"])
+    manifest = json.loads((REPO / "manifests" / "models.json").read_text(encoding="utf-8"))
+    for m in manifest:
+        if m.get("role") == "punctuation" and m.get("required"):
+            return m["name"]
+    raise SystemExit("punctuation = true, but manifests/models.json has no required punctuation model")
+
+
+def collapse_loops_of(cfg: dict) -> bool:
+    """configs.toml `collapse_loops`: the repeated-token loop collapse
+    (transcript.collapse_loops, docs/plans/16 section 12.3) in the config's
+    data root. On unless a config says `collapse_loops = false`, as in the
+    app, so the tables measure what users get."""
+    return bool(cfg.get("collapse_loops", True))
+
+
+def set_setting(data: Path, key: str, value: str) -> None:
+    """Writes one setting into the data root's database, as the app's
+    Settings would (diarist-cli has no settings verb)."""
+    import sqlite3
+
+    con = sqlite3.connect(data / "diarist.db")
+    try:
+        con.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def run_loops(data: Path, meeting_id: int) -> dict | None:
+    """`engine_info.loops` of the meeting's current run in the data root
+    (counts only), or None when the diarist-cli build has no loop collapse."""
+    import sqlite3
+
+    con = sqlite3.connect(data / "diarist.db")
+    try:
+        row = con.execute(
+            "SELECT r.engine_info FROM meetings m JOIN transcript_runs r ON r.id = m.current_run_id WHERE m.id = ?",
+            (meeting_id,),
+        ).fetchone()
+    finally:
+        con.close()
+    loops = json.loads(row[0]).get("loops") if row and row[0] else None
+    return loops if isinstance(loops, dict) else None
+
+
 def prepare_data_root(config: str, cfg: dict) -> Path:
     data = WORK / "data" / config
     data.mkdir(parents=True, exist_ok=True)
@@ -127,6 +192,12 @@ def prepare_data_root(config: str, cfg: dict) -> Path:
         cli(data, "models", "scan")
     cli(data, "models", "select", "asr", cfg["asr"])
     cli(data, "models", "select", "diarizer", cfg["diarizer"])
+    if punctuation_of(cfg):
+        # Fails when the model is not in the models folder: a punctuation
+        # config must never silently run without punctuation.
+        cli(data, "models", "select", "punctuation", punctuation_model(cfg))
+    set_setting(data, "transcript.punctuation", "auto" if punctuation_of(cfg) else "off")
+    set_setting(data, "transcript.collapse_loops", "on" if collapse_loops_of(cfg) else "off")
     return data
 
 
@@ -134,7 +205,22 @@ def run_dir(config: str, sid: str) -> Path:
     return WORK / "runs" / config / sid
 
 
-def cached(config: str, sid: str, cfg: dict) -> dict | None:
+def session_language(s: Session, cfg: dict) -> str:
+    """The language passed to diarist-cli: the session's own (public
+    non-English sets), else the config's."""
+    return s.language or cfg["language"]
+
+
+def asr_covers(cfg: dict, lang: str) -> bool:
+    """False when the config's ASR is an English-only model and the session
+    is in another language (manifests/models.json `languages`)."""
+    manifest = json.loads((REPO / "manifests" / "models.json").read_text(encoding="utf-8"))
+    m = next((x for x in manifest if x["name"] == cfg["asr"]), None)
+    langs = (m or {}).get("languages") or ["multi"]
+    return "multi" in langs or lang_base(lang) in {lang_base(x) for x in langs}
+
+
+def cached(config: str, sid: str, cfg: dict, lang: str | None = None) -> dict | None:
     """The finished run of (session, config), if its settings still match."""
     d = run_dir(config, sid)
     try:
@@ -143,9 +229,15 @@ def cached(config: str, sid: str, cfg: dict) -> dict | None:
         return None
     if meta.get("status") != "ok" or meta.get("schema") != RUN_SCHEMA or not (d / "transcript.json").is_file():
         return None
-    if any(meta.get(k) != cfg.get(k) for k in ("asr", "diarizer", "language")) or list(
-        meta.get("engine_args") or []
-    ) != list(cfg.get("engine_args") or []):
+    # A run made before the loop collapse existed has no `collapse_loops`:
+    # its words were not collapsed.
+    want = {"asr": cfg.get("asr"), "diarizer": cfg.get("diarizer"), "language": lang or cfg.get("language")}
+    if (
+        any(meta.get(k) != v for k, v in want.items())
+        or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+        or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
+        or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
+    ):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
     if CLI.is_file() and meta.get("cli_sha256") != sha256_file(CLI):
@@ -184,11 +276,14 @@ def phase_times(audio_dir: Path) -> dict:
 
 def transcribe(
     s: Session, config: str, cfg: dict, data: Path, *, language: str | None = None, run_id: str | None = None,
-    diarize: bool = True, wav: Path | None = None, duration: float | None = None,
+    diarize: bool = True, wav: Path | None = None, duration: float | None = None, diar_pass: bool = True,
 ) -> dict:
     """One diarist-cli transcribe of session s (or of `wav`, for FLEURS) into
     runs/<config>/<run_id or session id>, with wall time per engine step and
-    peak VRAM (nvidia-smi delta) per step."""
+    peak VRAM (nvidia-smi delta) per step. diar_pass=False leaves out the
+    standalone diarize pass of `--rttm`: it runs after the transcript is built
+    and never feeds it (crates/core/src/pipeline/import.rs step 3), so words,
+    tags and the transcribe step are the same."""
     rid = run_id or s.id
     d = run_dir(config, rid)
     d.mkdir(parents=True, exist_ok=True)
@@ -198,7 +293,7 @@ def transcribe(
     log(f"[{rid}] diarist-cli transcribe ({duration / 60:.1f} min, config {config}, language {lang})")
     gpu.wait_idle(GPU_IDLE_MIB)
     args = ["transcribe", str(wav), "--language", lang, "--title", rid]
-    args += ["--rttm"] if diarize else ["--no-diarize"]
+    args += (["--rttm"] if diar_pass else []) if diarize else ["--no-diarize"]
     args += ["--out", str(d / "transcript.json"), "--format", "json", *engine_arg_flags(cfg)]
     t_start = time.time()
     t0 = time.perf_counter()
@@ -232,6 +327,9 @@ def transcribe(
     )
     ph = phase_times(audio_dir)
     t_asr0, t_asr1, t_dia1 = ph["engine_start"] or t_start, ph["transcribe_end"], ph["diarize_end"]
+    loops = run_loops(data, int(mid))
+    if collapse_loops_of(cfg) and loops is None:
+        log(f"[{rid}] warning: this diarist-cli build has no loop collapse (no engine_info.loops); rebuild it")
     meta = {
         "schema": RUN_SCHEMA,
         "status": "ok",
@@ -254,6 +352,12 @@ def transcribe(
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
         "engine_args": list(cfg.get("engine_args") or []),
+        "punctuation": punctuation_of(cfg),
+        # transcript.collapse_loops in the data root, and what the run's
+        # engine_info.loops counted (None from a build without the collapse).
+        "collapse_loops": collapse_loops_of(cfg),
+        "loops": {k: loops.get(k) for k in ("applied", "runs", "words_removed")} if loops else None,
+        "diar_pass": bool(diarize and diar_pass),
         "engine_version": eng["engine"] if eng else None,
         "asr_file": eng["asr"] if eng else None,
         "diarizer_file": eng["diar"] if eng else None,
@@ -289,10 +393,14 @@ def load_reference(s: Session) -> tuple[list[dict], list, str]:
         out = WORK / "refs"
         zoom_vtt_to_ref.convert(s.vtt, s.id, out)
         return read_seglst(out / f"{s.id}.ref.seglst.jsonl"), read_rttm(out / f"{s.id}.ref.rttm"), "zoom-cue"
-    if s.kind == "ami":
+    if s.kind in ("ami", "ref"):
+        # Prebuilt SegLST + RTTM: AMI ES2002a (ami_fetch.py) and the public sets
+        # (the *_fetch.py scripts listed in docs/05 "Extend"), which name their
+        # reference type in `ref_source`.
         if not (s.ref_seglst and s.ref_seglst.is_file()):
-            raise SystemExit(f"{s.ref_seglst} missing: run `uv run python -I ami_fetch.py`")
-        return read_seglst(s.ref_seglst), read_rttm(s.ref_rttm), "ami-word"
+            hint = "ami_fetch.py" if s.kind == "ami" else f"the fetch script of set {s.extra.get('set', '?')}"
+            raise SystemExit(f"{s.ref_seglst} missing: run `uv run python -I {hint}`")
+        return read_seglst(s.ref_seglst), read_rttm(s.ref_rttm), s.extra.get("ref_source", "ami-word")
     raise SystemExit(f"session {s.id}: unknown kind {s.kind!r}")
 
 
@@ -321,8 +429,9 @@ def score(s: Session, config: str, meta: dict) -> dict:
     hyp_rttm = read_rttm(d / "hyp.rttm")
     duration = meta.get("audio_s")
     region = scored_region(s, ref_segs, duration)
+    lang = meta.get("language") or s.language
     t0 = time.perf_counter()
-    res = M.meeting_metrics(ref_segs, ref_rttm, hyp_segs, hyp_words, hyp_rttm, duration, s.id, region)
+    res = M.meeting_metrics(ref_segs, ref_rttm, hyp_segs, hyp_words, hyp_rttm, duration, s.id, region, lang)
     if (d / "diarizer.rttm").is_file():
         raw = M.diarization_metrics(ref_rttm, read_rttm(d / "diarizer.rttm"), duration, region)
         res.update({f"diar_{k}": v for k, v in raw.items()})
@@ -331,6 +440,8 @@ def score(s: Session, config: str, meta: dict) -> dict:
         label=s.label,
         group=s.group,
         ref_source=ref_src,
+        language=lang,
+        normalizer=normalizer_name(lang),
         region=region,
         audio_s=duration,
         wall_s=meta.get("wall_s"),
@@ -461,11 +572,45 @@ def quality_bar(results: list[dict]) -> list[str]:
                 f"- Single-speaker control ({r['label']}): transcript has {r['hyp_speakers']} speaker(s), "
                 f"diarizer pass {r.get('diar_hyp_speakers', '–')}: {'met' if r['hyp_speakers'] == 1 else 'NOT met'}"
             )
-    out.append(
-        "- References are Zoom cue-level, not hand-labelled yet (docs/00 asks for hand-labelled meetings); "
-        "treat the verdicts as provisional until data/eval/refs holds corrected references."
-    )
+    if any(r["ref_source"] == "zoom-cue" for r in results):
+        out.append(
+            "- References are Zoom cue-level, not hand-labelled yet (docs/00 asks for hand-labelled meetings); "
+            "treat the verdicts as provisional until data/eval/refs holds corrected references."
+        )
+    if not out:
+        out.append("- No session of the gate groups in this report; the bar applies to the user meetings only.")
     return out
+
+
+PUBLIC_TITLES = {
+    "pub-meeting": "Open multi-party meetings, close-talk mix (AMI EN2002 Mix-Headset, ICSI)",
+    "pub-far": "Distant single microphone, English (AMI EN2002 Array1-01, NOTSOFAR-1 single-channel devices)",
+    "pub-phone": "Phone-quality calls, accented English (Earnings-22)",
+    "pub-lang": "Other languages, close and distant (AliMeeting zh, SUMM-RE fr, Indic DiarBench hi)",
+}
+
+
+def public_sections(results: list[dict]) -> list[str]:
+    """The public sets (docs/05 "Extend"), one table per group, with mean and
+    max rows. Human references, so WER columns are word accuracy here."""
+    pub = [r for r in results if r["group"] in PUBLIC_GROUPS]
+    if not pub:
+        return []
+    lines = [
+        "## Public sets (docs/05 Extend)",
+        "",
+        "Human-made references (word times from manual or forced alignment, or turn times), so cpWER, tcpWER and "
+        "ORC-WER measure word accuracy here, unlike on the Zoom sessions. Mandarin rows are per character (CER). "
+        "The scored region is each reference's annotated span plus 1 s.",
+        "",
+    ]
+    for g in PUBLIC_GROUPS:
+        rows = [r for r in pub if r["group"] == g]
+        if not rows:
+            continue
+        lines += [f"### {PUBLIC_TITLES[g]}", "", *table_rows(rows)]
+        lines += [*aggregate_rows(g, rows), ""]
+    return lines
 
 
 def aggregate_rows(name: str, rows: list[dict]) -> list[str]:
@@ -518,6 +663,9 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
     order = {g: i for i, g in enumerate(GROUP_ORDER)}
     results = sorted(results, key=lambda r: (order.get(r["group"], 99), r["label"]))
     attr = [r for r in results if r["group"] in ("tuning", "heldout")]
+    gate = [r for r in results if r["group"] not in PUBLIC_GROUPS]
+    langs = sorted({r.get("language") or cfg["language"] for r in results})
+    other_langs = [x for x in langs if lang_base(x) != "en"]
     total_wall = sum(m.get("wall_s") or 0 for m in metas.values())
     total_audio = sum(m.get("audio_s") or 0 for m in metas.values())
     lines = [
@@ -535,13 +683,32 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Diarizer: {diar.get('name')} `{diar.get('repo')}` rev `{diar.get('revision', '')[:12]}` sha256 `{diar.get('sha256', '')[:16]}`"
         f" (local .verified matches: {diar.get('verified')}); preset {diar_preset_of(cfg, any_meta)}",
         f"- Decoder lookahead (`rnnt_right_context`): {lookahead_of(cfg, any_meta)}",
+        "- Punctuation: "
+        + (
+            f"on (`transcript.punctuation = auto`, model {punctuation_model(cfg)}); words, times and speakers are "
+            "unchanged by construction, so cpWER, tcpWER and WDER equal the unpunctuated run's, while segments end at "
+            "sentence ends, which moves DER, JER and ORC-WER"
+            if punctuation_of(cfg)
+            else "off (`transcript.punctuation = off` in the data root)"
+        ),
+        "- Repeated-token loops: "
+        + (
+            "collapsed (`transcript.collapse_loops = on`, the app's default; "
+            f"{sum((m.get('loops') or {}).get('words_removed') or 0 for m in metas.values())} words removed over these runs"
+            + ("; some runs come from a diarist-cli build without the collapse" if any(m.get("loops") is None for m in metas.values()) else "")
+            + ")"
+            if collapse_loops_of(cfg)
+            else "not collapsed (`transcript.collapse_loops = off` in the data root)"
+        ),
         f"- diarist-cli flags: `transcribe <16 kHz wav> --language {cfg['language']} --rttm --format json --out ..."
         + "".join(f" {a}" for a in engine_arg_flags(cfg))
-        + "`, then `export --format rttm`",
+        + "`, then `export --format rttm`"
+        + (f" (sessions with their own language pass it instead: {', '.join(other_langs)})" if other_langs else ""),
         "- Engine command lines (from diarist-core's engine.log): "
         + "; ".join(f"`{c}`" for c in engine_commands(config, metas)),
         "- Word-to-speaker fusion: the runtime's own tags (start-anchored argmax); no app-side smoothing yet",
-        f"- Text normaliser: {NORMALIZER_NAME}",
+        f"- Text normaliser: {NORMALIZER_NAME}"
+        + "".join(f"; {x}: {normalizer_name(x)}" for x in other_langs),
         f"- GPU wall time for these runs: {total_wall / 60:.1f} min for {total_audio / 60:.0f} min of audio"
         f" ({total_audio / max(total_wall, 1e-9):.1f}x real time; includes the standalone diarize pass)",
         "",
@@ -553,27 +720,40 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         "",
         "DER/JER from the exported transcript RTTM (one span per transcript segment). WDER near = words within 1 s of a reference speaker change.",
         "",
-        "### User meetings (tuning and held-out)",
-        "",
-        *section(attr),
-        "### Controls",
-        "",
-        *section([r for r in results if r["group"] in ("control", "overlap")]),
-        "### Stress: in-room multi-speaker (reported separately)",
-        "",
-        "Shared room devices carry several people under one Zoom label, so the reference undercounts speakers. "
-        "A diarizer that correctly splits those people is charged for it by DER, JER and WDER (the speaker map is one to one); "
-        "read this row for the speaker count and for regressions between configs, not against the bar.",
-        "",
-        *section([r for r in results if r["group"] == "stress"]),
-        "## Aggregates",
-        "",
-        "| Set | Stat | | | | Count err | " + " | ".join(c for c, _ in ATTR_COLS) + " |",
-        "|" + "---|" * (6 + len(ATTR_COLS)),
-        *aggregate_rows("Tuning", [r for r in results if r["group"] == "tuning"]),
-        *aggregate_rows("Held-out", [r for r in results if r["group"] == "heldout"]),
-        *aggregate_rows("Tuning + held-out", attr),
-        "",
+        *(
+            [
+                "### User meetings (tuning and held-out)",
+                "",
+                *section(attr),
+                "### Controls",
+                "",
+                *section([r for r in results if r["group"] in ("control", "overlap")]),
+                "### Stress: in-room multi-speaker (reported separately)",
+                "",
+                "Shared room devices carry several people under one Zoom label, so the reference undercounts speakers. "
+                "A diarizer that correctly splits those people is charged for it by DER, JER and WDER (the speaker map is one to one); "
+                "read this row for the speaker count and for regressions between configs, not against the bar.",
+                "",
+                *section([r for r in results if r["group"] == "stress"]),
+            ]
+            if gate
+            else []
+        ),
+        *public_sections(results),
+        *(
+            [
+                "## Aggregates",
+                "",
+                "| Set | Stat | | | | Count err | " + " | ".join(c for c, _ in ATTR_COLS) + " |",
+                "|" + "---|" * (6 + len(ATTR_COLS)),
+                *aggregate_rows("Tuning", [r for r in results if r["group"] == "tuning"]),
+                *aggregate_rows("Held-out", [r for r in results if r["group"] == "heldout"]),
+                *aggregate_rows("Tuning + held-out", attr),
+                "",
+            ]
+            if attr
+            else []
+        ),
         "## Standalone diarizer pass (`--rttm`)",
         "",
         "| Session | Hyp spk | Count err | DER c0.25 | miss | FA | conf | DER c0 | JER |",
@@ -611,6 +791,12 @@ def write_report(config: str, cfg: dict, results: list[dict], metas: dict[str, d
         f"- Zoom references ({sum(r['ref_source'] == 'zoom-cue' for r in results)} sessions): {CUE_TIMING_NOTE}. Overlapping speech is serialised and short backchannels are often missing, so DER is approximate there; speaker identity per cue is near ground truth, which is what WDER uses.",
         "- The Zoom transcript is machine output: cpWER, tcpWER and ORC-WER against it mix ASR disagreement with attribution. Word accuracy is judged on AMI only; cpWER − DI-cpWER is the attribution share.",
         "- AMI ES2002a: word-level manual annotation (ami_public_manual_1.6.2) for the SegLST reference, pyannote AMI-diarization-setup only_words RTTM for DER.",
+        *(
+            ["- Public sets: sources, licences, reference types and slices in docs/05 \"Extend\" and docs/research/20-public-eval-data.md; "
+             "the Ref source column names each reference type."]
+            if any(r["group"] in PUBLIC_GROUPS for r in results)
+            else []
+        ),
         "- DER collar 0.25 = ±0.25 s around reference boundaries (pyannote `collar=0.5`). Overlap is scored. The scored region is the whole recording, except AMI: its annotated span ±1 s, because the first 50 s of pre-meeting chatter is not transcribed (hypothesis words outside the span are dropped for the transcript metrics too).",
         "- AMI WER here is on the Mix-Headset (far-field mix) channel with this harness's normaliser, so it is not directly comparable with published AMI figures (usually IHM). Use it to compare configs.",
         "- Count err = hypothesis speakers − reference speakers (transcript speakers for the first table, diarizer labels for the second). Zoom labels count people with their own audio stream; the stress session's room devices hide several people behind one label, so its reference count is a lower bound.",
@@ -684,18 +870,6 @@ def lookahead_ms(cfg: dict) -> int:
     return (r + 1) * 80
 
 
-def multilingual_tokens(text: str) -> list[str]:
-    """Non-English normaliser: NFKC, casefold, every punctuation or symbol
-    character (Unicode P*, S*) becomes a space. Combining marks (Devanagari
-    vowel signs, Japanese voicing marks) are kept, unlike whisper's
-    BasicTextNormalizer, which splits Hindi words at every vowel sign."""
-    import unicodedata
-
-    s = unicodedata.normalize("NFKC", text).casefold()
-    s = "".join(" " if unicodedata.category(c)[0] in "PS" else c for c in s)
-    return s.split()
-
-
 def fleurs_units(lang: str, text: str) -> list[str]:
     from common import normalize_text
 
@@ -747,6 +921,8 @@ def run_fleurs(config: str, cfg: dict, langs: list[str], mode: str, force: bool,
             if (
                 meta.get("status") != "ok" or meta.get("language") != tag or meta.get("asr") != cfg["asr"]
                 or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
+                or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
+                or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
             ):
                 meta = None
         except (OSError, ValueError):
@@ -831,10 +1007,22 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="required except with --fleurs-report")
     ap.add_argument("--sessions", default="all", help="comma-separated session ids, or all")
-    ap.add_argument("--sessions-file", type=Path, default=EVAL_DIR / "sessions.toml")
+    ap.add_argument(
+        "--groups",
+        help="comma-separated groups: keep only sessions in them (with --sessions all, every session of those groups)",
+    )
+    ap.add_argument(
+        "--sessions-file", type=Path, default=EVAL_DIR / "sessions.toml",
+        help="sessions.toml (private, default) or sessions.public.toml (the public sets, docs/05 Extend)",
+    )
     ap.add_argument("--configs-file", type=Path, default=EVAL_DIR / "configs.toml")
     ap.add_argument("--force", action="store_true", help="re-transcribe even when cached")
     ap.add_argument("--transcribe-only", action="store_true")
+    ap.add_argument(
+        "--no-diar-pass", action="store_true",
+        help="leave out the standalone diarize pass of --rttm (about half the GPU time; the transcript, its tags "
+        "and the transcribe step are unchanged; the report then has no standalone-diarizer rows)",
+    )
     ap.add_argument("--metrics-only", action="store_true", help="never run the GPU; skip sessions without a cached run")
     ap.add_argument("--export-for-correction", metavar="SESSION")
     ap.add_argument("--out", type=Path, help="report path (default docs/eval/<date>-<config>.md)")
@@ -879,17 +1067,26 @@ def main() -> None:
     for sid in ids:
         if sid not in sessions:
             raise SystemExit(f"unknown session {sid!r}; known: {', '.join(sessions)}")
+    if a.groups:
+        groups = {g.strip() for g in a.groups.split(",") if g.strip()}
+        ids = [sid for sid in ids if sessions[sid].group in groups]
+        if not ids:
+            raise SystemExit(f"no session in groups {', '.join(sorted(groups))}")
 
     data = None
     metas: dict[str, dict] = {}
     for sid in ids:
         s = sessions[sid]
-        meta = None if a.force else cached(a.config, sid, cfg)
+        lang = session_language(s, cfg)
+        if not asr_covers(cfg, lang):
+            log(f"[{sid}] skipped: {cfg['asr']} does not cover language {lang}")
+            continue
+        meta = None if a.force else cached(a.config, sid, cfg, lang)
         if meta is None and not a.metrics_only:
             if not CLI.is_file():
                 raise SystemExit(f"{CLI} missing: build diarist-cli once and copy it there (README)")
             data = data or prepare_data_root(a.config, cfg)
-            meta = transcribe(s, a.config, cfg, data)
+            meta = transcribe(s, a.config, cfg, data, language=lang, diar_pass=not a.no_diar_pass)
         if meta is None:
             log(f"[{sid}] no cached run for {a.config}; skipped")
             continue
@@ -904,7 +1101,11 @@ def main() -> None:
         raise SystemExit("nothing to score")
     print_summary(results)
     if not a.no_report:
-        out = a.out or DOCS_EVAL / f"{dt.date.today().isoformat()}-{a.config}.md"
+        # sessions.public.toml -> <date>-<config>-public.md, so a run of the
+        # public sets never overwrites the gate report of the same day.
+        stem = a.sessions_file.stem.removeprefix("sessions").lstrip(".")
+        suffix = f"-{stem}" if stem else ""
+        out = a.out or DOCS_EVAL / f"{dt.date.today().isoformat()}-{a.config}{suffix}.md"
         write_report(a.config, cfg, results, metas, out)
 
 

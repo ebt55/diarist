@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use super::gguf::{GgufHeader, GgufValue};
 use crate::error::{CoreError, Result};
+use crate::punct::spec::PunctSpec;
 use crate::types::{ModelCapabilities, ModelRole};
 
 /// The result of classifying one file.
@@ -125,9 +126,17 @@ pub struct Sidecar {
     /// Decoder lookahead for file jobs (`--asr.streaming.rnnt_right_context`,
     /// 80 ms frames); wins over the manifest's value.
     pub file_right_context: Option<u32>,
+    /// Decoder lookahead of the live server
+    /// (`--asr.streaming.rnnt_right_context`, 80 ms frames); wins over the
+    /// manifest's value.
+    pub live_right_context: Option<u32>,
     /// Diarizer preset for file jobs (`--asr.diar.preset`); wins over the
     /// manifest's value.
     pub file_preset: Option<String>,
+    /// A punctuation model's description block (docs/plans/16 section 3.6,
+    /// docs/04 section 5); wins over the manifest's. An `.onnx` file is
+    /// listed as `punctuation` only with a valid one.
+    pub punctuation: Option<PunctSpec>,
 }
 
 impl Sidecar {
@@ -173,8 +182,14 @@ impl Sidecar {
         if let Some(v) = self.file_right_context {
             c.capabilities.file_right_context = Some(v);
         }
+        if let Some(v) = self.live_right_context {
+            c.capabilities.live_right_context = Some(v);
+        }
         if let Some(v) = &self.file_preset {
             c.capabilities.file_preset = Some(v.clone());
+        }
+        if let Some(v) = &self.punctuation {
+            c.capabilities.punctuation = Some(v.clone());
         }
     }
 }
@@ -270,7 +285,7 @@ mod tests {
         assert_eq!(Sidecar::read(&model).unwrap(), None);
         std::fs::write(
             Sidecar::path_for(&model),
-            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900,"file_right_context":13,"file_preset":"v3-offline"}"#,
+            r#"{"role":"asr","streaming":true,"languages":["fr"],"vram_mb":900,"file_right_context":13,"live_right_context":6,"file_preset":"v3-offline"}"#,
         )
         .unwrap();
         let sc = Sidecar::read(&model).unwrap().unwrap();
@@ -281,13 +296,70 @@ mod tests {
         assert_eq!(c.capabilities.languages, ["fr"]);
         assert_eq!(c.capabilities.vram_mb_measured, Some(900));
         assert_eq!(c.capabilities.file_right_context, Some(13));
+        assert_eq!(c.capabilities.live_right_context, Some(6));
         assert_eq!(c.capabilities.file_preset.as_deref(), Some("v3-offline"));
         // A hand-dropped model without the keys gets no lookahead or preset flag.
         let mut c = classify(&header(&[("general.architecture", s("asr"))]), 1);
         Sidecar::default().apply(&mut c);
         assert_eq!(c.capabilities.file_right_context, None);
+        assert_eq!(c.capabilities.live_right_context, None);
         assert_eq!(c.capabilities.file_preset, None);
         std::fs::write(Sidecar::path_for(&model), "{not json").unwrap();
         assert!(Sidecar::read(&model).is_err());
+    }
+
+    #[test]
+    fn sidecar_punctuation_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        std::fs::write(
+            Sidecar::path_for(&model),
+            r#"{"role": "punctuation", "languages": ["*"], "punctuation": {
+                "tokenizer": "tokenizer.json", "max_tokens": 512,
+                "heads": [{"output": "logits", "kind": "post", "labels": ["", "."],
+                           "position": "last_token", "values": "logits"}]}}"#,
+        )
+        .unwrap();
+        let sc = Sidecar::read(&model).unwrap().unwrap();
+        let mut c = unknown_onnx();
+        sc.apply(&mut c);
+        assert_eq!(c.role, ModelRole::Punctuation);
+        assert_eq!(c.capabilities.languages, ["*"]);
+        let spec = c.capabilities.punctuation.unwrap();
+        assert_eq!(
+            (spec.tokenizer.as_str(), spec.max_tokens),
+            ("tokenizer.json", 512)
+        );
+        // A block without heads names the field.
+        std::fs::write(
+            Sidecar::path_for(&model),
+            r#"{"punctuation": {"tokenizer": "tokenizer.json", "max_tokens": 512}}"#,
+        )
+        .unwrap();
+        let e = Sidecar::read(&model).unwrap_err().to_string();
+        assert!(e.contains("heads"), "{e}");
+    }
+
+    /// `manifests/punctuation-sidecar.example.json` (docs/04 section 5) is a
+    /// valid sidecar.
+    #[test]
+    fn the_sidecar_example_parses() {
+        let sc: Sidecar = serde_json::from_str(include_str!(
+            "../../../../manifests/punctuation-sidecar.example.json"
+        ))
+        .unwrap();
+        assert_eq!(sc.role, Some(ModelRole::Punctuation));
+        sc.punctuation.unwrap().validate().unwrap();
+    }
+
+    fn unknown_onnx() -> Classification {
+        Classification {
+            role: ModelRole::Unknown,
+            family: None,
+            architecture: None,
+            display_name: None,
+            quant: None,
+            capabilities: ModelCapabilities::default(),
+        }
     }
 }

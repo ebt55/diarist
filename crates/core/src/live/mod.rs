@@ -63,8 +63,12 @@ pub mod views;
 
 pub use postpass::{run_post_pass, PostPassJob, PostPassReport};
 pub use power::{KeepAwake, PowerEvent, PowerNotifications};
-pub use recover::{recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
-pub use rerun::rerun_post_pass;
+pub use recover::{needs_recovery, recover, RecoveredMeeting, RecoveryAction, PROMOTED_NOTE};
+pub use rerun::{
+    rerun_check, rerun_post_pass, RerunAudio, RerunCheck, AUDIO_GONE, LEFTOVERS, NO_LIVE_RUN,
+    RERUN_MARKER,
+};
+pub(crate) use restore::{check_idle, segment_options};
 pub use restore::{remove_restored_echo, restore_echo_dropped, EchoRestore};
 pub use snapshot::{snapshot, snapshot_except};
 pub use views::{
@@ -101,6 +105,7 @@ use crate::engine::{Engine, EngineEvent, EngineWord, LiveEngine, LiveOpts};
 use crate::error::{CoreError, Result};
 use crate::models::free_disk_bytes;
 use crate::pipeline::JobQueue;
+use crate::punct::PunctSource;
 use crate::settings;
 use crate::store::{NewAudioTrack, NewMeeting, RunStore};
 use crate::transcript::{SegmentOptions, ME_LABEL, UNKNOWN_LABEL};
@@ -154,8 +159,17 @@ pub struct LiveContext {
     pub min_free_bytes: u64,
     /// Runtime and models, stored in the live run's `engine_info`.
     pub live_engine_info: serde_json::Value,
+    /// The decoder lookahead the live server runs at
+    /// ([`crate::engine::ServeConfig::right_context`]; `None`: no flag, the
+    /// runtime default), stored as the live run's
+    /// `engine_info.live_right_context` (a number or `runtime default`).
+    pub live_right_context: Option<u32>,
     /// Post-pass progress and its terminal event.
     pub on_job_event: Option<JobEventFn>,
+    /// The post-pass's punctuation (plan 16 section 3.2): the caller's data
+    /// paths ([`PunctSource::Data`]), so the CLI's and the eval harness's
+    /// `--models-dir` overrides apply.
+    pub punct: PunctSource,
 }
 
 /// Which endpoints to record (ids from [`crate::audio::capture::list_devices`]).
@@ -574,6 +588,8 @@ impl Recorder {
         }
         info["language"] = serde_json::json!(language);
         info["diarize_mic"] = serde_json::json!(opts.diarize_mic);
+        info["live_right_context"] =
+            crate::protocol::lookahead_json(ctx.live_right_context.map(i64::from));
         info["capture_autoconvert"] = serde_json::json!(autoconvert);
         info["agc"] = serde_json::json!({
             "loopback": agc_setting(&stored, Channel::Loopback),
@@ -1080,6 +1096,8 @@ impl Recorder {
             transcribe,
             keep_live_runs: settings::get_bool(&stored, settings::KEEP_LIVE_RUNS),
             segment: SegmentOptions::default(),
+            punct: self.ctx.punct.clone(),
+            from_flac: false,
         };
         let post_pass = submit_post_pass(&self.ctx, job, true);
         Ok(StopOutcome {
@@ -1147,6 +1165,7 @@ fn register_wavs(
             channels: 1,
             duration_ms: Some(duration_ms),
             size_bytes: std::fs::metadata(&path).ok().map(|m| m.len() as i64),
+            channel_frames: None,
         })?;
     }
     Ok(())
@@ -1161,6 +1180,13 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
     let on_event = ctx.on_job_event.clone();
     let job_id = job.job_id.clone();
     let transcribe = job.transcribe;
+    // Run again from the stored audio, a job that does not finish leaves the
+    // transcript the meeting had, which is complete (plan 16 section 12.5 J).
+    let failed = if job.from_flac {
+        MeetingStatus::Done
+    } else {
+        MeetingStatus::Failed
+    };
     let run = move |token: &crate::pipeline::CancelToken| {
         let emit = |e: JobEvent| {
             if let Some(f) = &on_event {
@@ -1174,7 +1200,8 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
                 meeting_id: job.meeting,
             }),
             Err(CoreError::Cancelled) => {
-                // The live transcript stays; the WAVs stay for a later run.
+                // The live transcript stays; the WAVs stay for a later run
+                // (decoded from the FLAC, they went with the job).
                 let _ = store.set_meeting_status(job.meeting, MeetingStatus::Done);
                 emit(JobEvent::Cancelled {
                     job_id: job.job_id.clone(),
@@ -1182,7 +1209,7 @@ pub(crate) fn submit_post_pass(ctx: &LiveContext, job: PostPassJob, front: bool)
                 });
             }
             Err(e) => {
-                let _ = store.set_meeting_status(job.meeting, MeetingStatus::Failed);
+                let _ = store.set_meeting_status(job.meeting, failed);
                 emit(JobEvent::Error {
                     job_id: job.job_id.clone(),
                     meeting_id: Some(job.meeting),
@@ -1229,13 +1256,17 @@ struct EventLoop {
 }
 
 /// The meeting's live run among its runs (in creation order): the latest of
-/// kind `live` that is not a copy Restore made of one (a restored run has
-/// `engine_info.echo.restored_from`, holds no live utterances and must not
-/// stand in for the recording in a re-run, crash recovery or a snapshot).
+/// kind `live` that is not a copy made of one, by Restore
+/// (`engine_info.echo.restored_from`) or by adding or removing punctuation
+/// (`engine_info.punctuation.rebuilt_from`): a copy holds no live utterances
+/// and must not stand in for the recording in a re-run, crash recovery or a
+/// snapshot.
 pub(crate) fn live_run_of(runs: &[TranscriptRun]) -> Option<&TranscriptRun> {
-    runs.iter()
-        .rev()
-        .find(|r| r.kind == RunKind::Live && r.engine_info["echo"]["restored_from"].is_null())
+    runs.iter().rev().find(|r| {
+        r.kind == RunKind::Live
+            && r.engine_info["echo"]["restored_from"].is_null()
+            && r.engine_info["punctuation"]["rebuilt_from"].is_null()
+    })
 }
 
 /// Three decimals for `engine_info`.

@@ -63,9 +63,15 @@ pub const SETUP_LATER: &str = "setup.later";
 pub const ENGINE_LOW_VRAM: &str = "engine.low_vram";
 /// Decoder lookahead of file jobs and the post-pass, no UI (docs/04 section
 /// 5): "" or `model` = the ASR model's own value, `low` = none (the runtime
-/// default, the low-latency setting live keeps), a number = that many 80 ms
-/// frames for every model ([`file_lookahead`]).
+/// default, 1 frame), a number = that many 80 ms frames for every model
+/// ([`file_lookahead`]).
 pub const ENGINE_FILE_LOOKAHEAD: &str = "engine.file_lookahead";
+/// Decoder lookahead of the live server, no UI (docs/plans/16 section 5):
+/// "" or `model` = the ASR model's own `live_right_context` (6 for both
+/// Nemotron models since 0.1.0-beta.5), `low` = none (the runtime default,
+/// 1 frame), a number = that many 80 ms frames where the model was trained
+/// for it ([`live_lookahead`], [`crate::models::live_right_context`]).
+pub const ENGINE_LIVE_LOOKAHEAD: &str = "engine.live_lookahead";
 /// Diarizer preset of file jobs and the post-pass, no UI (docs/04 section
 /// 5): "" or `model` = the diarizer's own value, `streaming` = none (the
 /// runtime default, the setting live keeps), any other text = that preset
@@ -80,9 +86,22 @@ pub const PLAYBACK_VOLUME: &str = "playback.volume";
 /// (from the waveform peaks, at most +24 dB, with a limiter); the stored
 /// audio does not change.
 pub const PLAYBACK_NORMALIZE: &str = "playback.normalize";
+/// Punctuation of the post-pass, imports, Restore and rebuilds (plan 16
+/// section 3.8): `auto` (when a punctuation model is selected, installed and
+/// covers the run's language) or `off` ([`crate::punct::setting`]).
+pub const TRANSCRIPT_PUNCTUATION: &str = "transcript.punctuation";
+/// ONNX Runtime intra-op threads of the punctuation model, no UI; clamped
+/// to 1 to the machine's cores ([`crate::punct::threads`]).
+pub const TRANSCRIPT_PUNCTUATION_THREADS: &str = "transcript.punctuation_threads";
+/// Repeated-token loops (the decoder's bursts of one token) collapse to one
+/// word in the post-pass, imports, Restore and rebuilds (plan 16 section
+/// 12.3): `on` or `off`, no UI ([`collapse_loops`],
+/// [`crate::transcript::loops`]).
+pub const TRANSCRIPT_COLLAPSE_LOOPS: &str = "transcript.collapse_loops";
 
 /// Every known key with its default. Selections (`selected_engine`,
-/// `selected_model.asr`, `selected_model.diarizer`) default to "" (none;
+/// `selected_model.asr`, `selected_model.diarizer`,
+/// `selected_model.punctuation`) default to "" (none;
 /// the model scan picks the recommended files).
 pub const DEFAULTS: &[(&str, &str)] = &[
     (AUDIO_RETENTION_DAYS, "30"),
@@ -95,6 +114,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("selected_engine", ""),
     ("selected_model.asr", ""),
     ("selected_model.diarizer", ""),
+    ("selected_model.punctuation", ""),
     (RECORD_MIC_DEVICE, ""),
     (RECORD_LOOPBACK_DEVICE, ""),
     (RECORD_DIARIZE_MIC, "false"),
@@ -107,11 +127,15 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (ENGINE_IDLE_MINUTES, "10"),
     (ENGINE_LOW_VRAM, "false"),
     (ENGINE_FILE_LOOKAHEAD, ""),
+    (ENGINE_LIVE_LOOKAHEAD, ""),
     (ENGINE_FILE_DIAR_PRESET, ""),
     (SETUP_LATER, "false"),
     (SETUP_LANGUAGE_SEEDED, "false"),
     (PLAYBACK_VOLUME, "1.0"),
     (PLAYBACK_NORMALIZE, "true"),
+    (TRANSCRIPT_PUNCTUATION, "auto"),
+    (TRANSCRIPT_PUNCTUATION_THREADS, "4"),
+    (TRANSCRIPT_COLLAPSE_LOOPS, "on"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -219,6 +243,36 @@ pub fn file_lookahead(settings: &Settings) -> FileLookahead {
     }
 }
 
+/// The `engine.live_lookahead` setting (docs/plans/16 section 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveLookahead {
+    /// The ASR model's `live_right_context` (manifest entry or sidecar).
+    Model,
+    /// No flag: the runtime default (1 frame, 160 ms).
+    Low,
+    /// This value for every model that was trained for it; another model
+    /// keeps its own ([`crate::models::live_right_context`]).
+    Frames(u32),
+    /// Text that is none of the above, kept for the log line; read as
+    /// [`Self::Model`].
+    Unreadable(String),
+}
+
+/// `engine.live_lookahead`: `""` or `model` (any case), `low` (any case), a
+/// non-negative integer, else [`LiveLookahead::Unreadable`] (`-1`, `high`).
+pub fn live_lookahead(settings: &Settings) -> LiveLookahead {
+    let v = get(settings, ENGINE_LIVE_LOOKAHEAD).trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("model") {
+        LiveLookahead::Model
+    } else if v.eq_ignore_ascii_case("low") {
+        LiveLookahead::Low
+    } else if let Ok(n) = v.parse::<u32>() {
+        LiveLookahead::Frames(n)
+    } else {
+        LiveLookahead::Unreadable(v.to_owned())
+    }
+}
+
 /// The `engine.file_diar_preset` setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileDiarPreset {
@@ -278,6 +332,12 @@ pub fn default_language(settings: &Settings) -> String {
     }
 }
 
+/// `transcript.collapse_loops`: on unless it reads as false (`off`, `false`,
+/// `no`, `0`); anything unreadable is the default, on.
+pub fn collapse_loops(settings: &Settings) -> bool {
+    get_bool(settings, TRANSCRIPT_COLLAPSE_LOOPS)
+}
+
 /// The TypeScript module with [`DEFAULTS`]
 /// (`apps/desktop/src/lib/generated/settingDefaults.ts`).
 pub fn typescript_module() -> String {
@@ -323,6 +383,10 @@ mod tests {
         assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
         assert!(get_bool(&s, PLAYBACK_NORMALIZE));
         assert_eq!(get(&s, PLAYBACK_VOLUME), "1.0");
+        // Punctuation: on when a model is installed, 4 threads, no selection.
+        assert_eq!(get(&s, TRANSCRIPT_PUNCTUATION), "auto");
+        assert_eq!(get_u64(&s, TRANSCRIPT_PUNCTUATION_THREADS), 4);
+        assert_eq!(get(&s, &selection_key(ModelRole::Punctuation)), "");
         // Echo handling: on detection, at 0.5; clamped, unreadable is 0.5.
         assert_eq!(
             (echo_mode(&s), echo_gate_threshold(&s)),
@@ -401,6 +465,39 @@ mod tests {
         assert_eq!(six.resolve(Some(13)), Some(6));
         assert_eq!(six.resolve(None), Some(6));
         assert_eq!(read(Some("0")).resolve(Some(13)), Some(0));
+    }
+
+    #[test]
+    fn live_lookahead_forms() {
+        let store = MemoryStore::new();
+        let read = |v: Option<&str>| {
+            match v {
+                Some(v) => store.set_setting(ENGINE_LIVE_LOOKAHEAD, v).unwrap(),
+                None => store.remove_setting(ENGINE_LIVE_LOOKAHEAD).unwrap(),
+            }
+            live_lookahead(&effective(&store).unwrap())
+        };
+        // The default and `model`: the model's own value.
+        assert_eq!(default_of(ENGINE_LIVE_LOOKAHEAD), Some(""));
+        for v in [None, Some(""), Some("model"), Some(" MODEL ")] {
+            assert_eq!(read(v), LiveLookahead::Model, "{v:?}");
+        }
+        // `low`: no flag.
+        assert_eq!(read(Some("Low")), LiveLookahead::Low);
+        // A number, trimmed; 0 is a value (80 ms), not "unset".
+        assert_eq!(read(Some(" 6 ")), LiveLookahead::Frames(6));
+        assert_eq!(read(Some("0")), LiveLookahead::Frames(0));
+        assert_eq!(read(Some("13")), LiveLookahead::Frames(13));
+        // Anything else is kept for the log line and read as the model's.
+        for v in ["-1", "high", "6.5", "6 frames"] {
+            assert_eq!(read(Some(v)), LiveLookahead::Unreadable(v.into()), "{v}");
+        }
+        // The file lookahead is a separate key.
+        store.set_setting(ENGINE_LIVE_LOOKAHEAD, "6").unwrap();
+        assert_eq!(
+            file_lookahead(&effective(&store).unwrap()),
+            FileLookahead::Model
+        );
     }
 
     #[test]

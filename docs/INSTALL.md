@@ -1,11 +1,11 @@
 # Installing Diarist
 
-Version 0.1.0-beta.4 (a beta pre-release). For which GPU and which models, see "Choosing your package and
+Version 0.1.0-beta.5 (a beta pre-release). For which GPU and which models, see "Choosing your package and
 models" in the [README](../README.md#choosing-your-package-and-models).
 
 ## 1. Install
 
-1. Download `Diarist_0.1.0-beta.4_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.5_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases).
 2. Run it. Windows SmartScreen warns because the installer is not code-signed
    yet: choose "More info", then "Run anyway". It installs for your user only,
@@ -32,10 +32,11 @@ The setup screen checks:
   NVIDIA card and a desktop CPU only; the CPU runtime transcribes at about 5
   times real time ([KNOWN-ISSUES.md](KNOWN-ISSUES.md)).
 - **Disk**: free space where the data folder is. The defaults need about
-  1.1 GB while downloading and 1 GB after.
+  1.3 GB while downloading and 1.2 GB after.
 
 Then press **Install engine** (98 MB) and **Install recommended models**
-(770 MB: the speaker model and the English speech model). Each item shows its
+(1.0 GB: the speaker model, the English speech model and the punctuation
+model, which is seven files in one folder). Each item shows its
 progress. An interrupted download resumes where it stopped: press **Retry**,
 or install again later. Every file is checked against its published SHA-256
 before it is used.
@@ -55,29 +56,40 @@ folder it goes to, with **Retry**, **Copy link** and **Open folder**;
 1. Copy its link and download it with a browser.
 2. Press Open folder on its row and move the downloaded file there (any
    subfolder of `models\` works for models; for the runtime, put the zip
-   itself into `engine\`).
+   itself into `engine\`). The punctuation model's files go into the one
+   folder its row names, `tokenizer.json` and the licence files at its top
+   and `model_quantized.onnx` in its `onnx` subfolder.
 3. Press **Check again** (setup screen) or **Refresh** (Settings). The app
    checks the hash, extracts a runtime zip, and marks the item installed.
 
 ### Firewalls
 
 Per-app firewalls such as simplewall ask for permission the first time each
-program connects. Two different programs do the downloading:
+program connects. One program does all the downloading, `diarist.exe` (up to
+0.1.0-beta.4 the models came through Windows' `curl.exe`, started by the
+engine; since 0.1.0-beta.5 Diarist fetches them itself):
 
-| Download | Program | Hosts it connects to (observed) |
+| Download | Program | Hosts it connects to |
 |---|---|---|
 | Speech engine (runtime zip) | `diarist.exe` | `github.com`, then GitHub's download servers (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`) |
-| Models | `C:\Windows\System32\curl.exe`, started by the engine's `nemo-speech.exe` | `huggingface.co`, then its download servers (`*.hf.co`, for example `us.aws.cdn.hf.co`) |
+| Models | `diarist.exe` | `huggingface.co`, then its download servers (`*.hf.co`, for example `us.aws.cdn.hf.co`); for files Diarist hosts on its own releases page, `github.com` and GitHub's download servers as above |
 | Check for newer runtime | `diarist.exe` | `api.github.com` |
-| Check for updates | `diarist.exe` | `github.com` |
+| Check for updates | `diarist.exe` | `raw.githubusercontent.com` (the file `ebt55/diarist/main/updater/latest.json`); installing the update then fetches the installer from `github.com` and GitHub's download servers |
 
-If the firewall prompt was missed or denied, allow both programs and press
-Retry; or fetch the files by hand as above. Diagnostics, "Why isn't it
-working?", names the program when a download failed for a network reason.
+If the firewall prompt was missed or denied, allow `diarist.exe` and press
+Retry; a partial download resumes. Or fetch the files by hand as above.
+Diagnostics, "Why isn't it working?", names the program and the hosts when a
+download failed for a network reason.
 
-Some networks block certificate revocation checks. Windows' `curl.exe` then
-refuses the connection (`CRYPT_E_REVOCATION_OFFLINE`); fetching the model by
-hand always works.
+Some networks block certificate revocation checks. Up to 0.1.0-beta.4,
+Windows' `curl.exe` then refused the model downloads
+(`CRYPT_E_REVOCATION_OFFLINE`). Diarist's own downloader checks each
+server's certificate against the Windows certificate store: it refuses a
+server certificate that Windows knows to be revoked; a revocation server
+that cannot be reached no longer stops a download. Only the server's own
+certificate is checked for revocation, not the certificates that issued it.
+Every download is https only, redirects included. Fetching a file by hand
+always works.
 
 ### Offline machines
 

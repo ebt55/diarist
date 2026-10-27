@@ -2,9 +2,10 @@
 //! the blocking pool and map errors to strings. Argument names are
 //! snake_case on the wire, matching `docs/plans/03-phase2-desktop-ui.md`.
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use diarist_core::audio::{self, ChainDecoder};
@@ -15,6 +16,7 @@ use diarist_core::gpu;
 use diarist_core::models::releases::{self, RuntimeRelease};
 use diarist_core::models::{self, legacy, relocate, DataPaths, Manifest};
 use diarist_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
+use diarist_core::punct::{self, PunctReason, PunctReport, PunctSource, RebuildReport, RebuildWhy};
 use diarist_core::retention::{self, RetentionPlan, RetentionReport};
 use diarist_core::settings;
 use diarist_core::store::{RunStore, Store, StoreError};
@@ -28,6 +30,7 @@ use diarist_core::views::{
     StartupReport, UpdateCheck, Waveform,
 };
 use diarist_core::CoreError;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -209,7 +212,7 @@ fn run_import(
             ""
         }
     );
-    let mut opts = ImportOptions::new(&paths.root, &settings);
+    let mut opts = ImportOptions::new(paths, &settings);
     opts.language = language;
     opts.diarize_runner = Some(built.diarize_runner);
     let started = Instant::now();
@@ -354,6 +357,9 @@ pub async fn delete_meeting(
     if let Some(why) = crate::live::delete_blocker(&app, id) {
         return Err(why.into());
     }
+    if punct_job_of(&app, id) {
+        return Err(PUNCT_DELETE_BLOCKER.into());
+    }
     with_store(&store, move |s| s.delete_meeting(id)).await?;
     log::info!("deleted meeting {id}");
     Ok(())
@@ -385,13 +391,19 @@ pub async fn echo_dropped(
 }
 
 /// Restore: the words the echo gate removed from `run_id` (the meeting's
-/// current run) go back into "me" as a new current run; the old run stays
+/// current run) go back into "me" as a new current run, punctuated again
+/// with the selected punctuation model; the old run stays
 /// (`diarist_core::live::restore_echo_dropped`). Returns the new run.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn restore_echo_dropped(store: State<'_, AppStore>, run_id: RunId) -> CmdResult<RunId> {
+pub async fn restore_echo_dropped(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    run_id: RunId,
+) -> CmdResult<RunId> {
     let store = Arc::clone(&store.0);
+    let punct = diarist_core::punct::PunctSource::Data(paths.paths.clone());
     blocking(move || {
-        diarist_core::live::restore_echo_dropped(store.as_ref(), run_id)
+        diarist_core::live::restore_echo_dropped(store.as_ref(), &punct, run_id)
             .map(|r| r.run)
             .map_err(user_error)
     })
@@ -821,10 +833,13 @@ fn recommended_backend_now() -> &'static str {
     gpu::recommended_backend(gpu::gpu_info(0).as_ref(), &gpu::adapters())
 }
 
-/// Fetches a manifest model and verifies it, then rescans. Shipped models go
-/// through the selected runtime's `nemo-speech pull` (its downloader is
-/// System32 `curl.exe`); `models.user.json` entries are downloaded from their
-/// URL directly. Returns the file.
+/// Fetches a manifest model and verifies it, then rescans. Every entry goes
+/// through our own downloader (`models::fetch_entry`: every file of a
+/// multi-file entry, the others first and the primary file last, each with
+/// resume, size and SHA-256 and the `.sha256` cache) into the manifest's
+/// layout (`<repo>\<revision>\<file>`, where `nemo-speech pull` put files
+/// before 0.1.0-beta.5, so those are found; the entry's `dir`; `user\` for
+/// `models.user.json` entries). No engine is needed. Returns the file.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn pull_model(
     app: AppHandle,
@@ -856,42 +871,16 @@ pub async fn pull_model(
             )
         };
         progress(0, false, None);
-        let mut last_done = u64::MAX;
-        let mut tick = |done: u64| {
-            if done != last_done {
-                last_done = done;
+        // The downloader reports every 256 KiB; the UI needs four a second.
+        let mut last = Instant::now() - Duration::from_secs(1);
+        // fetch_entry fetches every file of an entry, the other files of a
+        // multi-file entry (a punctuation model) first and the primary last.
+        let result = models::fetch_entry(&entry, &data_paths, &mut |done, _| {
+            if last.elapsed() >= Duration::from_millis(250) {
+                last = Instant::now();
                 progress(done, false, None);
             }
-        };
-        let (process, result) = if entry.direct {
-            let dest = entry.dest_dir(&data_paths.models()).join(&entry.file);
-            let r =
-                models::download_file(&entry.url, &dest, &entry.sha256, total, &mut |d, _| tick(d))
-                    .map(|()| dest);
-            ("diarist.exe", r)
-        } else {
-            let engine = match models::selected_file(s, ModelRole::Engine)? {
-                Some(e) => e,
-                None => {
-                    models::scan(&data_paths, s, &manifest)?;
-                    models::selected_file(s, ModelRole::Engine)?.ok_or_else(|| {
-                        CoreError::Models(
-                            "the models are fetched by the speech engine, which is not installed; \
-                             install the engine first"
-                                .into(),
-                        )
-                    })?
-                }
-            };
-            let r = models::pull_with_progress(
-                &data_paths.absolute(&engine.path),
-                &data_paths.models(),
-                &entry,
-                &mut tick,
-            )
-            .map(|p| p.path);
-            ("curl.exe (started by nemo-speech.exe)", r)
-        };
+        });
         let result = result.and_then(|p| {
             models::scan(&data_paths, s, &manifest)?;
             Ok(p)
@@ -909,7 +898,7 @@ pub async fn pull_model(
         note_download(
             &app,
             &entry.name,
-            process,
+            "diarist.exe",
             &result.as_ref().map(|_| ()).map_err(|e| e.to_string()),
         );
         result.map(|p| p.display().to_string())
@@ -1651,6 +1640,7 @@ fn update_blocker(app: &AppHandle) -> Option<String> {
         .map(|id| match crate::live::post_pass_title(app, &id) {
             Some(t) if !t.is_empty() => format!("Finalizing \"{t}\""),
             Some(_) => "Finalizing a recording".to_owned(),
+            None if is_punct_job(app, &id) => "A punctuation job".to_owned(),
             None => "An import".to_owned(),
         });
     update_busy_message(running.as_deref(), jobs.queued().len())
@@ -1755,14 +1745,12 @@ pub async fn startup_report(startup: State<'_, Startup>) -> CmdResult<StartupRep
 
 // ---- "Why isn't it working?" ------------------------------------------------------------
 
-/// The download hosts a firewall must allow, by the process that connects.
-fn hosts_for(process: &str) -> &'static str {
-    if process.starts_with("curl") {
-        "huggingface.co and its download servers (*.hf.co, for example us.aws.cdn.hf.co)"
-    } else {
-        "github.com, objects.githubusercontent.com and huggingface.co"
-    }
-}
+/// The download hosts a firewall must allow. Since 0.1.0-beta.5 every
+/// download is `diarist.exe`'s own (the runtime's `curl.exe` no longer
+/// fetches models).
+const DOWNLOAD_HOSTS: &str = "github.com and its download servers \
+     (objects.githubusercontent.com, release-assets.githubusercontent.com), huggingface.co \
+     and its download servers (*.hf.co)";
 
 /// An error that looks like the network, a firewall or a proxy, not the file.
 fn connection_error(e: &str) -> bool {
@@ -2008,6 +1996,8 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
         echo_mode,
         last_recording_echo(store).as_ref(),
     ));
+    // 8d. Punctuation: the model's ONNX Runtime library and its VC++ runtime.
+    out.push(diagnostics::punctuation_check(paths, store));
 
     // 9. Live server reachable when it should be.
     let live = crate::live::status(app);
@@ -2063,7 +2053,7 @@ fn health_checks(app: &AppHandle, store: &dyn RunStore, paths: &DataPaths) -> Ve
                 "Downloading {what} failed: {err}. If a firewall such as simplewall asked about \
                  {process}, allow it (it connects to {}) and press Retry; or use Copy link to \
                  fetch the file with a browser and put it into the folder Open folder shows.",
-                hosts_for(&process)
+                DOWNLOAD_HOSTS
             ),
         )
         .fix("setup", "Open downloads"),
@@ -2121,9 +2111,553 @@ pub async fn open_microphone_privacy() -> CmdResult<()> {
     )
 }
 
+// ---- Punctuation (plan 16 sections 3.8, 3.9 and 4.3) ------------------------------------
+//
+// "Add punctuation", "Remove punctuation" and the bulk action run as jobs on
+// the job queue (CPU only, seconds per meeting; they wait while a recording
+// holds the queue). The command resolves when its job is done, with what it
+// did; `punctuation:progress` reports meetings done meanwhile. The result
+// types are mirrored by hand in `src/lib/punctuation.ts`.
+
+/// Punctuation jobs queued or running, with the meeting each works on
+/// (`None`: the bulk action), so the update and delete checks can name them.
+#[derive(Default)]
+pub(crate) struct PunctJobs(pub(crate) Mutex<HashMap<JobId, Option<MeetingId>>>);
+
+fn is_punct_job(app: &AppHandle, job: &JobId) -> bool {
+    app.state::<PunctJobs>()
+        .inner()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(job)
+}
+
+/// A punctuation job is queued or running for `meeting`.
+fn punct_job_of(app: &AppHandle, meeting: MeetingId) -> bool {
+    app.state::<PunctJobs>()
+        .inner()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|m| *m == Some(meeting))
+}
+
+/// Why `delete_meeting` waits while a punctuation job works on the meeting.
+const PUNCT_DELETE_BLOCKER: &str =
+    "punctuation is being added or removed; wait a moment, or cancel it in the job list";
+
+/// A punctuation job that panicked (the queue survives it).
+const PUNCT_PANIC: &str = "Punctuation stopped unexpectedly; the app log has the details.";
+
+/// `punctuation:progress`: meetings done of a punctuation job.
+pub(crate) const PUNCT_PROGRESS: &str = "punctuation:progress";
+
+#[derive(Debug, Clone, Serialize)]
+struct PunctProgress {
+    job_id: JobId,
+    done: usize,
+    total: usize,
+}
+
+fn emit_punct_progress(app: &AppHandle, job_id: &JobId, done: usize, total: usize) {
+    let p = PunctProgress {
+        job_id: job_id.clone(),
+        done,
+        total,
+    };
+    if let Err(e) = app.emit(PUNCT_PROGRESS, p) {
+        log::warn!("emit {PUNCT_PROGRESS} failed: {e}");
+    }
+}
+
+/// What Add or Remove punctuation did to one meeting.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PunctOutcome {
+    pub meeting_id: MeetingId,
+    /// The new current run; `None` when nothing would have changed (no run
+    /// was made), after an error and when cancelled.
+    pub run: Option<RunId>,
+    /// `engine_info.punctuation` of the new run, or what it would have been.
+    pub punctuation: Option<PunctReport>,
+    /// Why the meeting was left as it was (it records, it is being
+    /// finalized, it changed meanwhile), as the user should read it.
+    pub error: Option<String>,
+    /// The meeting's transcript changed while the rebuild ran (an edit, a
+    /// Restore, another rebuild finished first), so nothing was switched
+    /// (`punct::rebuild::is_meeting_changed`): worth another try.
+    pub changed: bool,
+    pub cancelled: bool,
+}
+
+/// What a rebuild that lost a race to another change of the meeting says.
+const PUNCT_CHANGED_ADD: &str =
+    "This meeting changed while punctuation was being added. Try again.";
+const PUNCT_CHANGED_REMOVE: &str =
+    "This meeting changed while punctuation was being removed. Try again.";
+
+impl PunctOutcome {
+    fn of(r: RebuildReport) -> Self {
+        Self {
+            meeting_id: r.meeting,
+            run: r.run,
+            punctuation: Some(r.punctuation),
+            error: None,
+            changed: false,
+            cancelled: false,
+        }
+    }
+
+    fn failed(meeting_id: MeetingId, error: String) -> Self {
+        Self {
+            meeting_id,
+            run: None,
+            punctuation: None,
+            error: Some(error),
+            changed: false,
+            cancelled: false,
+        }
+    }
+
+    /// The meeting changed while the rebuild ran ([`PunctOutcome::changed`]).
+    fn changed(meeting_id: MeetingId, why: RebuildWhy) -> Self {
+        let text = match why {
+            RebuildWhy::Add => PUNCT_CHANGED_ADD,
+            RebuildWhy::Remove => PUNCT_CHANGED_REMOVE,
+        };
+        Self {
+            changed: true,
+            ..Self::failed(meeting_id, text.to_owned())
+        }
+    }
+
+    fn cancelled(meeting_id: MeetingId) -> Self {
+        Self {
+            cancelled: true,
+            error: None,
+            ..Self::failed(meeting_id, String::new())
+        }
+    }
+}
+
+/// What the bulk action did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BackfillOutcome {
+    /// Meetings it set out to punctuate.
+    pub total: usize,
+    /// One per meeting it got to, in order.
+    pub outcomes: Vec<PunctOutcome>,
+    /// No punctuator could be loaded (no model, the setting off, ONNX
+    /// Runtime missing, a broken model): nothing was done.
+    pub unavailable: Option<PunctReport>,
+    /// The model failed beyond use part way (the session is gone): the
+    /// meetings after the last outcome were left as they were.
+    pub stopped: Option<PunctReport>,
+    pub cancelled: bool,
+}
+
+/// Runs `body` as a job on the queue (after the jobs queued before it; it
+/// waits while a recording holds the queue) and returns its result, or
+/// `dequeued` when the job was cancelled before it ran.
+async fn punct_job<T, F>(
+    app: AppHandle,
+    job_id: JobId,
+    meeting: Option<MeetingId>,
+    dequeued: T,
+    body: F,
+) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&CancelToken) -> CmdResult<T> + Send + 'static,
+{
+    let jobs = Arc::clone(&app.state::<Jobs>().inner().0);
+    let tracked = app.state::<PunctJobs>().inner();
+    tracked
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(job_id.clone(), meeting);
+    let (tx, rx) = std::sync::mpsc::channel::<CmdResult<T>>();
+    jobs.submit(job_id.clone(), move |token| {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(token)))
+            .unwrap_or_else(|_| Err(PUNCT_PANIC.to_owned()));
+        let _ = tx.send(r);
+    });
+    // A job taken off the queue before it ran drops its sender unsent.
+    let result = blocking(move || rx.recv().unwrap_or(Ok(dequeued))).await;
+    tracked
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&job_id);
+    result
+}
+
+/// "Add punctuation" (with `remove`: "Remove punctuation") on a finished
+/// meeting, as a job: a new current run from the speech model's text,
+/// punctuated with the selected model (or not), the earlier runs kept
+/// (`punct::rebuild_run`). `job_id` comes from the UI, so the job list knows
+/// the job before it starts. Resolves when the job is done.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn punctuate_meeting(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    meeting_id: MeetingId,
+    remove: bool,
+    job_id: Option<JobId>,
+) -> CmdResult<PunctOutcome> {
+    let job_id = job_id.unwrap_or_default();
+    let store = Arc::clone(&store.0);
+    let source = PunctSource::Data(paths.paths.clone());
+    let why = if remove {
+        RebuildWhy::Remove
+    } else {
+        RebuildWhy::Add
+    };
+    log::info!("punctuation {why:?} queued for meeting {meeting_id} (job {job_id})");
+    let (a, id) = (app.clone(), job_id.clone());
+    let body = move |token: &CancelToken| -> CmdResult<PunctOutcome> {
+        emit_punct_progress(&a, &id, 0, 1);
+        let started = Instant::now();
+        let r = punct::rebuild_run(store.as_ref(), &source, meeting_id, why, &|| {
+            token.is_cancelled()
+        });
+        emit_punct_progress(&a, &id, 1, 1);
+        match r {
+            Ok(rep) => {
+                log::info!(
+                    "punctuation {why:?} for meeting {meeting_id}: {} ({}) in {:.1} s",
+                    rep.punctuation.reason.as_str(),
+                    rep.run
+                        .map_or("no new run".to_owned(), |r| format!("run {r}")),
+                    started.elapsed().as_secs_f64()
+                );
+                Ok(PunctOutcome::of(rep))
+            }
+            Err(CoreError::Cancelled) => Ok(PunctOutcome::cancelled(meeting_id)),
+            Err(e) if punct::rebuild::is_meeting_changed(&e) => {
+                log::info!(
+                    "punctuation {why:?} for meeting {meeting_id}: the meeting changed meanwhile"
+                );
+                Ok(PunctOutcome::changed(meeting_id, why))
+            }
+            Err(e) => {
+                log::warn!("punctuation {why:?} for meeting {meeting_id} failed: {e}");
+                Err(user_error(e))
+            }
+        }
+    };
+    punct_job(
+        app,
+        job_id,
+        Some(meeting_id),
+        PunctOutcome::cancelled(meeting_id),
+        body,
+    )
+    .await
+}
+
+/// The bulk action, "Add punctuation to N older meetings": every finished
+/// meeting [`backfill_candidates`] lists, newest first, in one job with one
+/// ONNX Runtime session (`punct::rebuild_run_with`). A meeting that cannot
+/// be rebuilt (it records, it changed meanwhile) is skipped with its
+/// reason. Resolves when the job is done.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn punctuation_backfill(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    job_id: Option<JobId>,
+) -> CmdResult<BackfillOutcome> {
+    let job_id = job_id.unwrap_or_default();
+    let store = Arc::clone(&store.0);
+    let data_paths = paths.paths.clone();
+    log::info!("punctuation for older meetings queued (job {job_id})");
+    let (a, id) = (app.clone(), job_id.clone());
+    let body = move |token: &CancelToken| -> CmdResult<BackfillOutcome> {
+        let s = store.as_ref();
+        let cancel = || token.is_cancelled();
+        let manifest = Manifest::load(&data_paths.root).unwrap_or_else(|_| Manifest::builtin());
+        let model = punct_model_name(s, &manifest);
+        let (list, _) = backfill_candidates(s, model.as_deref()).map_err(user_error)?;
+        let total = list.len();
+        let mut out = BackfillOutcome {
+            total,
+            ..BackfillOutcome::default()
+        };
+        emit_punct_progress(&a, &id, 0, total);
+        if total == 0 {
+            return Ok(out);
+        }
+        // One session for the whole batch, dropped with `loaded` at the end.
+        let mut loaded = PunctSource::Data(data_paths.clone()).load(s);
+        if let Err(report) = &loaded {
+            log::info!(
+                "punctuation for older meetings: nothing to punctuate with ({})",
+                report.reason.as_str()
+            );
+            out.unavailable = Some((**report).clone());
+            return Ok(out);
+        }
+        let started = Instant::now();
+        for (i, m) in list.into_iter().enumerate() {
+            if cancel() {
+                out.cancelled = true;
+                break;
+            }
+            // A meeting that changed while it ran (an edit finished first)
+            // gets one more try.
+            let mut r = punct::rebuild_run_with(s, &mut loaded, m, RebuildWhy::Add, &cancel);
+            if r.as_ref().is_err_and(punct::rebuild::is_meeting_changed) && loaded.is_ok() {
+                r = punct::rebuild_run_with(s, &mut loaded, m, RebuildWhy::Add, &cancel);
+            }
+            match r {
+                Ok(rep) => out.outcomes.push(PunctOutcome::of(rep)),
+                Err(CoreError::Cancelled) => {
+                    out.cancelled = true;
+                    break;
+                }
+                Err(e) if punct::rebuild::is_meeting_changed(&e) => {
+                    log::info!("punctuation for meeting {m} skipped: it changed meanwhile, twice");
+                    out.outcomes.push(PunctOutcome::changed(m, RebuildWhy::Add));
+                }
+                Err(e) => {
+                    log::warn!("punctuation for meeting {m} skipped: {e}");
+                    out.outcomes.push(PunctOutcome::failed(m, user_error(e)));
+                }
+            }
+            emit_punct_progress(&a, &id, i + 1, total);
+            // The model failed beyond use (a panic drops the session): the
+            // rest would only say so one by one.
+            if let Err(report) = &loaded {
+                log::warn!(
+                    "punctuation for older meetings stopped: {}",
+                    report.message.as_deref().unwrap_or(report.reason.as_str())
+                );
+                out.stopped = Some((**report).clone());
+                break;
+            }
+        }
+        log::info!(
+            "punctuation for older meetings: {} of {total} got a new run in {:.1} s{}",
+            out.outcomes.iter().filter(|o| o.run.is_some()).count(),
+            started.elapsed().as_secs_f64(),
+            if out.cancelled { " (cancelled)" } else { "" }
+        );
+        Ok(out)
+    };
+    let dequeued = BackfillOutcome {
+        cancelled: true,
+        ..BackfillOutcome::default()
+    };
+    punct_job(app, job_id, None, dequeued, body).await
+}
+
+/// The name `engine_info.punctuation.model` gets with the model a build
+/// would use now (`punct::current`'s choice: the selected punctuation file,
+/// else the recommended one); `None` when none is installed.
+fn punct_model_name(store: &dyn RunStore, manifest: &Manifest) -> Option<String> {
+    let file = match models::selected_file(store, ModelRole::Punctuation) {
+        Ok(Some(f)) => f,
+        _ => {
+            let files = store.list_model_files().ok()?;
+            models::recommended(ModelRole::Punctuation, &files, manifest)?.clone()
+        }
+    };
+    Some(file.manifest_name.unwrap_or(file.display_name))
+}
+
+/// Whether the bulk action should punctuate a finished meeting whose current
+/// run carries `report` (`None`: a run from before punctuation), when a build
+/// now would use the model named `model`. Left alone: a run that is
+/// punctuated; one whose speech model punctuates by itself (a rebuild gives
+/// the same); one the user took the punctuation off by hand; one in a
+/// language the same model was found not to cover.
+fn backfill_wanted(report: Option<&PunctReport>, model: Option<&str>) -> bool {
+    let Some(r) = report else {
+        return true;
+    };
+    if r.applied {
+        return false;
+    }
+    match r.reason {
+        PunctReason::AsrPunctuates => false,
+        PunctReason::Off => r.rebuilt_from.is_none(),
+        PunctReason::Language => r.model.as_deref() != model,
+        _ => true,
+    }
+}
+
+/// The finished meetings the bulk action would punctuate, newest first, and
+/// how many it leaves alone on purpose ([`backfill_wanted`]).
+fn backfill_candidates(
+    store: &dyn RunStore,
+    model: Option<&str>,
+) -> diarist_core::Result<(Vec<MeetingId>, usize)> {
+    let mut wanted = Vec::new();
+    let mut settled = 0;
+    for m in punct::rebuild::meetings_missing_punctuation(store)? {
+        let report = store
+            .get_meeting(m)?
+            .current_run
+            .and_then(|r| PunctReport::of_engine_info(&r.engine_info));
+        if backfill_wanted(report.as_ref(), model) {
+            wanted.push(m);
+        } else {
+            settled += 1;
+        }
+    }
+    Ok((wanted, settled))
+}
+
+/// What Settings shows about punctuation.
+#[derive(Debug, Clone, Serialize)]
+pub struct PunctStatus {
+    /// The Diagnostics row "Punctuation runtime": the library, its Visual
+    /// C++ runtime, and a restart needed after a change of model.
+    pub check: HealthCheck,
+    /// Finished meetings the bulk action would punctuate.
+    pub candidates: usize,
+    /// Finished meetings it leaves alone on purpose: the speech model
+    /// punctuates them, the model does not cover their language, or the
+    /// punctuation was removed by hand.
+    pub settled: usize,
+}
+
+#[tauri::command]
+pub async fn punctuation_status(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<PunctStatus> {
+    let data_paths = paths.paths.clone();
+    with_store(&store, move |s| -> diarist_core::Result<PunctStatus> {
+        let manifest = Manifest::load(&data_paths.root).unwrap_or_else(|_| Manifest::builtin());
+        let model = punct_model_name(s, &manifest);
+        let (wanted, settled) = backfill_candidates(s, model.as_deref())?;
+        Ok(PunctStatus {
+            check: diagnostics::punctuation_check(&data_paths, s),
+            candidates: wanted.len(),
+            settled,
+        })
+    })
+    .await
+}
+
+/// The setting that records, per data root, that the user answered the
+/// "recommended downloads" notice (plan 16 section 4.3).
+pub(crate) const MODELS_NOTICE_KEY: &str = "notice.models_2026_10_shown";
+
+/// One reason the notice gives, with the downloads it offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoticePart {
+    /// `punctuation`; chunk G adds the corrected speech models.
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub items: Vec<DownloadItem>,
+}
+
+/// The "recommended downloads available" notice: shown once per data root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DownloadsNotice {
+    /// The setting the UI sets to `true` when the user answers it.
+    pub key: String,
+    pub parts: Vec<NoticePart>,
+}
+
+/// The notice's content, or `None`: nothing to offer, answered already
+/// (`shown`), or a first run (no engine, speech model or diarizer yet: the
+/// setup screen offers every download). `punctuation_off`: the user turned
+/// punctuation off, so it is not offered.
+fn downloads_notice(
+    manifest: &Manifest,
+    files: &[ModelFile],
+    items: &[DownloadItem],
+    shown: bool,
+    punctuation_off: bool,
+) -> Option<DownloadsNotice> {
+    if shown {
+        return None;
+    }
+    let present = |role: ModelRole| files.iter().any(|f| f.role == role && !f.missing);
+    if !(present(ModelRole::Engine) && present(ModelRole::Asr) && present(ModelRole::Diarizer)) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    // New in 0.1.0-beta.5: punctuation, for upgraders without a punctuation
+    // model (they never see the setup screen; plan 16 section 3.8). The
+    // manifest's punctuation entry, required first.
+    if !punctuation_off && !present(ModelRole::Punctuation) {
+        let mut entries: Vec<_> = manifest
+            .models
+            .iter()
+            .filter(|e| e.role == ModelRole::Punctuation && !e.experimental)
+            .collect();
+        entries.sort_by_key(|e| !e.required);
+        let item = entries.iter().find_map(|e| {
+            items
+                .iter()
+                .find(|i| i.kind == DownloadKind::Model && i.name == e.name && !i.installed)
+        });
+        if let Some(item) = item {
+            parts.push(NoticePart {
+                id: "punctuation".into(),
+                title: "New: punctuation.".into(),
+                text: "Transcripts get punctuation and capitals after Stop and on import; words, \
+                       times and speakers never change."
+                    .into(),
+                items: vec![item.clone()],
+            });
+        }
+    }
+    // Chunk G (plan 16 section 4.3): the corrected speech models, for the
+    // entries the user has installed, go here as one more part.
+    (!parts.is_empty()).then(|| DownloadsNotice {
+        key: MODELS_NOTICE_KEY.into(),
+        parts,
+    })
+}
+
+/// The "recommended downloads available" notice for this data root, or
+/// `None` (see [`downloads_notice`]). Reads the stored files; no scan.
+#[tauri::command]
+pub async fn recommended_downloads_notice(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+) -> CmdResult<Option<DownloadsNotice>> {
+    if paths.demo {
+        return Ok(None);
+    }
+    let data_paths = paths.paths.clone();
+    with_store(
+        &store,
+        move |s| -> diarist_core::Result<Option<DownloadsNotice>> {
+            let stored = settings::effective(s)?;
+            // Answered: no need to list (and hash) the downloads at every launch.
+            if settings::get_bool(&stored, MODELS_NOTICE_KEY) {
+                return Ok(None);
+            }
+            let manifest = Manifest::load(&data_paths.root)?;
+            let files = s.list_model_files()?;
+            let items =
+                models::download_items(&data_paths, &manifest, &files, recommended_backend_now());
+            Ok(downloads_notice(
+                &manifest,
+                &files,
+                &items,
+                settings::get_bool(&stored, MODELS_NOTICE_KEY),
+                punct::setting(s) == punct::PunctSetting::Off,
+            ))
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::update_busy_message;
+    use super::*;
 
     #[test]
     fn update_waits_for_the_queue_and_names_what_runs() {
@@ -2147,5 +2681,145 @@ mod tests {
         assert!(update_busy_message(None, 3)
             .unwrap()
             .starts_with("3 jobs wait in the queue"));
+    }
+
+    fn report(reason: PunctReason) -> PunctReport {
+        PunctReport::not_applied(reason)
+    }
+
+    #[test]
+    fn the_bulk_action_leaves_settled_meetings_alone() {
+        // Runs from before punctuation, and the reasons a rebuild can change.
+        assert!(backfill_wanted(None, Some("punct")));
+        for r in [
+            PunctReason::NoModel,
+            PunctReason::Runtime,
+            PunctReason::Error,
+            PunctReason::Invariant,
+        ] {
+            assert!(backfill_wanted(Some(&report(r)), Some("punct")), "{r:?}");
+        }
+        // Punctuated, or the speech model punctuates by itself.
+        let applied = PunctReport {
+            applied: true,
+            reason: PunctReason::Ok,
+            ..PunctReport::default()
+        };
+        assert!(!backfill_wanted(Some(&applied), Some("punct")));
+        assert!(!backfill_wanted(
+            Some(&report(PunctReason::AsrPunctuates)),
+            Some("punct")
+        ));
+        // Off when it was built: yes; removed by hand: the user's choice stays.
+        assert!(backfill_wanted(Some(&report(PunctReason::Off)), None));
+        let removed = PunctReport {
+            rebuilt_from: Some(RunId(7)),
+            ..report(PunctReason::Off)
+        };
+        assert!(!backfill_wanted(Some(&removed), Some("punct")));
+        // A language the same model does not cover: no; another model: try.
+        let language = PunctReport {
+            model: Some("punct".into()),
+            language: Some("vi".into()),
+            ..report(PunctReason::Language)
+        };
+        assert!(!backfill_wanted(Some(&language), Some("punct")));
+        assert!(backfill_wanted(Some(&language), Some("punct-large")));
+    }
+
+    fn file(id: i64, role: ModelRole, missing: bool) -> ModelFile {
+        ModelFile {
+            id: ModelFileId(id),
+            path: format!("models/f{id}"),
+            role,
+            architecture: None,
+            display_name: format!("f{id}"),
+            quant: None,
+            size_bytes: 1,
+            sha256: None,
+            source: diarist_core::types::ModelSource::Manifest,
+            capabilities: Default::default(),
+            manifest_name: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            missing,
+        }
+    }
+
+    fn item(name: &str, installed: bool) -> DownloadItem {
+        DownloadItem {
+            kind: DownloadKind::Model,
+            name: name.into(),
+            label: format!("{name} label"),
+            size_bytes: 300 << 20,
+            installed,
+            required: true,
+            experimental: false,
+            url: format!("https://example.invalid/{name}"),
+            sha256: "ab".repeat(32),
+            dest: "C:\\data\\models\\x".into(),
+            licence: "Apache-2.0".into(),
+            backend: None,
+            tested: true,
+            files: Vec::new(),
+        }
+    }
+
+    fn manifest_with_punctuation() -> Manifest {
+        let mut m = Manifest::builtin();
+        m.models.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "punct-small",
+                "role": "punctuation",
+                "required": true,
+                "file": "model.onnx",
+                "url": "https://example.invalid/punct-small/model.onnx",
+                "size_bytes": 300u64 << 20,
+                "sha256": "ab".repeat(32),
+            }))
+            .unwrap(),
+        );
+        m
+    }
+
+    #[test]
+    fn the_notice_offers_punctuation_to_upgraders_once() {
+        let m = manifest_with_punctuation();
+        let ready = vec![
+            file(1, ModelRole::Engine, false),
+            file(2, ModelRole::Asr, false),
+            file(3, ModelRole::Diarizer, false),
+        ];
+        let items = vec![item("nemotron-en", true), item("punct-small", false)];
+        let n = downloads_notice(&m, &ready, &items, false, false).unwrap();
+        assert_eq!(n.key, MODELS_NOTICE_KEY);
+        assert_eq!(n.parts.len(), 1);
+        assert_eq!(n.parts[0].id, "punctuation");
+        assert_eq!(n.parts[0].items[0].name, "punct-small");
+        assert!(
+            n.parts[0].text.contains("never change"),
+            "{}",
+            n.parts[0].text
+        );
+        // Once: answered.
+        assert_eq!(downloads_notice(&m, &ready, &items, true, false), None);
+        // A first run: the setup screen offers it.
+        assert_eq!(
+            downloads_notice(&m, &ready[1..], &items, false, false),
+            None
+        );
+        let gone = [ready.clone(), vec![file(4, ModelRole::Asr, true)]].concat();
+        assert!(downloads_notice(&m, &gone, &items, false, false).is_some());
+        // Punctuation off, or a punctuation model already there (any one).
+        assert_eq!(downloads_notice(&m, &ready, &items, false, true), None);
+        let with = [ready.clone(), vec![file(5, ModelRole::Punctuation, false)]].concat();
+        assert_eq!(downloads_notice(&m, &with, &items, false, false), None);
+        // Downloaded already, or no punctuation entry in the manifest yet.
+        let both = vec![item("punct-small", true)];
+        assert_eq!(downloads_notice(&m, &ready, &both, false, false), None);
+        assert_eq!(
+            downloads_notice(&Manifest::builtin(), &ready, &items, false, false),
+            None
+        );
     }
 }

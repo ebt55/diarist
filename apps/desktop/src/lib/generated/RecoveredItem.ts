@@ -13,4 +13,9 @@ was: string,
 /**
  * What recovery did, for the user.
  */
-action: string, };
+action: string, 
+/**
+ * Why recovery left the meeting `failed` as it was (the meeting's
+ * banner shows it); `None` when it did not.
+ */
+error: string | null, };

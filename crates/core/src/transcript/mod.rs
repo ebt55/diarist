@@ -10,7 +10,10 @@
 //! are segmented one channel at a time and their segments ordered by start
 //! time ([`interleave_segments`], [`build_transcript_channels`]), so speech
 //! that overlaps in time stays in readable per-speaker segments instead of
-//! alternating word by word.
+//! alternating word by word. Before segmentation every build collapses the
+//! decoder's repeated-token loops ([`loops`], plan 16 section 12.3).
+
+pub mod loops;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -84,6 +87,21 @@ pub struct TranscriptWord {
     pub speaker: String,
     /// Engine label before smoothing or edits (`words.raw_label`).
     pub raw_label: Option<String>,
+    /// The ASR's text where `text` holds display text that differs from it
+    /// (punctuation, `words.raw_text`); `None` when `text` is the ASR's.
+    pub raw_text: Option<String>,
+    /// v1.5 fusion (`words.margin`): `None` from the engines today; a
+    /// rebuild copies the stored value.
+    pub margin: Option<f32>,
+    /// v1.5 fusion (`words.overlap`); a rebuild copies the stored value.
+    pub overlap: bool,
+}
+
+impl TranscriptWord {
+    /// The ASR's text of the word: `raw_text`, else `text`.
+    pub fn asr_text(&self) -> &str {
+        self.raw_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// Converts engine words (microseconds) of one channel. Words without a
@@ -104,6 +122,9 @@ pub fn words_from_engine(
             confidence: w.conf,
             speaker: w.spk.clone().unwrap_or_else(|| default_label.to_owned()),
             raw_label: w.spk.clone(),
+            raw_text: None,
+            margin: None,
+            overlap: false,
         })
         .collect()
 }
@@ -146,12 +167,30 @@ pub struct SegmentDraft {
     pub words: Range<usize>,
 }
 
-/// True when `text` ends a sentence (`.`, `?`, `!`, `…`, also before closing quotes).
+/// True when `text` ends a sentence (`.`, `?`, `!`, `…`, `。` `？` `！`, the
+/// Devanagari `।` `॥`, the Arabic `؟` `۔`, the Ethiopic `።` `፧` and the Greek
+/// question mark U+037E; also before closing quotes and trailing whitespace).
 pub fn ends_sentence(text: &str) -> bool {
-    let trimmed = text.trim_end_matches(['"', '\'', ')', '”', '’', ']']);
+    let trimmed = text
+        .trim_end()
+        .trim_end_matches(['"', '\'', ')', '”', '’', ']']);
     matches!(
         trimmed.chars().last(),
-        Some('.' | '?' | '!' | '…' | '。' | '？' | '！')
+        Some(
+            '.' | '?'
+                | '!'
+                | '…'
+                | '。'
+                | '？'
+                | '！'
+                | '।'
+                | '॥'
+                | '؟'
+                | '۔'
+                | '።'
+                | '፧'
+                | '\u{037E}'
+        )
     )
 }
 
@@ -283,8 +322,9 @@ impl TranscriptBuilder {
             text: w.text.clone(),
             confidence: w.confidence,
             raw_label: w.raw_label.clone(),
-            margin: None,
-            overlap: false,
+            margin: w.margin,
+            overlap: w.overlap,
+            raw_text: w.raw_text.clone(),
         }));
     }
 }
@@ -341,6 +381,9 @@ mod tests {
             confidence: None,
             speaker: spk.into(),
             raw_label: Some(spk.into()),
+            raw_text: None,
+            margin: None,
+            overlap: false,
         }
     }
 
@@ -403,6 +446,13 @@ mod tests {
         assert_eq!(texts, ["Done. Next item?", "Yes okay"]);
         assert!(ends_sentence("end.\""));
         assert!(!ends_sentence("Dr"));
+        // Script sentence ends (plan 16 section 3.4).
+        for s in ["है।", "॥", "ماذا؟", "ہے۔", "ነው።", "፧", "τι\u{037E}", "好。"]
+        {
+            assert!(ends_sentence(s), "{s}");
+        }
+        assert!(!ends_sentence("،") && !ends_sentence("hello,"));
+        assert!(ends_sentence("done. ") && ends_sentence("ok?\" "));
     }
 
     #[test]

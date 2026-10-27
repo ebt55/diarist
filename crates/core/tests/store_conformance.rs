@@ -50,6 +50,7 @@ const CASES: &[(&str, Case)] = &[
     ("remove_setting", remove_setting),
     ("playback_track_rules", playback_track_rules),
     ("mark_reviewed", mark_reviewed),
+    ("raw_text_round_trip", raw_text_round_trip),
 ];
 
 /// `RunStore` cases, by name.
@@ -96,6 +97,9 @@ const RUN_CASES: &[(&str, RunCase)] = &[
         "echo_dropped_and_gated_materialise",
         echo_dropped_and_gated_materialise,
     ),
+    ("carry_over_identity_by_label", carry_over_identity_by_label),
+    ("run_segments_and_words", run_segments_and_words),
+    ("set_current_run_if_compares", set_current_run_if_compares),
 ];
 
 fn report(name: &str, e: Box<dyn std::any::Any + Send>) -> ! {
@@ -188,6 +192,7 @@ fn sample_transcript() -> NewTranscript {
                 raw_label: Some(format!("raw{spk}")),
                 margin: None,
                 overlap: false,
+                raw_text: None,
             });
         }
     }
@@ -604,10 +609,27 @@ fn audio_tracks(store: &dyn Store) {
             channels: 2,
             duration_ms: Some(6_000),
             size_bytes: Some(96_000),
+            channel_frames: None,
         })
         .unwrap();
+    assert_eq!(track.channel_frames, None);
+    // The playback FLAC of a live meeting keeps each channel's own length.
+    let flac = store
+        .add_audio_track(NewAudioTrack {
+            meeting_id: id,
+            channel: TrackChannel::Playback,
+            path: "audio/U/playback.flac".into(),
+            format: AudioFormat::Flac,
+            sample_rate: 16_000,
+            channels: 2,
+            duration_ms: Some(6_000),
+            size_bytes: Some(50_000),
+            channel_frames: Some(vec![96_000, 95_123]),
+        })
+        .unwrap();
+    assert_eq!(flac.channel_frames, Some(vec![96_000, 95_123]));
     let tracks = store.list_audio_tracks(id).unwrap();
-    assert_eq!(tracks, vec![track]);
+    assert_eq!(tracks, vec![track, flac]);
     assert!(is_not_found(store.list_audio_tracks(MeetingId(424_242))));
     store.delete_meeting(id).unwrap();
     assert!(is_not_found(store.list_audio_tracks(id)));
@@ -697,6 +719,7 @@ fn track(meeting_id: MeetingId, channel: TrackChannel, format: AudioFormat) -> N
         channels: 1,
         duration_ms: Some(6_000),
         size_bytes: None,
+        channel_frames: None,
     }
 }
 
@@ -1167,6 +1190,7 @@ fn carry_transcript(spec: &[(&str, &[(i64, i64)])]) -> NewTranscript {
                 raw_label: Some(spec[spk].0.to_owned()),
                 margin: None,
                 overlap: false,
+                raw_text: None,
             });
         }
     }
@@ -1504,6 +1528,7 @@ fn turns_transcript(labels: [&str; 3], shift_ms: i64, jitter_ms: i64) -> NewTran
                     raw_label: Some(labels[*spk].to_owned()),
                     margin: None,
                     overlap: false,
+                    raw_text: None,
                 });
                 texts.push(text);
                 at += d;
@@ -1713,6 +1738,7 @@ fn spike_transcript(
                 raw_label: Some(labels[*spk].to_owned()),
                 margin: None,
                 overlap: false,
+                raw_text: None,
             });
         }
     }
@@ -1870,6 +1896,7 @@ fn labelled_transcript(
                 raw_label: Some(l.clone()),
                 margin: None,
                 overlap: false,
+                raw_text: None,
             });
         }
     }
@@ -2091,4 +2118,250 @@ fn carry_over_rejects_bad_runs(store: &dyn RunStore) {
     assert!(is_invalid(store.carry_over(r1, r2)));
     assert!(is_invalid(store.carry_over(r1, r1)));
     assert!(is_not_found(store.carry_over(r1, RunId(424_242))));
+}
+
+/// `words.raw_text` (plan 16 section 3.5): stored where set, `None`
+/// elsewhere, kept through a segment split.
+fn raw_text_round_trip(store: &dyn Store) {
+    let m = store.create_meeting(new_meeting("Raw", T0)).unwrap();
+    let run = store
+        .create_run(m.id, RunKind::File, serde_json::json!({}))
+        .unwrap();
+    let mut t = sample_transcript();
+    // "Hello" was "hello", "team" was "team" (unchanged), "today." was "today".
+    t.words[0].raw_text = Some("hello".into());
+    t.words[8].text = "today.".into();
+    t.words[8].raw_text = Some("today".into());
+    store.insert_transcript(run.id, &t).unwrap();
+    store.set_current_run(m.id, run.id).unwrap();
+    let words = store.get_words(m.id, i64::MIN, i64::MAX).unwrap();
+    assert_eq!(words.len(), 9);
+    assert_eq!(words[0].raw_text.as_deref(), Some("hello"));
+    assert_eq!(words[0].asr_text(), "hello");
+    assert_eq!(words[1].raw_text, None);
+    assert_eq!(words[1].asr_text(), "budget");
+    assert_eq!(
+        (words[8].text.as_str(), words[8].raw_text.as_deref()),
+        ("today.", Some("today"))
+    );
+    // A split moves words, never their raw text.
+    let seg = segments(store, m.id)[2].id;
+    store.split_segment(seg, words[7].id).unwrap();
+    let after = store.get_words(m.id, i64::MIN, i64::MAX).unwrap();
+    assert_eq!(after[8].raw_text.as_deref(), Some("today"));
+    assert_eq!(after[0].raw_text.as_deref(), Some("hello"));
+    // Serialized only where set.
+    let j = serde_json::to_value(&after[1]).unwrap();
+    assert!(j.get("raw_text").is_none(), "{j}");
+    assert_eq!(
+        serde_json::to_value(&after[0]).unwrap()["raw_text"],
+        "hello"
+    );
+}
+
+/// `carry_over_identity` (plan 16 section 3.9 step 6): a run rebuilt from
+/// another's words, each under its own speaker row and with every row
+/// present, gets every speaker's name, colour, global id, merge, review flag
+/// and anchor by `(channel, engine_label)`, however little the speaker said.
+/// No `reassign` edit is replayed: the rebuild already put every word where
+/// the edits had (a replay by display name would move them again after a
+/// rename).
+fn carry_over_identity_by_label(store: &dyn RunStore) {
+    let m = live_meeting(store);
+    let spec: &[(&str, &[(i64, i64)])] = &[
+        ("spk_0", &[(0, 20)]),
+        ("spk_1", &[(20, 30), (30, 40)]),
+        ("spk_2", &[(40, 43)]),
+        ("spk_3", &[(43, 50), (50, 60)]),
+    ];
+    let mut t = carry_transcript(spec);
+    t.speakers[3].needs_review = true;
+    let old = run_with(store, m, RunKind::PostPass, &t);
+    store.set_current_run(m, old).unwrap();
+    let a = by_label(store, old, "spk_0");
+    let b = by_label(store, old, "spk_1");
+    let c = by_label(store, old, "spk_2");
+    store.rename_speaker(a.id, "Priya", None).unwrap();
+    store.set_speaker_color(a.id, "#123456").unwrap();
+    store
+        .rename_speaker(b.id, "Marcus", Some(segment_at(store, m, 30_000)))
+        .unwrap();
+    // A three-second speaker keeps its name (the time-overlap carry would
+    // not match it), and is merged into Marcus.
+    store.rename_speaker(c.id, "Ghost", None).unwrap();
+    store.merge_speakers(c.id, b.id).unwrap();
+    store
+        .reassign_segment(segment_at(store, m, 50_000), a.id)
+        .unwrap();
+
+    let new = run_with(store, m, RunKind::PostPass, &carry_transcript(spec));
+    let report = store.carry_over_identity(old, new).unwrap();
+    let x = by_label(store, new, "spk_0");
+    let y = by_label(store, new, "spk_1");
+    let z = by_label(store, new, "spk_2");
+    let w = by_label(store, new, "spk_3");
+    assert_eq!(report.matched.len(), 4);
+    assert!(report.matched.contains(&(c.id, z.id)));
+    assert_eq!(
+        (x.display_name.as_deref(), x.color.as_deref()),
+        (Some("Priya"), Some("#123456"))
+    );
+    assert_eq!(y.display_name.as_deref(), Some("Marcus"));
+    assert_eq!(
+        (y.name_anchor_start_ms, y.name_anchor_end_ms),
+        (Some(30_000), Some(39_800))
+    );
+    assert_eq!(z.display_name.as_deref(), Some("Ghost"));
+    assert_eq!(z.merged_into, Some(y.id));
+    assert!(!x.needs_review && !y.needs_review && !z.needs_review);
+    assert!(w.needs_review, "the review flag comes along");
+    assert_eq!(report.needs_review, vec![w.id]);
+    assert!(report.shift_ms.values().all(|&s| s == 0));
+    // Every field of every row, global id included, ids mapped.
+    let old_rows = store.run_speakers(old).unwrap();
+    let new_rows = store.run_speakers(new).unwrap();
+    assert_eq!(old_rows.len(), new_rows.len());
+    let label_of = |rows: &[Speaker], id: Option<SpeakerId>| {
+        id.map(|id| {
+            rows.iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .engine_label
+                .clone()
+        })
+    };
+    for o in &old_rows {
+        let n = new_rows
+            .iter()
+            .find(|n| (n.channel, &n.engine_label) == (o.channel, &o.engine_label))
+            .unwrap();
+        assert_eq!(
+            (
+                &n.display_name,
+                &n.color,
+                n.global_id,
+                n.needs_review,
+                n.name_anchor_start_ms,
+                n.name_anchor_end_ms,
+                label_of(&new_rows, n.merged_into)
+            ),
+            (
+                &o.display_name,
+                &o.color,
+                o.global_id,
+                o.needs_review,
+                o.name_anchor_start_ms,
+                o.name_anchor_end_ms,
+                label_of(&old_rows, o.merged_into)
+            ),
+            "{}",
+            o.engine_label
+        );
+    }
+    // No edit replays: the new run's words stay where they were built.
+    assert_eq!((report.edits_replayed, report.segments_split), (0, 0));
+    assert!(report.created_speakers.is_empty());
+    store.set_current_run(m, new).unwrap();
+    let tail: Vec<(i64, String)> = segments(store, m)
+        .into_iter()
+        .filter(|s| s.start_ms >= 43_000)
+        .map(|s| (s.start_ms, s.speaker_name))
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            (43_000, "Speaker 4".to_owned()),
+            (50_000, "Speaker 4".to_owned())
+        ]
+    );
+    // Bad runs.
+    assert!(is_invalid(store.carry_over_identity(new, new)));
+    assert!(is_not_found(store.carry_over_identity(old, RunId(424_242))));
+    let other = live_meeting(store);
+    let elsewhere = run_with(store, other, RunKind::PostPass, &carry_transcript(spec));
+    assert!(is_invalid(store.carry_over_identity(old, elsewhere)));
+}
+
+/// `run_segments` and `run_words` read any run, current or not, with each
+/// segment's own speaker row (not the merge root the views show).
+fn run_segments_and_words(store: &dyn RunStore) {
+    let (m, first) = seeded_meeting(store, "Runs", T0);
+    let mut t = sample_transcript();
+    t.words[2].margin = Some(0.5);
+    t.words[3].overlap = true;
+    t.words[0].raw_text = Some("hello".into());
+    let second = run_with(store, m, RunKind::PostPass, &t);
+    // A merge on the first run: the views show the root, run_segments the row.
+    let spk0 = by_label(store, first, "spk_0");
+    let spk1 = by_label(store, first, "spk_1");
+    store.merge_speakers(spk1.id, spk0.id).unwrap();
+    let shown = segments(store, m);
+    assert_eq!(shown[2].speaker_id, spk0.id);
+    let segs = store.run_segments(first).unwrap();
+    assert_eq!(segs.len(), 3);
+    assert!(segs.iter().all(|s| s.run_id == first && s.meeting_id == m));
+    assert_eq!(
+        segs.iter().map(|s| s.seq).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "seq order"
+    );
+    assert_eq!(segs[2].speaker_id, spk1.id, "its own row");
+    assert_eq!(segs[0].text, "Hello budget team");
+    let words = store.run_words(first).unwrap();
+    assert_eq!(words.len(), 9);
+    assert!(words.windows(2).all(|p| p[0].start_ms <= p[1].start_ms));
+    let own: std::collections::HashSet<SegmentId> = segs.iter().map(|s| s.id).collect();
+    assert!(words.iter().all(|w| own.contains(&w.segment_id)));
+    // The run that is not current, with its fusion fields and raw text.
+    let other = store.run_words(second).unwrap();
+    assert_eq!(other.len(), 9);
+    assert!(other.iter().all(|w| !own.contains(&w.segment_id)));
+    assert_eq!(other[2].margin, Some(0.5));
+    assert!(other[3].overlap);
+    assert_eq!(other[0].raw_text.as_deref(), Some("hello"));
+    assert_eq!(store.run_segments(second).unwrap().len(), 3);
+    // An empty run, and one that does not exist.
+    let empty = store
+        .create_run(m, RunKind::File, serde_json::json!({}))
+        .unwrap()
+        .id;
+    assert!(store.run_segments(empty).unwrap().is_empty());
+    assert!(store.run_words(empty).unwrap().is_empty());
+    assert!(is_not_found(store.run_segments(RunId(424_242))));
+    assert!(is_not_found(store.run_words(RunId(424_242))));
+}
+
+/// `set_current_run_if`: the compare-and-set a rebuild ends with.
+fn set_current_run_if_compares(store: &dyn RunStore) {
+    let (m, first) = seeded_meeting(store, "CAS", T0);
+    let second = run_with(store, m, RunKind::PostPass, &sample_transcript());
+    let third = run_with(store, m, RunKind::PostPass, &sample_transcript());
+    let current = || store.get_meeting(m).unwrap().current_run.unwrap().id;
+    // Still the run expected: switched.
+    assert!(store.set_current_run_if(m, first, second).unwrap());
+    assert_eq!(current(), second);
+    // Not any more: nothing changes.
+    assert!(!store.set_current_run_if(m, first, third).unwrap());
+    assert_eq!(current(), second);
+    // A meeting that records or is being finalized is never switched.
+    for status in [MeetingStatus::Processing, MeetingStatus::Recording] {
+        store.set_meeting_status(m, status).unwrap();
+        assert!(!store.set_current_run_if(m, second, third).unwrap());
+        assert_eq!(current(), second);
+    }
+    store.set_meeting_status(m, MeetingStatus::Failed).unwrap();
+    assert!(store.set_current_run_if(m, second, third).unwrap());
+    assert_eq!(current(), third);
+    // A meeting without a current run expects nothing.
+    store.delete_run(third).unwrap();
+    assert_eq!(store.get_meeting(m).unwrap().current_run, None);
+    assert!(!store.set_current_run_if(m, second, first).unwrap());
+    // Bad arguments.
+    let other = store.create_meeting(new_meeting("Other", T0)).unwrap().id;
+    assert!(is_invalid(store.set_current_run_if(other, first, second)));
+    assert!(is_not_found(store.set_current_run_if(
+        m,
+        first,
+        RunId(424_242)
+    )));
 }

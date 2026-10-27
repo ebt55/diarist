@@ -154,7 +154,8 @@ impl DataPaths {
             .unwrap_or_else(|| self.root.join("engine"))
     }
 
-    /// The SQLite database.
+    /// The SQLite database, in the plain form at any length (it is shown and
+    /// logged). `SqliteStore` converts a long one for SQLite itself.
     pub fn db(&self) -> PathBuf {
         self.root.join("diarist.db")
     }
@@ -398,6 +399,44 @@ mod tests {
             p.absolute(&p.relative(&p.models().join("a.gguf"))),
             p.models().join("a.gguf")
         );
+    }
+
+    /// A 264-character data folder (the KNOWN-ISSUES repro): the database
+    /// opens, migrates and answers there, a backup into another long folder
+    /// (a data-folder move) reopens, and the path stays in the plain form
+    /// everywhere it is kept or shown.
+    #[cfg(windows)]
+    #[test]
+    fn the_database_opens_and_backs_up_in_a_data_folder_longer_than_max_path() {
+        use crate::engine::process::long_test_dir;
+        use crate::store::{NewMeeting, RunStore, SqliteStore, Store};
+        use crate::types::{MeetingStatus, Source};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = long_test_dir(tmp.path(), 264);
+        let p = DataPaths::at(&root);
+        assert_eq!(p.db(), root.join("diarist.db"));
+        assert!(!p.db().to_string_lossy().starts_with(r"\\"), "{:?}", p.db());
+        let store = SqliteStore::open(p.db()).unwrap();
+        assert_eq!(store.path(), Some(p.db().as_path()));
+        assert_eq!(store.audio_dir("u"), Some(root.join("audio").join("u")));
+        store
+            .create_meeting(NewMeeting {
+                title: "Deep".into(),
+                source: Source::File,
+                source_path: None,
+                language: "en".into(),
+                diarize_mic: false,
+                started_at: 1_700_000_000_000,
+                status: MeetingStatus::Done,
+            })
+            .unwrap();
+        assert!(root.join("diarist.db").is_file());
+
+        let to = long_test_dir(&tmp.path().join("to"), 270).join("diarist.db");
+        store.backup(&to).unwrap();
+        let copy = SqliteStore::open(&to).unwrap();
+        assert_eq!(copy.list_meetings().unwrap()[0].title, "Deep");
+        assert!(!PathBuf::from(format!("{}.tmp", to.display())).exists());
     }
 
     #[test]

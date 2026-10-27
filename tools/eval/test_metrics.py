@@ -1,4 +1,5 @@
-"""Sanity checks for metrics.py on synthetic meetings (no GPU, no private data).
+"""Sanity checks for metrics.py on synthetic meetings, and for levers.py's loop rule
+against crates/core/src/transcript/loops.rs (no GPU, no private data).
 
   uv run python -I -m pytest test_metrics.py   (or: uv run python -I test_metrics.py)
 """
@@ -9,8 +10,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import levers as L  # noqa: E402
 import metrics as M  # noqa: E402
-from common import RttmRow, normalize_token, seglst_to_rttm  # noqa: E402
+from common import RttmRow, normalize_text, normalize_token, seglst_to_rttm  # noqa: E402
 
 TEXT = {
     "A": "so the budget for next quarter is mostly travel and hardware",
@@ -84,6 +86,81 @@ def test_normaliser_drops_fillers_and_punctuation():
     assert normalize_token("Um,") == ()
     assert normalize_token("Budget.") == ("budget",)
     assert normalize_token("OK") == ("okay",)
+
+
+# crates/core/src/transcript/loops.rs `NORM_PAIRS`: the Rust `norm` of each
+# text (combining vowel signs kept, tone marks, viramas and control
+# characters dropped, Rust's white space trimmed).
+NORM_PAIRS = [
+    ("नहीं", "नहीं"),
+    ("ที่", "ที"),
+    ("தமிழ்", "தமிழ"),
+    ("Ко-ко,", "коко"),
+    ("a\x1cb", "ab"),
+    ("İ", "i"),
+    ("Ⅻ", "ⅻ"),
+    (" ok\xa0", "ok"),
+    ("đâu?", "đâu"),
+]
+
+
+def test_loop_norm_is_the_rust_norm():
+    for text, want in NORM_PAIRS:
+        assert L.loop_norm(text) == want, (text, L.loop_norm(text), want)
+    # Devanagari is collapsible (a script with spaces), Thai never.
+    assert L.loop_eligible(L.loop_norm("नहीं"))
+    assert not L.loop_eligible(L.loop_norm("ที่"))
+    # Digits only, in any script, are never collapsed.
+    assert not L.loop_eligible(L.loop_norm("٣٣"))
+
+
+def _words(starts, text="no"):
+    return [{"start": t, "end": t + 80, "text": text, "norm": L.loop_norm(text), "speaker": "spk_0", "seg": None}
+            for t in starts]
+
+
+def test_loop_rule_matches_loops_rs():
+    # crates/core/src/transcript/loops.rs `real_repeats_after_a_burst_stay`
+    # and `a_train_of_bursts_keeps_one_word_per_burst`.
+    w = _words([0] * 5 + [300, 600, 900])
+    assert L.loop_removed(w, rule="plan") == 7
+    assert L.loop_removed(w) == 4
+    assert L.loop_removed(_words([0, 0, 0, 250], "I")) == 2
+    assert L.loop_removed(_words([0, 80, 161, 241], "and")) == 0
+    assert L.loop_removed(_words([0, 80, 161, 241], "and"), rule="plan") == 3
+    assert L.loop_removed(_words([1000 + (k // 8) * 160 for k in range(24)], "the")) == 21
+    # Never more than the plan's rule.
+    w = _words([0, 0, 0, 0, 300, 600, 900, 1200, 1500])
+    assert L.loop_removed(w) == L.loop_removed(w, rule="plan") == 0
+
+
+def test_multilingual_normaliser():
+    assert normalize_text("Euh, j'ai vu ÇA !", "fr") == ["j", "ai", "vu", "ça"]
+    # Mandarin per character, a Latin run stays one unit, 嗯 is dropped
+    assert normalize_text("嗯，我们讨论AI。", "zh-CN") == ["我", "们", "讨", "论", "ai"]
+    # Devanagari vowel signs stay inside the word; the danda goes
+    assert normalize_text("आप कैसे हैं।", "hi") == ["आप", "कैसे", "हैं"]
+    assert normalize_text("Okay.", None) == normalize_text("Okay.", "en-US") == ["okay"]
+
+
+def test_mandarin_identical_text_scores_zero():
+    ref = [{"session_id": "x", "speaker": "A", "start_time": 0.0, "end_time": 2.0, "words": "我们今天开会。"},
+           {"session_id": "x", "speaker": "B", "start_time": 2.5, "end_time": 4.0, "words": "好的，没问题"}]
+    hyp = [dict(r, speaker={"A": "s0", "B": "s1"}[r["speaker"]]) for r in ref]
+    r = M.meeting_metrics([dict(x) for x in ref], seglst_to_rttm(ref, "x"), [dict(h) for h in hyp], words_of(hyp),
+                          seglst_to_rttm(hyp, "x"), None, "x", None, "zh-CN")
+    assert r["cpwer"] == 0 and r["wder"] == 0 and r["ref_words"] == 11
+
+
+def test_dropped_turn_is_one_gap_and_deletions():
+    ref = meeting()
+    hyp = [dict(h) for i, h in enumerate(meeting()) if i != 3]  # turn 4 (C, 11 words, 4.4 s) missing
+    r = run(ref, hyp)
+    assert r["gaps"] == 1 and r["gaps_5s"] == 1  # 4.4 s turn plus the 0.6 s pauses on both sides
+    assert r["gap_ref_words"] == 11 and r["longest_gap_s"] >= 5.0
+    assert (r["w_del"], r["w_ins"], r["w_sub"]) == (11, 0, 0)
+    assert abs(r["wer"] - 11 / r["ref_words"]) < 1e-9
+    assert run(ref, meeting())["gaps"] == 0
 
 
 if __name__ == "__main__":

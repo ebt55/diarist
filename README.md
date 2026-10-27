@@ -29,7 +29,8 @@ toolkit is needed; the GPU driver is the only prerequisite.
   import), so an hour takes about two minutes.
 - **Records live**: your microphone is "me", the system audio is split into
   the other speakers (up to 8). Text appears within about a second; when you
-  stop, the recording is processed again for the final transcript.
+  stop, the recording is processed again for the final transcript, with
+  punctuation.
 - **Speakers**: rename "Speaker 2" to "Alice" once and the name sticks, merge
   labels, recolour, fix a line that went to the wrong person.
 - **Search** every transcript at once (accent-insensitive, any language).
@@ -39,13 +40,14 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `Diarist_0.1.0-beta.4_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.5_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
    `%LOCALAPPDATA%\Diarist`.
 2. The first start shows a setup screen: it checks your GPU, driver and free
    space, then **Install engine (98 MB)** and **Install recommended models
-   (770 MB)**. Every file is checked against its published SHA-256.
+   (1.0 GB)**: the diarizer, the EN model and the punctuation model. Every
+   file is checked against its published SHA-256.
 3. Press **Ctrl+O** to import a recording, or **R** to record a meeting.
 
 Using a coding agent (Claude Code, Codex or similar)? Point it at
@@ -76,9 +78,10 @@ From [docs/04-model-guide.md](docs/04-model-guide.md). Numbers marked
 | Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text, English (default) | 668 MB | NVIDIA Open Model License |
 | Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text, 40+ languages (optional) | 742 MB | OpenMDW-1.1 |
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only (see below) | 681 MB | CC-BY-4.0 |
+| Horizon-Labs punctuation-restoration-small, int8 ONNX, with ONNX Runtime 1.31.0 (Microsoft) | Punctuation and sentence capitals after Stop and on imports, on the CPU; never changes a word | 306 MB | Apache-2.0 as declared in the model card (base model MIT); ONNX Runtime MIT |
 
-The default download (engine, diarizer, EN model) is about 870 MB; with
-every optional model, 2.3 GB.
+The default download (engine, diarizer, EN model, punctuation) is about
+1.2 GB; with every optional model, 2.5 GB.
 
 ### Which runtime package for which PC
 
@@ -126,9 +129,14 @@ engine unloads after 10 idle minutes):
   of a 77-minute recording (*measured*), and no chunk size avoids it. Use it
   only for short clips you check yourself.
 
-Neither Nemotron model punctuates much; lines are split at pauses and speaker
-changes instead. On clean meeting audio expect about one word in 15 to 20 to
-be wrong or missing; on far-field room recordings about one in 9.
+Neither Nemotron model punctuates much, so since 0.1.0-beta.5 a small
+punctuation model adds `.` `,` `?` and sentence capitals after Stop and on
+imports, on the CPU (about 5 to 6 seconds per hour of audio), without
+changing a word; lines end at sentence ends where the pause allows. About two
+in three of its periods and question marks are where a person would put
+them (docs/04-model-guide.md, section 8). On clean meeting audio expect about
+one word in 15 to 20 to be wrong or missing; on far-field room recordings
+about one in 9.
 
 ### Speakers: limits worth knowing
 
@@ -179,12 +187,12 @@ deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 ## Status
 
-Version 0.1.0-beta.4, the fourth beta pre-release: file
+Version 0.1.0-beta.5, the fifth beta pre-release: file
 import and live recording work
 end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
 CPU runtime packages were tested on that machine's NVIDIA card and CPU only,
 and machines other than the author's are untested. Next
-on the roadmap: punctuation restoration, better speaker-change handling, and
+on the roadmap: better speaker-change handling, and
 recognising the same person across meetings
 ([docs/plans/00-roadmap.md](docs/plans/00-roadmap.md)). Changes:
 [CHANGELOG.md](CHANGELOG.md).
@@ -197,9 +205,9 @@ Rust, bun and the VS Build Tools: see [docs/DEV.md](docs/DEV.md) and
 ## Licence
 
 MIT for the code in this repository ([LICENSE](LICENSE)). The runtime
-(Apache-2.0) and the models (OpenMDW-1.1, NVIDIA Open Model License,
-CC-BY-4.0) are not part of the installer; you download them at first run under
-their own licences. The Diarist name, logo and icons are not MIT: use them to refer to
+(Apache-2.0), ONNX Runtime (MIT) and the models (OpenMDW-1.1, NVIDIA Open
+Model License, CC-BY-4.0, Apache-2.0) are not part of the installer; you
+download them at first run under their own licences. The Diarist name, logo and icons are not MIT: use them to refer to
 Diarist or to package the official builds, not on forks or other products
 ([branding/README.md](branding/README.md)). Third-party notices:
 [LICENSES.md](LICENSES.md).

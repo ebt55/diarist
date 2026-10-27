@@ -43,6 +43,16 @@ describe("meeting details echo line", () => {
     expect([l.action, l.actionLabel]).toEqual(["remove", "Remove echo words again"]);
   });
 
+  test("restored: words merged into a repeated-token loop are named", () => {
+    const l = echoLine(
+      echoInfo(run({ coupled: true, coupling: 0.72, lag_ms: 3, dropped: 0, restored: true, restored_words: 5, restored_merged: 3 })),
+    )!;
+    expect(l.text).toBe(
+      `Echo detected (coupling 0.72, 3 ms): the 5 far-end words removed from "me" are back in this transcript, 3 of them merged into repeated-token loops.`,
+    );
+    expect(l.action).toBe("remove");
+  });
+
   test("turned off for the recording: no action", () => {
     const l = echoLine(echoInfo(run({ coupled: true, coupling: 0.8, lag_ms: null, dropped: 0, user_off: true })))!;
     expect(l.text).toBe(`Echo detected (coupling 0.80); echo handling was turned off for this recording, so nothing was removed from "me".`);

@@ -6,7 +6,8 @@
 //! - Schema changes are numbered SQL files under `migrations/`, embedded with
 //!   `include_str!` and applied in order by `PRAGMA user_version`. Before
 //!   pending migrations run on an existing database, the backup API copies it
-//!   to `<db>.bak-<old version>` next to it (only the newest such copy is kept).
+//!   to `<db>.bak-<old version>` next to it (only the newest such copy is
+//!   kept, and the one the last release can open: [`RELEASED_SCHEMA`]).
 //! - Meeting and run ids come from the `counters` table (migration 0002), so
 //!   an id is never handed out twice, even after the newest row is deleted.
 //! - Full-text search uses the external-content FTS5 table `segments_fts`
@@ -31,7 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
-use super::carry_over::{carry_over, group_bounds, CarryOverReport};
+use super::carry_over::{carry_over, carry_over_identity, group_bounds, CarryOverReport};
 use super::{
     is_hex_color, pick_playback_track, NewAudioTrack, NewMeeting, NewTranscript, RunStore,
     ScannedModelFile, Store, StoreError, StoreResult,
@@ -42,7 +43,8 @@ use crate::transcript::SegmentOptions;
 use crate::types::{
     new_id, AudioTrack, Channel, ClockAnchor, EchoDroppedWord, Edit, EditKind, LiveUtterance,
     Meeting, MeetingId, MeetingStatus, ModelCapabilities, ModelFile, ModelFileId, ReassignTarget,
-    RunId, RunKind, RunStatus, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun, Word, WordId,
+    RunId, RunKind, RunStatus, Segment, SegmentId, Speaker, SpeakerId, TrackId, TranscriptRun,
+    Word, WordId,
 };
 use crate::views::{
     default_speaker_color, default_speaker_name, MeetingDetail, MeetingSummary, SearchHit,
@@ -59,6 +61,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0003_echo_dropped",
         include_str!("migrations/0003_echo_dropped.sql"),
+    ),
+    (
+        "0004_raw_text",
+        include_str!("migrations/0004_raw_text.sql"),
+    ),
+    (
+        "0005_track_frames",
+        include_str!("migrations/0005_track_frames.sql"),
     ),
 ];
 
@@ -98,14 +108,15 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens (creating if needed) the database at `path` and applies pending
     /// migrations. Meeting audio folders are expected in `audio/` next to it
-    /// (`docs/01` data layout); see [`SqliteStore::with_audio_root`].
+    /// (`docs/01` data layout); see [`SqliteStore::with_audio_root`]. A
+    /// long path works ([`sqlite_path`]); the store keeps `path` as given.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|e| StoreError::Backend(format!("create {}: {e}", parent.display())))?;
         }
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(sqlite_path(path))?;
         let audio_root = path.parent().map(|p| p.join("audio"));
         Self::init(conn, Some(path.to_owned()), audio_root)
     }
@@ -226,6 +237,76 @@ impl RunStore for SqliteStore {
         let report = carry_over(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
         tx.commit()?;
         Ok(report)
+    }
+
+    fn carry_over_identity(&self, from_run: RunId, to_run: RunId) -> StoreResult<CarryOverReport> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let report = carry_over_identity(&mut carry_over::TxBackend(&tx), from_run, to_run)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    fn run_segments(&self, run: RunId) -> StoreResult<Vec<Segment>> {
+        let conn = self.lock()?;
+        get_run(&conn, run)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, meeting_id, speaker_id, start_ms, end_ms, text, seq
+             FROM segments WHERE run_id = ?1 ORDER BY seq, id",
+        )?;
+        let rows = stmt
+            .query_map([run.0], |r| {
+                Ok(Segment {
+                    id: SegmentId(r.get(0)?),
+                    run_id: RunId(r.get(1)?),
+                    meeting_id: MeetingId(r.get(2)?),
+                    speaker_id: SpeakerId(r.get(3)?),
+                    start_ms: r.get(4)?,
+                    end_ms: r.get(5)?,
+                    text: r.get(6)?,
+                    seq: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn run_words(&self, run: RunId) -> StoreResult<Vec<Word>> {
+        let conn = self.lock()?;
+        get_run(&conn, run)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WORD_COLS}
+             FROM words w JOIN segments s ON s.id = w.segment_id
+             WHERE s.run_id = ?1 ORDER BY w.start_ms, w.id"
+        ))?;
+        let rows = stmt
+            .query_map([run.0], word_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn set_current_run_if(
+        &self,
+        meeting: MeetingId,
+        expected: RunId,
+        run: RunId,
+    ) -> StoreResult<bool> {
+        let conn = self.lock()?;
+        if get_run(&conn, run)?.meeting_id != meeting {
+            return Err(StoreError::Invalid(format!(
+                "run {run} does not belong to meeting {meeting}"
+            )));
+        }
+        // One statement: atomic against any other connection too.
+        let n = conn.execute(
+            "UPDATE meetings SET current_run_id = ?2, updated_at = ?4
+             WHERE id = ?1 AND current_run_id = ?3 AND status IN ('done', 'failed')",
+            params![meeting.0, run.0, expected.0, now_ms()],
+        )?;
+        if n == 0 {
+            meeting_exists(&conn, meeting)?;
+        }
+        Ok(n == 1)
     }
 
     fn append_live_utterance(
@@ -389,11 +470,19 @@ impl RunStore for SqliteStore {
         let _ = std::fs::remove_file(&tmp);
         {
             let conn = self.lock()?;
-            conn.backup(rusqlite::MAIN_DB, &tmp, None)?;
+            conn.backup(rusqlite::MAIN_DB, sqlite_path(&tmp), None)?;
         }
         std::fs::rename(&tmp, dest)
             .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))
     }
+}
+
+/// A database path as SQLite gets it: the extended-length form (`\\?\`)
+/// when it is long, since SQLite's Windows layer opens the plain form only
+/// below `MAX_PATH` ("unable to open database file"); short paths as they
+/// are. Only for the open call: never stored or shown.
+pub(crate) fn sqlite_path(path: &Path) -> PathBuf {
+    PathBuf::from(crate::engine::process::path_arg(path))
 }
 
 /// File name prefix of the pre-migration copies of `db` (`diarist.db.bak-`).
@@ -405,10 +494,20 @@ pub fn migration_backup_prefix(db: &Path) -> String {
     format!("{name}.bak-")
 }
 
+/// The schema version of the newest published release (0.1.0-beta.5: 5).
+/// Its pre-migration copy (`<db>.bak-5`) is never deleted, so going back to
+/// that release always finds a database it can open, however many
+/// migrations the builds after it apply one by one (each makes a copy of
+/// its own: 5 to 6 to 7 leaves `bak-5` and `bak-6`). The upgrade to this
+/// release from 0.1.0-beta.4 (3 to 5 in one open) leaves `bak-3`, its own
+/// copy. Raised to `MIGRATIONS.len()` when a release ships.
+pub const RELEASED_SCHEMA: u32 = 5;
+
 /// Before pending migrations run on an existing database (schema version
 /// 1 or later), copies it with the backup API to `<db>.bak-<version>` next to
-/// it and deletes older copies. A copy that cannot be made stops the open:
-/// the migration does not run without one.
+/// it and deletes older copies, except the one of [`RELEASED_SCHEMA`]. A
+/// copy that cannot be made stops the open: the migration does not run
+/// without one.
 fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<PathBuf>> {
     let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current == 0 || current as usize >= MIGRATIONS.len() {
@@ -418,7 +517,8 @@ fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<P
     let dest = db.with_file_name(format!("{prefix}{current}"));
     let tmp = db.with_file_name(format!("{prefix}{current}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    conn.backup(rusqlite::MAIN_DB, &tmp, None).map_err(|e| {
+    let target = sqlite_path(&tmp);
+    conn.backup(rusqlite::MAIN_DB, &target, None).map_err(|e| {
         StoreError::Backend(format!(
             "cannot back up {} before upgrading it: {e}",
             db.display()
@@ -426,10 +526,12 @@ fn backup_before_migration(conn: &Connection, db: &Path) -> StoreResult<Option<P
     })?;
     std::fs::rename(&tmp, &dest)
         .map_err(|e| StoreError::Backend(format!("rename backup to {}: {e}", dest.display())))?;
+    // The copy the last release can open stays, whatever came after it.
+    let released = format!("{prefix}{RELEASED_SCHEMA}");
     if let Some(dir) = db.parent().and_then(|d| std::fs::read_dir(d).ok()) {
         for entry in dir.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(&prefix) && entry.path() != dest {
+            if name.starts_with(&prefix) && entry.path() != dest && name != released {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -552,7 +654,7 @@ fn speaker_from_row(r: &Row<'_>) -> rusqlite::Result<Speaker> {
 
 const WORD_COLS: &str =
     "w.id, w.segment_id, w.meeting_id, w.start_ms, w.end_ms, w.text, w.confidence, \
-     w.raw_label, w.margin, w.overlap";
+     w.raw_label, w.margin, w.overlap, w.raw_text";
 
 fn word_from_row(r: &Row<'_>) -> rusqlite::Result<Word> {
     Ok(Word {
@@ -566,11 +668,11 @@ fn word_from_row(r: &Row<'_>) -> rusqlite::Result<Word> {
         raw_label: r.get(7)?,
         margin: r.get::<_, Option<f64>>(8)?.map(|v| v as f32),
         overlap: r.get(9)?,
+        raw_text: r.get(10)?,
     })
 }
 
-const TRACK_COLS: &str =
-    "id, meeting_id, channel, path, format, sample_rate, channels, duration_ms, size_bytes";
+const TRACK_COLS: &str = "id, meeting_id, channel, path, format, sample_rate, channels,      duration_ms, size_bytes, channel_frames";
 
 fn track_from_row(r: &Row<'_>) -> rusqlite::Result<AudioTrack> {
     Ok(AudioTrack {
@@ -583,6 +685,9 @@ fn track_from_row(r: &Row<'_>) -> rusqlite::Result<AudioTrack> {
         channels: r.get(6)?,
         duration_ms: r.get(7)?,
         size_bytes: r.get(8)?,
+        channel_frames: r
+            .get::<_, Option<String>>(9)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -1122,8 +1227,8 @@ fn write_transcript(
     }
     {
         let mut stmt = tx.prepare(
-            "INSERT INTO words (segment_id, meeting_id, start_ms, end_ms, text, confidence, raw_label, margin, overlap)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO words (segment_id, meeting_id, start_ms, end_ms, text, confidence, raw_label, margin, overlap, raw_text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         for w in &t.words {
             stmt.execute(params![
@@ -1135,7 +1240,8 @@ fn write_transcript(
                 w.confidence.map(f64::from),
                 w.raw_label,
                 w.margin.map(f64::from),
-                w.overlap
+                w.overlap,
+                w.raw_text
             ])?;
         }
     }
@@ -1649,8 +1755,8 @@ impl Store for SqliteStore {
         meeting_exists(&conn, track.meeting_id)?;
         conn.execute(
             "INSERT INTO audio_tracks (meeting_id, channel, path, format, sample_rate, channels,
-                duration_ms, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                duration_ms, size_bytes, channel_frames)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 track.meeting_id.0,
                 track.channel.as_str(),
@@ -1659,7 +1765,11 @@ impl Store for SqliteStore {
                 track.sample_rate,
                 track.channels,
                 track.duration_ms,
-                track.size_bytes
+                track.size_bytes,
+                track
+                    .channel_frames
+                    .as_ref()
+                    .map(|f| serde_json::json!(f).to_string())
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -1748,7 +1858,7 @@ fn list_model_files(conn: &Connection) -> StoreResult<Vec<ModelFile>> {
 mod tests {
     use super::*;
     use crate::store::{NewSegment, NewSpeaker, NewWord};
-    use crate::types::Source;
+    use crate::types::{AudioFormat, Source, TrackChannel};
 
     fn meeting(store: &SqliteStore, title: &str) -> Meeting {
         store
@@ -1794,6 +1904,7 @@ mod tests {
                     raw_label: Some("spk_0".into()),
                     margin: None,
                     overlap: false,
+                    raw_text: None,
                 });
             }
         }
@@ -2008,7 +2119,8 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             conn.execute_batch(
                 "DROP TABLE counters; ALTER TABLE transcript_runs DROP COLUMN echo_dropped;
-                 PRAGMA user_version = 1;",
+                 ALTER TABLE words DROP COLUMN raw_text;
+                 ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 1;",
             )
             .unwrap();
         }
@@ -2052,6 +2164,183 @@ mod tests {
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
     }
 
+    /// The upgrade from 0.1.0-beta.4 to 0.1.0-beta.5: schema 3 to 5 in one
+    /// open, one copy (`bak-3`, the database beta.4 opens), older copies
+    /// gone.
+    #[test]
+    fn migration_0004_from_beta4_adds_raw_text_after_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("diarist.db");
+        let a = {
+            let store = SqliteStore::open(&db).unwrap();
+            let a = meeting(&store, "Beta 4");
+            current(&store, a.id, &["kept words"]);
+            a.id
+        };
+        // Back to schema 3, as 0.1.0-beta.4 left it, with the copy its own
+        // upgrade from beta.3 made.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE words DROP COLUMN raw_text;
+                 ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let bak2 = dir.path().join("diarist.db.bak-2");
+        std::fs::write(&bak2, b"the database beta.3 opens").unwrap();
+        assert_eq!((RELEASED_SCHEMA, MIGRATIONS.len()), (5, 5));
+        let store = SqliteStore::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        let bak = dir.path().join("diarist.db.bak-3");
+        assert_eq!(store.migration_backup(), Some(bak.as_path()));
+        // One copy for both migrations, and the older one goes.
+        assert!(!bak2.exists());
+        assert!(!dir.path().join("diarist.db.bak-4").exists());
+        // The copy is the beta.4 database: schema 3, no raw_text.
+        let copy = Connection::open(&bak).unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        assert!(copy.prepare("SELECT raw_text FROM words").is_err());
+        drop(copy);
+        // Old words read back with raw_text NULL; new ones keep theirs.
+        let words = store.get_words(a, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(
+            words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            ["kept", "words"]
+        );
+        assert!(words.iter().all(|w| w.raw_text.is_none()));
+        let m = meeting(&store, "Beta 5");
+        let run = store
+            .create_run(m.id, RunKind::File, serde_json::json!({}))
+            .unwrap();
+        let mut t = NewTranscript::default();
+        t.speakers.push(NewSpeaker {
+            channel: Channel::Source,
+            engine_label: "spk_0".into(),
+            display_name: None,
+            color: None,
+            needs_review: false,
+        });
+        t.segments.push(NewSegment {
+            speaker: 0,
+            start_ms: 0,
+            end_ms: 900,
+            text: "Hello there.".into(),
+        });
+        for (i, (text, raw)) in [("Hello", Some("hello")), ("there.", Some("there"))]
+            .into_iter()
+            .enumerate()
+        {
+            t.words.push(NewWord {
+                segment: 0,
+                start_ms: i as i64 * 500,
+                end_ms: i as i64 * 500 + 400,
+                text: text.into(),
+                confidence: None,
+                raw_label: Some("spk_0".into()),
+                margin: None,
+                overlap: false,
+                raw_text: raw.map(str::to_owned),
+            });
+        }
+        store.insert_transcript(run.id, &t).unwrap();
+        store.set_current_run(m.id, run.id).unwrap();
+        let words = store.get_words(m.id, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(words[1].raw_text.as_deref(), Some("there"));
+        assert_eq!(words[1].asr_text(), "there");
+        drop(store);
+        assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+        assert!(bak.is_file());
+    }
+
+    #[test]
+    fn migration_0005_after_0004_keeps_the_released_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("diarist.db");
+        let (a, track) = {
+            let store = SqliteStore::open(&db).unwrap();
+            let a = meeting(&store, "Beta 5 build");
+            let track = store
+                .add_audio_track(NewAudioTrack {
+                    meeting_id: a.id,
+                    channel: TrackChannel::Playback,
+                    path: format!("audio/{}/playback.flac", a.uid),
+                    format: AudioFormat::Flac,
+                    sample_rate: 16_000,
+                    channels: 2,
+                    duration_ms: Some(6_000),
+                    size_bytes: Some(50_000),
+                    channel_frames: Some(vec![96_000, 95_000]),
+                })
+                .unwrap();
+            (a.id, track.id)
+        };
+        // Schema 4, as a development build with 0004 and without 0005 left
+        // it (no release has schema 4). `bak-5` stands in for the copy of
+        // the released schema that later builds keep whatever they migrate
+        // one step at a time (5 to 6 to 7 leaves `bak-5` and `bak-6`);
+        // `bak-3` and `bak-2` are copies of no released schema any more.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE audio_tracks DROP COLUMN channel_frames; PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        assert_eq!(RELEASED_SCHEMA, 5);
+        let bak5 = dir.path().join("diarist.db.bak-5");
+        std::fs::write(&bak5, b"the database beta.5 opens").unwrap();
+        let bak3 = dir.path().join("diarist.db.bak-3");
+        std::fs::write(&bak3, b"older").unwrap();
+        let bak2 = dir.path().join("diarist.db.bak-2");
+        std::fs::write(&bak2, b"older still").unwrap();
+
+        let store = SqliteStore::open(&db).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 5);
+        let bak4 = dir.path().join("diarist.db.bak-4");
+        assert_eq!(store.migration_backup(), Some(bak4.as_path()));
+        // The released schema's copy stays; the older ones go.
+        assert_eq!(std::fs::read(&bak5).unwrap(), b"the database beta.5 opens");
+        assert!(!bak3.exists() && !bak2.exists());
+        // bak-4 is the schema 4 database, without the column.
+        let copy = Connection::open(&bak4).unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        assert!(copy
+            .prepare("SELECT channel_frames FROM audio_tracks")
+            .is_err());
+        drop(copy);
+        // The existing row reads without channel lengths; new rows keep them.
+        let tracks = store.list_audio_tracks(a).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, track);
+        assert_eq!(tracks[0].channel_frames, None);
+        assert_eq!(tracks[0].size_bytes, Some(50_000));
+        let t = store
+            .add_audio_track(NewAudioTrack {
+                meeting_id: a,
+                channel: TrackChannel::Mic,
+                path: "audio/x/mic.wav".into(),
+                format: AudioFormat::Wav,
+                sample_rate: 16_000,
+                channels: 1,
+                duration_ms: Some(6_000),
+                size_bytes: None,
+                channel_frames: Some(vec![96_000]),
+            })
+            .unwrap();
+        assert_eq!(t.channel_frames, Some(vec![96_000]));
+        drop(store);
+        // Up to date: no copy, and both copies stay.
+        assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+        assert!(bak5.is_file() && bak4.is_file());
+    }
+
     #[test]
     fn runs_anchors_and_edits_helpers() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -2087,5 +2376,35 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].payload.to_engine_label.as_deref(), Some("spk_0"));
         assert_eq!(edits[0].channel, Channel::Source);
+    }
+
+    /// A cross-meeting identity (`global_id`) is copied by a rebuild like
+    /// the other speaker fields (the store API cannot set one yet, so the
+    /// conformance suite only sees `None`).
+    #[test]
+    fn a_rebuild_keeps_a_speakers_global_id() {
+        use crate::punct::{fixture::FixturePunctuator, Mark, PunctSource, RebuildWhy, WordLabel};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let m = meeting(&store, "Global");
+        let run = current(&store, m.id, &["bonjour tout le monde"]);
+        store.finish_run(run, RunStatus::Done).unwrap();
+        let spk = store.run_speakers(run).unwrap()[0].id;
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "INSERT INTO global_speakers (id, name, created_at) VALUES (7, 'Alice', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute("UPDATE speakers SET global_id = 7 WHERE id = ?1", [spk.0])
+                .unwrap();
+        }
+        let source =
+            PunctSource::factory(|| FixturePunctuator::per_word(|_| WordLabel::post(Mark::Period)));
+        let r =
+            crate::punct::rebuild_run(&store, &source, m.id, RebuildWhy::Add, &|| false).unwrap();
+        let new = store.run_speakers(r.run.unwrap()).unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].global_id, Some(7));
     }
 }

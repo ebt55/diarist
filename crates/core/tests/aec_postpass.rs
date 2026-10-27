@@ -29,7 +29,12 @@
 //! level layer), the owner's word error rate per variant, and through the
 //! transfer gate (plan 15 section 9.2) with every guard: the raw spliced
 //! window's words (transcribed here) gated with the raw band against the
-//! raw spliced mic, carried over to the cancelled words. Since the
+//! raw spliced mic, carried over to the cancelled words; and (plan 16
+//! section 12.2) the owner's level of both gates, also without the owner's
+//! words spoken while the far end was silent (`owner` lines), today's
+//! decision, the shipped one and the floor rule at each F with the owner's
+//! level as estimated and forced unknown (variant (c)), with histograms of
+//! the level over the cancelled mic's floor (`hist` lines). Since the
 //! transfer gate, the real post-pass (`auto`, its live run has no mic
 //! words) transcribes the raw mic once more; `engine_info.echo.transfer`
 //! has its wall time.
@@ -586,6 +591,12 @@ fn post_pass(
     }
     let store = SqliteStore::open(&db).unwrap();
     store.set_setting(settings::ECHO_MODE, mode).unwrap();
+    // The words as the gate leaves them, comparable with the figures from
+    // before the loop collapse (plan 16 section 12.3; the collapse runs
+    // after the gate and never changes `engine_info.echo`).
+    store
+        .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+        .unwrap();
     let ms = (mic.len() / 16) as i64;
     let meeting = store
         .create_meeting(NewMeeting {
@@ -638,6 +649,8 @@ fn post_pass(
         transcribe: true,
         keep_live_runs: true,
         segment: SegmentOptions::default(),
+        punct: diarist_core::punct::PunctSource::None,
+        from_flac: false,
     };
     let report = run_post_pass(&store, engine, &job, &CancelToken::default(), &|_| {}).unwrap();
     assert!(!folder.join("mic-aec.wav").exists(), "mic-aec.wav was left");
@@ -1686,6 +1699,155 @@ fn spliced(
                 (0..aec_words.len()).filter(|&i| t.reasons[i].is_some() && in_clips(i)).count()
             );
         }
+        // Plan 16 section 12.2: the owner's level of both gates (are the
+        // owner's words spoken while the far end was silent too few?);
+        // today's decision (today's owner's level on the cancelled words),
+        // the shipped one, the floor rule at each F with the owner's level
+        // as estimated and forced unknown (variant (c), the quiet owner's
+        // words out of the estimate); histograms of the level over the
+        // cancelled mic's floor.
+        let today = owner_line("spliced cancelled", &gw, &fi, floor, true);
+        owner_line("spliced raw", &raw_gw, &fi, raw_floor, false);
+        let quiet_owner = |i: usize| in_clips(i) && gw[i].presence.is_some_and(|p| !p.far_active);
+        let no_quiet: Vec<GateWord> = (0..gw.len())
+            .filter(|&i| !quiet_owner(i))
+            .map(|i| gw[i].clone())
+            .collect();
+        owner_line(
+            &format!(
+                "spliced cancelled without the {} quiet owner's words",
+                gw.len() - no_quiet.len()
+            ),
+            &no_quiet,
+            &fi,
+            floor,
+            true,
+        );
+        let decide = |rule: transfer::Rule, owner: Option<Option<f32>>| {
+            transfer::gate_with(
+                &raw_gw,
+                raw_floor,
+                &raw_opts,
+                &gw,
+                floor,
+                &after,
+                &fi,
+                &rule,
+                &move |c: &mut layers::Context| {
+                    if let Some(o) = owner {
+                        c.owner_db = o;
+                    }
+                },
+            )
+        };
+        eprintln!("| Spliced, floor rule: decision | Owner's level (source) | Removed (level, floor rule) | Dropped | Of them in the owner's clips | Owner's word error rate | Words outside the clips |");
+        eprintln!("|---|---|---|---|---|---|---|");
+        let rule_row = |name: &str, t: &transfer::TransferReport| {
+            let kept: Vec<&W> = aec_words
+                .iter()
+                .zip(&t.reasons)
+                .filter(|p| p.1.is_none())
+                .map(|p| p.0)
+                .collect();
+            let (e, outside) = wer(&kept);
+            let c = t.transfer;
+            eprintln!(
+                "| {name} | {:?} ({}) | {} ({}, {}) | {} {:?} | {} | {e:.1} % | {outside} |",
+                t.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
+                t.after.owner_source.as_str(),
+                c.removed(),
+                c.level,
+                c.floor,
+                t.dropped(),
+                t.counts,
+                (0..aec_words.len())
+                    .filter(|&i| t.reasons[i].is_some() && in_clips(i))
+                    .count()
+            );
+        };
+        let t_today = decide(transfer::Rule::SHIPPED, Some(today));
+        rule_row("today (today's owner's level)", &t_today);
+        rule_row(
+            &format!("shipped (F {} dB)", transfer::FLOOR_MARGIN_DB),
+            &decide(transfer::Rule::SHIPPED, None),
+        );
+        for f in F_SWEEP {
+            // The floor rule at F in either tier.
+            let rule = transfer::Rule {
+                floor_margin_db: f,
+                floor_margin_silent_db: f,
+                ..transfer::Rule::SHIPPED
+            };
+            rule_row(&format!("F {f} as estimated"), &decide(rule, None));
+            rule_row(
+                &format!("F {f} forced unknown (c)"),
+                &decide(rule, Some(None)),
+            );
+        }
+        // Plan 16 section 12.7: the raw gate's share of flagged words beside
+        // the silent tier's threshold, and the tier the shipped rule takes.
+        let shipped = decide(transfer::Rule::SHIPPED, None);
+        eprintln!(
+            "share spliced: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); shipped floor rule {:?}",
+            shipped.raw.dropped(),
+            raw_gw.len(),
+            100.0 * shipped.raw_echo_share,
+            100.0 * transfer::SILENT_SHARE,
+            shipped.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
+        );
+        let raw_flags: Vec<transfer::RawWord> = raw_gw
+            .iter()
+            .zip(&t_today.raw.reasons)
+            .map(|(w, r)| transfer::RawWord {
+                start_ms: w.start_ms,
+                end_ms: w.end_ms,
+                norm: &w.norm,
+                echo: r.is_some(),
+            })
+            .collect();
+        let (cand, _) = transfer::transfer(&gw, &raw_flags, None, None, Guard::Plain);
+        let over = |i: usize| gw[i].presence.zip(floor).map(|(p, f)| p.level_db - f);
+        let cut = |i: usize| {
+            gw[i]
+                .presence
+                .and_then(|p| p.attenuation_db)
+                .is_some_and(|a| a >= transfer::ATTENUATION_DB)
+        };
+        let h = |sel: &dyn Fn(usize) -> bool| -> String {
+            let v: Vec<f32> = (0..gw.len()).filter(|&i| sel(i)).filter_map(over).collect();
+            hist(&v)
+        };
+        eprintln!(
+            "hist spliced: owner's words (in the clips), candidates cut 3 dB or more: {}",
+            h(&|i| in_clips(i) && cand[i] && cut(i))
+        );
+        eprintln!(
+            "hist spliced: owner's words, cut 3 dB or more: {}",
+            h(&|i| in_clips(i) && cut(i))
+        );
+        eprintln!(
+            "hist spliced: owner's words, cut under 3 dB: {}",
+            h(&|i| in_clips(i) && !cut(i))
+        );
+        eprintln!(
+            "hist spliced: words outside the clips kept today, candidates cut 3 dB or more: {}",
+            h(&|i| !in_clips(i) && t_today.reasons[i].is_none() && cand[i] && cut(i))
+        );
+        // How much the canceller takes from the owner's own words (plan 16
+        // section 12.7 (i) 4, the module docs of the layers).
+        let mut att: Vec<f32> = (0..gw.len())
+            .filter(|&i| in_clips(i))
+            .filter_map(|i| gw[i].presence.and_then(|p| p.attenuation_db))
+            .collect();
+        att.sort_by(f32::total_cmp);
+        let q = |f: f64| att.get(((att.len().max(1) - 1) as f64 * f).round() as usize);
+        eprintln!(
+            "att spliced: the owner's words (in the clips), {} with a cut: p50 {:?} p90 {:?} dB; {} cut by 3 dB or more",
+            att.len(),
+            q(0.5),
+            q(0.9),
+            att.iter().filter(|a| **a >= transfer::ATTENUATION_DB).count()
+        );
     }
     if std::env::var("DIARIST_ECHO_KEEP").as_deref() != Ok("1") {
         let _ = std::fs::remove_dir_all(&dir);
@@ -1697,6 +1859,79 @@ fn spliced(
         reference: reference.clone(),
         clips,
     }
+}
+
+/// The floor rule's F sweep (plan 16 section 12.2.2 step 3).
+const F_SWEEP: [f32; 5] = [9.0, 12.0, 15.0, 18.0, f32::INFINITY];
+
+/// Counts of `v` (dB over the floor) per 3 dB bin: under 0, 0 to 3, ...,
+/// 27 to 30, 30 and over.
+fn hist(v: &[f32]) -> String {
+    let mut bins = [0usize; 12];
+    for &x in v {
+        let k = if x < 0.0 {
+            0
+        } else {
+            ((x / 3.0).floor() as usize + 1).min(11)
+        };
+        bins[k] += 1;
+    }
+    let mut s = format!("n {}:", v.len());
+    for (k, n) in bins.iter().enumerate() {
+        let label = match k {
+            0 => "<0".to_owned(),
+            11 => ">=30".to_owned(),
+            _ => format!("{}-{}", 3 * (k - 1), 3 * k),
+        };
+        s.push_str(&format!(" {label} {n}"));
+    }
+    s
+}
+
+/// The owner's level of words in any order (plan 16 section 12.2.3, first
+/// step): the estimator's sets, today's branch and the shipped one; returns
+/// today's estimate.
+fn owner_line(
+    tag: &str,
+    gw: &[GateWord],
+    far: &FarIndex,
+    floor: Option<f32>,
+    canceller: bool,
+) -> Option<f32> {
+    let mut order: Vec<usize> = (0..gw.len()).collect();
+    order.sort_by_key(|&i| (gw[i].start_ms, gw[i].end_ms, i));
+    let sorted: Vec<GateWord> = order.iter().map(|&i| gw[i].clone()).collect();
+    let s = layers::CalibrationStats::of(
+        &sorted,
+        &layers::text_runs(&sorted, far, TextWindow::DEFAULT),
+    );
+    let c = s.owner_counts();
+    let today = s.owner(false, None);
+    let now = s.owner(canceller, floor);
+    let over = |o: Option<f32>| match (o, floor) {
+        (Some(o), Some(f)) => format!("{:+.1} dB over the floor", o - f),
+        _ => "-".into(),
+    };
+    let r1 = |v: Option<f32>| v.map(|x| (x * 10.0).round() / 10.0);
+    eprintln!(
+        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}; high {}); floor {:?}",
+        gw.len(),
+        c.quiet,
+        c.unmatched,
+        c.clean_quiet,
+        c.clean,
+        today.source.as_str(),
+        r1(today.db),
+        today.words,
+        over(today.db),
+        now.source.as_str(),
+        r1(now.db),
+        now.words,
+        over(now.db),
+        now.high,
+        r1(floor)
+    );
+    today.db
 }
 
 /// The spliced set's cancelled words and their gate scores, to score other

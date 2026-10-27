@@ -28,6 +28,11 @@ describe("updateBlocker", () => {
     expect(updateBlocker(false, [post("Standup"), imp("b.wav", "queued")])).toContain("1 more job waits");
   });
 
+  test("names a punctuation job like the backend", () => {
+    const punct: JobLike = { kind: "punctuate", name: "Adding punctuation: Standup", stage: "saving" };
+    expect(updateBlocker(false, [punct])).toStartWith("A punctuation job is still running");
+  });
+
   test("only queued jobs (the queue waits between jobs)", () => {
     expect(updateBlocker(false, [imp("b.wav", "queued")])).toStartWith("The import of b.wav waits in the queue");
     expect(updateBlocker(false, [imp("b.wav", "queued"), imp("c.wav", "queued")])).toStartWith(

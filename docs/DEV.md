@@ -9,7 +9,7 @@ from Git Bash or PowerShell.
 
 | Tool | Version | Notes |
 |---|---|---|
-| Rust (MSVC) | 1.90+ (workspace `rust-version`; Tauri 2.12 needs it) | `rustup update stable` |
+| Rust (MSVC) | 1.92+ (workspace `rust-version`; Tauri 2.12 needs 1.90, `ort` 2.0.0-rc.15 1.92) | `rustup update stable` |
 | VS Build Tools 2022 | C++ workload | linker and Windows SDK |
 | bun | 1.2 | package manager and script runner for `apps/desktop` |
 | Node | 22.12+ | Vite 8 runs on Node |
@@ -32,10 +32,10 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.4"
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.5"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
-cargo run -p diarist-cli -- models pull                 # required models via `nemo-speech pull`, SHA-checked
+cargo run -p diarist-cli -- models pull                 # required models, Diarist's own downloader, SHA-checked
 cargo run -p diarist-cli -- engine install              # runtime zip from manifests/engine.json
 cargo run -p diarist-cli -- retention [--apply]         # audio past audio_retention_days (dry run by default)
 cargo run --release -p diarist-cli -- transcribe some.m4a [--language auto] [--rttm] [--out t.md]
@@ -112,23 +112,26 @@ Skipped unless the variables are set:
 |---|---|
 | `DIARIST_SAMPLES` (folders, `;`-separated) | `--test decode_samples`: every `*.m4a` decodes within 50 ms of ffprobe (run with `--release`) |
 | `DIARIST_MODELS_DIR` | real GGUF headers, scan, classification |
-| `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor`, cached `pull` |
+| `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` | `--test engine_gpu` (30 s AMI cut, cancel, error mapping, diarize, cascade), `doctor` (also from a 264-character root against the short folder), cached `pull` (the `--via-runtime` path) |
 | `DIARIST_AMI_WAV` | AMI WAV for `engine_gpu` (default `<models>\..\data\samples\ES2002a.Mix-Headset.wav`) |
 | `DIARIST_LONGFILE_WAV` + engine + models | `--test acceptance_gpu` (run with `--release`, about 2.5 min): 77-minute import within 2 percent of the reference word count, 8 speakers, no empty minute |
-| engine + models | `-p diarist-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency, VRAM |
+| engine + models | `-p diarist-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency (median, p90, max), VRAM. `DIARIST_LIVE_RIGHT_CONTEXT=<frames>` passes the live lookahead (unset: no flag, the runtime's 1 frame; the app ships 6 since 0.1.0-beta.5, so set 6 to test what ships), `DIARIST_LIVE_SECONDS` the seconds of AMI (30), `DIARIST_LIVE_SESSIONS=2` a second, undiarized session on the mic channel as a recording runs, `DIARIST_LIVE_ASR` the ASR file name (default the EN model, else 3.5) |
 | `DIARIST_AUDIO_TEST=1` (VB-Audio Cable) | `-p diarist-core --test capture_device`: a tone played into the cable is captured from `CABLE Output` at 16 kHz |
 | `DIARIST_LIVE_TEST=1` + engine + models (VB-Audio Cable) | `-p diarist-cli --test live_record` (about 80 s, one minute audible on the loopback output): cable as the mic, a second AMI cut on the default output (`DIARIST_LOOPBACK_RENDER` picks another output; `DIARIST_CABLE_RENDER` / `DIARIST_CABLE_CAPTURE` override the cable); WAV lengths, cross-correlation offsets, live latency, post-pass run, FLAC, rename carry-over |
-| `DIARIST_ECHO_MEETINGS` (live meeting folders, `;`-separated, read only; `DIARIST_ECHO_SAMPLE` for one) + `DIARIST_ECHO_DB` (a copy of the database) | `-p diarist-core --release --test echo_sample -- --nocapture`: per meeting the echo profile and its 7 s null (must never couple; `DIARIST_ECHO_NULL=1` replays the live monitor over the null too), then the layered gate on both paths: the post-pass path (the canceller where the post-pass runs it, its output's words from `mic-aec.words.json` or transcribed once with `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` and cached in `DIARIST_ECHO_OUT`; where it runs, the transfer gate with every guard (`transfer` lines) on the live run's mic words and on the raw mic transcribed once with the engine (timed, cached as `<uid>.raw-words.json`; `mic.words.json` without an engine), the shipped one's row in the table) and the live path (the live run's every revision through the live gate in arrival order, the monitor fed in 100 ms frames; a meeting without a live run stands in its stored transcripts). Prints the acceptance row per meeting and path (dropped per layer, residual duplicates with the chance level, owner's words kept; `DIARIST_ECHO_CLASSES` adds the meeting 12 labels), and on both paths the text layer at the 300 and 500 ms lag spreads (`spread` lines). `DIARIST_ECHO_SWEEP=1` adds the sweeps (text window, floor percentile, correlation look-back and bands, after-canceller variants), `DIARIST_ECHO_DUMP` a per-word feature TSV with text, and per raw source each cancelled word's raw neighbours and guard decisions (local analysis; delete it), `DIARIST_ECHO_KEEP=1` keeps the cached words (docs/eval/2026-10-21-echo-round2.md, "Transfer gate") |
-| `DIARIST_ECHO_FLEURS` + `DIARIST_ECHO_SAMPLE` + engine + models | `-p diarist-core --release --test echo_fleurs -- --ignored --nocapture`: FLEURS English utterances (`fleurs_fetch.py --langs en`) as the owner over a speaker meeting's far end with its echo path, the real post-pass with `echo.mode` off and auto (the canceller, then the gate) and the gate alone over the off run's words; prints "me" WER, echo words removed and double-talk words kept, then the headphone control (no echo: `auto` must give the words `off` gives; `DIARIST_ECHO_CONTROL=0` skips it); `DIARIST_ECHO_BANDS` sweeps the gate alone per band and look-back, `DIARIST_ECHO_AEC_SWEEP=1` the after-canceller variants; the transfer gate per guard over the auto run's words before the gate, the off run's words standing in for the raw mic (`DIARIST_ECHO_TRANSFER=0` skips it). The fixture of the eval docs is `DIARIST_ECHO_MINUTES=20` over meeting 12's far end (docs/eval/2026-10-20-echo.md, docs/eval/2026-10-21-echo-round2.md) |
+| `DIARIST_ECHO_MEETINGS` (live meeting folders, `;`-separated, read only; `DIARIST_ECHO_SAMPLE` for one) + `DIARIST_ECHO_DB` (a copy of the database) | `-p diarist-core --release --test echo_sample -- --nocapture`: per meeting the echo profile and its 7 s null (must never couple; `DIARIST_ECHO_NULL=1` replays the live monitor over the null too), then the layered gate on both paths: the post-pass path (the canceller where the post-pass runs it, its output's words from `mic-aec.words.json` or transcribed once with `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` and cached in `DIARIST_ECHO_OUT`; where it runs, the transfer gate with every guard (`transfer` lines) on the live run's mic words and on the raw mic transcribed once with the engine (timed, cached as `<uid>.raw-words.json`; `mic.words.json` without an engine), the shipped one's row in the table) and the live path (the live run's every revision through the live gate in arrival order, the monitor fed in 100 ms frames; a meeting without a live run stands in its stored transcripts). Prints the acceptance row per meeting and path (dropped per layer, residual duplicates with the chance level, owner's words kept; `DIARIST_ECHO_CLASSES` adds the meeting 12 labels), and on both paths the text layer at the 300 and 500 ms lag spreads (`spread` lines). `DIARIST_ECHO_SWEEP=1` adds the sweeps (text window, floor percentile, correlation look-back and bands, after-canceller variants), `DIARIST_ECHO_DUMP` a per-word feature TSV with text, and per raw source each cancelled word's raw neighbours and guard decisions (local analysis; delete it), `DIARIST_ECHO_KEEP=1` keeps the cached words (docs/eval/2026-10-21-echo-round2.md, "Transfer gate"). `DIARIST_ECHO_CLASSES_OUT` (a scratch folder) writes, for a meeting without a live run whose `mic.words.json` has words and no labels were given, the classes CSV `DIARIST_ECHO_CLASSES` reads, from the measurement's matcher (`<uid>.classes.csv`, with text: local only, delete it) |
+| `DIARIST_PUNCT_MODEL` (a punctuation model folder: an `.onnx` with its `<file>.meet.json`, the tokenizer and `diarist-onnxruntime.dll`) | `-p diarist-core --lib punct::onnx::tests::real_model -- --ignored --test-threads=1`: loads the model, labels a 200-word English fixture twice (deterministic, every invariant holds), the module-identity check, RSS back after the session is dropped |
+| `DIARIST_PUNCT_CHECK_ROOT` (an empty scratch folder) + `DIARIST_PUNCT_CHECK_WORDS` (a cached `transcribe --json` output, default the 5-minute AMI fixture) | `-p diarist-core --lib punct::onnx::tests::cli_check_root -- --ignored`: a scratch data root with one meeting imported from the cached words (no engine, no GPU), for `diarist-cli --data-dir <root> --models-dir <model folder> punctuate <id>` and the exports before and after (plan 16 section 7.2 B) |
+| `DIARIST_RERUN_ROOT` (a copy of a data root: `diarist.db` with `-wal` and `-shm`, and the meeting's `audio\<uid>\`; it is migrated and written) + `DIARIST_RERUN_MEETING` (the meeting's id) + engine + models | `-p diarist-core --release --lib live::rerun::tests::a_stored -- --ignored --nocapture`: Process again from the copy's `playback.flac` with the engine its current run names must reproduce that run's words, `engine_info.echo` and `echo_dropped` exactly, apart from wall times and, without stored channel lengths, each channel's last word end (counts only) |
+| `DIARIST_ECHO_FLEURS` + `DIARIST_ECHO_SAMPLE` + engine + models | `-p diarist-core --release --test echo_fleurs -- --ignored --nocapture`: FLEURS English utterances (`fleurs_fetch.py --langs en`) as the owner over a speaker meeting's far end with its echo path, the real post-pass with `echo.mode` off and auto (the canceller, then the gate) and the gate alone over the off run's words; prints "me" WER, echo words removed and double-talk words kept, then the headphone control (no echo: `auto` must give the words `off` gives; `DIARIST_ECHO_CONTROL=0` skips it); `DIARIST_ECHO_BANDS` sweeps the gate alone per band and look-back, `DIARIST_ECHO_AEC_SWEEP=1` the after-canceller variants; the transfer gate per guard over the auto run's words before the gate, the off run's words standing in for the raw mic (`DIARIST_ECHO_TRANSFER=0` skips it). The fixture of the eval docs is `DIARIST_ECHO_MINUTES=20` over meeting 12's far end (docs/eval/2026-10-20-echo.md, docs/eval/2026-10-21-echo-round2.md). Plan 16 section 12.2.3: `DIARIST_ECHO_UNKNOWN=a` builds the forced-unknown fixture instead (`DIARIST_ECHO_UTTERANCES` owner utterances, default 10, each placed over far-end speech), `b` the same with a quieter owner (about 21 dB over the floor); `DIARIST_ECHO_OWNER_DBFS` sets the owner's RMS of any variant (default −33); the `owner`, `hist`, `share`, `unmasked` and `lost` lines print the owner's level per gate, the floor rule at each F and the post-canceller correlation layer's cost (docs/eval/2026-10-26-echo-owner-level.md) |
 | `DIARIST_ECHO_SAMPLE` + `DIARIST_ECHO_DB` (a copy) + `DIARIST_ECHO_CLASSES` + `DIARIST_ECHO_OUT` + engine + models | `-p diarist-core --release --test aec_postpass -- --ignored --nocapture` (about 10 minutes for 111 minutes of audio): the real post-pass over a stored speaker recording with `echo.mode` off and auto, the gate alone over the off run's words, scored per class (owner's words kept, with the fair count; duplicates against a 7 s null); the canceller's wall time; the spliced double-talk set of research 14 rebuilt and transcribed (owner's WER raw, cancelled, cancelled and gated, per after-canceller variant of the layered gate, and per guard of the transfer gate on the raw window's words). The auto post-pass's live run has no mic words, so it transcribes the raw mic once more for the transfer gate (`engine_info.echo.transfer.raw_wall_s`; 44 to 49 s more for 111 minutes). `DIARIST_ECHO_AGC_REPLAY=1` adds a post-pass with a gain track made by replaying the AGC backwards and the signal-level table (no track, 10 ms values, one per frame). Everything it writes under `DIARIST_ECHO_OUT` is deleted at the end (`DIARIST_ECHO_KEEP=1` keeps it; `DIARIST_ECHO_REUSE=1` reuses the post-pass results of the last kept run) (docs/eval/2026-10-20-echo.md, "Post-pass canceller (B2a)") |
-| `REPRO_FLAC` + engine + models (no audio device) | `-p diarist-core --test live_carry_repro -- --ignored --nocapture`: replays a stereo 16 kHz FLAC (left mic, right loopback, e.g. a live meeting's `playback.flac`) in real time through `nemo-speech serve` as the recorder would, renames the top loopback label from the legend and the second from a live line half way, then runs the real post-pass with `keep_live_runs` on; prints the carry-over report, both runs' speakers and a checksum of the post-pass words, and fails when a name reaches nobody. `REPRO_OUT` (default `%TEMP%\diarist-replay`) holds `repro.db` and the logs; `REPRO_SRC_DB` + `REPRO_MEETING` take the clock anchors from the recording's database (read-only); `REPRO_SECONDS`, `REPRO_SPEED`, `REPRO_RENAME_AT`; `REPRO_RESUME=1` runs the post-pass and carry-over again on `REPRO_OUT`'s live run |
+| `REPRO_FLAC` + engine + models (no audio device) | `-p diarist-core --test live_carry_repro -- --ignored --nocapture`: replays a stereo 16 kHz FLAC (left mic, right loopback, e.g. a live meeting's `playback.flac`) in real time through `nemo-speech serve` as the recorder would, renames the top loopback label from the legend and the second from a live line half way, then runs the real post-pass with `keep_live_runs` on; prints the carry-over report, both runs' speakers and a checksum of the post-pass words, and fails when a name reaches nobody. `REPRO_OUT` (default `%TEMP%\diarist-replay`) holds `repro.db` and the logs; `REPRO_SRC_DB` + `REPRO_MEETING` take the clock anchors from the recording's database (read-only); `REPRO_SECONDS`, `REPRO_SPEED`, `REPRO_RENAME_AT`; `REPRO_RESUME=1` runs the post-pass and carry-over again on `REPRO_OUT`'s live run; `DIARIST_LIVE_RIGHT_CONTEXT=<frames>` the live server's lookahead (unset: no flag, the runtime's 1 frame; set 6 to replay as the app ships since 0.1.0-beta.5) |
 
 `UPDATE_GOLDEN=1 cargo test -p diarist-core golden` rewrites the export golden
 files in `crates/core/tests/golden/`.
 
 `.cargo/config.toml` turns on the MSRV-aware resolver
 (`incompatible-rust-versions = "fallback"`), so `cargo update` picks dependency
-versions that support the workspace `rust-version` (1.90) when they exist.
+versions that support the workspace `rust-version` (1.92) when they exist.
 
 ### Core/UI seam
 
@@ -407,7 +410,10 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   queued imports say "Waiting for the recording to stop"); at Stop the
   post-pass goes to the front of the queue, then the queue resumes. A failed
   or cancelled post-pass can be retried (`live::rerun_post_pass`) while the
-  WAVs exist.
+  WAVs exist, and since 0.1.0-beta.5 a finished live meeting whose live run
+  is kept runs again from its `playback.flac` ("Process again" in the
+  meeting details; `live::rerun_check` says whether and from which audio,
+  docs/02 "Process again").
 - Echo (plan 15). The first detected coupling shows the echo warning with
   "Turn off for this recording" (**N** while it shows;
   `turn_off_echo_for_recording`, `Recorder::turn_off_echo`): the rest of the
@@ -425,8 +431,11 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   `me` (engine labels kept, each channel re-segmented with the run's
   `engine_info.segmentation` and interleaved as the post-pass does), carries
   names, colours and reassignments over and makes the old run's merges
-  again, writes `engine_info.echo.restored: true` (`restored_from`,
-  `restored_words`, `dropped: 0`) and an empty `echo_dropped`, and makes it
+  again, collapses the channels' repeated-token loops again (the restored
+  words are raw), writes `engine_info.echo.restored: true` (`restored_from`,
+  `restored_words`, `restored_merged`: how many of them merged into a
+  burst, which the details line names, `dropped: 0`) and an empty
+  `echo_dropped`, and makes it
   current; the old run stays, and restoring it again replaces the earlier
   restored run. A restored run offers "Remove echo words again"
   (`remove_restored_echo(run_id)`: the old run becomes current, nothing is
@@ -436,12 +445,28 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   carries them. `engine_info.echo.layers` counts the removed words per
   layer (`text`, `attenuation`, `level`, `correlation`, `utterance`, and
   `transfer` when the post-pass transfer gate removed any), with
-  `band`, `band_calibrated`, `text_matched`, `floor_db` and `owner_db`;
-  after the post-pass canceller `engine_info.echo.transfer` has the raw
-  mic's `source` (`live` or `transcribed`), `raw_words`, `raw_dropped`,
-  `raw_layers`, `raw_band`, `raw_wall_s`, `gate_s`, the `guard` and its
-  counts (`candidates`, `removed`, `text`, `level`, `plain`, `guarded`,
-  `unmatched`), or `{"error": ...}` when the raw transcription failed. Both refuse while the meeting
+  `band`, `band_calibrated`, `text_matched`, `floor_db` and `owner_db`,
+  and since 0.1.0-beta.5 where the owner's level came from (plan 16
+  sections 12.2, 12.7 and 12.8): `owner_source` (`quiet`, `clean`,
+  `unmatched`, `too_few` or `implausible`; after the canceller only words
+  it cut by under 3 dB count, and a median under floor + 6 dB is
+  implausible), `owner_words` (the words the level came from),
+  `owner_low` (an estimate 6 to 15 dB over the floor after the canceller)
+  and `owner_high` (words the canceller left alone 18 dB or more over the
+  floor: the talking-owner guard of the silent tier, which needs at most
+  10). After the post-pass canceller `engine_info.echo.transfer` has the
+  raw mic's `source` (`live` or `transcribed`), `raw_words`,
+  `raw_dropped`, `raw_layers`, `raw_band`, `raw_wall_s`, `gate_s`, the
+  `guard` and its counts (`candidates`, `removed`, `text`, `level`,
+  `plain`, `guarded`, `unmatched`, and `floor`, the words the floor rule
+  removed), the raw gate's `raw_owner_db`, `raw_floor_db` and
+  `raw_echo_share` (the share of the raw mic's words it flagged), and
+  `floor_rule` `{tier, f_db, removed}` (the rule for an unknown owner
+  level: `tier` `unknown` at 12 dB over the cancelled mic's floor, or
+  `silent` at 18 dB when the level is `implausible`, `owner_high` is at
+  most 10 and `raw_echo_share` at least 0.998; `tier` and `f_db` null
+  with the level known), or `{"error": ...}` when the raw transcription
+  failed. Runs made before 0.1.0-beta.5 have none of these fields. Both refuse while the meeting
   records or is finalized. When the post-pass echo step fails, the mic
   stays ungated and `engine_info.echo` is `{"error": "<message>"}`.
 - Start refuses under 2560 MB of free VRAM, read from NVML (`core::gpu`;
@@ -461,11 +486,31 @@ All are in `settings::DEFAULTS` (and `generated/settingDefaults.ts`):
 | `capture.autoconvert` | `true` | Windows converts to 16 kHz; `false` captures at the mix format and resamples with rubato |
 | `record.mic_device`, `record.loopback_device` | `""` | Endpoint ids for new recordings (`""`: the default communications mic; the default output, following the app that plays) |
 | `record.diarize_mic` | `false` | Diarize the mic too (a room with several people) |
+| `engine.live_lookahead` | `""` | The live server's decoder lookahead (plan 16 section 5; no UI, read when the live server starts): `""` or `model` uses the ASR model's own `live_right_context` (6 frames, 560 ms, for both Nemotron models since 0.1.0-beta.5: `--asr.streaming.rnnt_right_context 6`), `low` passes no flag (the runtime default, 1 frame, as up to 0.1.0-beta.4), a number passes that many 80 ms frames to a model trained for it (another model keeps its own), anything else is logged and read as `model`. Live runs record it as `engine_info.live_right_context`; docs/04-model-guide.md section 5 |
 | `echo.mode` | `auto` | Recording with speakers (plan 15; Settings, "Recording with speakers (echo)": Detect and handle / Off / Always on): `auto` runs the echo monitor (2 s blocks, FFT correlation of the loopback against the mic, both band-passed to 300 to 3,400 Hz) and the layered echo gate on the mic words, live (what the view shows, and the live run at Stop) and in the post-pass (`audio::echo::layers`, plan 15 section 9): text matching against the loopback's words and the near-end level once the text matches show echo (8 or more words in delay-consistent runs of three, and at least 1 percent of the mic words), the correlation from the first detected coupling to the end of the recording, and an utterance rule; a recording that neither couples nor shows text matches (headphones without a leak) is left exactly as it was; `off` runs nothing and gates nothing; `always` runs the correlation regardless of detection. In the post-pass, a coupled recording whose echo return loss is under 20 dB (every recording with `always`) first goes through Diarist's echo canceller, whose output (`mic-aec.wav`) is transcribed instead of the raw mic; the transfer gate then decides on the raw mic's words (the live run's, else `mic.wav` transcribed once more) with the raw band and carries the echo decisions over to the cancelled words the canceller cut by 3 dB or more and that sit 12 dB or more under the owner's level (`audio::echo::transfer`, plan 15 section 9.2). "Turn off for this recording" overrides it for one recording |
 | `echo.gate_threshold` | `0.5` | The neighbours' median correlation at or above which a mic word in the correlation layer's middle band (0.30 to 0.70) is dropped; words at 0.70 or more always go, under 0.30 always stay. With 20 or more text-matched words the band is calibrated per recording instead (drop bound at their 10th percentile within 0.55 to 0.80, keep bound at the 90th percentile of the owner-level words; this setting moves the neighbours' bound from the middle). After the post-pass echo canceller has run, the band over the cancelled transcript's words is 0.60 / threshold + 0.20 (0.70 by default) / 0.95, not calibrated (`band_after_canceller`; docs/eval/2026-10-21-echo-round2.md); the transfer gate's decision on the raw mic's words uses the raw band with this threshold (calibrated as live). Values outside 0.2 to 0.6 are clamped (Settings, under Advanced; the range comes from `ECHO_GATE` in `generated/settingDefaults.ts`). Removed words are listed in the run's `echo_dropped` column, the counts in `engine_info.echo`; Restore puts them back (above) |
 
 The level meters show the gain the AGC applied; their tooltip shows the
 peak before it.
+
+### Punctuation settings
+
+Plan 16 section 3.8; also in `settings::DEFAULTS`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `transcript.punctuation` | `auto` | `auto`: the post-pass, imports, Restore and "Add punctuation" punctuate the words when a punctuation model is selected, installed and covers the run's language (`punct::load`); `off`: never (`engine_info.punctuation.reason` is `off`). Nothing live is punctuated in beta.5 |
+| `transcript.punctuation_threads` | `4` | ONNX Runtime intra-op threads, clamped to 1 to the machine's cores (`punct::threads`); no UI |
+| `transcript.collapse_loops` | `on` | Repeated-token loops (plan 16 section 12.3, `transcript::loops`): the post-pass, imports, Restore and every punctuation rebuild (Add and Remove) keep each burst of one word that the speech model wrote several times in one 80 ms frame as one word; `off` keeps every word (`engine_info.loops.applied` is `false`). No UI and no CLI command: with Diarist closed, `sqlite3 "<data folder>\diarist.db" "INSERT OR REPLACE INTO settings (key, value) VALUES ('transcript.collapse_loops', 'off')"` sets it, and deleting the row restores the default. It applies to transcripts built after the change; turning it off does not bring collapsed words back into an existing transcript (neither does Remove punctuation), because a rebuild starts from the current run's words. Only the earlier run or a new transcription has them: the meeting folder's words JSON for the post-pass and imports, the run a Restore or rebuild was made from, and the kept live run of a promoted one |
+| `selected_model.punctuation` | `""` | The selected punctuation model file, like the other roles; the scan picks the recommended one |
+
+Punctuation never changes a word, its times or its speaker (the loop
+collapse, behind its own setting above, does): the display
+text goes to `words.text`, the speech model's text to `words.raw_text`
+where they differ (docs/02). `diarist-cli punctuate <meeting>` (or
+`--all-missing`) adds it to finished meetings as a new run, `--remove`
+takes it out; without a model it prints the reason and exits 0. The eval
+data roots keep it `off` (plan 16 section 3.5).
 
 ### Crash recovery
 
@@ -476,11 +521,23 @@ meetings a crash left behind:
   is materialised and made current, and the post-pass is queued.
 - `processing` (the post-pass was queued or running) with both WAVs: the
   runs the interrupted post-pass wrote are deleted and it is queued again.
+  A copy of the live run (Restore, a punctuation rebuild) that was current
+  stays current, so the post-pass carries its names over; such copies are
+  never taken for the live run.
 - `processing` without WAVs: a finished `post_pass` run that is current is
-  kept (the live run is deleted unless `keep_live_runs` or the post-pass
-  recorded `engine_info.unplaced_names`); otherwise the live
+  kept (the live run is deleted unless `keep_live_runs`, the post-pass
+  recorded `engine_info.unplaced_names`, or the run is a promoted live run
+  whose loop collapse removed words, `promoted_live` with
+  `loops.words_removed` above 0, since those words exist only in the live
+  run); otherwise the live
   run becomes current with `engine_info.recovery` explaining why, and the
   meeting is done.
+
+Before the first import can be queued, every launch also marks imports
+left in `processing` as failed and deletes the runs an interrupted
+punctuation rebuild or Restore left half-built (still `running`, not
+current, `punctuation.rebuilt_from` or `echo.restored_from` set, meeting
+`done` or `failed`): `pipeline::recover_interrupted_imports`.
 
 The app log says what it did (`recovered meeting 3 (was processing):
 PostPassQueued; ...`). To try it, end the app from Task Manager while it
@@ -526,22 +583,54 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   recommended runtime package (`cuda`, `vulkan`, `cpu`), free disk and every
   download with URL, SHA-256, size and folder. The first launch opens the
   setup screen until the user picks "Set up later" (`setup.later`).
-- Engine zips: `download_file` (ureq, platform verifier) resumes
-  `<zip>.part` with Range requests; each request runs at most two minutes,
-  three requests in a row without data end it as stalled.
-- Models: `nemo-speech pull` downloads with System32 `curl.exe` into
-  `<file>.partial` in the model's folder; `pull_with_progress` polls that
-  folder (opening each file, since a directory listing keeps the old size of
-  a file being written) and stops a pull after two minutes without new bytes.
-  `models.user.json` entries (`"direct": true` by default) are fetched by our
-  own downloader into `models\user\`.
-- Hand-placed manifest models without the runtime's `.verified` sidecar are
-  hashed once on scan and cached in `<file>.sha256`; a mismatch is reported
-  and the file is not treated as the manifest model. Linked folders under
-  `models\` are scanned.
+- Engine zips and models: `download_file` (ureq, platform verifier, https
+  only outside tests so no redirect to http is followed, redirects
+  followed, User-Agent `diarist/<version>`) resumes `<file>.part` with Range
+  requests, each from the original URL so a resumed download gets a fresh
+  redirect; each request runs at most two minutes, three requests in a row
+  without data end it as stalled. A 206 is appended only when its
+  `Content-Range` starts at the bytes on disk, else the file restarts from
+  byte 0. `<file>.part.json` records the URL and SHA-256 a `.part` belongs
+  to; another URL or hash, or no record, starts from byte 0.
+  `<file>.part.lock` (an OS file lock, gone with a crashed process) is held
+  while the `.part` is written, so a second download of the same file (the
+  CLI during an app install) fails at once with "already downloading".
+- Models: since 0.1.0-beta.5 the app and `diarist-cli models pull` fetch
+  every manifest model with `models::fetch_entry`, every file from its
+  `url` (the other files first, the primary file last) into
+  `ModelEntry::dest_dir` (`<repo>\<revision>\` for shipped models, the
+  layout `nemo-speech pull` used, so earlier pulls are found; `models\user\`
+  for direct entries; `models\<dir>` when the entry names one), and write
+  `<file>.sha256`; no engine is needed. A
+  `<file>.partial` an interrupted `nemo-speech pull` left there is deleted
+  once the model is in place. `nemo-speech pull` (System32 `curl.exe`,
+  which fails where revocation checks are blocked; model paths it builds
+  itself, so no long data folders) is kept for one release behind
+  `diarist-cli models pull --via-runtime`.
+- Engine names in `manifests\engine.json` (and from the release list)
+  become `engine\<name>`, so `check_engine_name` accepts one plain folder
+  name only, at load and before an install.
+- Manifest models without the runtime's `.verified` sidecar (hand-placed or
+  downloaded by us) are hashed once on scan and cached in `<file>.sha256`
+  (a download writes it directly); a mismatch is reported and the file is
+  not treated as the manifest model. Linked folders under `models\` are
+  scanned.
 - Observed connections: the engine zip from `diarist.exe` (github.com,
-  then GitHub's download CDN on 185.199.108-111.133); model pulls only from
-  `C:\Windows\System32\curl.exe` (huggingface.co, us.aws.cdn.hf.co).
+  then GitHub's download CDN on 185.199.108-111.133); up to 0.1.0-beta.4,
+  model pulls only from `C:\Windows\System32\curl.exe` (huggingface.co,
+  us.aws.cdn.hf.co). Since 0.1.0-beta.5 models come from `diarist.exe`
+  (`diarist-cli.exe` for the CLI) too.
+- Long paths: `process::command` passes the runtime as `\\?\C:\...` when
+  its absolute path is 240 characters or more (`process::exe_arg`);
+  `CreateProcessW` refuses the plain form at 260 or more with os error 3.
+  Model, audio and output paths get the same form as arguments
+  (`process::path_arg`; `\\server\share\...` becomes
+  `\\?\UNC\server\share\...`), and so does every path handed to SQLite
+  (`SqliteStore::open`, its backups, the pre-migration copy, the pre-rename
+  copy in `legacy`: SQLite opens the plain form only below 260).
+  `DataPaths::db` and everything stored, logged or shown stay plain;
+  `process::plain_paths` turns the runtime's echoed `\\?\` paths back for
+  messages. Rust's own file calls handle long paths themselves.
 - Move data folder: `move_data_root` copies (database through the backup
   API, then audio, engine, models, manifests; logs, window state and the
   pre-upgrade `diarist.db.bak-*` as they are), verifies sizes, writes the registry key (cleared when the target is

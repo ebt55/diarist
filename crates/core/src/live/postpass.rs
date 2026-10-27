@@ -11,12 +11,42 @@
 //! WAVs deleted, and the live run deleted unless `keep_live_runs` or a
 //! display name of the live run reached nobody in the new run (counted in
 //! the new run's `engine_info.unplaced_names`, and logged with the rest of
-//! the carry-over's counts). With
+//! the carry-over's counts) or, for a promoted live run, the loop collapse
+//! removed a word (below). With
 //! `transcribe = false` (`post_pass_mode = on_issues` and a clean
 //! recording) the live run is promoted instead and only the audio work runs.
 //! Words that come back mostly unknown-token markers fail the post-pass
 //! before anything is stored ([`CoreError::UnknownTokens`]): the live run
 //! and the WAVs stay, so it can run again.
+//!
+//! Punctuation (plan 16 section 3.2), with the job's [`PunctSource`]: after
+//! the echo step and the unknown-token check, before segmentation, both
+//! channels are punctuated, each as its own stream
+//! ([`crate::punct::punctuate_loaded`]); the report is the run's
+//! `engine_info.punctuation`, and `echo_dropped` keeps the raw words. Names
+//! carry over from the meeting's current run when it is a copy of the live
+//! run (Restore, a punctuation rebuild; plan 16 section 3.9 step 7), else
+//! from the live run. With `transcribe = false` and a punctuator that
+//! changes the text of at least one word, the live run is not promoted as
+//! it is: a `post_pass` run is built from its words (each under the speaker
+//! row of its own segment, `punct::rebuild::source_run`), punctuated, with
+//! `promoted_live`, the live run's `engine_info.echo` and `echo_dropped`,
+//! every speaker row carried by identity; it becomes current and the live
+//! run goes as after a transcribing post-pass. Without a punctuator (or
+//! `off`), or when no word changed (a language the model does not cover, a
+//! failure, nothing to mark), the live run is promoted as before.
+//!
+//! Repeated-token loops (plan 16 section 12.3, [`loops`]): both channels
+//! are collapsed after the echo step and the unknown-token check (which see
+//! the raw words) and before punctuation, behind `transcript.collapse_loops`;
+//! the counts are the run's `engine_info.loops`. The removed words of a
+//! transcribing post-pass survive in the file engine's words JSON in the
+//! meeting folder. The promoted live run is collapsed too: a loop it holds
+//! builds the inline `post_pass` run above even without a punctuator, and
+//! then the live run stays, whatever `keep_live_runs` says, because it is
+//! the only place the removed words survive (the live engine writes no
+//! words JSON; a re-run needs it too). Crash recovery keeps it as well
+//! ([`promotion_collapsed`]).
 //!
 //! Echo (plan 15; nothing with `echo.mode = off`), on a thread of its own
 //! while the loopback is transcribed ([`prepare_echo`]):
@@ -62,6 +92,20 @@
 //! mic stays ungated, `engine_info.echo` is `{"error": "<message>"}` and the
 //! error is logged; a canceller that fails leaves the raw mic to be
 //! transcribed and gated, with `aec_error` in `engine_info.echo`.
+//!
+//! Run again from the stored audio ([`PostPassJob::from_flac`], plan 16
+//! section 12.5 J): the job first writes its marker and decodes the
+//! registered `playback.flac` into the two WAVs
+//! ([`crate::audio::flac::decode_stereo_to_wavs`]: `.part` files first,
+//! never over WAVs that are there, each channel cut back to its stored
+//! length), then runs as above, and never encodes, moves or deletes the
+//! FLAC or touches its row. Every step that can fail comes before its run
+//! becomes current, and no earlier run is deleted (the live run neither);
+//! the decoded WAVs go when the job ends, whatever happens, then the
+//! marker ([`super::rerun`]). No post-pass encodes over a registered
+//! `playback.flac`, and WAVs beside one go only once it is seen to hold
+//! them. Any post-pass that fails deletes the run it made, unless that run
+//! had already become current.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -85,15 +129,17 @@ use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, File
 use crate::error::{CoreError, Result};
 use crate::models::languages;
 use crate::pipeline::CancelToken;
+use crate::punct::rebuild::{descends_from, rebuild_transcript, root_run, source_run, texts_of};
+use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
-use crate::store::{CarryOverReport, NewAudioTrack, RunStore};
+use crate::store::{CarryOverReport, NewAudioTrack, RunStore, StoreError};
 use crate::transcript::{
-    build_transcript_channels, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
+    build_transcript_channels, loops, words_from_engine, SegmentOptions, TranscriptWord, ME_LABEL,
     UNKNOWN_LABEL,
 };
 use crate::types::{
     AudioFormat, Channel, EchoDroppedWord, JobId, LiveUtterance, MeetingId, MeetingStatus, RunId,
-    RunKind, RunStatus, TrackChannel,
+    RunKind, RunStatus, TrackChannel, TranscriptRun,
 };
 use crate::views::{JobEvent, JobStage};
 
@@ -113,6 +159,15 @@ pub struct PostPassJob {
     pub transcribe: bool,
     pub keep_live_runs: bool,
     pub segment: SegmentOptions,
+    /// Where the punctuator comes from (the context's data paths).
+    pub punct: PunctSource,
+    /// Run again from the stored audio (plan 16 section 12.5 J,
+    /// [`super::rerun_post_pass`]): the WAVs are decoded from the meeting's
+    /// registered `playback.flac` when the job starts and deleted when it
+    /// ends, whatever happens; the FLAC and its track row are never touched
+    /// and no earlier run is deleted (`keep_live_runs` aside). Needs
+    /// `transcribe`.
+    pub from_flac: bool,
 }
 
 impl PostPassJob {
@@ -171,6 +226,51 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+/// A post-pass run being built: deleted when this drops unless it became
+/// current, so a post-pass that fails leaves no run nobody has seen.
+struct NewRun<'a> {
+    store: &'a dyn RunStore,
+    run: RunId,
+    current: bool,
+}
+
+impl Drop for NewRun<'_> {
+    fn drop(&mut self) {
+        if !self.current {
+            if let Err(e) = self.store.delete_run(self.run) {
+                log::warn!(
+                    "post-pass: cannot delete run {} it did not finish ({e})",
+                    self.run
+                );
+            }
+        }
+    }
+}
+
+/// `(channel, engine label, display name)` of a run's speakers.
+type Speakers = Vec<(Channel, String, Option<String>)>;
+
+fn speakers_of(store: &dyn RunStore, run: RunId) -> Result<Speakers> {
+    Ok(store
+        .run_speakers(run)?
+        .into_iter()
+        .map(|s| (s.channel, s.engine_label, s.display_name))
+        .collect())
+}
+
+/// Deletes the meeting's `mic` and `loopback` WAV track rows (the WAVs are
+/// gone, or go right after).
+fn delete_wav_rows(store: &dyn RunStore, meeting: MeetingId) -> Result<()> {
+    for t in store.list_audio_tracks(meeting)? {
+        if t.format == AudioFormat::Wav
+            && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
+        {
+            store.delete_audio_track(t.id)?;
+        }
+    }
+    Ok(())
+}
+
 /// What a finished post-pass did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostPassReport {
@@ -204,18 +304,18 @@ fn wav_frames(p: &Path) -> Result<u64> {
 }
 
 /// Runs one file job to completion; returns the latest revision of every
-/// utterance's words, in order.
+/// utterance's words, in order, and the languages the runtime detected.
 fn transcribe(
     engine: &dyn Engine,
     job: FileJob,
     cancel: &CancelToken,
     on_progress: &dyn Fn(u64, Option<u64>),
-) -> Result<Vec<EngineWord>> {
+) -> Result<(Vec<EngineWord>, Vec<String>)> {
     let job_id = job.job_id.clone();
     let rx = engine.transcribe_file(job)?;
     let mut utterances: BTreeMap<u32, (u32, Vec<EngineWord>)> = BTreeMap::new();
     let mut cancel_sent = false;
-    loop {
+    let languages = loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(EngineEvent::Progress {
                 done_ms, total_ms, ..
@@ -228,7 +328,7 @@ fn transcribe(
                     *e = (rev, words);
                 }
             }
-            Ok(EngineEvent::Done { .. }) => break,
+            Ok(EngineEvent::Done { stats, .. }) => break stats.languages,
             Ok(EngineEvent::Error { code, message, .. }) => {
                 if cancel_sent || code == ErrorCode::Cancelled {
                     return Err(CoreError::Cancelled);
@@ -248,8 +348,11 @@ fn transcribe(
                 ))
             }
         }
-    }
-    Ok(utterances.into_values().flat_map(|(_, w)| w).collect())
+    };
+    Ok((
+        utterances.into_values().flat_map(|(_, w)| w).collect(),
+        languages,
+    ))
 }
 
 /// How many distinct display names of `live_run` (as the user sees them: a
@@ -276,6 +379,163 @@ fn unplaced_names(
         .filter(|n| !placed.contains(n.as_str()))
         .collect();
     Ok(unplaced.len())
+}
+
+/// The run the post-pass carries names and edits from (plan 16 section 3.9
+/// step 7): the meeting's current run when it is a copy of `live_run` (a
+/// Restore or a punctuation rebuild of it, a promoted live run of it, or a
+/// copy of one of those), so names given on the copy survive; else
+/// `live_run`.
+fn carry_source(store: &dyn RunStore, meeting: MeetingId, live_run: RunId) -> RunId {
+    match store.get_meeting(meeting).map(|d| d.current_run) {
+        Ok(Some(c)) if c.id != live_run && copies_live(store, &c, live_run) => c.id,
+        _ => live_run,
+    }
+}
+
+/// Whether `run` holds `live_run`'s own words under its own speakers: a
+/// Restore or a punctuation rebuild of it ([`descends_from`]), or a
+/// `post_pass` run [`promote_punctuated`] built from it
+/// (`engine_info.promoted_live`, punctuated or with its loops collapsed),
+/// or a Restore or rebuild of such a run.
+fn copies_live(store: &dyn RunStore, run: &TranscriptRun, live_run: RunId) -> bool {
+    if descends_from(store, run, live_run) {
+        return true;
+    }
+    let root = root_run(store, run);
+    let root = if root == run.id {
+        Ok(run.clone())
+    } else {
+        store.get_run(root)
+    };
+    root.is_ok_and(|r| {
+        r.kind == RunKind::PostPass
+            && r.meeting_id == run.meeting_id
+            && r.engine_info["promoted_live"].as_i64() == Some(live_run.0)
+    })
+}
+
+/// A promoted live run rebuilt by [`promote_punctuated`].
+struct Promoted {
+    run: RunId,
+    carry: CarryOverReport,
+    /// Display names of the live run no speaker of the new run received.
+    unplaced: usize,
+    /// Words the loop collapse removed. They exist only in the live run
+    /// (the live engine writes no words JSON), so it stays when this is
+    /// not 0.
+    collapsed: u64,
+}
+
+/// `transcribe = false`: a `post_pass` run built from the live run's words,
+/// each under the speaker row of its own segment, its repeated-token loops
+/// collapsed (`collapse`, plan 16 section 12.3) and punctuated with
+/// `loaded`, made current. `Ok(None)` when the collapse removed no word and
+/// no word's text changed (no punctuator, the model did not run, or it
+/// marked nothing): nothing is made and the live run is promoted as it is.
+fn promote_punctuated(
+    store: &dyn RunStore,
+    job: &PostPassJob,
+    loaded: &mut crate::punct::Loaded,
+    collapse: bool,
+    cancel: &CancelToken,
+) -> Result<Option<Promoted>> {
+    if loaded.is_err() && !collapse {
+        return Ok(None);
+    }
+    let source = source_run(store, job.live_run)?;
+    let mut channels = source.channels.clone();
+    let before = texts_of(&channels);
+    let loops = loops::collapse_channels(&mut channels, collapse);
+    if loaded.is_err() && loops.words_removed == 0 {
+        // No punctuator and no loop: today's promotion.
+        return Ok(None);
+    }
+    let punctuation = punctuate_loaded(
+        loaded,
+        &mut channels,
+        &job.segment,
+        &RunLanguage::new(&job.language),
+        &|| cancel.is_cancelled(),
+    );
+    if cancel.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    if loops.words_removed == 0 && texts_of(&channels) == before {
+        log::info!(
+            "post-pass meeting {}: punctuation changed no word of the live run ({}); it is promoted as it is",
+            job.meeting,
+            punctuation.reason.as_str()
+        );
+        return Ok(None);
+    }
+    let transcript = rebuild_transcript(&source, channels, &job.segment);
+    let mut info = source.run.engine_info.clone();
+    if !info.is_object() {
+        info = serde_json::json!({});
+    }
+    info["promoted_live"] = serde_json::json!(job.live_run.0);
+    info["live_run"] = serde_json::json!(job.live_run.0);
+    info["language"] = serde_json::json!(job.language);
+    info["diarize_mic"] = serde_json::json!(job.diarize_mic);
+    info["segmentation"] = serde_json::json!({
+        "max_gap_ms": job.segment.max_gap_ms,
+        "sentence_gap_ms": job.segment.sentence_gap_ms,
+        "max_words": job.segment.max_words,
+    });
+    info["punctuation"] = punctuation.to_json();
+    info["loops"] = loops.to_json();
+    let run = store.create_run(job.meeting, RunKind::PostPass, info)?;
+    let built = (|| -> Result<(CarryOverReport, usize)> {
+        if let Some(dropped) = store.echo_dropped(job.live_run)? {
+            store.set_echo_dropped(run.id, &dropped)?;
+        }
+        store.insert_transcript(run.id, &transcript)?;
+        // The same words, each with its own speaker row: speakers carry by
+        // identity.
+        let report = store.carry_over_identity(job.live_run, run.id)?;
+        let unplaced = unplaced_names(store, job.live_run, &report)?;
+        let mut info = store.get_run(run.id)?.engine_info;
+        info["unplaced_names"] = serde_json::json!(unplaced);
+        store.set_run_engine_info(run.id, info)?;
+        store.finish_run(run.id, RunStatus::Done)?;
+        Ok((report, unplaced))
+    })();
+    let (report, unplaced) = match built {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = store.delete_run(run.id);
+            return Err(e);
+        }
+    };
+    store.set_current_run(job.meeting, run.id)?;
+    log::info!(
+        "post-pass meeting {}: live run {} promoted as punctuated run {} ({}, {} marks; {} loops, {} words collapsed), {} named, {} unplaced names",
+        job.meeting,
+        job.live_run,
+        run.id,
+        punctuation.reason.as_str(),
+        punctuation.marks_added.unwrap_or(0),
+        loops.runs,
+        loops.words_removed,
+        report.named.len(),
+        unplaced
+    );
+    Ok(Some(Promoted {
+        run: run.id,
+        carry: report,
+        unplaced,
+        collapsed: loops.words_removed,
+    }))
+}
+
+/// Whether the live run must stay because the promoted run `info` (its
+/// `engine_info`) collapsed repeated-token loops: the removed words exist
+/// nowhere else (the live engine writes no words JSON, and a re-run needs
+/// the live run). Crash recovery asks the same.
+pub(super) fn promotion_collapsed(info: &serde_json::Value) -> bool {
+    info["promoted_live"].is_i64()
+        && loops::LoopReport::of_engine_info(info).is_some_and(|l| l.words_removed > 0)
 }
 
 /// Maps a channel's words from channel time to meeting time and clamps
@@ -688,6 +948,19 @@ fn gate_mic(
                 {
                     o.extend(cs);
                 }
+                // The raw gate's owner's level, floor and share of flagged
+                // words, and the level guard's floor rule: its tier and
+                // margin, null with the owner's level known (plan 16
+                // sections 12.2.2 step 4 and 12.7).
+                info["raw_owner_db"] = serde_json::json!(t.raw.owner_db.map(super::round3));
+                info["raw_floor_db"] = serde_json::json!(t.raw.floor_db.map(super::round3));
+                info["raw_echo_share"] =
+                    serde_json::json!((t.raw_echo_share * 10_000.0).round() / 10_000.0);
+                info["floor_rule"] = serde_json::json!({
+                    "tier": t.floor_rule.map(|f| f.tier),
+                    "f_db": t.floor_rule.map(|f| super::round3(f.f_db)),
+                    "removed": c.floor,
+                });
                 transfer_info = Some(info);
                 transfer_log = format!(
                     "; transfer from the {} mic words ({} of {} echo, {:.1} s): {} of {} candidates (text {}, level {}, plain {}), {} beyond the layers, {} without a raw word",
@@ -703,6 +976,14 @@ fn gate_mic(
                     t.counts.transfer,
                     c.unmatched
                 );
+                if let Some(f) = t.floor_rule {
+                    transfer_log.push_str(&format!(
+                        " (floor rule, {} tier, at {} dB: {})",
+                        f.tier.as_str(),
+                        f.f_db,
+                        c.floor
+                    ));
+                }
                 let mut r = t.after;
                 r.reasons = t.reasons;
                 r.counts = t.counts;
@@ -757,6 +1038,16 @@ fn gate_mic(
     });
     if let Some(r) = &report {
         layer_summary(&mut summary, r, correlation);
+    }
+    // Where the owner's level came from, and whether it is low (plan 16
+    // sections 12.2.2 step 4 and 12.7).
+    if let Some(r) = &report {
+        summary["owner_source"] = serde_json::json!(r.owner_source);
+        summary["owner_words"] = serde_json::json!(r.owner_words);
+        summary["owner_low"] = serde_json::json!(r.owner_low);
+        // The words the canceller left alone high over the floor, the
+        // floor rule's talking-owner guard (plan 16 section 12.8).
+        summary["owner_high"] = serde_json::json!(r.owner_high);
     }
     if let Some(t) = transfer_info {
         summary["transfer"] = t;
@@ -914,6 +1205,25 @@ pub fn run_post_pass(
         })
     };
     let (mic, lb) = (job.mic_wav(), job.loopback_wav());
+    if job.from_flac && !job.transcribe {
+        return Err(StoreError::Invalid(
+            "a run from the stored audio transcribes it (transcribe = true)".into(),
+        )
+        .into());
+    }
+    // Run again from the stored audio (plan 16 section 12.5 J): the WAVs
+    // are decoded from `playback.flac` first and go when this returns,
+    // whatever happens.
+    let mut decoded = if job.from_flac {
+        Some(super::rerun::decode_wavs(store, job, &|done, total| {
+            progress(JobStage::Decoding, done, total)
+        })?)
+    } else {
+        None
+    };
+    // A run from the FLAC: its size, the current run's speakers and word
+    // count, taken before the new run becomes current (below).
+    let mut from_flac_tail: Option<(u64, Speakers, usize)> = None;
     let mic_frames = wav_frames(&mic)?;
     let lb_frames = wav_frames(&lb)?;
     let wav_bytes = std::fs::metadata(&mic)?.len() + std::fs::metadata(&lb)?.len();
@@ -946,8 +1256,17 @@ pub fn run_post_pass(
     let mut carry = None;
     let mut unplaced = 0;
     let mut live_deleted = false;
+    // A post-pass run replaced the live run (transcribed, or promoted with
+    // punctuation or the loop collapse).
+    let mut replaced_live = job.transcribe;
+    // The promoted run's loop collapse removed words, which only the live
+    // run still has.
+    let mut kept_for_loops = false;
     let current_run = if job.transcribe {
         let t0 = Instant::now();
+        // The languages the runtime detected, per channel (its first job:
+        // the raw mic's extra pass for the echo transfer adds nothing).
+        let detected: std::cell::RefCell<BTreeMap<Channel, Vec<String>>> = Default::default();
         // One channel through the file engine, on meeting time; `part`:
         // the `k`-th of `n` equal parts of the progress.
         let transcribe_channel = |(k, n): (u64, u64),
@@ -960,7 +1279,7 @@ pub fn run_post_pass(
                 return Err(CoreError::Cancelled);
             }
             let base = k * audio_ms;
-            let words = transcribe(
+            let (words, languages) = transcribe(
                 engine,
                 FileJob {
                     job_id: JobId::new(),
@@ -972,6 +1291,7 @@ pub fn run_post_pass(
                 cancel,
                 &|done, _| progress(JobStage::Transcribing, (base + done) / n, total_ms),
             )?;
+            detected.borrow_mut().entry(ch).or_insert(languages);
             let default = if ch == Channel::Mic && !diarize {
                 ME_LABEL
             } else {
@@ -1103,12 +1423,39 @@ pub fn run_post_pass(
         progress(JobStage::Saving, audio_ms, total_ms);
         // Mic first on equal start times.
         channels.reverse();
+        // Repeated-token loops collapse after the echo gate and the
+        // unknown-token check (both saw the raw words), before punctuation
+        // (plan 16 section 12.3).
+        let loops = loops::collapse_channels(&mut channels, loops::enabled(store));
+        // Punctuation after the echo gate, before segmentation; the
+        // session is dropped right after. In `auto` it takes the language
+        // the runtime detected most often, the loopback's on a tie.
+        let detected = {
+            let d = detected.borrow();
+            RunLanguage::most_detected(
+                [Channel::Loopback, Channel::Mic]
+                    .iter()
+                    .filter_map(|c| d.get(c))
+                    .flatten()
+                    .map(String::as_str),
+            )
+        };
+        let punctuation = {
+            let mut loaded = job.punct.load(store);
+            punctuate_loaded(
+                &mut loaded,
+                &mut channels,
+                &job.segment,
+                &RunLanguage::new(&job.language).with_detected(detected.clone()),
+                &|| cancel.is_cancelled(),
+            )
+        };
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         let transcript = build_transcript_channels(channels, &job.segment);
         let info = engine.info();
-        let run = store.create_run(
-            job.meeting,
-            RunKind::PostPass,
-            serde_json::json!({
+        let mut run_info = serde_json::json!({
                 "runtime": info.runtime,
                 "models": info.models,
                 "device": info.device,
@@ -1123,8 +1470,25 @@ pub fn run_post_pass(
                     "sentence_gap_ms": job.segment.sentence_gap_ms,
                     "max_words": job.segment.max_words,
                 },
-            }),
-        )?;
+                "punctuation": punctuation.to_json(),
+                "loops": loops.to_json(),
+        });
+        if let Some(d) = detected {
+            // For a later "Add punctuation" (`punct::rebuild::run_language`).
+            run_info["detected_language"] = serde_json::Value::String(d);
+        }
+        let run = store.create_run(job.meeting, RunKind::PostPass, run_info)?;
+        // Until it is current: a post-pass that fails leaves no run nobody
+        // has seen (a run from the FLAC also names it in its marker, for
+        // crash recovery).
+        let mut new_run = NewRun {
+            store,
+            run: run.id,
+            current: false,
+        };
+        if let Some(d) = decoded.as_mut() {
+            d.record_run(run.id)?;
+        }
         if let Some(e) = &echo {
             let mut info = run.engine_info.clone();
             info["echo"] = e.summary.clone();
@@ -1133,16 +1497,16 @@ pub fn run_post_pass(
                 store.set_echo_dropped(run.id, &e.dropped)?;
             }
         }
-        if let Err(e) = store.insert_transcript(run.id, &transcript) {
-            let _ = store.finish_run(run.id, RunStatus::Failed);
-            return Err(e.into());
-        }
+        store.insert_transcript(run.id, &transcript)?;
         store.finish_run(run.id, RunStatus::Done)?;
-        let report = store.carry_over(job.live_run, run.id)?;
+        // From the live run, or from a copy of it the user named speakers
+        // on (Restore, a punctuation rebuild).
+        let source = carry_source(store, job.meeting, job.live_run);
+        let report = store.carry_over(source, run.id)?;
         // Names given on the live run that reached no speaker of the new
         // run: the live run is kept for them (recorded before the WAVs go,
         // so crash recovery keeps it too).
-        unplaced = unplaced_names(store, job.live_run, &report)?;
+        unplaced = unplaced_names(store, source, &report)?;
         let mut info = store.get_run(run.id)?.engine_info;
         info["unplaced_names"] = serde_json::json!(unplaced);
         store.set_run_engine_info(run.id, info)?;
@@ -1156,62 +1520,147 @@ pub fn run_post_pass(
             unplaced
         );
         carry = Some(report);
+        if job.from_flac {
+            // Run again from the stored audio: every step that can fail
+            // comes before the switch, so a run that fails leaves the
+            // transcript the meeting had. Nothing is encoded; WAV rows
+            // (none are registered for a run from the FLAC) go.
+            let bytes = std::fs::metadata(job.flac())
+                .map_err(|e| {
+                    CoreError::Io(std::io::Error::other(format!(
+                        "cannot look at {}: {e}",
+                        job.flac().display()
+                    )))
+                })?
+                .len();
+            delete_wav_rows(store, job.meeting)?;
+            from_flac_tail = Some((
+                bytes,
+                speakers_of(store, run.id)?,
+                store.run_words(run.id)?.len(),
+            ));
+        }
         store.set_current_run(job.meeting, run.id)?;
+        new_run.current = true;
         run.id
     } else {
         store.set_current_run(job.meeting, job.live_run)?;
-        job.live_run
+        // A `post_pass` run is built inline when a punctuator changes a word
+        // or the loop collapse removes one (plan 16 sections 3.2 and 12.3).
+        let mut loaded = job.punct.load(store);
+        match promote_punctuated(store, job, &mut loaded, loops::enabled(store), cancel)? {
+            Some(p) => {
+                carry = Some(p.carry);
+                unplaced = p.unplaced;
+                replaced_live = true;
+                kept_for_loops = p.collapsed > 0;
+                p.run
+            }
+            // No punctuator (or `off`) and no loop, or no word changed:
+            // the live run is the final one.
+            None => job.live_run,
+        }
     };
 
-    // The playback track: stereo FLAC, then the WAVs go. A post-pass that
-    // was interrupted after registering its FLAC left a row to replace.
+    // The playback track: stereo FLAC, then the WAVs go. A registered
+    // `playback.flac` is the meeting's audio and is never encoded again
+    // (plan 16 section 12.5 J, review B4): a job run again from it decoded
+    // these WAVs from it (a decode or encode bug must not be able to destroy
+    // the only copy), and a post-pass interrupted after registering it had
+    // encoded it from these same WAVs, which then go only once it is seen
+    // to hold them. Its row stays. A row whose file is gone (`NotFound`,
+    // nothing else) is replaced; a FLAC that cannot be looked at fails the
+    // post-pass, the WAVs kept.
     let flac = job.flac();
-    let info = encode_stereo(&mic, &lb, &flac)?;
-    for t in store.list_audio_tracks(job.meeting)? {
-        if t.channel == TrackChannel::Playback {
-            store.delete_audio_track(t.id)?;
-        }
-    }
-    let rel = |p: &Path| -> String {
-        p.strip_prefix(&job.data_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| p.display().to_string())
+    let kept = match &from_flac_tail {
+        Some((bytes, _, _)) => Some(*bytes),
+        None => match super::rerun::playback_flac(store, &job.data_root, job.meeting, &flac)? {
+            Some(track) => {
+                super::rerun::flac_holds(&flac, &track, [Some(&mic), Some(&lb)]).map_err(
+                    |why| {
+                        CoreError::Io(std::io::Error::other(format!(
+                            "{} is this meeting's registered audio and is kept, but it does not \
+                             hold what mic.wav and loopback.wav hold ({why}), so they stay too",
+                            flac.display()
+                        )))
+                    },
+                )?;
+                Some(std::fs::metadata(&flac)?.len())
+            }
+            None => None,
+        },
     };
-    store.add_audio_track(NewAudioTrack {
-        meeting_id: job.meeting,
-        channel: TrackChannel::Playback,
-        path: rel(&flac),
-        format: AudioFormat::Flac,
-        sample_rate: 16_000,
-        channels: 2,
-        duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
-        size_bytes: Some(info.bytes as i64),
-    })?;
-    for t in store.list_audio_tracks(job.meeting)? {
-        if t.format == AudioFormat::Wav
-            && matches!(t.channel, TrackChannel::Mic | TrackChannel::Loopback)
-        {
-            store.delete_audio_track(t.id)?;
+    let (flac_frames, flac_bytes) = if let Some(bytes) = kept {
+        (mic_frames.max(lb_frames), bytes)
+    } else {
+        let info = encode_stereo(&mic, &lb, &flac)?;
+        for t in store.list_audio_tracks(job.meeting)? {
+            if t.channel == TrackChannel::Playback {
+                store.delete_audio_track(t.id)?;
+            }
         }
-    }
-    let _ = std::fs::remove_file(&mic);
-    let _ = std::fs::remove_file(&lb);
+        let rel = |p: &Path| -> String {
+            p.strip_prefix(&job.data_root)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.display().to_string())
+        };
+        store.add_audio_track(NewAudioTrack {
+            meeting_id: job.meeting,
+            channel: TrackChannel::Playback,
+            path: rel(&flac),
+            format: AudioFormat::Flac,
+            sample_rate: 16_000,
+            channels: 2,
+            duration_ms: Some((info.frames * 1_000 / 16_000) as i64),
+            size_bytes: Some(info.bytes as i64),
+            // Each channel's own length, for a run from the FLAC later.
+            channel_frames: Some(info.channel_frames.to_vec()),
+        })?;
+        (info.frames, info.bytes)
+    };
     let _ = std::fs::remove_file(job.mic_aec_wav());
-
-    // A live run with a name nobody in the new run received stays, as if
-    // `keep_live_runs` were on for this meeting.
-    if job.transcribe && !job.keep_live_runs && unplaced == 0 {
-        store.delete_run(job.live_run)?;
-        live_deleted = true;
-    }
-    store.set_meeting_status(job.meeting, MeetingStatus::Done)?;
-
-    let speakers = store
-        .run_speakers(current_run)?
-        .into_iter()
-        .map(|s| (s.channel, s.engine_label, s.display_name))
-        .collect();
-    let words = store.get_words(job.meeting, i64::MIN, i64::MAX)?.len();
+    let (speakers, words) = match from_flac_tail {
+        // A run from the FLAC: its new run is current and nothing fails
+        // any more. The decoded copies go (only those), then the marker,
+        // then the meeting is done; every earlier run stays, the live run
+        // too (the dialog promises it, and the next run needs it).
+        Some((_, speakers, words)) => {
+            drop(decoded.take());
+            if let Err(e) = store.set_meeting_status(job.meeting, MeetingStatus::Done) {
+                log::warn!(
+                    "post-pass meeting {}: run {current_run} is current but the meeting could not be marked done ({e}); the next start finishes it",
+                    job.meeting
+                );
+            }
+            (speakers, words)
+        }
+        None => {
+            delete_wav_rows(store, job.meeting)?;
+            let _ = std::fs::remove_file(&mic);
+            let _ = std::fs::remove_file(&lb);
+            // A live run with a name nobody in the new run received stays,
+            // as if `keep_live_runs` were on for this meeting; so does a
+            // promoted one whose words the loop collapse shortened (they
+            // exist only there).
+            if kept_for_loops {
+                log::info!(
+                    "post-pass meeting {}: live run {} kept: it holds the words the loop collapse removed from run {}",
+                    job.meeting,
+                    job.live_run,
+                    current_run
+                );
+            }
+            if replaced_live && !job.keep_live_runs && unplaced == 0 && !kept_for_loops {
+                store.delete_run(job.live_run)?;
+                live_deleted = true;
+            }
+            store.set_meeting_status(job.meeting, MeetingStatus::Done)?;
+            (
+                speakers_of(store, current_run)?,
+                store.get_words(job.meeting, i64::MIN, i64::MAX)?.len(),
+            )
+        }
+    };
     Ok(PostPassReport {
         meeting: job.meeting,
         current_run,
@@ -1222,11 +1671,267 @@ pub fn run_post_pass(
         carry_over: carry,
         unplaced_names: unplaced,
         flac_path: flac,
-        flac_frames: info.frames,
-        flac_bytes: info.bytes,
+        flac_frames,
+        flac_bytes,
         wav_bytes,
         drift_ppm,
         transcribe_wall,
         wall: started.elapsed(),
     })
+}
+
+#[cfg(test)]
+mod loop_tests {
+    //! The repeated-token loop collapse in the post-pass (plan 16 section
+    //! 12.3): both channels of a transcribing post-pass, and the promoted
+    //! live run without a punctuator.
+    use std::sync::mpsc::{channel, Receiver};
+
+    use super::*;
+    use crate::engine::nemo_cli::file_events;
+    use crate::engine::EngineInfo;
+    use crate::store::{NewMeeting, SqliteStore, Store};
+    use crate::types::Meeting;
+
+    /// A file engine that answers a job on `mic.wav` with `mic` and every
+    /// other with `lb`.
+    struct Words {
+        mic: Vec<EngineWord>,
+        lb: Vec<EngineWord>,
+    }
+
+    impl Engine for Words {
+        fn transcribe_file(&self, job: FileJob) -> Result<Receiver<EngineEvent>> {
+            let (tx, rx) = channel();
+            let mic = job.wav_path.file_name().is_some_and(|n| n == "mic.wav");
+            let words = if mic { &self.mic } else { &self.lb };
+            for ev in file_events(
+                &job.job_id,
+                Channel::Source,
+                words.clone(),
+                3_000_000,
+                Duration::from_millis(1),
+                Vec::new(),
+            ) {
+                tx.send(ev).unwrap();
+            }
+            Ok(rx)
+        }
+        fn cancel(&self, _: JobId) {}
+        fn info(&self) -> EngineInfo {
+            EngineInfo {
+                runtime: "fake".into(),
+                ..Default::default()
+            }
+        }
+    }
+
+    fn at(t_ms: u64, text: &str, spk: Option<&str>) -> EngineWord {
+        EngineWord {
+            t0_us: t_ms * 1_000,
+            t1_us: t_ms * 1_000 + 80_000,
+            text: text.into(),
+            conf: None,
+            spk: spk.map(str::to_owned),
+        }
+    }
+
+    /// `n` copies of `text` in one frame at `t_ms`.
+    fn burst(t_ms: u64, n: usize, text: &str, spk: Option<&str>) -> Vec<EngineWord> {
+        (0..n).map(|_| at(t_ms, text, spk)).collect()
+    }
+
+    /// A meeting being finalized: a live run with `live` on the loopback,
+    /// 3 s WAVs, echo handling off.
+    fn meeting(store: &SqliteStore, dir: &Path, live: &[EngineWord]) -> (Meeting, RunId) {
+        store.set_setting(settings::ECHO_MODE, "off").unwrap();
+        let meeting = store
+            .create_meeting(NewMeeting {
+                title: "Loops".into(),
+                source: crate::types::Source::Live,
+                source_path: None,
+                language: "en".into(),
+                diarize_mic: false,
+                started_at: 1_791_000_000_000,
+                status: MeetingStatus::Processing,
+            })
+            .unwrap();
+        store
+            .finish_meeting(meeting.id, meeting.started_at + 3_000, 3_000)
+            .unwrap();
+        let run = store
+            .create_run(
+                meeting.id,
+                RunKind::Live,
+                serde_json::json!({"runtime": "fake live"}),
+            )
+            .unwrap();
+        store
+            .append_live_utterance(run.id, Channel::Loopback, 0, 0, live)
+            .unwrap();
+        store
+            .materialise_live_run(run.id, &SegmentOptions::default())
+            .unwrap();
+        store.finish_run(run.id, RunStatus::Done).unwrap();
+        store.set_current_run(meeting.id, run.id).unwrap();
+        let folder = dir.join("audio").join(&meeting.uid);
+        for ch in ["mic", "loopback"] {
+            let mut w =
+                crate::audio::wav::WavSink::create(&folder.join(format!("{ch}.wav"))).unwrap();
+            w.write(&vec![100i16; 48_000]).unwrap();
+            w.finalize().unwrap();
+        }
+        (meeting, run.id)
+    }
+
+    fn job(dir: &Path, meeting: &Meeting, live: RunId, transcribe: bool) -> PostPassJob {
+        PostPassJob {
+            job_id: JobId::new(),
+            meeting: meeting.id,
+            live_run: live,
+            data_root: dir.to_path_buf(),
+            folder: dir.join("audio").join(&meeting.uid),
+            language: "en".into(),
+            diarize_mic: false,
+            transcribe,
+            keep_live_runs: false,
+            segment: SegmentOptions::default(),
+            punct: PunctSource::None,
+            from_flac: false,
+        }
+    }
+
+    /// (channel, text) of the current run's words, in time order.
+    fn words(store: &SqliteStore, m: MeetingId) -> Vec<(Channel, String)> {
+        let run = store.get_meeting(m).unwrap().current_run.unwrap().id;
+        let speakers: std::collections::HashMap<_, _> = store
+            .run_speakers(run)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, s.channel))
+            .collect();
+        let channel_of: std::collections::HashMap<_, _> = store
+            .run_segments(run)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, speakers[&s.speaker_id]))
+            .collect();
+        store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|w| (channel_of[&w.segment_id], w.text))
+            .collect()
+    }
+
+    #[test]
+    fn the_post_pass_collapses_loops_on_both_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let mut lb = vec![at(0, "so", Some("spk_0"))];
+        lb.extend(burst(500, 5, "the", Some("spk_0")));
+        lb.push(at(1_500, "plan", Some("spk_0")));
+        let mut mic = burst(1_000, 3, "I", None);
+        mic.push(at(2_000, "yes", None));
+        let engine = Words { mic, lb };
+        let run = |store: &SqliteStore| {
+            let (m, live) = meeting(store, dir.path(), &[at(500, "hello", Some("spk_0"))]);
+            let report = run_post_pass(
+                store,
+                &engine,
+                &job(dir.path(), &m, live, true),
+                &CancelToken::default(),
+                &|_| {},
+            )
+            .unwrap();
+            (m.id, store.get_run(report.current_run).unwrap())
+        };
+        let (m, current) = run(&store);
+        assert_eq!(current.kind, RunKind::PostPass);
+        let mut got = words(&store, m);
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (Channel::Mic, "I".to_owned()),
+                (Channel::Mic, "yes".into()),
+                (Channel::Loopback, "plan".into()),
+                (Channel::Loopback, "so".into()),
+                (Channel::Loopback, "the".into()),
+            ]
+        );
+        let l = &current.engine_info["loops"];
+        assert_eq!(l["applied"], true);
+        assert_eq!(
+            (l["runs"].as_u64(), l["words_removed"].as_u64()),
+            (Some(2), Some(6))
+        );
+        assert_eq!(l["per_channel"]["loopback"]["words_removed"], 4);
+        assert_eq!(l["per_channel"]["mic"]["words_removed"], 2);
+        // Off: every word stays.
+        store
+            .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let (m, current) = run(&store);
+        assert_eq!(words(&store, m).len(), 11);
+        assert_eq!(current.engine_info["loops"]["applied"], false);
+    }
+
+    #[test]
+    fn a_loop_in_a_promoted_live_run_builds_a_post_pass_run_without_a_punctuator() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("diarist.db")).unwrap();
+        let engine = Words {
+            mic: Vec::new(),
+            lb: Vec::new(),
+        };
+        let mut live = burst(500, 4, "we", Some("spk_0"));
+        live.push(at(1_500, "go", Some("spk_0")));
+        let promote = |store: &SqliteStore| {
+            let (m, live) = meeting(store, dir.path(), &live);
+            let report = run_post_pass(
+                store,
+                &engine,
+                &job(dir.path(), &m, live, false),
+                &CancelToken::default(),
+                &|_| {},
+            )
+            .unwrap();
+            (m.id, live, report)
+        };
+        let (m, live_run, report) = promote(&store);
+        assert!(report.promoted_live);
+        assert_ne!(report.current_run, live_run);
+        let run = store.get_run(report.current_run).unwrap();
+        assert_eq!((run.kind, run.status), (RunKind::PostPass, RunStatus::Done));
+        assert_eq!(run.engine_info["promoted_live"].as_i64(), Some(live_run.0));
+        assert_eq!(run.engine_info["loops"]["words_removed"], 3);
+        assert_eq!(
+            run.engine_info["punctuation"],
+            serde_json::json!({"applied": false, "reason": "no_model"})
+        );
+        assert_eq!(
+            words(&store, m),
+            [
+                (Channel::Loopback, "we".to_owned()),
+                (Channel::Loopback, "go".into())
+            ]
+        );
+        // The live run stays with every word (keep_live_runs is off): the
+        // three removed words exist nowhere else.
+        assert!(!report.live_run_deleted);
+        assert_eq!(store.get_run(live_run).unwrap().status, RunStatus::Done);
+        assert_eq!(store.run_words(live_run).unwrap().len(), 5);
+        assert!(promotion_collapsed(&run.engine_info));
+        // With the collapse off (as without a loop) the live run is
+        // promoted as it is.
+        store
+            .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let (m, live_run, report) = promote(&store);
+        assert_eq!(report.current_run, live_run);
+        assert!(!report.live_run_deleted);
+        assert_eq!(store.list_runs(m).unwrap().len(), 1);
+        assert_eq!(words(&store, m).len(), 5);
+    }
 }

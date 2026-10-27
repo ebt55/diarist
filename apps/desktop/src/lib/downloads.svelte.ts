@@ -1,10 +1,12 @@
 // Engine and model downloads, shared by the first-run screen and Settings:
-// one item at a time (the engine first: model pulls run its downloader),
+// one item at a time (the engine first, then the models, all through
+// Diarist's own downloader),
 // with per-item progress from `models:progress`. The backend resumes a
 // partial download and checks every file's SHA-256 before it is used.
 import { api, errorText, onEvent } from "./api";
 import type { DownloadItem } from "./generated/DownloadItem";
 import type { DownloadProgress } from "./generated/DownloadProgress";
+import { downloadLinks } from "./links";
 
 export type ItemState = "waiting" | "running" | "done" | "failed";
 
@@ -85,8 +87,8 @@ class Downloads {
 
   /**
    * Downloads the items that are not installed, one after another, engine
-   * first. Resolves to the number that failed. A failed engine stops the
-   * rest (model pulls need it).
+   * first. Resolves to the number that failed. A failed item does not stop
+   * the rest: since 0.1.0-beta.5 models download without the engine.
    */
   async install(items: DownloadItem[]): Promise<number> {
     this.#listen();
@@ -110,13 +112,6 @@ class Downloads {
           failed++;
           this.#set(d.name, { state: "failed", error: errorText(e) });
           void api.log("error", `download ${d.name} failed: ${errorText(e)}`);
-          if (d.kind === "engine") {
-            for (const rest of todo.slice(i + 1)) {
-              failed++;
-              this.#set(rest.name, { state: "failed", error: "Needs the engine, which did not install." });
-            }
-            break;
-          }
         }
       }
     } finally {
@@ -153,22 +148,25 @@ class Downloads {
 
 /**
  * What to try after a failed download, for the row (and the firewall case:
- * per-app firewalls such as simplewall ask about diarist.exe for the
- * engine and about curl.exe, the runtime's downloader, for models).
+ * per-app firewalls such as simplewall ask about diarist.exe, which since
+ * 0.1.0-beta.5 downloads the engine and the models itself).
  */
-export function failureHint(kind: "engine" | "model", error: string | null): string {
+export function failureHint(_kind: "engine" | "model", error: string | null): string {
   const e = (error ?? "").toLowerCase();
   const net = /10013|10060|10061|11001|no such host|dns|resolve|connect|timed out|timeout|revocation|certificate|stalled|network|unreachable/.test(e);
-  const who = kind === "engine" ? "diarist.exe" : "curl.exe (the engine's downloader)";
   return net
-    ? `This looks like the network. If a firewall such as simplewall asked about ${who}, allow it and press Retry; a partial download resumes. Or use Copy link, download the file with a browser and put it into the folder Open folder shows, then Refresh.`
+    ? "This looks like the network. If a firewall such as simplewall asked about diarist.exe, allow it and press Retry; a partial download resumes. Or use Copy link, download the file with a browser and put it into the folder Open folder shows, then Refresh."
     : "Press Retry (a partial download resumes), or use Copy link to download the file with a browser, put it into the folder Open folder shows, and press Refresh: the hash is checked there.";
 }
 
-/** Puts the addresses of `items` on the clipboard, one per line. */
+/**
+ * Puts the addresses of `items` on the clipboard, one per line: every file
+ * of a multi-file download (a punctuation model). Resolves to the count.
+ */
 export async function copyLinks(items: DownloadItem[]): Promise<number> {
-  await navigator.clipboard.writeText(items.map((i) => `${i.url}\n`).join(""));
-  return items.length;
+  const links = downloadLinks(items);
+  await navigator.clipboard.writeText(links.map((u) => `${u}\n`).join(""));
+  return links.length;
 }
 
 export const downloads = new Downloads();

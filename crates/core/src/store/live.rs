@@ -132,6 +132,9 @@ pub(crate) fn transcript_from_live(
                         confidence: j.conf,
                         speaker: j.spk.clone().unwrap_or_else(|| default.to_owned()),
                         raw_label: j.spk,
+                        raw_text: None,
+                        margin: None,
+                        overlap: false,
                     }
                 }),
         );

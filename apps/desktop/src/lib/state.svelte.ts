@@ -1,7 +1,7 @@
 // App-wide state: route, meeting list, open meeting, jobs, toasts, theme.
 // Svelte 5 runes in a module; components import the `app` singleton.
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, errorText, langApi, onEvent, onJobEvent } from "./api";
+import { api, errorText, langApi, onEvent, onJobEvent, punctApi } from "./api";
 import { CPU_NOTICE, isCpuPackage, selectedEngine } from "./cpuNotice";
 import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
@@ -12,10 +12,24 @@ import type { MeetingId } from "./generated/MeetingId";
 import type { MeetingSummary } from "./generated/MeetingSummary";
 import type { MissingPart } from "./generated/MissingPart";
 import type { PostPassView } from "./generated/PostPassView";
+import type { RerunAudio } from "./generated/RerunAudio";
+import { againEndText } from "./processAgain";
 import type { SegmentId } from "./generated/SegmentId";
 import type { Settings } from "./generated/Settings";
 import type { StartupReport } from "./generated/StartupReport";
 import { SETTING_DEFAULTS, type SettingKey } from "./generated/settingDefaults";
+import {
+  BACKFILL_JOB_NAME,
+  PUNCT_PROGRESS_EVENT,
+  TRY_AGAIN,
+  backfillDoneText,
+  punctErrorText,
+  punctJobName,
+  punctOutcomeText,
+  type BackfillOutcome,
+  type PunctOutcome,
+  type PunctProgress,
+} from "./punctuation";
 
 export type Route = "library" | "settings" | "diagnostics" | "setup";
 
@@ -49,8 +63,11 @@ export interface Toast {
 
 export interface Job {
   id: string;
-  /** An import, or the post-pass of a live recording. */
-  kind: "import" | "postpass";
+  /**
+   * An import, the post-pass of a live recording, or Add or Remove
+   * punctuation (for `punctuate`, `doneMs` and `totalMs` count meetings).
+   */
+  kind: "import" | "postpass" | "punctuate";
   meetingId: MeetingId | null;
   name: string;
   stage: JobStage;
@@ -143,6 +160,7 @@ class AppState {
       .catch(() => {});
     this.ready = Promise.all([meetings, settings]).then(() => {});
     void onJobEvent((e) => this.#onJob(e));
+    void onEvent<PunctProgress>(PUNCT_PROGRESS_EVENT, (p) => this.#onPunctProgress(p));
     // After the first paint data: the check scans the models folder.
     void this.ready.then(() => this.#checkSetup());
     void onEvent<StartupReport>("app:startup", (r) => this.#onStartup(r));
@@ -180,6 +198,8 @@ class AppState {
     if (this.#startupShown) return;
     this.#startupShown = true;
     const details = { label: "Details", run: () => (this.route = "diagnostics") };
+    // A meeting recovery left failed as it was: its banner says why.
+    for (const x of r.recovered) if (x.error) this.#noteFailure(x.meeting_id, x.error);
     if (r.recovered.length > 0) {
       const what = r.recovered.map((x) => `"${x.title || "Untitled"}"`).join(", ");
       this.toast("info", `Recovered after an unexpected exit: ${what}`, details);
@@ -377,8 +397,15 @@ class AppState {
     }
   }
 
-  /** Registers a post-pass the app just queued (Stop, Retry). */
-  trackPostPass(jobId: string, meetingId: MeetingId, title: string): void {
+  /** Process-again jobs (plan 16 section 12.5 J) and the audio each reads, until they end. */
+  #againJobs = new Map<string, RerunAudio>();
+
+  /**
+   * Registers a post-pass the app just queued (Stop, Retry; `again`: "Process again" from that
+   * audio, whose end is told in its own words, once, open meeting or not).
+   */
+  trackPostPass(jobId: string, meetingId: MeetingId, title: string, again?: RerunAudio): void {
+    if (again) this.#againJobs.set(jobId, again);
     this.#upsertJob(jobId, { kind: "postpass", meetingId, name: title || "Recording" });
     if (this.postPassErrors.has(meetingId)) {
       const next = new Map(this.postPassErrors);
@@ -453,6 +480,8 @@ class AppState {
 
   #handleJob(e: JobEvent): void {
     const job = this.jobs.find((j) => j.id === e.job_id);
+    // Punctuation jobs report through their command (`punctuate`, `backfill`).
+    if (job?.kind === "punctuate") return;
     const name = job && job.name !== "Importing…" ? job.name : "file";
     if (e.type === "progress") {
       const first = !job || job.stage === "queued";
@@ -463,8 +492,10 @@ class AppState {
     }
     this.jobs = this.jobs.filter((j) => j.id !== e.job_id);
     const pp = this.postPasses.find((p) => p.job_id === e.job_id);
-    if (job?.kind === "postpass" || pp) {
-      this.#postPassEnded(e, job?.meetingId ?? pp?.meeting_id ?? null, pp?.title || job?.name || "Recording");
+    const again = this.#againJobs.get(e.job_id) ?? null;
+    this.#againJobs.delete(e.job_id);
+    if (job?.kind === "postpass" || pp || again) {
+      this.#postPassEnded(e, job?.meetingId ?? pp?.meeting_id ?? null, pp?.title || job?.name || "Recording", again);
       return;
     }
     if (e.type === "done") {
@@ -497,11 +528,23 @@ class AppState {
     this.postPassErrors = next;
   }
 
-  #postPassEnded(e: JobEvent, meetingId: MeetingId | null, title: string): void {
+  /**
+   * How a post-pass ended, told once. `again`: a "Process again" job and the audio it read; from
+   * the FLAC the meeting stays done with its current transcript whatever happens (the new run
+   * becomes current only once nothing can fail), so it is said even with the meeting open.
+   */
+  #postPassEnded(e: JobEvent, meetingId: MeetingId | null, title: string, again: RerunAudio | null = null): void {
     void this.refreshMeetings();
     const id = e.type === "done" ? e.meeting_id : (meetingId ?? ("meeting_id" in e ? e.meeting_id : null));
     if (e.type === "error" && id !== null) this.#noteFailure(id, e.message);
     const open = id !== null && this.openId === id && this.route === "library";
+    const openAction = !open && id !== null ? { label: "Open", run: () => this.open(id), meetingId: id } : undefined;
+    if (again && e.type !== "progress") {
+      if (e.type === "error") void api.log("error", `process again of ${title} failed: ${e.message}`);
+      const t = againEndText(e.type, title, again, e.type === "error" ? e.message : "", open);
+      if (t) this.toast(t.kind, t.text, openAction);
+      return;
+    }
     if (e.type === "done") {
       if (!open && id !== null) {
         this.toast("success", `"${title}" is final`, { label: "Open", run: () => this.open(id), meetingId: id });
@@ -527,6 +570,102 @@ class AppState {
           meetingId: id ?? undefined,
         });
       }
+    }
+  }
+
+  // ---- Punctuation (plan 16 section 3.9) ----------------------------------------
+
+  /** Meetings with Add or Remove punctuation queued or running. */
+  punctuating = $state.raw(new Set<MeetingId>());
+  /** The bulk action is queued or running. */
+  backfillRunning = $state(false);
+  #punctListeners = new Set<(id: MeetingId) => void>();
+
+  /** Called with a meeting's id when a punctuation job on it ended (its current run may be new). */
+  onPunctuated(cb: (id: MeetingId) => void): () => void {
+    this.#punctListeners.add(cb);
+    return () => this.#punctListeners.delete(cb);
+  }
+
+  #setPunctuating(id: MeetingId, on: boolean): void {
+    const next = new Set(this.punctuating);
+    if (on) next.add(id);
+    else next.delete(id);
+    this.punctuating = next;
+  }
+
+  #onPunctProgress(p: PunctProgress): void {
+    const job = this.jobs.find((j) => j.id === p.job_id);
+    if (job) Object.assign(job, { stage: "saving", doneMs: p.done, totalMs: p.total });
+  }
+
+  /** A job id the backend accepts (any unique string). */
+  #newJobId(): string {
+    const c = globalThis.crypto as Crypto | undefined;
+    return `punct-${c?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+  }
+
+  /**
+   * "Add punctuation" (`remove`: "Remove punctuation") on one meeting, as a
+   * job in the job list; says what it did when it is done, and offers Try
+   * again when it could not run (the meeting records, it changed meanwhile).
+   */
+  async punctuate(meetingId: MeetingId, title: string, remove: boolean): Promise<PunctOutcome | null> {
+    if (this.punctuating.has(meetingId)) return null;
+    const id = this.#newJobId();
+    this.#upsertJob(id, { kind: "punctuate", meetingId, name: punctJobName(remove, title) });
+    this.#setPunctuating(meetingId, true);
+    try {
+      const o = await punctApi.punctuateMeeting(meetingId, remove, id);
+      const files = await api.listModelFiles().catch(() => []);
+      const t = punctOutcomeText(o, remove, files);
+      const elsewhere = this.openId !== meetingId || this.route !== "library";
+      const action = t.retry
+        ? { label: TRY_AGAIN, run: () => void this.punctuate(meetingId, title, remove), meetingId }
+        : elsewhere
+          ? { label: "Open", run: () => this.open(meetingId), meetingId }
+          : undefined;
+      this.toast(t.kind, elsewhere ? `"${title || "Untitled meeting"}": ${t.text}` : t.text, action);
+      return o;
+    } catch (e) {
+      const msg = errorText(e);
+      void api.log("warn", `${remove ? "remove" : "add"} punctuation on meeting ${meetingId}: ${msg}`);
+      this.toast("error", punctErrorText(remove, msg), {
+        label: TRY_AGAIN,
+        run: () => void this.punctuate(meetingId, title, remove),
+        meetingId,
+      });
+      return null;
+    } finally {
+      this.jobs = this.jobs.filter((j) => j.id !== id);
+      this.#setPunctuating(meetingId, false);
+      for (const cb of this.#punctListeners) cb(meetingId);
+    }
+  }
+
+  /** The bulk action, "Add punctuation to N older meetings" (confirmed by the caller); reports when done. */
+  async backfill(): Promise<BackfillOutcome | null> {
+    if (this.backfillRunning) return null;
+    const id = this.#newJobId();
+    this.backfillRunning = true;
+    this.#upsertJob(id, { kind: "punctuate", meetingId: null, name: BACKFILL_JOB_NAME });
+    try {
+      const o = await punctApi.backfill(id);
+      const t = backfillDoneText(o);
+      this.toast(t.kind, t.text);
+      for (const x of o.outcomes) if (x.run !== null) for (const cb of this.#punctListeners) cb(x.meeting_id);
+      return o;
+    } catch (e) {
+      const msg = errorText(e);
+      void api.log("warn", `punctuation for older meetings: ${msg}`);
+      this.toast("error", `Adding punctuation to older meetings did not work: ${msg.replace(/\.$/, "")}.`, {
+        label: TRY_AGAIN,
+        run: () => void this.backfill(),
+      });
+      return null;
+    } finally {
+      this.jobs = this.jobs.filter((j) => j.id !== id);
+      this.backfillRunning = false;
     }
   }
 }

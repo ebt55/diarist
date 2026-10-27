@@ -305,11 +305,23 @@ pub struct ModelCapabilities {
     /// the runtime default (the low-latency setting live keeps).
     #[serde(default)]
     pub file_right_context: Option<u32>,
+    /// Decoder lookahead of the live server (`nemo-speech serve
+    /// --asr.streaming.rnnt_right_context`, 80 ms frames), from the manifest
+    /// entry or the `<file>.meet.json` sidecar. `None`: no flag, the
+    /// runtime default (1 frame, 160 ms).
+    #[serde(default)]
+    pub live_right_context: Option<u32>,
     /// Diarizer preset for file jobs and the post-pass (`--asr.diar.preset`,
     /// e.g. `v3-offline`), from the manifest entry or the sidecar. `None`: no
     /// flag, the runtime's streaming default (which live keeps).
     #[serde(default)]
     pub file_preset: Option<String>,
+    /// A punctuation model's description block (docs/plans/16 section 3.6),
+    /// from the manifest entry or the `<file>.meet.json` sidecar; an `.onnx`
+    /// file is a `punctuation` file only with a valid one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub punctuation: Option<crate::punct::spec::PunctSpec>,
 }
 
 /// A file the model scanner found (`model_files`).
@@ -394,6 +406,11 @@ pub struct AudioTrack {
     pub channels: u16,
     pub duration_ms: Option<i64>,
     pub size_bytes: Option<i64>,
+    /// Sample frames of each channel before the shorter one was padded
+    /// (`[mic, loopback]` for a live meeting's playback FLAC, registered
+    /// since beta.5); `None` when unknown (older tracks, imports).
+    #[serde(default)]
+    pub channel_frames: Option<Vec<u64>>,
 }
 
 /// Live alignment anchor: one per channel per second (`clock_anchors`).
@@ -464,6 +481,18 @@ pub struct Word {
     pub margin: Option<f32>,
     /// v1.5 fusion: another speaker was active during the word.
     pub overlap: bool,
+    /// The ASR's text where `text` (the display text, punctuated) differs
+    /// from it; absent when they are the same (`words.raw_text` NULL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub raw_text: Option<String>,
+}
+
+impl Word {
+    /// The ASR's text of the word: `raw_text`, else `text`.
+    pub fn asr_text(&self) -> &str {
+        self.raw_text.as_deref().unwrap_or(&self.text)
+    }
 }
 
 /// A mic word the echo gate removed (`transcript_runs.echo_dropped`, plan
@@ -701,6 +730,7 @@ mod tests {
             raw_label: Some("spk_1".into()),
             margin: None,
             overlap: false,
+            raw_text: None,
         };
         let run2: TranscriptRun =
             serde_json::from_str(&serde_json::to_string(&run).unwrap()).unwrap();
