@@ -247,6 +247,9 @@ fn after_the_canceller_the_owners_level_comes_from_words_it_left_alone() {
             source: OwnerSource::Quiet,
             words: 22,
             low: false,
+            // The owner's 22, 20 dB over the floor; the cut residue is not
+            // counted.
+            high: 22,
         }
     );
     assert_eq!(
@@ -350,9 +353,11 @@ fn an_implausible_set_falls_through_to_the_next() {
     words.extend((0..40).map(|k| cut(w(k * 1_000 + 500, "o", 2, FLOOR + 25.0, true, None), 1.0)));
     let l = stats(&words).owner(true, Some(FLOOR));
     assert_eq!(
-        (l.source, l.words, l.db, l.low),
-        (OwnerSource::Clean, 65, Some(FLOOR + 25.0), false)
+        (l.source, l.words, l.db, l.low, l.high),
+        (OwnerSource::Clean, 65, Some(FLOOR + 25.0), false, 40)
     );
+    // Before the canceller nothing is high (plan 16 section 12.8).
+    assert_eq!(stats(&words).owner(false, Some(FLOOR)).high, 0);
     // Every set with enough words implausible: the last one tried counts.
     let mut words: Vec<GateWord> = (0..25)
         .map(|k| cut(w(k * 1_000, "n", 1, FLOOR + 2.0, false, None), 0.3))
@@ -360,8 +365,8 @@ fn an_implausible_set_falls_through_to_the_next() {
     words.extend((0..10).map(|k| cut(w(k * 1_000 + 500, "r", 2, FLOOR + 4.0, true, None), 1.0)));
     let l = stats(&words).owner(true, Some(FLOOR));
     assert_eq!(
-        (l.source, l.words, l.db),
-        (OwnerSource::Implausible, 35, None)
+        (l.source, l.words, l.db, l.high),
+        (OwnerSource::Implausible, 35, None, 0)
     );
     // The first set too small, the second implausible (meeting 21: 16 clean
     // words with the far end silent, 35 in all at +3.3 dB).
@@ -371,11 +376,65 @@ fn an_implausible_set_falls_through_to_the_next() {
     words.extend((0..19).map(|k| cut(w(k * 1_000 + 500, "r", 2, FLOOR + 3.3, true, None), 1.0)));
     let l = stats(&words).owner(true, Some(FLOOR));
     assert_eq!(
-        (l.source, l.words, l.db),
-        (OwnerSource::Implausible, 35, None)
+        (l.source, l.words, l.db, l.high),
+        (OwnerSource::Implausible, 35, None, 0)
     );
     assert_eq!(OwnerSource::Implausible.as_str(), "implausible");
     assert_eq!(OwnerSource::TooFew.as_str(), "too_few");
+}
+
+#[test]
+fn high_counts_the_words_the_canceller_left_alone_high_over_the_floor() {
+    // Ten words left alone at the margin, ten just under it, ten cut at the
+    // margin: only the first ten count, whatever the estimate's source.
+    let mut words: Vec<GateWord> = (0..10)
+        .map(|k| cut(w(k * 1_000, "o", 1, FLOOR + OWNER_HIGH_DB, true, None), 1.0))
+        .collect();
+    words.extend((0..10).map(|k| {
+        cut(
+            w(
+                k * 1_000 + 300,
+                "q",
+                1,
+                FLOOR + OWNER_HIGH_DB - 0.1,
+                true,
+                None,
+            ),
+            1.0,
+        )
+    }));
+    words.extend((0..10).map(|k| cut(w(k * 1_000 + 600, "r", 2, FLOOR + 25.0, true, None), 3.0)));
+    let s = stats(&words);
+    let l = s.owner(true, Some(FLOOR));
+    assert_eq!((l.source, l.words, l.high), (OwnerSource::Clean, 20, 10));
+    // Too few to estimate: still counted.
+    let l = stats(&words[..10]).owner(true, Some(FLOOR));
+    assert_eq!((l.source, l.high), (OwnerSource::TooFew, 10));
+    // Without a floor, or before the canceller: 0.
+    assert_eq!(s.owner(true, None).high, 0);
+    assert_eq!(s.owner(false, Some(FLOOR)).high, 0);
+    assert_eq!(OWNER_HIGH_DB, 18.0);
+    // The gate reports it.
+    let opts = LayerOptions {
+        correlation: false,
+        canceller: true,
+        fixed: GateBand::DEFAULT,
+        threshold: GateBand::DEFAULT.threshold,
+        window: TextWindow::DEFAULT,
+        calibrate: false,
+    };
+    let r = gate(&words, &far(&[]), Some(FLOOR), &opts);
+    assert_eq!((r.owner_source, r.owner_high), (OwnerSource::Clean, 10));
+    let r = gate(
+        &words,
+        &far(&[]),
+        Some(FLOOR),
+        &LayerOptions {
+            canceller: false,
+            ..opts
+        },
+    );
+    assert_eq!(r.owner_high, 0);
 }
 
 #[test]

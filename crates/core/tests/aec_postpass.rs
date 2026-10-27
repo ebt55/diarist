@@ -1914,7 +1914,7 @@ fn owner_line(
     };
     let r1 = |v: Option<f32>| v.map(|x| (x * 10.0).round() / 10.0);
     eprintln!(
-        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}); floor {:?}",
+        "owner {tag}: {} words; quiet {}, unmatched {}, clean quiet {}, clean {}; today {} {:?} ({} words, {}); shipped {} {:?} ({} words, {}; high {}); floor {:?}",
         gw.len(),
         c.quiet,
         c.unmatched,
@@ -1928,6 +1928,7 @@ fn owner_line(
         r1(now.db),
         now.words,
         over(now.db),
+        now.high,
         r1(floor)
     );
     today.db

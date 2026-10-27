@@ -20,20 +20,24 @@
 //!   ([`Guard::Level`]; the owner's level of the cancelled words, as
 //!   [`super::layers::CalibrationStats::owner`] defines it after the
 //!   canceller: from the words it left alone, unknown when there are too
-//!   few or they sit at the floor). With the owner's level unknown (b) is
+//!   few or their median sits at the floor). With the owner's level unknown (b) is
 //!   the floor rule ([`Rule::floor_rule`], plan 16 sections 12.2.2 and
 //!   12.7): cut by at least [`ATTENUATION_DB`] and at most F over the floor
 //!   of the cancelled mic. F is [`FLOOR_MARGIN_DB`] in general, and
 //!   [`FLOOR_MARGIN_SILENT_DB`] in the silent tier, when the recording
-//!   shows a silent owner twice over: the owner's level is
+//!   shows a silent owner three times over: the owner's level is
 //!   [`OwnerSource::Implausible`] (20 or more words the canceller left
-//!   alone, all at the floor, which a talking owner's words never are) and
-//!   the raw gate took at least [`SILENT_SHARE`] of the raw mic's words for
-//!   echo (meeting 21, a talk on speakers with the owner nearly silent:
-//!   99.93 percent; no other meeting over 89; fixtures whose owner speaks
-//!   one to ten sentences only over loud far-end speech 92.9 to 99.92,
-//!   their owner's level known or too few to tell, never implausible). The
-//!   guards protect
+//!   alone, their median at the floor), at most [`SILENT_MAX_HIGH_WORDS`]
+//!   of those words sit [`super::layers::OWNER_HIGH_DB`] or more over the
+//!   floor ([`super::layers::OwnerLevel::high`]; a talking owner's uncut
+//!   words sit that high, 90 to 100 percent of them on every meeting and
+//!   fixture, residue the canceller left alone at the floor), and the raw
+//!   gate took at least [`SILENT_SHARE`] of the raw mic's words for echo
+//!   (meeting 21, a talk on speakers with the owner nearly silent: 5 of its
+//!   35 words left alone that high, 99.93 percent; no other meeting over
+//!   89; fixtures whose owner speaks one to ten sentences only over loud
+//!   far-end speech 92.9 to 99.92, their owner's level known or too few to
+//!   tell, never implausible). The guards protect
 //!   the owner's words that the canceller recovered from double talk, which
 //!   overlap the raw transcript's echo words; (b) alone ships ([`GUARD`]:
 //!   it also protects the owner's words the raw gate itself took for echo,
@@ -73,13 +77,14 @@ pub const MARGIN_DB: f32 = 12.0;
 /// known owner's level the guard sits 15 to 18 dB over the floor on the
 /// canceller meetings 12, 14, 16, 17, 18 and 20.
 pub const FLOOR_MARGIN_DB: f32 = 12.0;
-/// ... or this far (dB) in the silent tier (`F_s`), when two independent
-/// signatures of a silent owner agree: the owner's level is
-/// [`OwnerSource::Implausible`] (enough words the canceller left alone, all
-/// at the floor) and the raw gate took at least [`SILENT_SHARE`] of the
-/// raw mic's words for echo. Meeting 21's residue sits 0 to 21 dB over the
-/// floor; at 18 dB it keeps 77 words with 42 cut far-active ones (288 and
-/// 253 before the fix, 155 and 120 at 12 dB).
+/// ... or this far (dB) in the silent tier (`F_s`), when the signatures of
+/// a silent owner agree: the owner's level is [`OwnerSource::Implausible`]
+/// (enough words the canceller left alone, their median at the floor), at
+/// most [`SILENT_MAX_HIGH_WORDS`] of them high over it, and the raw gate
+/// took at least [`SILENT_SHARE`] of the raw mic's words for echo. Meeting
+/// 21's residue sits 0 to 21 dB over the floor; at 18 dB it keeps 77 words
+/// with 42 cut far-active ones (288 and 253 before the fix, 155 and 120 at
+/// 12 dB).
 pub const FLOOR_MARGIN_SILENT_DB: f32 = 18.0;
 /// The raw gate's share of flagged words the silent tier needs: 99.8
 /// percent. Meeting 21 reaches 99.93; plan 16 section 12.7 set 99.5 unless
@@ -90,6 +95,20 @@ pub const FLOOR_MARGIN_SILENT_DB: f32 = 18.0;
 /// three utterances in 20 minutes: 99.91 and 99.92); the owner's level
 /// does, which is why the tier needs both.
 pub const SILENT_SHARE: f64 = 0.998;
+/// The most words the canceller left alone in no run at
+/// [`super::layers::OWNER_HIGH_DB`] or more over the floor
+/// ([`super::layers::OwnerLevel::high`]) that the silent tier allows: a
+/// talking owner's uncut words sit that high, residue the canceller left
+/// alone at the floor (plan 16 section 12.8). The median check of
+/// [`OwnerSource::Implausible`] alone lets an owner through who says a few
+/// sentences quietly over a long talk, never in its pauses; this guard can
+/// only move a recording from the silent tier to the general one. Twice
+/// meeting 21's count, the one recording in the tier (5 of its 35 words
+/// left alone, plan 16 section 12.8's rule for a count of 3 to 5); the
+/// FLEURS fixture whose owner talks only over loud far-end speech 23 dB
+/// over the floor has 46 (docs/eval/2026-10-26-echo-owner-level.md,
+/// section 3).
+pub const SILENT_MAX_HIGH_WORDS: usize = 10;
 
 /// What a candidate needs besides its raw counterpart's echo decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -140,6 +159,8 @@ pub struct Rule {
     pub floor_margin_silent_db: f32,
     /// [`SILENT_SHARE`].
     pub silent_share: f64,
+    /// [`SILENT_MAX_HIGH_WORDS`].
+    pub silent_max_high: usize,
 }
 
 impl Rule {
@@ -149,23 +170,31 @@ impl Rule {
         floor_margin_db: FLOOR_MARGIN_DB,
         floor_margin_silent_db: FLOOR_MARGIN_SILENT_DB,
         silent_share: SILENT_SHARE,
+        silent_max_high: SILENT_MAX_HIGH_WORDS,
     };
 
     /// The floor rule in force: `None` with the owner's level known (the
     /// level guard is the owner's), else its tier and margin. The silent
-    /// tier needs the owner's level [`OwnerSource::Implausible`] and the raw
-    /// gate's flagged share `raw_echo_share` at least [`Rule::silent_share`].
+    /// tier needs the owner's level [`OwnerSource::Implausible`], at most
+    /// [`Rule::silent_max_high`] of the words the canceller left alone high
+    /// over the floor (`owner_high`, [`super::layers::OwnerLevel::high`]),
+    /// and the raw gate's flagged share `raw_echo_share` at least
+    /// [`Rule::silent_share`].
     pub fn floor_rule(
         &self,
         owner_db: Option<f32>,
         owner_source: OwnerSource,
+        owner_high: usize,
         raw_echo_share: f64,
     ) -> Option<FloorRule> {
         if owner_db.is_some() {
             return None;
         }
         Some(
-            if owner_source == OwnerSource::Implausible && raw_echo_share >= self.silent_share {
+            if owner_source == OwnerSource::Implausible
+                && owner_high <= self.silent_max_high
+                && raw_echo_share >= self.silent_share
+            {
                 FloorRule {
                     tier: FloorTier::Silent,
                     f_db: self.floor_margin_silent_db,
@@ -186,7 +215,7 @@ impl Rule {
 pub enum FloorTier {
     /// The owner's level unknown: [`Rule::floor_margin_db`].
     Unknown,
-    /// Both signatures of a silent owner: [`Rule::floor_margin_silent_db`].
+    /// The signatures of a silent owner: [`Rule::floor_margin_silent_db`].
     Silent,
 }
 
@@ -289,6 +318,7 @@ pub fn transfer(
         raw,
         owner_db,
         OwnerSource::TooFew,
+        0,
         0.0,
         floor_db,
         &Rule {
@@ -298,20 +328,22 @@ pub fn transfer(
     )
 }
 
-/// [`transfer`] with every parameter in `rule`, the owner's level's source
-/// and the raw gate's flagged share (the floor rule's tier,
-/// [`Rule::floor_rule`]).
+/// [`transfer`] with every parameter in `rule`, the owner's level's source,
+/// its count of words high over the floor and the raw gate's flagged share
+/// (the floor rule's tier, [`Rule::floor_rule`]).
+#[allow(clippy::too_many_arguments)]
 pub fn transfer_with(
     cancelled: &[GateWord],
     raw: &[RawWord],
     owner_db: Option<f32>,
     owner_source: OwnerSource,
+    owner_high: usize,
     raw_echo_share: f64,
     floor_db: Option<f32>,
     rule: &Rule,
 ) -> (Vec<bool>, TransferCounts) {
     let floor_margin = rule
-        .floor_rule(owner_db, owner_source, raw_echo_share)
+        .floor_rule(owner_db, owner_source, owner_high, raw_echo_share)
         .map(|f| f.f_db);
     let overlap = rule.overlap_ms;
     let mut order: Vec<usize> = (0..raw.len()).collect();
@@ -476,11 +508,17 @@ pub fn gate_with(
         &raw_words,
         after.owner_db,
         after.owner_source,
+        after.owner_high,
         raw_echo_share,
         after.floor_db,
         rule,
     );
-    let floor_rule = rule.floor_rule(after.owner_db, after.owner_source, raw_echo_share);
+    let floor_rule = rule.floor_rule(
+        after.owner_db,
+        after.owner_source,
+        after.owner_high,
+        raw_echo_share,
+    );
     let reasons: Vec<Option<EchoReason>> = after
         .reasons
         .iter()
@@ -637,7 +675,16 @@ mod tests {
         floor: Option<f32>,
         rule: &Rule,
     ) -> (Vec<bool>, TransferCounts) {
-        transfer_with(cancelled, raw, None, OwnerSource::TooFew, 1.0, floor, rule)
+        transfer_with(
+            cancelled,
+            raw,
+            None,
+            OwnerSource::TooFew,
+            0,
+            1.0,
+            floor,
+            rule,
+        )
     }
 
     #[test]
@@ -692,13 +739,14 @@ mod tests {
         let cancelled = floor_case(&[(5.0, 8.0), (27.0, 8.0), (29.0, 8.0), (5.0, 1.0)]);
         for f in [9.0, 12.0, f32::INFINITY] {
             for source in [OwnerSource::Quiet, OwnerSource::Implausible] {
-                let (d, c) = transfer_with(&cancelled, &raw, OWNER, source, 1.0, FLOOR, &rule(f));
+                let (d, c) =
+                    transfer_with(&cancelled, &raw, OWNER, source, 0, 1.0, FLOOR, &rule(f));
                 assert_eq!(d, [true, true, false, false], "{f}");
                 assert_eq!((c.level, c.floor), (2, 0));
             }
         }
         assert_eq!(
-            Rule::SHIPPED.floor_rule(OWNER, OwnerSource::Implausible, 1.0),
+            Rule::SHIPPED.floor_rule(OWNER, OwnerSource::Implausible, 0, 1.0),
             None
         );
     }
@@ -710,7 +758,9 @@ mod tests {
             floor_margin_silent_db: 18.0,
             ..Rule::SHIPPED
         };
-        let tier = |source: OwnerSource, share: f64| r.floor_rule(None, source, share);
+        let tier = |source: OwnerSource, share: f64| r.floor_rule(None, source, 0, share);
+        let with_high =
+            |source: OwnerSource, share: f64, high: usize| r.floor_rule(None, source, high, share);
         let silent = Some(FloorRule {
             tier: FloorTier::Silent,
             f_db: 18.0,
@@ -732,6 +782,31 @@ mod tests {
         assert_eq!(tier(OwnerSource::Implausible, 0.89), unknown);
         // Forced unknown with an estimate (the evaluation's sweeps).
         assert_eq!(tier(OwnerSource::Clean, 1.0), unknown);
+        // The talking-owner guard (plan 16 section 12.8), at the ruling's
+        // first value of 5: up to five words the canceller left alone high
+        // over the floor still allow the tier, a sixth does not; it never
+        // moves a recording into the tier.
+        let five = Rule {
+            silent_max_high: 5,
+            ..r
+        };
+        let at_five = |source: OwnerSource, share: f64, high: usize| {
+            five.floor_rule(None, source, high, share)
+        };
+        assert_eq!(at_five(OwnerSource::Implausible, 0.9993, 5), silent);
+        assert_eq!(at_five(OwnerSource::Implausible, 0.9993, 6), unknown);
+        assert_eq!(at_five(OwnerSource::TooFew, 1.0, 0), unknown);
+        // Shipped: twice meeting 21's 5 (its 7,606 of 7,611 and 5 high words
+        // stay in the tier).
+        assert_eq!(SILENT_MAX_HIGH_WORDS, 10);
+        assert_eq!(Rule::SHIPPED.silent_max_high, SILENT_MAX_HIGH_WORDS);
+        assert_eq!(with_high(OwnerSource::Implausible, 0.9993, 5), silent);
+        assert_eq!(with_high(OwnerSource::Implausible, 0.9993, 10), silent);
+        assert_eq!(with_high(OwnerSource::Implausible, 0.9993, 11), unknown);
+        assert_eq!(with_high(OwnerSource::TooFew, 1.0, 0), unknown);
+        // The FLEURS fixture whose owner talks only over the far end 23 dB
+        // over the floor: 46 of its 51 words left alone are high.
+        assert_eq!(with_high(OwnerSource::Implausible, 1.0, 46), unknown);
         assert_eq!(SILENT_SHARE, 0.998);
         assert_eq!((FLOOR_MARGIN_DB, FLOOR_MARGIN_SILENT_DB), (12.0, 18.0));
         // The share of the raw gate's flags.
@@ -741,14 +816,16 @@ mod tests {
         // The tier moves the margin: a candidate 15 dB over the floor.
         let raw = [rw(1_000, "echo", true)];
         let cancelled = floor_case(&[(10.0, 8.0), (15.0, 8.0), (20.0, 8.0)]);
-        let go = |source: OwnerSource, share: f64| {
-            let (d, c) = transfer_with(&cancelled, &raw, None, source, share, FLOOR, &r);
+        let go = |source: OwnerSource, share: f64, high: usize| {
+            let (d, c) = transfer_with(&cancelled, &raw, None, source, high, share, FLOOR, &r);
             assert_eq!(c.floor, d.iter().filter(|x| **x).count());
             d
         };
-        assert_eq!(go(OwnerSource::Implausible, 1.0), [true, true, false]);
-        assert_eq!(go(OwnerSource::Implausible, 0.9), [true, false, false]);
-        assert_eq!(go(OwnerSource::TooFew, 1.0), [true, false, false]);
+        assert_eq!(go(OwnerSource::Implausible, 1.0, 0), [true, true, false]);
+        assert_eq!(go(OwnerSource::Implausible, 0.9, 0), [true, false, false]);
+        assert_eq!(go(OwnerSource::TooFew, 1.0, 0), [true, false, false]);
+        assert_eq!(go(OwnerSource::Implausible, 1.0, 10), [true, true, false]);
+        assert_eq!(go(OwnerSource::Implausible, 1.0, 11), [true, false, false]);
     }
 
     /// The raw mic heard the far end cleanly, `n` words in one run (every
@@ -805,7 +882,7 @@ mod tests {
             residue(4_000, 15.0),
             cw(6_000, "okay", -30.0, 0.5),
         ];
-        let run = |cancelled: &[GateWord]| {
+        let run_with = |cancelled: &[GateWord], rule: &Rule| {
             gate_with(
                 &raw,
                 floor,
@@ -814,18 +891,19 @@ mod tests {
                 floor,
                 &layer_opts(true),
                 &far,
-                &r,
+                rule,
                 &|_| {},
             )
         };
+        let run = |cancelled: &[GateWord]| run_with(cancelled, &r);
         // Too few words the canceller left alone: unknown, the general tier
         // (F_u, 12 dB), though the raw mic is all echo.
         let t = run(&cancelled);
         assert_eq!(t.raw.dropped(), 40);
         assert_eq!(t.raw_echo_share, 1.0);
         assert_eq!(
-            (t.after.owner_source, t.after.owner_db),
-            (OwnerSource::TooFew, None)
+            (t.after.owner_source, t.after.owner_db, t.after.owner_high),
+            (OwnerSource::TooFew, None, 1)
         );
         assert_eq!(
             t.floor_rule,
@@ -848,11 +926,17 @@ mod tests {
             });
             cancelled.push(w);
         }
-        // (Of the 26 words it left alone, "okay" among them, the median.)
+        // (Of the 26 words it left alone, "okay" among them, the median;
+        // "okay" is the one high over the floor.)
         let t = run(&cancelled);
         assert_eq!(
-            (t.after.owner_source, t.after.owner_words, t.after.owner_db),
-            (OwnerSource::Implausible, 26, None)
+            (
+                t.after.owner_source,
+                t.after.owner_words,
+                t.after.owner_db,
+                t.after.owner_high
+            ),
+            (OwnerSource::Implausible, 26, None, 1)
         );
         assert_eq!(
             t.floor_rule,
@@ -868,6 +952,62 @@ mod tests {
         assert_eq!(t.transfer.floor, 2);
         // The noise words have no raw word near them: kept.
         assert!(t.reasons[3..].iter().all(Option::is_none));
+        // The owner talks after all (plan 16 section 12.8): `n` more words
+        // over the far end at −30 dBFS, left alone by the canceller. The
+        // median of the words it left alone stays at the floor
+        // (implausible), but n + 1 of them sit high over it.
+        let talking = |n: i64| {
+            let mut v = cancelled.clone();
+            for k in 0..n {
+                v.push(cw(6_400 + 400 * k, &format!("o{k}"), -30.0, 0.4));
+            }
+            v
+        };
+        let unknown = Some(FloorRule {
+            tier: FloorTier::Unknown,
+            f_db: 12.0,
+        });
+        // At the ruling's first value of 5: six words, seven high, the
+        // general tier, and the fragment 15 dB over the floor stays.
+        let five = Rule {
+            silent_max_high: 5,
+            ..r
+        };
+        let t = run_with(&talking(6), &five);
+        assert_eq!(
+            (
+                t.after.owner_source,
+                t.after.owner_words,
+                t.after.owner_high
+            ),
+            (OwnerSource::Implausible, 32, 7)
+        );
+        assert_eq!(t.floor_rule, unknown);
+        assert_eq!(t.reasons[..3], [Some(EchoReason::Transfer), None, None]);
+        assert_eq!(t.transfer.floor, 1);
+        // The owner's words are candidates (over flagged raw words), and the
+        // guard keeps them.
+        assert!(t.reasons[28..].iter().all(Option::is_none));
+        assert_eq!(t.transfer.candidates, 2 + 1 + 6);
+        // Shipped, twice meeting 21's 5: seven high words stay in the silent
+        // tier, eleven leave it.
+        let t = run(&talking(6));
+        assert_eq!(t.after.owner_high, 7);
+        assert_eq!(t.floor_rule.map(|f| f.tier), Some(FloorTier::Silent));
+        assert_eq!(t.transfer.floor, 2);
+        let t = run(&talking(SILENT_MAX_HIGH_WORDS as i64));
+        assert_eq!(
+            (
+                t.after.owner_source,
+                t.after.owner_words,
+                t.after.owner_high
+            ),
+            (OwnerSource::Implausible, 36, SILENT_MAX_HIGH_WORDS + 1)
+        );
+        assert_eq!(t.floor_rule, unknown);
+        assert_eq!(t.reasons[..3], [Some(EchoReason::Transfer), None, None]);
+        assert_eq!(t.transfer.floor, 1);
+        assert!(t.reasons[28..].iter().all(Option::is_none));
         // One raw word in 40 the raw gate kept (97.5 percent): the general
         // tier again.
         let mut raw2 = raw.clone();
