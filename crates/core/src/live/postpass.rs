@@ -129,7 +129,7 @@ use crate::engine::{DiarPreset, Engine, EngineEvent, EngineWord, ErrorCode, File
 use crate::error::{CoreError, Result};
 use crate::models::languages;
 use crate::pipeline::CancelToken;
-use crate::punct::rebuild::{descends_from, rebuild_transcript, source_run, texts_of};
+use crate::punct::rebuild::{descends_from, rebuild_transcript, root_run, source_run, texts_of};
 use crate::punct::{punctuate_loaded, PunctSource, RunLanguage};
 use crate::settings;
 use crate::store::{CarryOverReport, NewAudioTrack, RunStore, StoreError};
@@ -139,7 +139,7 @@ use crate::transcript::{
 };
 use crate::types::{
     AudioFormat, Channel, EchoDroppedWord, JobId, LiveUtterance, MeetingId, MeetingStatus, RunId,
-    RunKind, RunStatus, TrackChannel,
+    RunKind, RunStatus, TrackChannel, TranscriptRun,
 };
 use crate::views::{JobEvent, JobStage};
 
@@ -380,13 +380,36 @@ fn unplaced_names(
 
 /// The run the post-pass carries names and edits from (plan 16 section 3.9
 /// step 7): the meeting's current run when it is a copy of `live_run` (a
-/// Restore or a punctuation rebuild of it, or of a copy of it), so names
-/// given on the copy survive; else `live_run`.
+/// Restore or a punctuation rebuild of it, a promoted live run of it, or a
+/// copy of one of those), so names given on the copy survive; else
+/// `live_run`.
 fn carry_source(store: &dyn RunStore, meeting: MeetingId, live_run: RunId) -> RunId {
     match store.get_meeting(meeting).map(|d| d.current_run) {
-        Ok(Some(c)) if c.id != live_run && descends_from(store, &c, live_run) => c.id,
+        Ok(Some(c)) if c.id != live_run && copies_live(store, &c, live_run) => c.id,
         _ => live_run,
     }
+}
+
+/// Whether `run` holds `live_run`'s own words under its own speakers: a
+/// Restore or a punctuation rebuild of it ([`descends_from`]), or a
+/// `post_pass` run [`promote_punctuated`] built from it
+/// (`engine_info.promoted_live`, punctuated or with its loops collapsed),
+/// or a Restore or rebuild of such a run.
+fn copies_live(store: &dyn RunStore, run: &TranscriptRun, live_run: RunId) -> bool {
+    if descends_from(store, run, live_run) {
+        return true;
+    }
+    let root = root_run(store, run);
+    let root = if root == run.id {
+        Ok(run.clone())
+    } else {
+        store.get_run(root)
+    };
+    root.is_ok_and(|r| {
+        r.kind == RunKind::PostPass
+            && r.meeting_id == run.meeting_id
+            && r.engine_info["promoted_live"].as_i64() == Some(live_run.0)
+    })
 }
 
 /// A promoted live run rebuilt by [`promote_punctuated`].

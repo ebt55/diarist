@@ -275,6 +275,14 @@ impl Finished {
 }
 
 fn finished(keep_live: bool) -> Finished {
+    finished_as(keep_live, false)
+}
+
+/// [`finished`]; with `promoted`, the live run also holds a repeated-token
+/// loop (four `we` in one frame on the loopback) and the first post-pass
+/// promoted it without transcribing: a `post_pass` run with the loop
+/// collapsed is current, and the live run stays for the collapsed words.
+fn finished_as(keep_live: bool, promoted: bool) -> Finished {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let store = Arc::new(SqliteStore::open(root.join("diarist.db")).unwrap());
@@ -329,21 +337,23 @@ fn finished(keep_live: bool) -> Finished {
         (Channel::Loopback, "hello", Some("spk_0")),
         (Channel::Mic, "hi", None),
     ] {
-        store
-            .append_live_utterance(
-                live,
-                ch,
-                0,
-                0,
-                &[EngineWord {
-                    t0_us: 1_050_000,
-                    t1_us: 1_900_000,
-                    text: text.into(),
-                    conf: None,
-                    spk: spk.map(str::to_owned),
-                }],
-            )
-            .unwrap();
+        let mut words = vec![EngineWord {
+            t0_us: 1_050_000,
+            t1_us: 1_900_000,
+            text: text.into(),
+            conf: None,
+            spk: spk.map(str::to_owned),
+        }];
+        if promoted && ch == Channel::Loopback {
+            words.extend((0..4).map(|_| EngineWord {
+                t0_us: 2_050_000,
+                t1_us: 2_130_000,
+                text: "we".into(),
+                conf: None,
+                spk: Some("spk_0".into()),
+            }));
+        }
+        store.append_live_utterance(live, ch, 0, 0, &words).unwrap();
     }
     store
         .materialise_live_run(live, &SegmentOptions::default())
@@ -370,7 +380,7 @@ fn finished(keep_live: bool) -> Finished {
         folder: folder.clone(),
         language: "en".into(),
         diarize_mic: false,
-        transcribe: true,
+        transcribe: !promoted,
         keep_live_runs: keep_live,
         segment: SegmentOptions::default(),
         punct: crate::punct::PunctSource::None,
@@ -393,7 +403,12 @@ fn finished(keep_live: bool) -> Finished {
     };
     assert_eq!(f.status(), MeetingStatus::Done);
     f.no_wavs_left();
-    assert_eq!(report.live_run_deleted, !keep_live);
+    if promoted {
+        assert!(report.promoted_live && !report.live_run_deleted);
+        assert_ne!(report.current_run, live);
+    } else {
+        assert_eq!(report.live_run_deleted, !keep_live);
+    }
     f
 }
 
@@ -1092,6 +1107,94 @@ fn processing_again_collapses_loops_and_punctuates_the_new_run() {
     let info = f.store.get_run(report.current_run).unwrap().engine_info;
     assert_eq!(info["loops"]["applied"], false);
     assert_eq!(info["loops"]["words_removed"], 0);
+}
+
+/// A name given on a promoted live run (the `post_pass` run the meeting
+/// shows, built from the live run's words with a loop collapsed) or on a
+/// punctuation copy of it reaches the run Process again makes; the run it
+/// was given on stays, and so does the live run.
+fn promoted_names_carry(through_copy: bool) {
+    let f = finished_as(false, true);
+    let promoted = f.store.get_run(f.first).unwrap();
+    assert_eq!(promoted.kind, RunKind::PostPass);
+    assert_eq!(
+        promoted.engine_info["promoted_live"].as_i64(),
+        Some(f.live.0)
+    );
+    assert_eq!(promoted.engine_info["loops"]["words_removed"], 3);
+    let named_run = if through_copy {
+        let p = crate::punct::PunctSource::factory(|| {
+            crate::punct::fixture::FixturePunctuator::marks(&[(
+                "hello",
+                crate::punct::Mark::Period,
+            )])
+        });
+        crate::punct::rebuild_run(
+            &*f.store,
+            &p,
+            f.meeting,
+            crate::punct::RebuildWhy::Add,
+            &|| false,
+        )
+        .unwrap()
+        .run
+        .unwrap()
+    } else {
+        f.first
+    };
+    assert_eq!(f.current(), named_run);
+    let spk = f
+        .store
+        .run_speakers(named_run)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.engine_label == "spk_0")
+        .unwrap();
+    f.store.rename_speaker(spk.id, "Alice", None).unwrap();
+    // The live run has no name: only the run the meeting shows carries it.
+    assert!(f
+        .store
+        .run_speakers(f.live)
+        .unwrap()
+        .iter()
+        .all(|s| s.display_name.is_none()));
+
+    let report = f.wait(rerun_post_pass(&f.ctx, f.meeting).unwrap()).unwrap();
+    assert_eq!(f.current(), report.current_run);
+    let named: Vec<(Channel, String, String)> = f
+        .store
+        .run_speakers(report.current_run)
+        .unwrap()
+        .into_iter()
+        .filter_map(|s| s.display_name.map(|n| (s.channel, s.engine_label, n)))
+        .collect();
+    assert_eq!(
+        named,
+        [(Channel::Loopback, "spk_0".to_owned(), "Alice".to_owned())]
+    );
+    assert_eq!(report.unplaced_names, 0);
+    // Every earlier run stays: the one the name was given on with it, the
+    // promoted run and the live run.
+    for r in [f.first, named_run, f.live] {
+        assert_eq!(f.store.get_run(r).unwrap().status, RunStatus::Done);
+    }
+    assert!(f
+        .store
+        .run_speakers(named_run)
+        .unwrap()
+        .iter()
+        .any(|s| s.display_name.as_deref() == Some("Alice")));
+    f.no_wavs_left();
+}
+
+#[test]
+fn processing_again_carries_names_from_a_promoted_live_run() {
+    promoted_names_carry(false);
+}
+
+#[test]
+fn processing_again_carries_names_from_a_punctuation_copy_of_a_promoted_run() {
+    promoted_names_carry(true);
 }
 
 #[test]
