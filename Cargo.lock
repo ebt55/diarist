@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "diarist"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "diarist-core",
  "log",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "diarist-cli"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "diarist-core"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "flac-codec",
  "futures-util",
