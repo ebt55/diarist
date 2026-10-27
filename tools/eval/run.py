@@ -204,11 +204,14 @@ def phase_times(audio_dir: Path) -> dict:
 
 def transcribe(
     s: Session, config: str, cfg: dict, data: Path, *, language: str | None = None, run_id: str | None = None,
-    diarize: bool = True, wav: Path | None = None, duration: float | None = None,
+    diarize: bool = True, wav: Path | None = None, duration: float | None = None, diar_pass: bool = True,
 ) -> dict:
     """One diarist-cli transcribe of session s (or of `wav`, for FLEURS) into
     runs/<config>/<run_id or session id>, with wall time per engine step and
-    peak VRAM (nvidia-smi delta) per step."""
+    peak VRAM (nvidia-smi delta) per step. diar_pass=False leaves out the
+    standalone diarize pass of `--rttm`: it runs after the transcript is built
+    and never feeds it (crates/core/src/pipeline/import.rs step 3), so words,
+    tags and the transcribe step are the same."""
     rid = run_id or s.id
     d = run_dir(config, rid)
     d.mkdir(parents=True, exist_ok=True)
@@ -218,7 +221,7 @@ def transcribe(
     log(f"[{rid}] diarist-cli transcribe ({duration / 60:.1f} min, config {config}, language {lang})")
     gpu.wait_idle(GPU_IDLE_MIB)
     args = ["transcribe", str(wav), "--language", lang, "--title", rid]
-    args += ["--rttm"] if diarize else ["--no-diarize"]
+    args += (["--rttm"] if diar_pass else []) if diarize else ["--no-diarize"]
     args += ["--out", str(d / "transcript.json"), "--format", "json", *engine_arg_flags(cfg)]
     t_start = time.time()
     t0 = time.perf_counter()
@@ -274,6 +277,7 @@ def transcribe(
         "asr": cfg["asr"],
         "diarizer": cfg["diarizer"],
         "engine_args": list(cfg.get("engine_args") or []),
+        "diar_pass": bool(diarize and diar_pass),
         "engine_version": eng["engine"] if eng else None,
         "asr_file": eng["asr"] if eng else None,
         "diarizer_file": eng["diar"] if eng else None,
@@ -915,6 +919,11 @@ def main() -> None:
     ap.add_argument("--configs-file", type=Path, default=EVAL_DIR / "configs.toml")
     ap.add_argument("--force", action="store_true", help="re-transcribe even when cached")
     ap.add_argument("--transcribe-only", action="store_true")
+    ap.add_argument(
+        "--no-diar-pass", action="store_true",
+        help="leave out the standalone diarize pass of --rttm (about half the GPU time; the transcript, its tags "
+        "and the transcribe step are unchanged; the report then has no standalone-diarizer rows)",
+    )
     ap.add_argument("--metrics-only", action="store_true", help="never run the GPU; skip sessions without a cached run")
     ap.add_argument("--export-for-correction", metavar="SESSION")
     ap.add_argument("--out", type=Path, help="report path (default docs/eval/<date>-<config>.md)")
@@ -978,7 +987,7 @@ def main() -> None:
             if not CLI.is_file():
                 raise SystemExit(f"{CLI} missing: build diarist-cli once and copy it there (README)")
             data = data or prepare_data_root(a.config, cfg)
-            meta = transcribe(s, a.config, cfg, data, language=lang)
+            meta = transcribe(s, a.config, cfg, data, language=lang, diar_pass=not a.no_diar_pass)
         if meta is None:
             log(f"[{sid}] no cached run for {a.config}; skipped")
             continue

@@ -104,6 +104,17 @@ def test_mandarin_identical_text_scores_zero():
     assert r["cpwer"] == 0 and r["wder"] == 0 and r["ref_words"] == 11
 
 
+def test_dropped_turn_is_one_gap_and_deletions():
+    ref = meeting()
+    hyp = [dict(h) for i, h in enumerate(meeting()) if i != 3]  # turn 4 (C, 11 words, 4.4 s) missing
+    r = run(ref, hyp)
+    assert r["gaps"] == 1 and r["gaps_5s"] == 1  # 4.4 s turn plus the 0.6 s pauses on both sides
+    assert r["gap_ref_words"] == 11 and r["longest_gap_s"] >= 5.0
+    assert (r["w_del"], r["w_ins"], r["w_sub"]) == (11, 0, 0)
+    assert abs(r["wer"] - 11 / r["ref_words"]) < 1e-9
+    assert run(ref, meeting())["gaps"] == 0
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

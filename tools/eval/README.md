@@ -11,7 +11,7 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `configs.toml` | The configurations: baselines, `--verbatim`, decoder lookahead and diarizer preset variants (per-config `engine_args`) |
 | `fleurs_fetch.py` | About 10 minutes of the FLEURS test split per language (CC-BY-4.0) for the WER-only mode |
 | `nemo_direct.py` | Runs `nemo-speech transcribe` directly with the app's file-job flags plus extra flags (spikes on runtime options the app does not pass) |
-| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share |
+| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, and `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
 | `public_data.py` | Shared helpers of the public-set fetch scripts: pinned curl downloads with SHA-256 checks, 16 kHz conversion, reference and session-list writing |
 | `ami_test_fetch.py`, `icsi_fetch.py`, `notsofar_fetch.py`, `earnings22_fetch.py`, `alimeeting_fetch.py`, `summre_fetch.py`, `indic_fetch.py` | One per public set (docs/05 "Extend"): fetch a pinned slice into `.work/public/<set>/` and write its references and session list |
@@ -53,6 +53,7 @@ uv run python -I run.py --config nemotron35 --sessions aug2,aug9,seplog,ami
 uv run python -I run.py --config nemotron35 --sessions all
 uv run python -I run.py --config nemotron35 --sessions all --metrics-only   # never touches the GPU
 uv run python -I run.py --config nemotron35 --sessions all --force          # re-transcribe
+uv run python -I run.py --config nemotron35 --sessions all --no-diar-pass   # no standalone diarize pass: about half the GPU time
 uv run python -I fleurs_fetch.py                                            # FLEURS slices, once
 uv run python -I run.py --config nemotron35 --fleurs all                    # WER only, language tag given
 uv run python -I run.py --config nemotron35 --fleurs all --fleurs-language auto
@@ -112,7 +113,10 @@ uv run --with pyarrow==21.0.0 python -I indic_fetch.py     # 0.63 GB  Indic Diar
 uv run python -I run.py --config shipped_n35 --sessions-file sessions.public.toml
 uv run python -I run.py --config shipped_en --sessions-file sessions.public.toml --groups pub-meeting,pub-far,pub-phone
 uv run python -I smoke.py --session nsf-mtg32000 --start 60 --dur 180    # one clip, no full run
+uv run python -I levers.py --sessions-file sessions.public.toml baseline --configs shipped_en,shipped_n35   # tables
 ```
+
+metrics.json also carries the speaker-agnostic WER with its deletions, insertions and substitutions (`wer`, `w_del`, `w_ins`, `w_sub`) and the gap count of research/19 section 0 (`gaps`, `gaps_5s`: stretches of 2 s and 5 s or more without a hypothesis word that hold at least 3 reference words). meeteval refuses its ORC-based measures with more than 10 reference speakers (two Earnings-22 calls); DI-cpWER and ORC-WER are then NaN, the rest is scored. The 27 Oct 2026 beta.4 baseline on these sets is `docs/eval/2026-10-27-baseline-public.md`.
 
 Sessions carry their own `language` (zh-CN, fr, hi in `pub-lang`): it is passed to diarist-cli instead of the config's, an English-only ASR config skips those sessions, and their text is scored with the multilingual normaliser (Mandarin per character). Agents sharing the PC can set `DIARIST_EVAL_LOCKS` to the folder holding `quiet.lock`; large downloads then pause while it exists.
 

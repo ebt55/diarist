@@ -9,6 +9,7 @@ over runs that run.py or nemo_direct.py already cached. Never touches the GPU.
   uv run python -I levers.py punct --words <words.json> [...]
   uv run python -I levers.py table --configs nemotron35,n35_rc_3,nemotron_en,en_rc_13
   uv run python -I levers.py boost --base .work/spikes/boost/n35_base --runs .work/spikes/boost/n35_b3 --phrases Craig beagle
+  uv run python -I levers.py --sessions-file sessions.public.toml baseline --configs shipped_en,shipped_n35
 
 offsets: word-start offset of each config against the base config on the
   same session: normalised words aligned by Levenshtein, starts compared on
@@ -29,6 +30,9 @@ fleurs-utts: per-utterance errors of FLEURS runs, with empty and silent
   recordings counted.
 boost: phrase hits, changes against the unboosted run, clip WER and the
   runtime's boosting messages, per nemo_direct run.
+baseline: per-group session tables and pooled rows (cpWER, tcpWER, WER with
+  del / ins / sub, WDER, DER, count error, gaps, speed) of one or more configs,
+  as in docs/eval/2026-10-27-baseline-public.md.
 table: the lookahead summary, one row per config (quality on the short
   sessions, speed, and on the 77-minute session VRAM, tag agreement and the
   word-start offset against the same model's R = 1 config).
@@ -409,6 +413,119 @@ def cmd_compare(a) -> None:
             )
 
 
+BASELINE_MODEL = {"nemotron-en": "EN", "nemotron-3.5": "3.5"}
+
+
+def _pool(rows: list[dict]) -> dict:
+    """Pooled metrics over (metrics.json, run.json) rows: error counts summed,
+    WDER over all aligned pairs, DER weighted by scored reference speech,
+    speed over the rows with a clean timing only."""
+    s = lambda k: sum((m.get(k) or 0) for m, _, _ in rows)  # noqa: E731
+    timed = [(m, r) for m, r, ok in rows if ok and r.get("asr_wall_s")]
+    der_t = s("der_c025_total_s")
+    return {
+        "n": len(rows), "min": s("audio_s") / 60,
+        "cpwer": s("cp_errors") / s("cp_length") if s("cp_length") else None,
+        "tcpwer": s("tcp_errors") / s("tcp_length") if s("tcp_length") else None,
+        "wer": (s("w_sub") + s("w_del") + s("w_ins")) / s("ref_words") if s("ref_words") else None,
+        "w_del": s("w_del"), "w_ins": s("w_ins"), "w_sub": s("w_sub"),
+        "wder": sum(m["wder"] * m["wder_pairs"] for m, _, _ in rows if m.get("wder_pairs")) / s("wder_pairs")
+        if s("wder_pairs") else None,
+        "der": sum(m["der_c025"] * m["der_c025_total_s"] for m, _, _ in rows if m.get("der_c025_total_s")) / der_t
+        if der_t else None,
+        "abs_count": sum(abs(m.get("count_error") or 0) for m, _, _ in rows),
+        "gaps": s("gaps"), "gaps_5s": s("gaps_5s"),
+        "xrt": sum(r["audio_s"] for _, r in timed) / sum(r["asr_wall_s"] for _, r in timed) if timed else None,
+        "timed": len(timed),
+    }
+
+
+def cmd_baseline(a) -> None:
+    """Per-group session tables and pooled rows over cached runs of one or
+    more configs (docs/eval baseline reports): cpWER, tcpWER, plain WER with
+    its deletions, insertions and substitutions, WDER, DER c0.25, speaker-count
+    error, gaps of 2 s and 5 s or more (metrics.py), minutes and times real
+    time of the transcribe step (audio over run.json asr_wall_s, model load
+    included). --clean-timing names a JSON object {"<config>/<session>": bool};
+    speed is then shown only where it is true."""
+    import re
+    import tomllib
+
+    from common import GROUP_ORDER
+
+    sessions = load_sessions(a.sessions_file)
+    cfgs = tomllib.loads((EVAL_DIR / "configs.toml").read_text(encoding="utf-8"))
+    configs = [x.strip() for x in a.configs.split(",") if x.strip()]
+    clean = json.loads(Path(a.clean_timing).read_text(encoding="utf-8")) if a.clean_timing else None
+    groups = [g.strip() for g in a.groups.split(",")] if a.groups else GROUP_ORDER
+
+    def pc(x):
+        return "–" if x is None or x != x else f"{100 * x:.1f}"
+
+    def model(c):
+        return BASELINE_MODEL.get(cfgs.get(c, {}).get("asr"), c)
+
+    rows = []  # (session, config, metrics, run, timing ok)
+    for sid, s in sessions.items():
+        if s.group not in groups:
+            continue
+        for c in configs:
+            m, r = _load(RUNS / c / sid / "metrics.json"), _load(RUNS / c / sid / "run.json")
+            if m and r and r.get("status") == "ok":
+                ok = clean.get(f"{c}/{sid}", False) if clean is not None else True
+                rows.append((s, c, m, r, ok))
+    titles = {
+        "pub-meeting": "pub-meeting: open multi-party meetings, close-talk mix (AMI EN2002 Mix-Headset, ICSI)",
+        "pub-far": "pub-far: distant single microphone, English (AMI EN2002 Array1-01, NOTSOFAR-1)",
+        "pub-phone": "pub-phone: phone-quality calls, accented English (Earnings-22)",
+        "pub-lang": "pub-lang: other languages, close and distant (AliMeeting zh, SUMM-RE fr, Indic DiarBench hi)",
+    }
+    head = ("| Session | Model | Min | cpWER | tcpWER | WER | del | ins | sub | WDER | DER c0.25 | Count err | "
+            "Gaps ≥ 2 s | Gaps ≥ 5 s | × real time |")
+    for g in groups:
+        rs = [x for x in rows if x[0].group == g]
+        if not rs:
+            continue
+        print(f"\n### {titles.get(g, g)}\n\n{head}\n|" + "---|" * 15)
+        for s, c, m, r, ok in rs:
+            xrt = f"{r['audio_s'] / r['asr_wall_s']:.0f}" if ok and r.get("asr_wall_s") else "–"
+            print(
+                f"| {s.label} | {model(c)} | {r['audio_s'] / 60:.0f} | {pc(m.get('cpwer'))} | {pc(m.get('tcpwer'))} | "
+                f"{pc(m.get('wer'))} | {m.get('w_del')} | {m.get('w_ins')} | {m.get('w_sub')} | {pc(m.get('wder'))} | "
+                f"{pc(m.get('der_c025'))} | {m['count_error']:+d} | {m.get('gaps')} | {m.get('gaps_5s')} | {xrt} |"
+            )
+    pools: list[tuple[str, list]] = []
+    for g in groups:
+        sets = []
+        for s, *_ in rows:
+            if s.group == g and s.extra.get("set") not in sets:
+                sets.append(s.extra.get("set"))
+        if len(sets) > 1:
+            pools += [(f"{g} / {st}", [x for x in rows if x[0].group == g and x[0].extra.get("set") == st]) for st in sets]
+        pools.append((g, [x for x in rows if x[0].group == g]))
+    for spec in a.pool or []:
+        name, _, rx = spec.partition("=")
+        pools.append((name, [x for x in rows if re.search(rx, x[0].label)]))
+    if len(groups) > 1:
+        pools.append(("all", rows))
+    print("\n### Pooled\n")
+    print("| Set | Model | Sessions | Min | cpWER | tcpWER | WER | del | ins | sub | WDER | DER c0.25 | "
+          "Sum of abs count err | Gaps ≥ 2 s | Gaps ≥ 5 s | × real time |")
+    print("|" + "---|" * 16)
+    for name, prow in pools:
+        for c in configs:
+            p = [(m, r, ok) for s, cc, m, r, ok in prow if cc == c]
+            if not p:
+                continue
+            q = _pool(p)
+            xrt = f"{q['xrt']:.0f}" + ("" if q["timed"] == q["n"] else f" ({q['timed']} of {q['n']})") if q["xrt"] else "–"
+            print(
+                f"| {name} | {model(c)} | {q['n']} | {q['min']:.0f} | {pc(q['cpwer'])} | {pc(q['tcpwer'])} | {pc(q['wer'])} | "
+                f"{q['w_del']} | {q['w_ins']} | {q['w_sub']} | {pc(q['wder'])} | {pc(q['der'])} | {q['abs_count']} | "
+                f"{q['gaps']} | {q['gaps_5s']} | {xrt} |"
+            )
+
+
 def cmd_punct(a) -> None:
     for p in a.words:
         ws = raw_words(Path(p))
@@ -465,9 +582,14 @@ def main() -> None:
     p.add_argument("--base-en", default="nemotron_en")
     p = sub.add_parser("punct")
     p.add_argument("--words", nargs="+", required=True)
+    p = sub.add_parser("baseline")
+    p.add_argument("--configs", required=True)
+    p.add_argument("--groups", help="comma-separated groups (default: every group, in report order)")
+    p.add_argument("--clean-timing", help='JSON {"<config>/<session>": true|false}: speed only where true')
+    p.add_argument("--pool", action="append", help="extra pooled row NAME=REGEX over session labels (repeatable)")
     a = ap.parse_args()
     {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts, "compare": cmd_compare,
-     "punct": cmd_punct}[a.cmd](a)
+     "punct": cmd_punct, "baseline": cmd_baseline}[a.cmd](a)
 
 
 if __name__ == "__main__":
