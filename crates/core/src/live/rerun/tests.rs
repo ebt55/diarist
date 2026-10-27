@@ -446,6 +446,68 @@ fn echo_without_walls(info: &serde_json::Value) -> serde_json::Value {
     e
 }
 
+/// `engine_info.echo` fields added since chunk I (plan 16 sections 12.2.2,
+/// 12.7 and 12.8), at the top level and under `transfer`.
+const ECHO_FIELDS_SINCE_I: &[&str] = &["owner_low", "owner_source", "owner_words", "owner_high"];
+const TRANSFER_FIELDS_SINCE_I: &[&str] = &[
+    "floor",
+    "floor_rule",
+    "raw_echo_share",
+    "raw_floor_db",
+    "raw_owner_db",
+];
+
+/// `new` without the fields of [`ECHO_FIELDS_SINCE_I`] and
+/// [`TRANSFER_FIELDS_SINCE_I`] that `stored` lacks (both from
+/// [`echo_without_walls`]); every other key, and every key `stored` has,
+/// stays and is compared exactly.
+fn without_fields_since_i(
+    stored: &serde_json::Value,
+    mut new: serde_json::Value,
+) -> serde_json::Value {
+    let (Some(s), Some(n)) = (stored.as_object(), new.as_object_mut()) else {
+        return new;
+    };
+    for k in ECHO_FIELDS_SINCE_I {
+        if !s.contains_key(*k) {
+            n.remove(*k);
+        }
+    }
+    if let (Some(st), Some(nt)) = (
+        s.get("transfer").and_then(|t| t.as_object()),
+        n.get_mut("transfer").and_then(|t| t.as_object_mut()),
+    ) {
+        for k in TRANSFER_FIELDS_SINCE_I {
+            if !st.contains_key(*k) {
+                nt.remove(*k);
+            }
+        }
+    }
+    new
+}
+
+#[test]
+fn only_the_fields_since_chunk_i_that_a_stored_run_lacks_are_left_out() {
+    let stored = serde_json::json!({"dropped": 3, "transfer": {"candidates": 4, "floor": 1}});
+    let new = serde_json::json!({
+        "dropped": 3, "owner_source": "quiet", "owner_words": 157, "owner_low": false,
+        "transfer": {"candidates": 4, "floor": 1, "floor_rule": {"tier": null}, "raw_echo_share": 0.857,
+                     "raw_floor_db": -51.1, "raw_owner_db": -24.2}
+    });
+    assert_eq!(without_fields_since_i(&stored, new.clone()), stored);
+    // A key the stored run has is still compared, inside `transfer` too.
+    let mut changed = new.clone();
+    changed["transfer"]["floor"] = serde_json::json!(2);
+    assert_ne!(without_fields_since_i(&stored, changed), stored);
+    // Any other new key, or one of these names at the wrong level, stays.
+    let mut other = new.clone();
+    other["something_else"] = serde_json::json!(1);
+    assert_ne!(without_fields_since_i(&stored, other), stored);
+    let mut wrong_level = new;
+    wrong_level["raw_owner_db"] = serde_json::json!(-24.2);
+    assert_ne!(without_fields_since_i(&stored, wrong_level), stored);
+}
+
 #[test]
 fn a_finished_meeting_runs_again_from_its_flac_and_the_flac_stays_as_it_is() {
     let f = finished(true);
@@ -1483,11 +1545,29 @@ fn a_stored_meeting_runs_again_from_its_flac_exactly() {
             }
         }
     }
-    let echo_same = echo_without_walls(&new.engine_info) == echo_without_walls(&old.engine_info);
-    let echo_diff: Vec<String> = match (
-        echo_without_walls(&old.engine_info),
-        echo_without_walls(&new.engine_info),
-    ) {
+    // Stored runs from before chunk I lack its echo fields; acceptance is
+    // "identical apart from the new fields" (plan 16, 12.5).
+    let old_echo = echo_without_walls(&old.engine_info);
+    let new_echo = without_fields_since_i(&old_echo, echo_without_walls(&new.engine_info));
+    let echo_same = new_echo == old_echo;
+    let full = echo_without_walls(&new.engine_info);
+    let left_out: Vec<String> = ECHO_FIELDS_SINCE_I
+        .iter()
+        .filter(|k| full.get(**k).is_some() && new_echo.get(**k).is_none())
+        .map(|k| k.to_string())
+        .chain(
+            TRANSFER_FIELDS_SINCE_I
+                .iter()
+                .filter(|k| {
+                    full["transfer"].get(**k).is_some() && new_echo["transfer"].get(**k).is_none()
+                })
+                .map(|k| format!("transfer.{k}")),
+        )
+        .collect();
+    eprintln!(
+        "echo fields new since chunk I, absent from the stored run, not compared: {left_out:?}"
+    );
+    let echo_diff: Vec<String> = match (old_echo, new_echo) {
         (serde_json::Value::Object(a), serde_json::Value::Object(b)) => a
             .keys()
             .chain(b.keys())
