@@ -32,10 +32,11 @@ The setup screen checks:
   NVIDIA card and a desktop CPU only; the CPU runtime transcribes at about 5
   times real time ([KNOWN-ISSUES.md](KNOWN-ISSUES.md)).
 - **Disk**: free space where the data folder is. The defaults need about
-  1.1 GB while downloading and 1 GB after.
+  1.3 GB while downloading and 1.2 GB after.
 
 Then press **Install engine** (98 MB) and **Install recommended models**
-(770 MB: the speaker model and the English speech model). Each item shows its
+(1.0 GB: the speaker model, the English speech model and the punctuation
+model, which is seven files in one folder). Each item shows its
 progress. An interrupted download resumes where it stopped: press **Retry**,
 or install again later. Every file is checked against its published SHA-256
 before it is used.
@@ -55,7 +56,9 @@ folder it goes to, with **Retry**, **Copy link** and **Open folder**;
 1. Copy its link and download it with a browser.
 2. Press Open folder on its row and move the downloaded file there (any
    subfolder of `models\` works for models; for the runtime, put the zip
-   itself into `engine\`).
+   itself into `engine\`). The punctuation model's files go into the one
+   folder its row names, `tokenizer.json` and the licence files at its top
+   and `model_quantized.onnx` in its `onnx` subfolder.
 3. Press **Check again** (setup screen) or **Refresh** (Settings). The app
    checks the hash, extracts a runtime zip, and marks the item installed.
 
