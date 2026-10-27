@@ -192,6 +192,12 @@ fn post_pass(
     }
     let store = SqliteStore::open(&db).unwrap();
     store.set_setting(settings::ECHO_MODE, mode).unwrap();
+    // The fixture's words as the gate leaves them, comparable with the
+    // figures from before the loop collapse (plan 16 section 12.3; the
+    // collapse runs after the gate and never changes `engine_info.echo`).
+    store
+        .set_setting(settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+        .unwrap();
     if let Ok(t) = std::env::var("DIARIST_ECHO_THRESHOLD") {
         store
             .set_setting(settings::ECHO_GATE_THRESHOLD, &t)
