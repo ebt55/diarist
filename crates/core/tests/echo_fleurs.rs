@@ -44,6 +44,19 @@
 //!   the owner at [`UNKNOWN_B_OWNER_DBFS`], about 21 dB over the floor by
 //!   the gate's level. `DIARIST_ECHO_OWNER_DBFS` sets the owner's RMS of
 //!   any variant (default −33).
+//! - Plan 16 section 12.7 (`share`, `unmasked` and `lost` lines): the raw
+//!   gate's share of flagged words beside the silent tier's threshold, the
+//!   floor rule with the post-canceller correlation layer off (the known
+//!   guard against the owner's level forced unknown at each F, and at the
+//!   owner's true level), and the owner's words the shipped decision
+//!   removes that the known guard keeps.
+//! - `DIARIST_ECHO_REUSE=1`: the post-passes' words from `pass-off.json`
+//!   and `pass-auto.json` in `DIARIST_ECHO_OUT` (written by every run), so
+//!   the in-test decisions run again without the GPU. `DIARIST_ECHO_KEEP=1`
+//!   keeps them, the post-pass folders and databases, and writes the
+//!   fixture's audio there (`fixture-mic.wav`, `fixture-loopback.wav`, the
+//!   in-test canceller's `fixture-cancelled.wav`) with its owner's
+//!   utterances (`fixture-utts.json`).
 //! - `DIARIST_ECHO_CONTROL=0` skips the headphone control;
 //!   `DIARIST_ECHO_DUMP` (a scratch folder) writes every after-canceller
 //!   word's features with its text (local analysis; delete it after).
@@ -265,6 +278,76 @@ struct Pass {
     /// The loopback's words.
     far: Vec<(i64, i64, String)>,
     echo: serde_json::Value,
+}
+
+fn words_json(w: &[(i64, i64, String)]) -> serde_json::Value {
+    w.iter()
+        .map(|w| serde_json::json!([w.0, w.1, w.2]))
+        .collect()
+}
+
+fn words_of(v: &serde_json::Value) -> Vec<(i64, i64, String)> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                w[0].as_i64().unwrap(),
+                w[1].as_i64().unwrap(),
+                w[2].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// [`post_pass`], or its result from `pass-<name>.json` in `out` with
+/// `DIARIST_ECHO_REUSE=1` (written by every run; deleted at the end unless
+/// `DIARIST_ECHO_KEEP=1`).
+fn post_pass_cached(
+    out: &Path,
+    engine: &NemoCliEngine,
+    mic: &[i16],
+    lb: &[i16],
+    mode: &str,
+    name: &str,
+) -> Pass {
+    let cache = out.join(format!("pass-{name}.json"));
+    if std::env::var("DIARIST_ECHO_REUSE").as_deref() == Ok("1") && cache.is_file() {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        eprintln!("{name}: reused {}", cache.display());
+        eprintln!("{name}: engine_info.echo {}", v["echo"]);
+        return Pass {
+            me: words_of(&v["me"]),
+            dropped: words_of(&v["dropped"]),
+            far: words_of(&v["far"]),
+            echo: v["echo"].clone(),
+        };
+    }
+    let p = post_pass(out, engine, mic, lb, mode, name);
+    let v = serde_json::json!({
+        "mode": mode,
+        "echo": p.echo,
+        "me": words_json(&p.me),
+        "dropped": words_json(&p.dropped),
+        "far": words_json(&p.far),
+    });
+    std::fs::write(&cache, serde_json::to_vec(&v).unwrap()).unwrap();
+    p
+}
+
+/// A mono 16 kHz WAV of `x`.
+fn write_wav(path: &Path, x: &[i16]) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec).unwrap();
+    for &v in x {
+        w.write_sample(v).unwrap();
+    }
+    w.finalize().unwrap();
 }
 
 /// One post-pass over the fixture with `mode` (`name` names its files).
@@ -668,6 +751,39 @@ fn fleurs_owner_over_a_speaker_meeting() {
         utts.iter().filter(|u| u.double_talk).count(),
         utts.iter().map(|u| u.words.len()).sum::<usize>()
     );
+    // `DIARIST_ECHO_KEEP=1`: the fixture's audio and its owner's utterances
+    // stay in `out` with the passes' words (plan 16 section 12.7, chunk M):
+    // `fixture-mic.wav`, `fixture-loopback.wav`, `fixture-utts.json`
+    // (placement in samples, reference words), `pass-off.json`,
+    // `pass-auto.json`, and the in-test canceller's output
+    // `fixture-cancelled.wav`.
+    let keep = std::env::var("DIARIST_ECHO_KEEP").as_deref() == Ok("1");
+    if keep {
+        write_wav(&out.join("fixture-mic.wav"), &mic);
+        write_wav(&out.join("fixture-loopback.wav"), &lb);
+        let u: Vec<serde_json::Value> = utts
+            .iter()
+            .map(|u| {
+                serde_json::json!({
+                    "at": u.at,
+                    "len": u.len,
+                    "words": u.words,
+                    "double_talk": u.double_talk,
+                })
+            })
+            .collect();
+        std::fs::write(
+            out.join("fixture-utts.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "minutes": minutes,
+                "unknown": unknown,
+                "owner_dbfs": owner_dbfs,
+                "utterances": u,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
 
     let asr = find(&models, "nemotron-speech-streaming-en-0.6b.q8_0.gguf").expect("EN model");
     let diar = find(&models, "Nemotron-3-Diarization.q8_0.gguf").expect("diarizer");
@@ -675,9 +791,9 @@ fn fleurs_owner_over_a_speaker_meeting() {
     engine.pass_language = false;
     engine.right_context = Some(13);
     engine.diar_preset = Some("v3-offline".into());
-    let off_pass = post_pass(&out, &engine, &mic, &lb, "off", "off");
+    let off_pass = post_pass_cached(&out, &engine, &mic, &lb, "off", "off");
     let off = score(&utts, &off_pass.me);
-    let on_pass = post_pass(&out, &engine, &mic, &lb, "auto", "auto");
+    let on_pass = post_pass_cached(&out, &engine, &mic, &lb, "auto", "auto");
     let on = score(&utts, &on_pass.me);
     // The gate alone (no canceller) over the gate-off run's words, with the
     // post-pass's own scan (no clock maps in the fixture: meeting time is
@@ -800,7 +916,10 @@ fn fleurs_owner_over_a_speaker_meeting() {
         aec_sweep(&utts, &on_pass, &mic, &lb, &p);
     }
     if std::env::var("DIARIST_ECHO_TRANSFER").as_deref() != Ok("0") {
-        transfer_sweep(&utts, &on_pass, &off_pass, &mic, &lb, &p);
+        let cancelled = transfer_sweep(&utts, &on_pass, &off_pass, &mic, &lb, &p);
+        if keep {
+            write_wav(&out.join("fixture-cancelled.wav"), &cancelled);
+        }
     }
 
     // The control: the same owner with headphones and no leak. `auto` must
@@ -830,13 +949,25 @@ fn fleurs_owner_over_a_speaker_meeting() {
         assert_eq!(a.me, b.me, "the headphone control changed");
         assert_eq!(b.echo["dropped"].as_u64(), Some(0));
     }
+    if !keep {
+        for name in ["off", "auto"] {
+            let _ = std::fs::remove_file(out.join(format!("pass-{name}.json")));
+        }
+    }
 }
 
 /// The transfer gate's guards (module docs) over the auto run's words
 /// before the gate, the canceller run again here as the post-pass runs it,
 /// the off run's words as the raw mic's; and the post-canceller layers
-/// alone at both lag spreads.
-fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16], p: &EchoProfile) {
+/// alone at both lag spreads. Returns the canceller's output.
+fn transfer_sweep(
+    utts: &[Utt],
+    auto: &Pass,
+    off: &Pass,
+    mic: &[i16],
+    lb: &[i16],
+    p: &EchoProfile,
+) -> Vec<i16> {
     let mut words: Vec<(i64, i64, String)> = auto.me.iter().chain(&auto.dropped).cloned().collect();
     words.sort();
     let hint = |t: i64| p.lag_at(t);
@@ -897,18 +1028,20 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
             .collect();
         let s = score(utts, &kept);
         eprintln!(
-            "| {name} | {extra} | {} | {:.2} % | {:.2} % | {:.2} % | {} | {} | {:.2} % |",
+            "| {name} | {extra} | {} | {:.2} % | {:.2} % | {:.2} % | {} | {} | {:.2} % | {} of {} |",
             words.len() - kept.len(),
             s.wer,
             s.wer_double_talk,
             s.wer_clear,
             s.echo_words,
             s.me_words,
-            100.0 * s.echo_words as f64 / s.me_words.max(1) as f64
+            100.0 * s.echo_words as f64 / s.me_words.max(1) as f64,
+            s.me_words - s.echo_words,
+            score(utts, &words).me_words - score(utts, &words).echo_words
         );
     };
-    eprintln!("| Transfer gate (FLEURS): guard | Raw echo, candidates, removed (text, level, plain) | Dropped | \"me\" WER | over the far end | in far-end pauses | Echo words left | Kept | Echo share of kept |");
-    eprintln!("|---|---|---|---|---|---|---|---|---|");
+    eprintln!("| Transfer gate (FLEURS): guard | Raw echo, candidates, removed (text, level, plain) | Dropped | \"me\" WER | over the far end | in far-end pauses | Echo words left | Kept | Echo share of kept | Owner's words kept |");
+    eprintln!("|---|---|---|---|---|---|---|---|---|---|");
     line(
         "canceller, no gate",
         &vec![None; words.len()],
@@ -980,12 +1113,13 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
             name,
             &t.reasons,
             format!(
-                "owner {:?} ({}); removed {} (level {}, floor rule {}), guarded {}; {:?}",
+                "owner {:?} ({}); removed {} (level {}, floor rule {} {:?}), guarded {}; {:?}",
                 t.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
                 t.after.owner_source.as_str(),
                 c.removed(),
                 c.level,
                 c.floor,
+                t.floor_rule.map(|f| (f.tier.as_str(), f.f_db)),
                 c.guarded,
                 t.counts
             ),
@@ -994,16 +1128,22 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
     let t_today = decide(transfer::Rule::SHIPPED, Some(today));
     rule_line("today (today's owner's level)", &t_today);
     rule_line(
-        &format!("shipped (F {} dB)", transfer::FLOOR_MARGIN_DB),
+        &format!(
+            "shipped (F_u {} dB, F_s {} dB)",
+            transfer::FLOOR_MARGIN_DB,
+            transfer::FLOOR_MARGIN_SILENT_DB
+        ),
         &decide(transfer::Rule::SHIPPED, None),
     );
+    // The floor rule at F in either tier.
+    let at = |f: f32| transfer::Rule {
+        floor_margin_db: f,
+        floor_margin_silent_db: f,
+        ..transfer::Rule::SHIPPED
+    };
     for f in F_SWEEP {
-        let rule = transfer::Rule {
-            floor_margin_db: f,
-            ..transfer::Rule::SHIPPED
-        };
-        rule_line(&format!("F {f} as estimated"), &decide(rule, None));
-        rule_line(&format!("F {f} forced unknown"), &decide(rule, Some(None)));
+        rule_line(&format!("F {f} as estimated"), &decide(at(f), None));
+        rule_line(&format!("F {f} forced unknown"), &decide(at(f), Some(None)));
     }
     let raw_words: Vec<transfer::RawWord> = raw_gw
         .iter()
@@ -1062,6 +1202,121 @@ fn transfer_sweep(utts: &[Utt], auto: &Pass, off: &Pass, mic: &[i16], lb: &[i16]
         own_clean.get(own_clean.len() / 2),
         own_clean.len()
     );
+
+    // Plan 16 section 12.7 (ii): the raw gate's share of flagged words
+    // beside the silent tier's threshold; the shipped decision's owner's
+    // level, source and tier; then the floor rule's own cost with the
+    // post-canceller correlation layer off (it masks the rule: a word two
+    // layers remove counts once), the known guard against the owner's
+    // level forced unknown at each F, and the known guard at the owner's
+    // true level (the median after the canceller of the owner's words it
+    // left alone, else of all of them).
+    let mut att: Vec<f32> = (0..gw.len())
+        .filter(|&i| inside(&words[i]))
+        .filter_map(|i| gw[i].presence.and_then(|p| p.attenuation_db))
+        .collect();
+    att.sort_by(f32::total_cmp);
+    let q = |f: f64| att.get(((att.len().max(1) - 1) as f64 * f).round() as usize);
+    eprintln!(
+        "att FLEURS: the owner's words (in the utterances), {} with a cut: p50 {:?} p90 {:?} dB; {} cut by 3 dB or more",
+        att.len(),
+        q(0.5),
+        q(0.9),
+        att.iter().filter(|a| **a >= transfer::ATTENUATION_DB).count()
+    );
+    let shipped = decide(transfer::Rule::SHIPPED, None);
+    eprintln!(
+        "share FLEURS: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); shipped: owner {:?} ({}, {} words, low {}), floor rule {:?}",
+        shipped.raw.dropped(),
+        raw_gw.len(),
+        100.0 * shipped.raw_echo_share,
+        100.0 * transfer::SILENT_SHARE,
+        shipped.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
+        shipped.after.owner_source.as_str(),
+        shipped.after.owner_words,
+        shipped.after.owner_low,
+        shipped.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
+    );
+    let true_level = {
+        let mut v: Vec<f32> = (0..gw.len())
+            .filter(|&i| inside(&words[i]) && !cut(i))
+            .filter_map(|i| gw[i].presence.map(|p| p.level_db))
+            .collect();
+        if v.len() < 5 {
+            v = (0..gw.len())
+                .filter(|&i| inside(&words[i]))
+                .filter_map(|i| gw[i].presence.map(|p| p.level_db))
+                .collect();
+        }
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let unmasked = |rule: transfer::Rule, owner: Option<Option<f32>>| {
+        transfer::gate_with(
+            &raw_gw,
+            raw_floor,
+            &raw_opts,
+            &gw,
+            floor,
+            &after,
+            &fi,
+            &rule,
+            &move |c: &mut layers::Context| {
+                c.correlation_min_attenuation_db = Some(f32::INFINITY);
+                if let Some(o) = owner {
+                    c.owner_db = o;
+                }
+            },
+        )
+    };
+    eprintln!(
+        "unmasked FLEURS: the owner's true level {:?} dBFS ({:?} dB over the floor)",
+        true_level.map(|v| (v * 10.0).round() / 10.0),
+        true_level
+            .zip(floor)
+            .map(|(o, f)| ((o - f) * 10.0).round() / 10.0)
+    );
+    let known_est = unmasked(transfer::Rule::SHIPPED, None);
+    let known_true = unmasked(transfer::Rule::SHIPPED, Some(true_level));
+    rule_line("unmasked, shipped (as estimated)", &known_est);
+    rule_line("unmasked, known guard (true level)", &known_true);
+    for f in [9.0f32, 12.0, 15.0, 18.0] {
+        rule_line(
+            &format!("unmasked, F {f} forced unknown"),
+            &unmasked(at(f), Some(None)),
+        );
+    }
+    rule_line(
+        "masked (shipped), known guard (true level)",
+        &decide(transfer::Rule::SHIPPED, Some(true_level)),
+    );
+    // The owner's words the shipped decision removes and the known guard
+    // at the true level keeps, by level over the floor (both masked and
+    // unmasked): the natural-unknown runs' bar.
+    for (name, a, b) in [
+        (
+            "masked",
+            &shipped,
+            &decide(transfer::Rule::SHIPPED, Some(true_level)),
+        ),
+        ("unmasked", &known_est, &known_true),
+    ] {
+        let lost: Vec<f32> = (0..gw.len())
+            .filter(|&i| inside(&words[i]) && a.reasons[i].is_some() && b.reasons[i].is_none())
+            .filter_map(over)
+            .map(|v| (v * 10.0).round() / 10.0)
+            .collect();
+        let gained = (0..gw.len())
+            .filter(|&i| inside(&words[i]) && a.reasons[i].is_none() && b.reasons[i].is_some())
+            .count();
+        eprintln!(
+            "lost FLEURS {name}: the shipped decision removes {} owner's words the known guard (true level) keeps, at {lost:?} dB over the floor ({} within {} dB of it); keeps {gained} it removes",
+            lost.len(),
+            lost.iter().filter(|v| **v <= layers::PRESENCE_DB).count(),
+            layers::PRESENCE_DB
+        );
+    }
+    y
 }
 
 /// The after-canceller variants of the layered gate (`DIARIST_ECHO_AEC_SWEEP=1`):

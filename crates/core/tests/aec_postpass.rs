@@ -1765,8 +1765,10 @@ fn spliced(
             &decide(transfer::Rule::SHIPPED, None),
         );
         for f in F_SWEEP {
+            // The floor rule at F in either tier.
             let rule = transfer::Rule {
                 floor_margin_db: f,
+                floor_margin_silent_db: f,
                 ..transfer::Rule::SHIPPED
             };
             rule_row(&format!("F {f} as estimated"), &decide(rule, None));
@@ -1775,6 +1777,17 @@ fn spliced(
                 &decide(rule, Some(None)),
             );
         }
+        // Plan 16 section 12.7: the raw gate's share of flagged words beside
+        // the silent tier's threshold, and the tier the shipped rule takes.
+        let shipped = decide(transfer::Rule::SHIPPED, None);
+        eprintln!(
+            "share spliced: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); shipped floor rule {:?}",
+            shipped.raw.dropped(),
+            raw_gw.len(),
+            100.0 * shipped.raw_echo_share,
+            100.0 * transfer::SILENT_SHARE,
+            shipped.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
+        );
         let raw_flags: Vec<transfer::RawWord> = raw_gw
             .iter()
             .zip(&t_today.raw.reasons)
@@ -1812,6 +1825,21 @@ fn spliced(
         eprintln!(
             "hist spliced: words outside the clips kept today, candidates cut 3 dB or more: {}",
             h(&|i| !in_clips(i) && t_today.reasons[i].is_none() && cand[i] && cut(i))
+        );
+        // How much the canceller takes from the owner's own words (plan 16
+        // section 12.7 (i) 4, the module docs of the layers).
+        let mut att: Vec<f32> = (0..gw.len())
+            .filter(|&i| in_clips(i))
+            .filter_map(|i| gw[i].presence.and_then(|p| p.attenuation_db))
+            .collect();
+        att.sort_by(f32::total_cmp);
+        let q = |f: f64| att.get(((att.len().max(1) - 1) as f64 * f).round() as usize);
+        eprintln!(
+            "att spliced: the owner's words (in the clips), {} with a cut: p50 {:?} p90 {:?} dB; {} cut by 3 dB or more",
+            att.len(),
+            q(0.5),
+            q(0.9),
+            att.iter().filter(|a| **a >= transfer::ATTENUATION_DB).count()
         );
     }
     if std::env::var("DIARIST_ECHO_KEEP").as_deref() != Ok("1") {

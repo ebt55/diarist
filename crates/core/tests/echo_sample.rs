@@ -67,7 +67,10 @@
 //!   histograms of the level over the cancelled mic's floor (kept
 //!   candidates cut by 3 dB or more, the clean owner's class, the owner's
 //!   class among the cut candidates); and the raw transcript, gated by the
-//!   raw gate, in place of the cancelled one.
+//!   raw gate, in place of the cancelled one. Plan 16 section 12.7
+//!   (`share` lines and the table's last columns): the raw gate's share of
+//!   flagged words beside the silent tier's threshold, the owner's level's
+//!   low mark and the floor rule's tier; the F sweep sets both tiers' F.
 //! - Both paths: the text layer's lag spread at 300 ms (round two) and
 //!   500 ms (`spread` lines: run words, duplicates and owner's among them,
 //!   chance with the mic 45 s later).
@@ -566,6 +569,11 @@ struct Row {
     /// Kept words spoken while the far end was active that the canceller
     /// cut by 3 dB or more (after the canceller; plan 16 section 12.2.3).
     far_cut: Option<usize>,
+    /// The owner's level marked low, the raw gate's share of flagged words
+    /// and the floor rule's tier (the transfer; plan 16 section 12.7).
+    owner_low: Option<bool>,
+    raw_share: Option<f64>,
+    tier: Option<&'static str>,
 }
 
 /// Kept words (`drop` false) spoken while the far end was active that the
@@ -706,7 +714,7 @@ fn print_row(uid: &str, r: &Row) {
     });
     let c = &r.counts;
     eprintln!(
-        "| {uid} | {} | {} | {} | {} | {} | {} | {} | {} | {} ({:.2} %) | {:.2} % | {} of {} ({:.2} %){} | {band} | {:?} / {:?} | {} | {} | {} |",
+        "| {uid} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} ({:.2} %) | {:.2} % | {} of {} ({:.2} %){} | {band} | {:?} / {:?} | {} | {}{} | {} | {} | {} |",
         r.path,
         r.before,
         c.text,
@@ -714,6 +722,7 @@ fn print_row(uid: &str, r: &Row) {
         c.level,
         c.correlation,
         c.utterance,
+        c.transfer,
         r.kept,
         r.dups_kept,
         pct(r.dups_kept, r.kept),
@@ -731,7 +740,11 @@ fn print_row(uid: &str, r: &Row) {
         r.owner.map(|f| (f * 10.0).round() / 10.0),
         r.text3,
         r.owner_source.unwrap_or("-"),
+        if r.owner_low == Some(true) { " (low)" } else { "" },
         r.far_cut.map_or("-".into(), |n| n.to_string()),
+        r.raw_share
+            .map_or("-".into(), |s| format!("{:.2} %", 100.0 * s)),
+        r.tier.unwrap_or("-"),
     );
 }
 
@@ -1432,7 +1445,25 @@ fn transfer_rows(
             if guard == transfer::GUARD && shipped.is_none() {
                 x.owner_source = Some(t.after.owner_source.as_str());
                 x.far_cut = Some(far_cut(gw, &d));
+                x.owner_low = Some(t.after.owner_low);
+                x.raw_share = Some(t.raw_echo_share);
+                x.tier = t.floor_rule.map(|f| f.tier.as_str());
                 shipped = Some((*name, x));
+            }
+            if guard == transfer::GUARD {
+                eprintln!(
+                    "share {} {name}: raw gate flagged {} of {} ({:.2} %; silent tier at {:.1} %); owner {:?} ({}, {} words, low {}); floor rule {:?}",
+                    m.uid,
+                    t.raw.dropped(),
+                    raw.len(),
+                    100.0 * t.raw_echo_share,
+                    100.0 * transfer::SILENT_SHARE,
+                    t.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
+                    t.after.owner_source.as_str(),
+                    t.after.owner_words,
+                    t.after.owner_low,
+                    t.floor_rule.map(|f| (f.tier.as_str(), f.f_db))
+                );
             }
             decisions.push(t.reasons.clone());
             raw_reasons = t.raw.reasons.clone();
@@ -1474,13 +1505,14 @@ fn transfer_rows(
             score_row(&mut x, words, &d, &m.lb_words, lab);
             let clean_kept = (0..words.len()).filter(|&i| clean[i] && !d[i]).count();
             eprintln!(
-                "rule {} {name} {label}: owner {:?} ({}); removed {} (level {}, floor rule {}), guarded {}; dropped {} {:?}; kept {}, far-active cut kept {}, residual {} ({:.2} %, chance {:.2} %), owner's {} of {} ({:.2} %), clean owner's {clean_kept} of {n_clean}{}",
+                "rule {} {name} {label}: owner {:?} ({}); removed {} (level {}, floor rule {} {:?}), guarded {}; dropped {} {:?}; kept {}, far-active cut kept {}, residual {} ({:.2} %, chance {:.2} %), owner's {} of {} ({:.2} %), clean owner's {clean_kept} of {n_clean}{}",
                 m.uid,
                 t.after.owner_db.map(|v| (v * 10.0).round() / 10.0),
                 t.after.owner_source.as_str(),
                 t.transfer.removed(),
                 t.transfer.level,
                 t.transfer.floor,
+                t.floor_rule.map(|f| (f.tier.as_str(), f.f_db)),
                 t.transfer.guarded,
                 t.dropped(),
                 t.counts,
@@ -1502,7 +1534,11 @@ fn transfer_rows(
         let t_today = decide(transfer::Rule::SHIPPED, Some(today));
         line("today (today's owner's level)", &t_today);
         line(
-            &format!("shipped (F {} dB)", transfer::FLOOR_MARGIN_DB),
+            &format!(
+                "shipped (F_u {} dB, F_s {} dB)",
+                transfer::FLOOR_MARGIN_DB,
+                transfer::FLOOR_MARGIN_SILENT_DB
+            ),
             &transfer::gate(
                 &raw_gw,
                 raw_floor,
@@ -1515,8 +1551,10 @@ fn transfer_rows(
             ),
         );
         for f in F_SWEEP {
+            // The floor rule at F in either tier.
             let rule = transfer::Rule {
                 floor_margin_db: f,
+                floor_margin_silent_db: f,
                 ..transfer::Rule::SHIPPED
             };
             line(&format!("F {f} as estimated"), &decide(rule, None));
@@ -2421,8 +2459,8 @@ fn echo_on_stored_meetings() {
         }
     }
     eprintln!();
-    eprintln!("| Meeting | Path | Mic words | Text | Attenuation | Level | Correlation | Utterance | Kept | Residual duplicates | Chance | Owner's words kept | Band | Floor / owner (dBFS) | Text-matched | Owner source | Far-active cut kept |");
-    eprintln!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    eprintln!("| Meeting | Path | Mic words | Text | Attenuation | Level | Correlation | Utterance | Transfer | Kept | Residual duplicates | Chance | Owner's words kept | Band | Floor / owner (dBFS) | Text-matched | Owner source | Far-active cut kept | Raw echo share | Floor rule tier |");
+    eprintln!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (uid, r) in &rows {
         print_row(uid, r);
     }
