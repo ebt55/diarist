@@ -2,11 +2,11 @@
 
 Plan 16 section 12.2 (D7, fix 1) as chunk I of section 12.5: the design in 12.2.2 to 12.2.4, the reviewer's findings B1 to B3 in 12.6. Release build, AMD Ryzen 9 5900X; the GPU runs (EN model, lookahead 13, `v3-offline`) went through the shared queue, one batch each. A copy of the database and of the meeting folders, read only; numbers per meeting number only, no titles, names or transcript text.
 
-What changed (`crates/core/src/audio/echo/{layers,transfer}.rs`, `crates/core/src/live/postpass.rs` inside `gate_mic`):
+What changed (`crates/core/src/audio/echo/{layers,transfer}.rs`, `crates/core/src/live/postpass.rs` inside `gate_mic`), as fixed after the review ruling of plan 16 section 12.7 (27 Oct; the first build's P = 15 and single F = 18 are in this note's history):
 
-- **The owner's level after the canceller** (`CalibrationStats::owner`): the median level of the words in no text run that the canceller cut by under 3 dB, spoken while the far end was silent (`quiet`), else of all such words (`clean`), from 20 or more; else unknown (`none`); and unknown when the estimate sits under the floor plus `OWNER_PLAUSIBLE_DB` (P = 15 dB). Before the canceller (the raw gate of the transfer, the live view, Stop) the estimator is today's: quiet words, else every word in no run (`unmatched`), no plausibility check.
-- **The transfer guard without the owner's level** (`transfer::transfer`, which now takes the cancelled mic's floor): a candidate goes when the canceller cut it by 3 dB or more and its level after the canceller is at most `FLOOR_MARGIN_DB` (F) over that floor. With a known level the guard is today's (12 dB under the owner).
-- **Recorded**: `engine_info.echo.owner_source` and `owner_words`; in `engine_info.echo.transfer` the raw gate's `owner_db` and `floor_db` and `floor_rule: {f_db, removed}`.
+- **The owner's level after the canceller** (`CalibrationStats::owner`): the median level of the words in no text run that the canceller cut by under 3 dB, spoken while the far end was silent (`quiet`), else of all such words (`clean`), from 20 or more. A set whose median sits under the floor plus `OWNER_PLAUSIBLE_DB` (P = 6 dB, the presence margin: a level that close to the floor is not near-end speech) does not stop the search, the next set is tried; the level is unknown when every set of 20 or more words is that close (`implausible`) or none has 20 (`too_few`). An estimate from 6 to 15 dB over the floor is trusted and marked `owner_low`. Before the canceller (the raw gate of the transfer, the live view, Stop) the estimator is the earlier one: quiet words, else every word in no run (`unmatched`), else `too_few`; no plausibility check.
+- **The transfer guard without the owner's level, in two tiers** (`transfer::Rule::floor_rule`): a candidate goes when the canceller cut it by 3 dB or more and its level after the canceller is at most F over the cancelled mic's floor, F = `F_u` (`FLOOR_MARGIN_DB`) in general and `F_s` = 18 dB (`FLOOR_MARGIN_SILENT_DB`) when two signatures of a silent owner agree: the owner's level is `implausible` and the raw gate flagged at least 99.5 percent of the raw mic's words (`SILENT_SHARE`). With a known level the guard is the earlier one (12 dB under the owner).
+- **Recorded**: `engine_info.echo.owner_source`, `owner_words` and `owner_low`; in `engine_info.echo.transfer` the raw gate's `raw_owner_db`, `raw_floor_db` and `raw_echo_share`, the counts with `floor`, and `floor_rule: {tier, f_db, removed}` (`tier` `unknown` or `silent`, `tier` and `f_db` null with the owner's level known).
 
 Method. `echo_sample.rs` replays both paths of every stored meeting on the CPU from `playback.flac`, the stored words and the database copy (live revisions in arrival order); "today" is the same decision with today's estimator forced in (`gate_with`), which reproduces the stored `engine_info.echo` of meetings 17, 18, 20 and 21 exactly (meeting 21: 1,993 candidates, 1,989 guarded, 288 kept). Meeting 12's cancelled mic was transcribed once on the GPU (48 s), meeting 18's raw mic once (6 s, for the 12.2.4 variant). `echo_fleurs.rs` and `aec_postpass.rs` ran the real post-pass on the GPU (FLEURS 20 minutes over meeting 12's far end; meeting 12 off and auto and the spliced set), the F sweep in-test over the same words. The meeting 12 measurement's per-word classes file is gone; it was rebuilt from the stored transcript by the same matcher (`DIARIST_ECHO_CLASSES_OUT`): 14,627 words, 12,260 duplicates, 1,462 owner's words, as in docs/eval/2026-10-20-echo.md. "Far-active cut kept" (12.2.3's bar): kept "me" words spoken while the far end was active that the canceller cut by 3 dB or more. "Owner's" is the matcher's class (non-duplicates whose ±5 neighbours are at most 30 percent duplicates); "clean owner's" those of them the canceller cut by under 3 dB.
 
@@ -16,7 +16,7 @@ Before any threshold was set (12.2.3, B3). The sets are the words in no text run
 
 | Recording | Path | Words | Quiet | Unmatched | Clean quiet | Clean | Today | Shipped | Floor |
 |---|---|---|---|---|---|---|---|---|---|
-| 4, 5 (silent mic) | post-pass, Stop | 0 | 0 | 0 | 0 | 0 | none | none | – |
+| 4, 5 (silent mic) | post-pass, Stop | 0 | 0 | 0 | 0 | 0 | too few | too few | – |
 | 12 | post-pass (cancelled) | 2,544 | 1,186 | 1,965 | 1,186 | 1,559 | quiet −33.4 (1,186; +30.0) | quiet −33.4 (1,186; +30.0) | −63.4 |
 | 12 | raw gate (stored raw transcript) | 14,627 | 1,228 | 2,791 | – | – | quiet −33.6 (1,228; +29.1) | the same | −62.6 |
 | 12 | Stop (stand-in) | 14,627 | 1,228 | 2,791 | – | – | quiet −33.6 (1,228; +29.1) | the same | −62.6 |
@@ -39,7 +39,7 @@ Before any threshold was set (12.2.3, B3). The sets are the words in no text run
 | 20 | post-pass (cancelled) | 2,626 | 1,053 | 1,671 | 1,053 | 1,243 | quiet −32.6 (1,053; +28.3) | quiet −32.6 (1,053; +28.3) | −60.9 |
 | 20 | raw gate (live words) | 10,981 | 1,062 | 2,012 | – | – | quiet −32.5 (1,062; +27.1) | the same | −59.6 |
 | 20 | Stop | 10,981 | 1,062 | 2,021 | – | – | quiet −32.5 (1,062; +27.1) | the same | −59.6 |
-| **21** | **post-pass (cancelled)** | 2,063 | **16** | 422 | **16** | **35** | **unmatched −50.2 (422; +11.2)** | **none (35 clean words, median +3.3)** | −61.4 |
+| **21** | **post-pass (cancelled)** | 2,063 | **16** | 422 | **16** | **35** | **unmatched −50.2 (422; +11.2)** | **implausible (35 clean words, median +3.3)** | −61.4 |
 | 21 | raw gate (live words) | 7,611 | 4 | 431 | – | – | unmatched −29.0 (431; +31.1) | the same | −60.1 |
 | 21 | Stop | 7,611 | 5 | 384 | – | – | unmatched −29.1 (384; +31.0) | the same | −60.1 |
 | FLEURS, 55 utterances | post-pass (cancelled) | 1,182 | 378 | 1,182 | 378 | 1,079 | quiet −31.1 (378; +32.3) | quiet −31.1 (378; +32.3) | −63.4 |
@@ -54,7 +54,7 @@ Before any threshold was set (12.2.3, B3). The sets are the words in no text run
 | Spliced set | raw gate (the raw window transcribed) | 1,173 | 18 | 666 | – | – | unmatched −33.3 (666; +29.3) | the same | −62.6 |
 | Spliced set (c): the 11 quiet owner's words out | post-pass (cancelled) | 648 | 0 | 641 | 0 | 536 | unmatched −33.9 (641; +29.5) | clean −32.9 (536; +30.5) | −63.4 |
 
-Read: meetings 12 to 20 keep their estimate to the hundredth: after the canceller every quiet word in no run is also one it left alone (clean quiet = quiet), and no raw path moved. Meeting 21 is the case of 12.2.2: 16 quiet words (under 20) sent today's estimator to all 422 words in no run, the residue, 11.2 dB over the floor; 35 of them were left alone by the canceller, and their median sits 3.3 dB over the floor, so the plausibility check makes the level unknown. The FLEURS fixture (a), whose ten owner utterances all lie over far-end speech, has only 5 quiet words, as the reviewer expected of such a fixture: today's estimator falls back to all words in no run (here the owner's own, +32.2), the shipped one to the 190 clean words (+32.5), so the owner is known and the fixture's `owner_source` is `clean`, not `none`. No fixture with a talking owner reaches the unknown regime by itself, because the owner's words over echo are mostly cut by under 3 dB (190 of 212 on (a)). Fixtures (a), (b) and (c) are therefore run **forced unknown**: the post-canceller owner's level set to unknown in the in-test decision (`gate_with`), every other feature as the post-pass computes it. The spliced set confirms the reviewer's B3: its owner's clips sit over the window with the most far-end speech, only 11 of its words in no run were spoken while the far end was silent, and today's estimator passed through the `unmatched` fallback (−33.9 dBFS, which happened to be the owner's own level because the owner's words dominate the window); the shipped one takes the 547 clean words (−32.9) and keeps the case right, also with the 11 quiet owner's words removed (536 clean words, −32.9): so variant (c), too, needs the owner's level forced unknown.
+Read: meetings 12 to 20 keep their estimate to the hundredth: after the canceller every quiet word in no run is also one it left alone (clean quiet = quiet), and no raw path moved. Meeting 21 is the case of 12.2.2: 16 quiet words (under 20) sent today's estimator to all 422 words in no run, the residue, 11.2 dB over the floor; 35 of them were left alone by the canceller, and their median sits 3.3 dB over the floor, under the presence margin of 6 dB, so the level is unknown (`implausible`; the first build's P = 15 gave the same here, and no recording has an estimate between 6 and 15 dB over the floor, so P = 6 moves no row of this note). The FLEURS fixture (a), whose ten owner utterances all lie over far-end speech, has only 5 quiet words, as the reviewer expected of such a fixture: today's estimator falls back to all words in no run (here the owner's own, +32.2), the shipped one to the 190 clean words (+32.5), so the owner is known and the fixture's `owner_source` is `clean`, not unknown. No fixture with ten owner utterances reaches the unknown regime by itself, because the owner's words over echo are mostly cut by under 3 dB (190 of 212 on (a)); the natural-unknown runs of section 3 (three and one utterances) do. Fixtures (a), (b) and (c) are therefore run **forced unknown**: the post-canceller owner's level set to unknown in the in-test decision (`gate_with`), every other feature as the post-pass computes it. The spliced set confirms the reviewer's B3: its owner's clips sit over the window with the most far-end speech, only 11 of its words in no run were spoken while the far end was silent, and today's estimator passed through the `unmatched` fallback (−33.9 dBFS, which happened to be the owner's own level because the owner's words dominate the window); the shipped one takes the 547 clean words (−32.9) and keeps the case right, also with the 11 quiet owner's words removed (536 clean words, −32.9): so variant (c), too, needs the owner's level forced unknown.
 
 ## 2. Histograms of the level over the cancelled mic's floor
 
@@ -90,22 +90,73 @@ Counts of words per 3 dB bin of level after the canceller over its floor; "candi
 
 Read: the residue the floor rule is for (meeting 21's kept candidates) sits 0 to 21 dB over the floor, 184 of its 239 under 15 and 211 under 18. The owner's words the canceller left alone sit 18 dB or more over the floor: 94 to 100 percent of them on every meeting and fixture, 90 percent on (b). The owner's words among the cut candidates on the real meetings sit mostly low (0 to 12 dB: floor-level fragments under far-end speech, which the round-two notes read one by one as garbled echo), except on meeting 18 (8 of 13 at 15 to 21 dB) and meeting 12 (17 of 55 at 15 dB or more). On the fixtures the owner's real words among the cut candidates sit 18 to 30 dB over the floor ((a): all 16; FLEURS: 15 of 18), and on (b), where the owner was lowered to 23 dB over the floor, 94 of its 99 sit 12 to 27 dB over it: there F decides.
 
-## 3. The F sweep
+## 3. The floor rule's F, measured without the masking (plan 16 section 12.7)
 
-The floor rule at each F of {9, 12, 15, 18, ∞} (∞: the canceller's cut alone). On every recording whose owner's level is known (all but meeting 21) F changes nothing; the rows that decide are meeting 21, unknown by itself, and the forced-unknown ones: the fixtures (a), (b) and (c), and for reference the full FLEURS fixture and every canceller meeting with the owner's level forced unknown. Meetings on their shipped raw source (live words; meeting 12 its raw mic transcribed). "Today" is today's estimator and guard.
+The first build chose a single F = 18 dB on bars that could not see the floor rule's own cost: on the FLEURS fixtures whose owner talks only over the far end, the post-canceller correlation layer removes most of the owner's words before the transfer runs ((b): 161 of 212), and a word two layers remove counts once. The re-measurement (27 Oct, fresh GPU runs, EN model, lookahead 13, `v3-offline`, 20 minutes over meeting 12's far end) decides the same words with that layer off (`gate_with`, `correlation_min_attenuation_db: Some(∞)`), the known guard against the owner's level forced unknown at each F. Each cell: "me" WER of the owner's utterances; the owner's words kept (of the canceller's output inside the utterances); words the transfer removed.
 
-Meeting 21 and the fixtures ("me" WER of the owner's utterances; the spliced set's owner's WER; echo words left over kept words in brackets):
+| Decision, post-canceller correlation layer off | (b): owner −44.5 dBFS, +23.2 dB over the floor | (b′): owner −38 dBFS, +28.1 dB |
+|---|---|---|
+| the canceller alone, no gate | 9.48 %; 212 of 212 | 7.11 %; 212 of 212 |
+| known guard (the owner's level as estimated: `clean`, 51 and 140 words) | 10.90 %; 207; 5 | 8.06 %; 210; 3 |
+| forced unknown, F = 9 | 10.90 %; 207; 5 | 7.11 %; 212; 1 |
+| **forced unknown, F = 12** | **10.90 %; 207; 5** | **7.11 %; 212; 1** |
+| forced unknown, F = 15 | 14.22 % (+3.32); 199; 13 | 7.58 %; 211; 2 |
+| forced unknown, F = 18 | 27.96 % (+17.06); 166; 46 | 8.53 %; 209; 4 |
 
-| F | 21: kept | 21: far-active cut kept | 21: removed by the floor rule | 21: residual duplicates (chance) | FLEURS, forced unknown | (a), forced unknown | (b) −44.5 dBFS, forced unknown | (b′) −38 dBFS, forced unknown | (c) spliced, forced unknown |
-|---|---|---|---|---|---|---|---|---|---|
-| today (owner's level known on all but 21) | 288 | 253 | 0 (level guard 4) | 56 = 19.44 % (2.78 %) | 12.69 % (0 of 1,150) | 10.43 % (0 of 207) | 78.20 % (0 of 49) | 26.54 % (0 of 165; 27.01 with the shipped estimator) | 8.1 % (17 outside the clips) |
-| 9 | 196 | 161 | 479 | 41 = 20.92 % (3.57 %) | 12.61 % (0 of 1,153) | 10.90 % (0 of 209) | 77.73 % (0 of 50) | 26.54 % (0 of 165) | 7.9 % (17) |
-| 12 | 155 | 120 | 768 | 36 = 23.23 % (3.23 %) | 12.61 % | 10.90 % | 77.73 % | 26.54 % | 7.9 % |
-| 15 | 104 | 69 | 1,139 | 28 = 26.92 % (1.92 %) | 12.61 % | 10.90 % | 78.20 % (0 of 49) | 26.54 % | 7.9 % |
-| **18** | **77** | **42** | 1,422 | 23 = 29.87 % (1.30 %) | 12.61 % (0 of 1,152) | **10.90 %** | 79.15 % (0 of 46) | 27.01 % (0 of 164) | **8.1 %** |
-| ∞ | 49 | 14 | 1,957 | 14 = 28.57 % (2.04 %) | 12.94 % (0 of 1,147) | **15.64 %** (0 of 195) | 79.62 % (0 of 45) | **37.91 %** (0 of 141) | 8.6 % (17) |
+The bar of 12.7 (ii), the forced-unknown figure within 2 points of the known guard's on both: 9 and 12 pass on both, 15 fails on (b) by 1.3 points over the bar (8 more of the owner's words), 18 by 15. **F_u = 12 dB** (`FLOOR_MARGIN_DB`), as the planner read the histogram of section 2 (the rule reaches 5 of the 99 cut candidates in (b)'s owner utterances at 12, the known guard's own 5, 13 at 15 and 46 at 18). With the layer on, the same decisions read (b) 78.20 known, 77.73 at 9 and 12, 78.20 at 15, 79.15 at 18; (b′) 27.01 known, 26.54 at 9 to 15, 27.01 at 18: the layer's loss is chunk M's (12.7 (iv)). How much the canceller takes from the owner's own words over continuous echo: on (b) 161 of 212 cut by 3 dB or more (median cut 5.6 dB, 90th percentile 11.6), on (b′) 72 (2.1, 6.0), on (a) 22 (1.0, 3.1), on the spliced set 87 of 628 (0.9, 4.0).
 
-The canceller meetings with the owner's level forced unknown (owner's words kept, clean owner's kept, far-active cut kept; with the known level the shipped rows are today's at every F):
+The other fixtures at F_u = 12 ("me" WER; echo words left of kept words):
+
+| Fixture | Owner's level known (shipped) | Forced unknown at 12 | Layer off: known / forced unknown at 12 |
+|---|---|---|---|
+| FLEURS, 55 utterances at random times | 12.69 % (0 of 1,150) | 12.61 % (0 of 1,153) | 10.32 % / 10.32 % |
+| (a): ten utterances over the far end, −33 dBFS | 10.43 % (0 of 207) | 10.90 % (0 of 209) | 9.00 % / 9.48 % |
+| spliced set; (c): forced unknown | 8.1 % (17 words outside the clips) | (c) 7.9 % (17) | – |
+
+**Natural-unknown runs** (12.7 (ii)): the owner's level unknown by itself, not forced. The two runs the ruling named, fixture (b) with three utterances and (a) with one, did not reach it: with three, 29 of the owner's 75 words were left alone by the canceller, and the one utterance of (a) at −33 dBFS gave exactly 20 clean words, the minimum, so both are known. The same fixture (b) with two and with one utterance does (`too_few`). "Known guard": the owner's true level forced in (the median after the canceller of the owner's words it left alone, as the estimator would read it with enough of them).
+
+| Run | Owner's words (left alone) | Owner's level | Raw echo share | Floor rule | Shipped: WER; owner's kept | Known guard | Layer off: shipped / known guard |
+|---|---|---|---|---|---|---|---|
+| (b), 3 utterances (73 reference words) | 75 (29) | `clean` −40.9 (+22.7) | 99.91 % | none (known) | 58.90 %; 35 of 75 | the same | 19.18 %; 73 / the same |
+| (a), 1 utterance (19) | 20 (20) | `clean` −31.1 (+32.5) | 99.02 % | none (known) | 31.58 %; 20 of 20 | the same | the same |
+| **(b), 2 utterances (40)** | 41 (14) | **`too_few`** | 99.92 % | **unknown, 12 dB**, removed 0 | 70.00 %; 12 of 41 | 70.00 %; 12 | 12.50 %; 41 / 12.50 %; 41 |
+| **(b), 1 utterance (19)** | 20 (9) | **`too_few`** | 99.92 % | **unknown, 12 dB**, removed 0 | 52.63 %; 11 of 20 | 52.63 %; 11 | 21.05 %; 20 / 21.05 %; 20 |
+
+Both natural-unknown runs keep every owner's word the known guard keeps, with the layer on and off (0 lost; the bar asks for all but those at the floor). The floor rule at 12 takes none of their words; at 15 it would take 5 of 41 and 2 of 20, at 18 9 and 3.
+
+**The raw echo share** (the raw gate's flagged share of the raw mic's words, `transfer.raw_echo_share`) of every recording with a transfer, beside the silent tier's threshold:
+
+| Recording | Raw words | Flagged | Share | Owner's level after the canceller | Floor rule |
+|---|---|---|---|---|---|
+| 12 | 14,627 | 13,042 | 89.16 % | quiet | none |
+| 14 | 1,336 | 1,026 | 76.80 % | quiet | none |
+| 16 | 1,196 | 966 | 80.77 % | quiet | none |
+| 17 | 1,168 | 1,001 | 85.70 % | quiet | none |
+| 18 | 1,618 | 912 | 56.37 % | quiet | none |
+| 20 | 10,981 | 9,748 | 88.77 % | quiet | none |
+| **21** | 7,611 | 7,606 | **99.93 %** | **implausible** | **silent, 18 dB** |
+| FLEURS, 55 utterances | 2,413 | 1,321 | 54.75 % | quiet | none |
+| (a) | 2,284 | 2,121 | 92.86 % | clean | none |
+| (b) | 2,266 | 2,258 | **99.65 %** | clean | none |
+| (b′) | 2,272 | 2,196 | 96.65 % | clean | none |
+| (b), 3 / 2 / 1 utterances | 2,336 / 2,353 / 2,361 | 2,334 / 2,351 / 2,359 | **99.91 / 99.92 / 99.92 %** | clean / too_few / too_few | none / unknown / unknown |
+| (a), 1 utterance | 2,358 | 2,335 | 99.02 % | clean | none |
+| spliced set | 1,173 | 582 | 49.62 % | clean | none |
+
+Meetings 13 and 15 have no canceller and no transfer; 4 and 5 no words. Fixture (b), whose owner talks, reaches 99.5 percent (99.65), so by the ruling **the threshold moves to 99.8 percent** (`SILENT_SHARE`); meeting 21 stays over it. The fixtures with one to three utterances in 20 minutes reach 99.91 to 99.92, over 99.8 as well: the share alone separates a silent owner from one who says a few sentences over a long talk by 0.01 to 0.02 points, which is no separation. What keeps those fixtures out of the silent tier is the other signature: their owner's level is known or `too_few`, never `implausible`, because none of them has 20 words at the floor that the canceller left alone (their far end never pauses long). A recording with both, an owner who says a few sentences over a long talk with pauses that leave 20 or more noise or residue words at the floor, would get F_s = 18 on that owner's cut words; no recording or fixture here is one (on meeting 21 the analysis counts about two words of the owner's own).
+
+**Meeting 21**: owner's level `implausible` (35 words left alone, median 3.3 dB over the floor), raw echo share 99.93 percent, so the silent tier at F_s = 18 dB: 77 kept "me" words (288 before chunk I; target 70) with 42 far-active cut words among them (253; target 40), both missed narrowly and recorded; 1,422 words removed by the floor rule. The floor rule at each F in either tier, for reference:
+
+| F | 21: kept | 21: far-active cut kept | 21: removed by the floor rule | 21: residual duplicates (chance) |
+|---|---|---|---|---|
+| before chunk I (the unmatched fallback, the residue's level) | 288 | 253 | 0 (level guard 4) | 56 = 19.44 % (2.78 %) |
+| 9 | 196 | 161 | 479 | 41 = 20.92 % (3.57 %) |
+| 12 (F_u: what the general tier would give) | 155 | 120 | 768 | 36 = 23.23 % (3.23 %) |
+| 15 | 104 | 69 | 1,139 | 28 = 26.92 % (1.92 %) |
+| **18 (F_s, shipped)** | **77** | **42** | 1,422 | 23 = 29.87 % (1.30 %) |
+| ∞ | 49 | 14 | 1,957 | 14 = 28.57 % (2.04 %) |
+
+The canceller meetings with the owner's level forced unknown, the rule at F (owner's words kept, clean owner's kept, far-active cut kept; with the known level, as shipped, F changes nothing on them):
 
 | F | 12: labels strict / fair (of 1,462); owner's (of 1,593); far-active cut | 14: owner's (of 307); far-active cut | 16: owner's (of 248); far-active cut | 17: owner's (of 163) | 18: owner's (of 740); far-active cut | 20: owner's (of 1,221); far-active cut |
 |---|---|---|---|---|---|---|
@@ -118,34 +169,34 @@ The canceller meetings with the owner's level forced unknown (owner's words kept
 
 The clean owner's words are kept at every F on every meeting (12: 1,523 of 1,524; 14: 301 of 301; 16: 227 of 228; 17: 160 of 160; 18: 706 of 706; 20: 1,191 of 1,193), and no fixture's forced-unknown run leaves an echo word.
 
-**F = 18 dB**, by the rule of 12.2.2 step 3 (the largest F at which every owner-word bar of 12.2.3 holds):
+On the real meetings forced unknown, F = 12 keeps 6 more owner-class words than the known guard on meeting 12 and 7 on meeting 18, with 13, 2, 2, 8 and 14 more far-active cut words on 12, 14, 16, 18 and 20: the general tier is the owner-safe side of the known guard, which sits 15 to 18 dB over the floor on these meetings. No real meeting but 21 has an unknown owner's level.
 
-- ∞ fails: on (a) the cut alone takes the owner's own words spoken over the far end (17 removed against 1 at F = 18) and the owner's WER goes from 10.43 (known) and 10.90 (F = 18) to 15.64 percent, 5.2 points over (a)'s own figure and 3.0 over the full fixture's 12.69, against the 2-point bar; the full fixture moves 12.69 to 12.94 and the spliced set 8.1 to 8.6, both inside their bars, and meeting 12's matcher class loses 9 more words.
-- 18 holds: (a) 10.90 percent (0.5 over its known figure, under the full fixture's); (c) 8.1 percent, the spliced figure itself; the full fixture 12.61; (b) 79.15 against its known 78.20 (see the bars: (b) misses the bar against the full fixture at every F, the known decision included); and on every real meeting the forced-unknown rows at 18 equal the known ones but for 2 more kept words on meeting 12 (one more matcher duplicate) and 2 fewer far-active cut words on meeting 20: with the owner at their usual level the rule at 18 does what today's guard does.
-- What it reaches on meeting 21: 77 kept "me" words (288 today; target 70) with 42 far-active cut words among them (253 today; target 40). Both targets are missed narrowly; as 12.2.3 says the owner's words outrank them, and the gap is recorded. 15 dB would leave 104 and 69, ∞ would meet both (49 and 14) at (a)'s cost above.
-- (b′), the owner at −38 dBFS RMS (5 dB under the standard fixture in the plan's own units, "−33 dBFS over a −59 floor"; +28.1 dB by the gate's level), run after the timing window: F = 18 gives 27.01 percent, equal to (b′)'s own known-owner figure (F 9 to 15: 26.54), and the cut alone 37.91 (+10.9). The rule's 2-point margin holds at 18, so F stays 18; like (b), (b′) misses the bar against the full fixture at every F, the owner's level known included, because the post-canceller correlation layer takes 48 of its owner's words (the canceller alone leaves 7.11 percent).
+## 4. The bars (12.2.3 and 12.7)
 
-## 4. The bars (12.2.3)
+With F_u = 12 dB, F_s = 18 dB and the silent tier at 99.8 percent shipped. Meeting rows from the replay (section 6, re-run on 27 Oct with the fixed code), meeting 12 also from the real post-pass (`aec_postpass.rs`, canceller, raw mic transcribed once more), FLEURS and the spliced set from the real post-pass and its in-test decision.
 
-With F = 18 dB shipped. Meeting rows from the replay (section 6), meeting 12 also from the real post-pass (`aec_postpass.rs`, canceller, raw mic transcribed once more, shipped code), FLEURS and the spliced set from the real post-pass and its in-test decision.
-
-| Bar (12.2.3) | Result | |
+| Bar | Result | |
 |---|---|---|
+| (b) and (b′), layer off: forced unknown within 2 points of the known guard (12.7 (ii)) | at F_u = 12: (b) 10.90 against 10.90, (b′) 7.11 against 8.06 | met |
+| Natural-unknown runs keep every owner's word the known guard keeps but those at the floor (12.7 (ii)) | (b) with two and one utterances, `too_few`, tier unknown: 0 lost with the layer on and off; the two runs named in the ruling turned out known (above) | met |
+| Silent tier's threshold: no fixture with a talking owner at 99.5 percent (12.7 (ii)) | (b) at 99.65: the threshold moved to 99.8; the one-to-three-utterance fixtures reach 99.91 to 99.92 (their level known or `too_few`, so not in the tier) | moved, recorded |
+| Meeting 21 at F_s: 77 kept, 42 far-active cut, `implausible`, tier silent (12.7) | 77 kept, 42 far-active cut; `owner_source` implausible (35 words), raw echo share 99.93, `floor_rule.tier` silent, 1,422 removed | met |
 | Meeting 12: labelled owner's words fair 98.29, strict 96.65 percent | real post-pass: 1,437 and 1,413 of 1,462 (98.29 / 96.65 percent), 1,578 kept, 10 duplicates (0.6 percent); `owner_source` quiet, 1,186 words; the replay the same | met |
 | Meeting 14: clean owner's 301 of 301 (strict 301 of 307) | 301 of 301 (301 of 307) | met |
 | Meeting 16: clean owner's 227 of 228 | 227 of 228 | met |
 | Meetings 13 and 15 unchanged (no canceller) | rows identical (13: 292 kept, 285 of 292; 15: 187 of 187) | met |
-| Silent-mic controls (4, 5) and the headphone control byte-identical | 4 and 5: 0 mic words on both paths, as before; headphone control: 1,178 "me" words with echo off and auto, identical, 0 dropped, 0 text runs | met |
-| Live-view and Stop rows of every meeting unchanged | every live row, Stop's drops by reason and the view's end state identical on meetings 4, 5 and 12 to 21 (22 lines compared, the raw path untouched) | met |
+| Silent-mic controls (4, 5) and the headphone control byte-identical | 4 and 5: 0 mic words on both paths; headphone control: 1,178 "me" words with echo off and auto, identical, 0 dropped, 0 text runs | met |
+| Meetings 12 to 20 and every live row identical to section 6 | every post-pass and live row of section 6 identical on meetings 4, 5 and 12 to 21, meeting 21's post-pass row the shipped one (the raw path untouched) | met |
 | Spliced set at most 8.1 percent | 8.1 percent (17 words outside the clips) | met |
 | FLEURS at most 12.69 percent | 12.69 percent (real post-pass; 0 echo words) | met |
-| (a) forced unknown: echo words at most 1 percent of kept; owner's WER within 2 points of the full fixture's | 0 of 209; 10.90 percent (full fixture 12.69; (a) with its own level known 10.43) | met |
-| (b) forced unknown: the same | (b) at −44.5 dBFS: 0 of 46 kept; 79.15 percent against 78.20 with its own level known (+0.95). (b′) at −38 dBFS: 0 of 164; 27.01 percent, equal to its known figure. Both are far over the full fixture's 12.69 at every F and with the owner's level known, because at these levels the owner is at or under the echo and the post-canceller correlation layer takes 161 of 212 and 48 of 213 of its words, not the floor rule (the canceller alone leaves 9.48 and 7.11 percent) | echo part met; WER part missed at every F (not by F); within 2 points of each variant's own known figure at F = 18 |
-| (c) forced unknown: within 1 point of the spliced figure | 8.1 percent (spliced 8.1) | met |
-| Meeting 21: far-active cut words among the kept at most 40; kept at most 70 (reported) | 42 of 77 kept (253 of 288 today) | both missed narrowly, recorded |
-| Meeting 20: far-active cut words no higher than today | 15 (15) | met |
-| Meetings 17 and 18 within 2 words of today | identical (17: 160 kept, 0 far-active cut; 18: 757, 27) | met |
+| (a) forced unknown: echo words at most 1 percent of kept; owner's WER within 2 points of the full fixture's | 0 of 209; 10.90 percent at F_u (full fixture 12.69; (a) known 10.43) | met |
+| (c) forced unknown: within 1 point of the spliced figure | 7.9 percent at F_u (spliced 8.1) | met |
+| Meeting 21: far-active cut words among the kept at most 40; kept at most 70 (reported) | 42 of 77 kept (253 of 288 before chunk I) | both missed narrowly, recorded |
+| Meeting 20: far-active cut words no higher than before | 15 (15) | met |
+| Meetings 17 and 18 within 2 words of before | identical (17: 160 kept, 0 far-active cut; 18: 757, 27) | met |
 | Meeting 21's other layers, measured | after the canceller the utterance sweep 9 → 0 and the level layer 0 → 0 (it is off after the canceller); the 3 level drops are the raw gate's and stay (raw path); the transfer 1 → 221 words beyond the layers | measured |
+
+The (b) and (b′) rows of 12.2.3's first bar (the owner's WER within 2 points of the full fixture's with the layer on) stay missed at every F and with the owner's level known (78.20 and 27.01 against 12.69): the post-canceller correlation layer's loss, chunk M's.
 
 On meeting 21 the owner's class of the matcher (8 non-duplicate words) goes from 5 to 2 kept at every F, 9 to ∞: the 3 words are candidates the canceller cut, 0 to 6 dB over the floor; the one word of the owner's class the canceller left alone is kept, and the analysis counts about two words of the owner's own in the whole recording.
 
@@ -180,11 +231,11 @@ Neither variant moves meeting 18 materially. The overlap at 150 or 200 ms remove
 
 ## 6. Every meeting's rows, today and shipped
 
-Post-pass rows (shipped, transfer from the live run's mic words; meeting 12 from its raw mic transcribed), today's rows identical on every meeting but 21; the live rows identical on all. Owner's: the matcher's class on that path's words.
+Post-pass rows (shipped, transfer from the live run's mic words; meeting 12 from its raw mic transcribed), today's rows identical on every meeting but 21; the live rows identical on all. Owner's: the matcher's class on that path's words. Re-run on 27 Oct with the fixed code of plan 16 section 12.7 (P = 6, the fall-through, F_u = 12, the silent tier at F_s = 18): every row identical, meeting 21's shipped row now from the silent tier (owner's level `implausible`, raw echo share 99.93 percent).
 
 | Meeting | Path | Mic words | Text | Level | Correlation | Utterance | Transfer | Kept | Residual duplicates (chance) | Owner's kept | Owner source | Far-active cut kept |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 4, 5 | both | 0 | 0 | 0 | 0 | 0 | 0 | 0 | – | – | none | – |
+| 4, 5 | both | 0 | 0 | 0 | 0 | 0 | 0 | 0 | – | – | too few | – |
 | 12 | post-pass | 2,544 | 576 | 0 | 324 | 8 | 58 | 1,578 | 10 = 0.63 % (3.68 %) | 1,545 of 1,593; labels 96.65 %, fair 98.29 % | quiet | 27 |
 | 12 | live (stand-in) | 14,627 | 11,834 | 52 | 1,154 | 2 | – | 1,585 | 13 = 0.82 % (3.34 %) | labels 98.22 %, fair 99.38 % | – | – |
 | 13 | post-pass | 386 | 65 | 29 | 0 | 0 | – | 292 | 2 = 0.68 % (1.71 %) | 285 of 292 | quiet | – |
@@ -202,7 +253,7 @@ Post-pass rows (shipped, transfer from the live run's mic words; meeting 12 from
 | 20 | post-pass | 2,626 | 949 | 0 | 298 | 26 | 108 | 1,245 | 18 = 1.45 % (2.17 %) | 1,198 of 1,221 | quiet | 15 |
 | 20 | live | 10,981 | 8,960 | 21 | 754 | 6 | – | 1,240 | 10 = 0.81 % (2.26 %) | 1,131 of 1,145 | – | – |
 | 21 | post-pass, today | 2,063 | 1,633 | 0 | 132 | 9 | 1 | 288 | 56 = 19.44 % (2.78 %) | 5 of 8 | (unmatched) | 253 |
-| **21** | **post-pass, shipped** | 2,063 | 1,633 | 0 | 132 | **0** | **221** | **77** | 23 = 29.87 % (1.30 %) | 2 of 8 | **none** | **42** |
+| **21** | **post-pass, shipped** | 2,063 | 1,633 | 0 | 132 | **0** | **221** | **77** | 23 = 29.87 % (1.30 %) | 2 of 8 | **implausible** (floor rule's silent tier) | **42** |
 | 21 | live | 7,611 | 7,227 | 3 | 374 | 0 | – | 7 | 1 (14.29 %) | – | – | – |
 
 The duplicate matcher stays blind to meeting 21's garbled residue, as the reviewer found (B2): its share of the kept words rises as the floor rule removes the fragments it never flagged. The bar that sees the failure, the far-active cut words, falls from 253 to 42.
@@ -210,5 +261,7 @@ The duplicate matcher stays blind to meeting 21's garbled residue, as the review
 ## 7. Notes
 
 - The raw path is untouched by construction: the live view's estimator (`CalibrationStats::owner_db`), Stop's and the transfer's raw gate keep today's estimator; only words transcribed from the canceller's output use the new one.
-- `engine_info.echo` on the real post-pass of meeting 12: `owner_source` quiet, `owner_words` 1,186; in `transfer` the raw gate's `owner_db` −33.565 and `floor_db` −62.625, `floor_rule {f_db, removed: 0}`. On meeting 21 the post-pass would record `owner_db: null`, `owner_source: none`, `owner_words: 35` and `floor_rule.removed` 1,422.
-- Every copy (database, meeting folders, cached transcripts, dumps, logs, the rebuilt classes file) lived only in a scratch folder outside the repository and was deleted after the runs.
+- `engine_info.echo` on the real post-pass of meeting 12 (fixed code): `owner_source` quiet, `owner_words` 1,186, `owner_low` false; in `transfer` the raw gate's `raw_owner_db` −33.565, `raw_floor_db` −62.625 and `raw_echo_share` 0.8916, `floor` 0, `floor_rule {tier: null, f_db: null, removed: 0}`. On meeting 21 the post-pass would record `owner_db: null`, `owner_source: implausible`, `owner_words: 35`, `owner_low: false`, `raw_echo_share` 0.9993 and `floor_rule {tier: silent, f_db: 18, removed: 1,422}` (the replay's decision; the stored meeting was not processed again). On fixture (b)'s real post-pass: `owner_source` clean, 51 words, `raw_echo_share` 0.9965, `floor_rule` null.
+- The tier on meeting 21: the silent tier needs both signatures, and meeting 21 has both (35 words the canceller left alone at 3.3 dB over the floor; 7,606 of 7,611 raw words flagged). With the general tier alone it would keep 155 words with 120 far-active cut ones (section 3).
+- No estimate of the owner's level on any recording or fixture sits between 6 and 15 dB over the floor, so `owner_low` is false everywhere here.
+- Every copy of the owner's data (database, meeting folders, cached transcripts, dumps, logs, the rebuilt classes file) lived only in a scratch folder outside the repository and was deleted after the runs. The FLEURS fixtures' audio and words of section 3 (FLEURS speech over meeting 12's far end) are kept outside the repository for chunk M.
