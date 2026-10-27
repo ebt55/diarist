@@ -494,13 +494,14 @@ pub fn migration_backup_prefix(db: &Path) -> String {
     format!("{name}.bak-")
 }
 
-/// The schema version of the newest published release (0.1.0-beta.4: 3).
-/// Its pre-migration copy (`<db>.bak-3`) is never deleted, so going back to
+/// The schema version of the newest published release (0.1.0-beta.5: 5).
+/// Its pre-migration copy (`<db>.bak-5`) is never deleted, so going back to
 /// that release always finds a database it can open, however many
 /// migrations the builds after it apply one by one (each makes a copy of
-/// its own: 3 to 4 to 5 leaves `bak-3` and `bak-4`). Raised to
-/// `MIGRATIONS.len()` when a release ships.
-pub const RELEASED_SCHEMA: u32 = 3;
+/// its own: 5 to 6 to 7 leaves `bak-5` and `bak-6`). The upgrade to this
+/// release from 0.1.0-beta.4 (3 to 5 in one open) leaves `bak-3`, its own
+/// copy. Raised to `MIGRATIONS.len()` when a release ships.
+pub const RELEASED_SCHEMA: u32 = 5;
 
 /// Before pending migrations run on an existing database (schema version
 /// 1 or later), copies it with the backup API to `<db>.bak-<version>` next to
@@ -2163,6 +2164,9 @@ mod tests {
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
     }
 
+    /// The upgrade from 0.1.0-beta.4 to 0.1.0-beta.5: schema 3 to 5 in one
+    /// open, one copy (`bak-3`, the database beta.4 opens), older copies
+    /// gone.
     #[test]
     fn migration_0004_from_beta4_adds_raw_text_after_a_backup() {
         let dir = tempfile::tempdir().unwrap();
@@ -2173,7 +2177,8 @@ mod tests {
             current(&store, a.id, &["kept words"]);
             a.id
         };
-        // Back to schema 3, as 0.1.0-beta.4 left it.
+        // Back to schema 3, as 0.1.0-beta.4 left it, with the copy its own
+        // upgrade from beta.3 made.
         {
             let conn = Connection::open(&db).unwrap();
             conn.execute_batch(
@@ -2182,10 +2187,16 @@ mod tests {
             )
             .unwrap();
         }
+        let bak2 = dir.path().join("diarist.db.bak-2");
+        std::fs::write(&bak2, b"the database beta.3 opens").unwrap();
+        assert_eq!((RELEASED_SCHEMA, MIGRATIONS.len()), (5, 5));
         let store = SqliteStore::open(&db).unwrap();
-        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        assert_eq!(store.schema_version().unwrap(), 5);
         let bak = dir.path().join("diarist.db.bak-3");
         assert_eq!(store.migration_backup(), Some(bak.as_path()));
+        // One copy for both migrations, and the older one goes.
+        assert!(!bak2.exists());
+        assert!(!dir.path().join("diarist.db.bak-4").exists());
         // The copy is the beta.4 database: schema 3, no raw_text.
         let copy = Connection::open(&bak).unwrap();
         let version: u32 = copy
@@ -2242,10 +2253,11 @@ mod tests {
         assert_eq!(words[1].asr_text(), "there");
         drop(store);
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
+        assert!(bak.is_file());
     }
 
     #[test]
-    fn migration_0005_after_0004_keeps_the_copy_beta4_opens() {
+    fn migration_0005_after_0004_keeps_the_released_copy() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("diarist.db");
         let (a, track) = {
@@ -2266,9 +2278,11 @@ mod tests {
                 .unwrap();
             (a.id, track.id)
         };
-        // Schema 4, as a build with 0004 and without 0005 left it, after its
-        // own upgrade from beta.4 (schema 3) made `bak-3`; an older copy is
-        // there too.
+        // Schema 4, as a development build with 0004 and without 0005 left
+        // it (no release has schema 4). `bak-5` stands in for the copy of
+        // the released schema that later builds keep whatever they migrate
+        // one step at a time (5 to 6 to 7 leaves `bak-5` and `bak-6`);
+        // `bak-3` and `bak-2` are copies of no released schema any more.
         {
             let conn = Connection::open(&db).unwrap();
             conn.execute_batch(
@@ -2276,19 +2290,21 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(RELEASED_SCHEMA, 3);
+        assert_eq!(RELEASED_SCHEMA, 5);
+        let bak5 = dir.path().join("diarist.db.bak-5");
+        std::fs::write(&bak5, b"the database beta.5 opens").unwrap();
         let bak3 = dir.path().join("diarist.db.bak-3");
-        std::fs::write(&bak3, b"the database beta.4 opens").unwrap();
+        std::fs::write(&bak3, b"older").unwrap();
         let bak2 = dir.path().join("diarist.db.bak-2");
-        std::fs::write(&bak2, b"older").unwrap();
+        std::fs::write(&bak2, b"older still").unwrap();
 
         let store = SqliteStore::open(&db).unwrap();
         assert_eq!(store.schema_version().unwrap(), 5);
         let bak4 = dir.path().join("diarist.db.bak-4");
         assert_eq!(store.migration_backup(), Some(bak4.as_path()));
-        // The copy beta.4 opens stays; the older one goes.
-        assert_eq!(std::fs::read(&bak3).unwrap(), b"the database beta.4 opens");
-        assert!(!bak2.exists());
+        // The released schema's copy stays; the older ones go.
+        assert_eq!(std::fs::read(&bak5).unwrap(), b"the database beta.5 opens");
+        assert!(!bak3.exists() && !bak2.exists());
         // bak-4 is the schema 4 database, without the column.
         let copy = Connection::open(&bak4).unwrap();
         let version: u32 = copy
@@ -2322,7 +2338,7 @@ mod tests {
         drop(store);
         // Up to date: no copy, and both copies stay.
         assert_eq!(SqliteStore::open(&db).unwrap().migration_backup(), None);
-        assert!(bak3.is_file() && bak4.is_file());
+        assert!(bak5.is_file() && bak4.is_file());
     }
 
     #[test]
