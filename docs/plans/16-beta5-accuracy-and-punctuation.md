@@ -851,3 +851,60 @@ Expected change: none on any measured recording.
 **Not plain (a), shipping as it is:** the standing rule puts the owner's words first, the exposed owner is a real one, and the guard is a small CPU-only change whose only failure mode is losing echo removal.
 
 **What tipped it:** the share does not separate a silent owner from a talking one (99.91 to 99.93 on both), so all of today's protection rests on the median of the clean set. A count of uncut words over +18 is the direct signature of a talking owner.
+
+### 12.9 Adjudication of the punctuation model's provenance (27 Oct 2026)
+
+Fable 5.1, read only, answering the owner's question "I thought our punctuation tests were giving good results, now what is the issue?" Quality is not in question: every number in 3.13 and docs/eval/2026-10-26-punctuation.md is Diarist's own measurement on Diarist's audio. The question is who published the model and on what terms.
+
+#### (i) The risks
+
+**Diarist's own MIT licence: no risk.** Diarist ships no weights. The two model files download from Hugging Face at a pinned revision with SHA-256. Diarist re-hosts only the Apache text, its own NOTICE and Microsoft's MIT runtime. A model file is data loaded through ONNX Runtime, not code linked into the binary, and Apache-2.0 and MIT are compatible anyway.
+
+1. **The licence is declared only in the card's YAML.** `license: apache-2.0` is line 2 of the card's YAML, and the repository has no LICENSE file.
+   - **What could go wrong:** the authors deny the grant, which is unlikely, because Apache-2.0 section 2 grants are perpetual and irrevocable for copies already obtained. Or the authors lack the rights they claim; the mitigation is that the repository carries the full training code, data statistics and training log, and every checkable claim checked out.
+   - **Severity:** a model swap by manifest change.
+   - **B, C and the MIT base model are declared the same way**, so switching removes nothing on this point.
+2. **The organisation's age.** Horizon-Labs lists no members or website and has published 35 models since late September 2026. The repository has four commits (3 to 9 Oct) and 1,178 downloads, against B's 254,862.
+   - **Risk:** the repository is deleted or gated, so first-run downloads of this item fail until the manifest changes. Installed users are unaffected, and a missing model only means an unpunctuated transcript.
+   - **Likelihood:** low over months, moderate over years.
+   - **Severity:** a URL change, because Apache-2.0 section 4 lets Diarist host the files itself.
+3. **The LLM-written training text** (49,144 windows, about 4 % of 1,168,626) was written by `Qwen/Qwen3.8-27B-FP8`, run locally through vLLM (`code/punct/gen_spoken.py` at ee31fdf). Qwen3.8-27B is Apache-2.0 with a LICENSE file. No API was used, so no provider's terms apply, and such terms would not travel to a model's downstream users anyway. **Risk: none that can be named.**
+4. **FineWeb and FineWeb-2 (ODC-BY).** The licence asks for an attribution notice; Diarist's NOTICE names both datasets. The model is a six-label token classifier and cannot reproduce any of its training text. B and C were trained on WMT News Crawl, whose README disclaims ownership of the text: a weaker data provenance, not a stronger one.
+5. **The MIT base model** (mmBERT-small). Releasing a fine-tune under Apache-2.0 is permitted, and Diarist's NOTICE names the base model and its licence. **No risk.**
+
+#### (ii) Upstream since ee31fdf
+
+Nothing has changed, as read on 27 Oct 2026:
+- `main` is still ee31fdf, last modified 9 Oct 2026;
+- no LICENSE or NOTICE file has appeared;
+- the card still declares Apache-2.0;
+- the card at this revision has SHA-256 4f4ec573102819c5a12ffc86b4ecfbf9706d78cf5587f64d11a6cb6190907a78 (340 lines).
+
+#### (iii) Ruling: (b), ship A with these mitigations (no code change, no change to the manifest's `files` or the hashed NOTICE)
+
+1. **LICENSES.md:** add the punctuation model and ONNX Runtime 1.31.0 CPU (Microsoft, MIT) to the first-run table. This is the one real gap found.
+2. **A dated snapshot:** add two extra assets to the `models-2026-10` release, not referenced by the manifest:
+   - the card at ee31fdf, `punctuation-model-card-ee31fdf.md`, with the SHA-256 above;
+   - the HF API model-info JSON of 27 Oct 2026.
+
+   The owner also saves the model page and its `/tree/ee31fdf…` page on web.archive.org.
+3. **Ask the authors for a LICENSE file** in a Hugging Face discussion, posted by the owner. Not blocking.
+4. **A written swap plan.**
+   - (a) The repository is gone: Diarist hosts the two upstream files itself under Apache-2.0 section 4, the URLs change, the hashes stay. Keep a deliberate private copy of the two files now.
+   - (b) A rights claim: set `required: false` or remove the entry, a manifest change only. Installed users keep their copy under an irrevocable grant.
+5. **docs/04:** name Qwen3.8-27B (Apache-2.0, run locally, no API terms), and add a sentence that the alternatives are declared the same way.
+6. **The upgrade rule for rule 8:** before any new pinned revision, re-read the card's licence line and the file list, and record the date.
+
+**Why not (c), shipping B or C instead.**
+- **B-q8pc** ties on gate-pool micro F1, but:
+  - loses 5.4 corrected boundary-F1 points (0.671 against 0.725) and 2.8 points on AMI;
+  - loses 5.2 points of upper-case F1, and 3 to 12 FLEURS points in seven of eight languages;
+  - loses six languages;
+  - is a file Diarist quantised itself, so Diarist would distribute a derivative.
+- **C** is English only and 7 boundary points behind.
+
+Both are declared the same way and trained on text with weaker provenance. (c) would pay a measured quality cost for no provenance gain.
+
+#### (iv) For the owner
+
+The tests are fine; this is paperwork, not quality. The model's maker says it is Apache-2.0, but only in the model card's header line, and the maker is an anonymous account a few weeks old. If that claim were ever wrong, or the account vanished, Diarist would point at another model or host the files itself: a manifest change, never a change to Diarist's own MIT licence. The two older alternatives are declared the same way and measure worse, so A ships with its licence text, a dated record of the claim and a swap plan.
