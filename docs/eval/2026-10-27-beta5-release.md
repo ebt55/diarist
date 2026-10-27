@@ -4,7 +4,7 @@ The release check of the beta.5 integration branch against the beta.4 baseline (
 
 On these recordings (single-track files, the import path) the beta.5 changes that can act are the loop collapse, which removes words, and punctuation, which never changes words, times or speakers but splits segments at sentence ends. The echo gate (chunk I), Process again (J) and the live lookahead (F) act on live recordings only, and the model files are unchanged (the Q8 pointwise respin was not shipped, research/19).
 
-Result: the three accuracy bars pass. Pooled cpWER EN 11.01 → 10.85, Nemotron 3.5 11.30 → 11.30; no session is worse at all; no gap is new and none is gone. The speed bar is still owed: 6 of the 14 timed gate runs are valid so far and sit within -3.3 to +1.9 percent of beta.4, and the other 8 are to be re-timed in an exclusive window (below).
+Result: the three accuracy bars pass. Pooled cpWER EN 11.01 → 10.85, Nemotron 3.5 11.30 → 11.30; no session is worse at all; no gap is new and none is gone. The speed bar is met for the EN model and missed narrowly for Nemotron 3.5 as measured: over all 14 gate runs, pooled × real time is +5.0 percent against beta.4 with EN (faster) and -5.4 percent with Nemotron 3.5 (slower; the bar is 5 percent). The 3.5 shortfall sits in the three runs of the last timed block, which overlapped the Claude desktop app's own GPU use (allowed by the validity rule), while the same build did those three sessions within -1.5 to +1.3 percent of beta.4 earlier the same day; the transcribe step runs the same runtime, models and command line as beta.4 (speed, below).
 
 ## Setup
 
@@ -48,7 +48,7 @@ The baseline's, computed by the same code: research/19's `analyze.py` (plain WER
 
 ## Results
 
-Speed: × real time is shown only for timed runs that held quiet.lock with no non-Diarist process above 5 % SM in any `nvidia-smi pmon -s u -d 1` sample of the run (claude.exe excepted). Every gate-set run was timed, in two blocks under quiet.lock on 27 Oct 2026 (13:34 to 13:39 EN, 13:43 to 13:48 3.5, IST). Surfshark.exe, a desktop application of the owner's, drew 7 to 22 percent SM in single one-second samples about every 30 s, so 8 of the 14 runs are invalid and are left out; they are to be re-timed with configs `rel_shipped_en_t` and `rel_shipped_n35_t` in one exclusive block, after a 60 s pmon check with the GPU otherwise idle. Two such checks have failed so far (a browser at 9 to 47 percent SM, then another desktop application at up to 44 percent), so no re-run has started. Accuracy is unaffected: decoding is deterministic, and the invalid runs' words are scored above. The speed bar is not judged until the block has run. The broad and talks sets were run without quiet.lock (accuracy only; decoding is deterministic, research/19 section 2).
+Speed: × real time is shown only for timed runs that held quiet.lock with no non-Diarist process above 5 % SM in any `nvidia-smi pmon -s u -d 1` sample of the run (claude.exe excepted). Every gate-set run was timed, in two blocks under quiet.lock on 27 Oct 2026 (13:34 to 13:39 EN, 13:43 to 13:48 3.5, IST). Surfshark.exe, a desktop application of the owner's, drew 7 to 22 percent SM in single one-second samples about every 30 s, so 8 of the 14 runs were invalid and are left out. They were re-timed with configs `rel_shipped_en_t` and `rel_shipped_n35_t` (copies of the release configs, the same build `ce5b757b`, `--transcribe-only --no-diar-pass`) in one exclusive block on 27 Oct 2026, 17:16:48 to 17:23:01 IST. Two earlier 60 s pmon checks had failed (a browser at 9 to 47 percent SM, then another desktop application at up to 44 percent); the third passed with only claude.exe drawing the GPU (up to 31 percent SM). All 8 runs are valid (`check_pmon.py`: in 367 sample times, no sample of a non-Diarist process other than claude.exe above 5 percent SM). claude.exe, which the rule allows because it draws the Claude desktop app the agents run in, was busier during the block's second half, the three Nemotron 3.5 runs: 7 to 22 samples above 5 percent SM per run (up to 34 percent), against 2 to 4 per EN run. nemo-speech's own SM averaged 54.6 to 58.1 percent there, against 56.7 to 62.0 for the EN runs, at the same total CPU load (9 against 8 percent). Accuracy is unaffected: decoding is deterministic, and every run's words are scored above. The broad and talks sets were run without quiet.lock (accuracy only; decoding is deterministic, research/19 section 2).
 
 ### Gate set (six user meetings plus AMI)
 
@@ -56,18 +56,18 @@ Speed: × real time is shown only for timed runs that held quiet.lock with no no
 
 | Session | Model | Min | cpWER | Δ cpWER | tcpWER | WER | Δ WER | del | ins | sub | WDER | DER c0.25 | Count err | Gaps ≥ 2 s | Gaps ≥ 5 s | × real time |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Aug 2 | EN | 44 | 9.5 | 0.0 | 9.5 | 9.1 | 0.0 | 266 | 189 | 164 | 0.3 | 13.2 | +0 | 21 | 1 | – |
+| Aug 2 | EN | 44 | 9.5 | 0.0 | 9.5 | 9.1 | 0.0 | 266 | 189 | 164 | 0.3 | 13.2 | +0 | 21 | 1 | 81 |
 | Aug 2 | 3.5 | 44 | 10.3 | 0.0 | 10.4 | 10.1 | 0.0 | 361 | 125 | 199 | 0.2 | 12.2 | +0 | 28 | 5 | 79 |
-| Aug 9 | EN | 44 | 8.0 | -0.1 | 8.0 | 7.4 | -0.2 | 162 | 195 | 128 | 0.3 | 12.7 | +0 | 25 | 4 | – |
-| Aug 9 | 3.5 | 44 | 8.4 | 0.0 | 8.4 | 8.0 | 0.0 | 236 | 144 | 145 | 0.3 | 11.2 | +0 | 31 | 6 | – |
-| Sep 7 | EN | 48 | 7.1 | -0.1 | 7.1 | 6.8 | -0.1 | 161 | 188 | 124 | 0.3 | 15.0 | -1 | 50 | 2 | – |
+| Aug 9 | EN | 44 | 8.0 | -0.1 | 8.0 | 7.4 | -0.2 | 162 | 195 | 128 | 0.3 | 12.7 | +0 | 25 | 4 | 79 |
+| Aug 9 | 3.5 | 44 | 8.4 | 0.0 | 8.4 | 8.0 | 0.0 | 236 | 144 | 145 | 0.3 | 11.2 | +0 | 31 | 6 | 72 |
+| Sep 7 | EN | 48 | 7.1 | -0.1 | 7.1 | 6.8 | -0.1 | 161 | 188 | 124 | 0.3 | 15.0 | -1 | 50 | 2 | 79 |
 | Sep 7 | 3.5 | 48 | 7.5 | 0.0 | 7.5 | 7.2 | 0.0 | 251 | 110 | 141 | 0.2 | 14.6 | -1 | 60 | 4 | 83 |
-| Sep 5 | EN | 45 | 4.7 | 0.0 | 4.7 | 4.5 | 0.0 | 92 | 171 | 122 | 0.2 | 7.0 | -1 | 14 | 2 | – |
+| Sep 5 | EN | 45 | 4.7 | 0.0 | 4.7 | 4.5 | 0.0 | 92 | 171 | 122 | 0.2 | 7.0 | -1 | 14 | 2 | 82 |
 | Sep 5 | 3.5 | 45 | 5.1 | 0.0 | 5.1 | 4.9 | 0.0 | 176 | 89 | 158 | 0.2 | 5.6 | -1 | 9 | 1 | 83 |
 | Sep Logistics | EN | 46 | 7.0 | 0.0 | 7.0 | 7.0 | 0.0 | 116 | 198 | 130 | 0.0 | 12.2 | +0 | 10 | 1 | 83 |
-| Sep Logistics | 3.5 | 46 | 6.6 | 0.0 | 6.6 | 6.6 | 0.0 | 141 | 147 | 129 | 0.0 | 9.3 | +0 | 14 | 2 | – |
-| Aug 14 | EN | 77 | 43.8 | -0.1 | 44.4 | 7.1 | -0.1 | 260 | 311 | 291 | 19.4 | 29.3 | +2 | 22 | 9 | – |
-| Aug 14 | 3.5 | 77 | 42.9 | 0.0 | 43.6 | 7.0 | 0.0 | 318 | 178 | 353 | 19.3 | 27.6 | +2 | 22 | 9 | – |
+| Sep Logistics | 3.5 | 46 | 6.6 | 0.0 | 6.6 | 6.6 | 0.0 | 141 | 147 | 129 | 0.0 | 9.3 | +0 | 14 | 2 | 77 |
+| Aug 14 | EN | 77 | 43.8 | -0.1 | 44.4 | 7.1 | -0.1 | 260 | 311 | 291 | 19.4 | 29.3 | +2 | 22 | 9 | 83 |
+| Aug 14 | 3.5 | 77 | 42.9 | 0.0 | 43.6 | 7.0 | 0.0 | 318 | 178 | 353 | 19.3 | 27.6 | +2 | 22 | 9 | 78 |
 | AMI ES2002a | EN | 21 | 18.0 | 0.0 | 18.4 | 16.6 | 0.0 | 341 | 16 | 77 | 2.3 | 25.4 | +0 | 10 | 4 | 82 |
 | AMI ES2002a | 3.5 | 21 | 20.7 | 0.0 | 21.0 | 19.1 | 0.0 | 396 | 19 | 84 | 2.2 | 28.2 | +0 | 12 | 3 | 82 |
 
@@ -177,19 +177,36 @@ Per session the step takes 3.2 to 8.1 s per hour of audio, the short sessions hi
 
 ### Speed, gate set
 
-The transcribe step's wall time, model load included, against the baseline's valid timings.
+The transcribe step's wall time, model load included, against the baseline's valid timings. Every gate run now has a valid timing: the 6 of the first blocks (13:34 to 13:48, "first") and the 8 of the timed block (17:16 to 17:23, "block").
 
-| Session | Model | Min | beta.4 s | beta.4 × real time | beta.5 s | beta.5 × real time | Change in × real time |
-|---|---|---|---|---|---|---|---|
-| Sep Logistics | EN | 46 | 33.0 | 83 | 33.1 | 83 | -0.3 % |
-| AMI ES2002a | EN | 21 | 15.4 | 83 | 15.6 | 82 | -1.3 % |
-| Aug 2 | 3.5 | 44 | 31.8 | 82 | 32.9 | 79 | -3.3 % |
-| Sep 7 | 3.5 | 48 | 34.2 | 83 | 34.5 | 83 | -0.9 % |
-| Sep 5 | 3.5 | 45 | 32.3 | 83 | 32.6 | 83 | -0.9 % |
-| AMI ES2002a | 3.5 | 21 | 15.8 | 81 | 15.5 | 82 | +1.9 % |
-| valid runs pooled | EN | 67 | 48.4 | 82.7 | 48.7 | 82.2 | -0.6 % |
-| valid runs pooled | 3.5 | 157 | 114.1 | 82.6 | 115.5 | 81.6 | -1.2 % |
-| **pending: 8 runs** | EN Aug 2, EN Aug 9, EN Sep 7, EN Sep 5, EN Aug 14, 3.5 Aug 9, 3.5 Sep Logistics, 3.5 Aug 14 | | | | | | re-run in an exclusive window |
+| Session | Model | Min | beta.4 s | beta.4 × real time | beta.5 s | beta.5 × real time | Change in × real time | Timing |
+|---|---|---|---|---|---|---|---|---|
+| Aug 2 | EN | 44 | 36.7 | 71 | 32.4 | 81 | +13.3 % | block |
+| Aug 9 | EN | 44 | 34.1 | 78 | 33.9 | 79 | +0.6 % | block |
+| Sep 7 | EN | 48 | 42.7 | 67 | 35.9 | 79 | +18.9 % | block |
+| Sep 5 | EN | 45 | 33.2 | 81 | 32.9 | 82 | +0.9 % | block |
+| Sep Logistics | EN | 46 | 33.0 | 83 | 33.1 | 83 | -0.3 % | first |
+| Aug 14 | EN | 77 | 56.1 | 82 | 55.4 | 83 | +1.3 % | block |
+| AMI ES2002a | EN | 21 | 15.4 | 83 | 15.6 | 82 | -1.3 % | first |
+| Aug 2 | 3.5 | 44 | 31.8 | 82 | 32.9 | 79 | -3.3 % | first |
+| Aug 9 | 3.5 | 44 | 32.4 | 82 | 36.9 | 72 | -12.2 % | block |
+| Sep 7 | 3.5 | 48 | 34.2 | 83 | 34.5 | 83 | -0.9 % | first |
+| Sep 5 | 3.5 | 45 | 32.3 | 83 | 32.6 | 83 | -0.9 % | first |
+| Sep Logistics | 3.5 | 46 | 32.7 | 84 | 35.6 | 77 | -8.1 % | block |
+| Aug 14 | 3.5 | 77 | 54.7 | 84 | 59.3 | 78 | -7.8 % | block |
+| AMI ES2002a | 3.5 | 21 | 15.8 | 81 | 15.5 | 82 | +1.9 % | first |
+| gate pooled | EN | 324 | 251.2 | 77.4 | 239.2 | 81.3 | +5.0 % | |
+| gate pooled | 3.5 | 324 | 233.9 | 83.1 | 247.3 | 78.6 | -5.4 % | |
+
+Reading it:
+
+- EN is faster than beta.4 on the pooled set, +5.0 percent. Most of that comes from two beta.4 runs that were slow for no reason visible in the words: Aug 2 at 71 and Sep 7 at 67 times real time, against 78 to 83 for every other EN run of either release. Without them the other five sessions pool at +0.5 percent.
+- Nemotron 3.5 is 5.4 percent slower pooled, 0.4 points beyond the bar.
+  - The four runs of the first block are within -3.3 to +1.9 percent of beta.4; the three of the timed block are 7.8 to 12.2 percent slower.
+  - The same build timed those three sessions at 13:44 to 13:48 in 32.0, 33.2 and 55.2 s, within -1.5 to +1.3 percent of beta.4's 32.4, 32.7 and 54.7. Those runs were left out only for Surfshark's single samples.
+  - The block's second half is where claude.exe drew the GPU most (above).
+  - Nothing in the measured step changed between the releases: `nemo-speech transcribe` is the same executable, with the same models and the same command line (Setup), so a code cause is not expected.
+- What would settle it: the three 3.5 runs re-timed with the Claude desktop app idle (minimised, no agent output streaming), about 3 minutes of GPU under quiet.lock. That was not done here, because the owner had the GPU back at 17:23.
 
 ### Release bars
 
@@ -198,7 +215,7 @@ The transcribe step's wall time, model load included, against the baseline's val
 | Pooled cpWER per model not worse than beta.4 | EN 11.01 → 10.85 (all 36), 3.5 11.30 → 11.30; every set lower or equal (table above) | met |
 | No session worse by more than 0.5 cpWER points (unless the words show why) | no session worse at all, with either model | met |
 | No new gap of 5 s or more | 0 new gaps of any length with either model, and none gone | met |
-| Speed within 5 % of beta.4 for the same measurement | pending: the 6 valid runs are within -3.3 to +1.9 percent of beta.4's × real time (pooled -0.6 percent EN, -1.2 percent 3.5); 8 runs still to be re-timed | pending |
+| Speed within 5 % of beta.4 for the same measurement | all 14 gate runs timed and valid: pooled × real time +5.0 percent EN (faster), -5.4 percent Nemotron 3.5. The 3.5 shortfall is the three runs of the timed block, which overlapped the Claude desktop app's GPU use; the same build did those sessions within -1.5 to +1.3 percent of beta.4 earlier the same day (speed table) | EN met; 3.5 missed by 0.4 points as measured, attributed to contention; a re-time of the three runs would settle it |
 
 ## Integration checks on the same tree
 
@@ -220,6 +237,10 @@ for c in rel_shipped_en rel_shipped_n35; do
   uv run python -I run.py --config $c --configs-file <scratch configs.toml> --sessions <ids> --transcribe-only --no-diar-pass
   uv run python -I run.py --config $c --configs-file <scratch configs.toml> --sessions <ids> --metrics-only --no-report
 done
+# the timed re-runs: configs rel_shipped_en_t and rel_shipped_n35_t (the same two, renamed so
+# they transcribe again) with --transcribe-only --no-diar-pass under quiet.lock, with
+# nvidia-smi pmon -s u -d 1 running; validity per run from that log (no non-Diarist
+# process other than claude.exe above 5 % SM)
 # WER, gaps and the tables: research/19's analyze.py over these runs and the baseline's
 ```
 
