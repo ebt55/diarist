@@ -1074,8 +1074,9 @@
   <section>
     <h2>About</h2>
     <p class="help">
-      Diarist {version} · MIT licence. The speech engine (Apache-2.0) and the models (OpenMDW-1.1,
-      NVIDIA Open Model License, CC-BY-4.0) are downloaded separately under their own licences. Nothing leaves this
+      Diarist {version} · MIT licence. The speech engine (Apache-2.0), ONNX Runtime (MIT) and the models
+      (OpenMDW-1.1, NVIDIA Open Model License, CC-BY-4.0, Apache-2.0) are downloaded separately under their own
+      licences. Nothing leaves this
       computer except those downloads and an update check you start yourself.
     </p>
     <div class="row">
