@@ -1,0 +1,11 @@
+# The public evaluation sets (docs/05-eval-data.md "Extend", docs/research/20-public-eval-data.md).
+# Nothing private here: every file lives under tools/eval/.work/public/<set>/ once that set's
+# fetch script has run, and each set writes its own sessions.toml there. A set that has not
+# been fetched is skipped with a note.
+#
+#   uv run python -I run.py --config shipped_n35 --sessions-file sessions.public.toml
+#   uv run python -I run.py --config shipped_en --sessions-file sessions.public.toml --groups pub-meeting,pub-far,pub-phone
+#
+# Groups: pub-meeting (AMI EN2002 Mix-Headset, ICSI), pub-far (AMI EN2002 Array1-01,
+# NOTSOFAR-1), pub-phone (Earnings-22), pub-lang (AliMeeting zh, SUMM-RE fr, Indic DiarBench hi).
+include = ["tools/eval/.work/public/*/sessions.toml"]

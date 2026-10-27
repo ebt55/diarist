@@ -11,7 +11,10 @@ Conventions
   hypothesis words whose midpoint falls outside it are dropped for the
   transcript metrics too.
 - Text: reference and hypothesis go through the same per-token normaliser
-  (common.normalize_token); fillers are dropped on both sides.
+  (common.normalize_token); fillers are dropped on both sides. Sessions in
+  another language use the multilingual normaliser (common.token_normalizer:
+  NFKC, casefold, punctuation removed); Mandarin and Japanese are scored per
+  character, so cpWER there is a speaker-attributed CER.
 - cpWER, tcpWER (collar 5 s), DI-cpWER and greedy ORC-WER (speaker-agnostic
   WER; exact ORC-WER does not fit in memory for a 20-minute meeting) via
   meeteval. DI-cpWER is computed with every hypothesis word as its own
@@ -23,6 +26,17 @@ Conventions
   to one); WDER = aligned pairs whose hypothesis speaker does not map to the
   reference speaker / aligned pairs. "near" restricts to reference words within
   1 s of a reference speaker change.
+- WER (speaker-agnostic): the same Levenshtein alignment of time-ordered
+  normalised words as WDER; w_sub, w_del and w_ins are its counts (research/19
+  section 0).
+- Gaps (research/19 section 0): stretches of at least GAP_MIN_S without a
+  hypothesis word in which the reference has at least GAP_MIN_REF_WORDS words.
+  A stretch runs from one hypothesis word's end to the next one's start (and
+  from the scored region's start, to its end); a reference word counts when
+  its midpoint lies inside the stretch shrunk by GAP_MARGIN_S at both ends
+  (Nemotron word times run about 0.3 s late). gaps_5s counts those of at least
+  GAP_LONG_S. Turn-level references spread a turn's span over its words, and
+  per-character languages count characters, so gaps there are approximate.
 
 CLI (one meeting, files from anywhere):
   uv run python -I metrics.py --ref-seglst r.jsonl --ref-rttm r.rttm \
@@ -60,6 +74,10 @@ logging.getLogger("error_rate").setLevel(logging.ERROR)
 
 NEAR_CHANGE_S = 1.0
 TCP_COLLAR_S = 5.0
+GAP_MIN_S = 2.0
+GAP_LONG_S = 5.0
+GAP_MIN_REF_WORDS = 3
+GAP_MARGIN_S = 0.5
 
 
 # --------------------------------------------------------------------------
@@ -93,6 +111,7 @@ def diarization_metrics(
             d = m(r, h, uem=uem, detailed=True)
             total = d["total"] or 1e-9
             out[name] = d["diarization error rate"]
+            out[name + "_total_s"] = d["total"]  # scored reference speech, for pooling
             out[name + "_miss"] = d["missed detection"] / total
             out[name + "_fa"] = d["false alarm"] / total
             out[name + "_conf"] = d["confusion"] / total
@@ -127,10 +146,20 @@ def wder(ref_words: list[Word], hyp_words: list[Word], radius: float = NEAR_CHAN
     ref_tok = [w.word for w in ref_words]
     hyp_tok = [w.word for w in hyp_words]
     pairs: list[tuple[int, int]] = []
+    sub = dele = ins = 0
     for op in Levenshtein.opcodes(ref_tok, hyp_tok):
+        n_ref, n_hyp = op.src_end - op.src_start, op.dest_end - op.dest_start
         if op.tag in ("equal", "replace"):
-            n = min(op.src_end - op.src_start, op.dest_end - op.dest_start)
+            n = min(n_ref, n_hyp)
             pairs.extend((op.src_start + k, op.dest_start + k) for k in range(n))
+        if op.tag == "replace":
+            sub += min(n_ref, n_hyp)
+            dele += max(0, n_ref - n_hyp)
+            ins += max(0, n_hyp - n_ref)
+        elif op.tag == "delete":
+            dele += n_ref
+        elif op.tag == "insert":
+            ins += n_hyp
     ref_spk = sorted({w.speaker for w in ref_words})
     hyp_spk = sorted({w.speaker for w in hyp_words})
     ri = {s: i for i, s in enumerate(ref_spk)}
@@ -160,6 +189,41 @@ def wder(ref_words: list[Word], hyp_words: list[Word], radius: float = NEAR_CHAN
         "ref_words": len(ref_words),
         "hyp_words": len(hyp_words),
         "speaker_map": mapping,
+        # Speaker-agnostic WER on the same alignment.
+        "wer": (sub + dele + ins) / len(ref_tok) if ref_tok else float("nan"),
+        "w_sub": sub,
+        "w_del": dele,
+        "w_ins": ins,
+    }
+
+
+def word_gaps(
+    ref_words: list[Word], hyp_words: list[Word], t0: float, t1: float, min_gap: float = GAP_MIN_S,
+    min_ref: int = GAP_MIN_REF_WORDS, margin: float = GAP_MARGIN_S,
+) -> list[dict]:
+    """Stretches of [t0, t1] without a hypothesis word, at least min_gap long,
+    holding at least min_ref reference words (midpoints, margin trimmed off
+    both ends). Definition: research/19 section 0."""
+    edges = [t0] + [x for w in sorted(hyp_words, key=lambda w: (w.start, w.end)) for x in (w.start, w.end)] + [t1]
+    ref_mid = sorted((w.start + w.end) / 2 for w in ref_words)
+    out = []
+    for i in range(0, len(edges) - 1, 2):
+        a, b = edges[i], edges[i + 1]
+        if b - a < min_gap:
+            continue
+        n = bisect.bisect_right(ref_mid, b - margin) - bisect.bisect_left(ref_mid, a + margin)
+        if n >= min_ref:
+            out.append({"start": round(a, 2), "end": round(b, 2), "len": round(b - a, 2), "ref_words": n})
+    return out
+
+
+def gap_metrics(ref_words: list[Word], hyp_words: list[Word], t0: float, t1: float) -> dict:
+    g = word_gaps(ref_words, hyp_words, t0, t1)
+    return {
+        "gaps": len(g),
+        "gaps_5s": sum(1 for x in g if x["len"] >= GAP_LONG_S),
+        "gap_ref_words": sum(x["ref_words"] for x in g),
+        "longest_gap_s": max((x["len"] for x in g), default=0.0),
     }
 
 
@@ -194,11 +258,22 @@ def wer_metrics(ref_segs: list[dict], hyp_segs: list[dict], hyp_word_segs: list[
         cp_falarm_speaker=cp.falarm_speaker,
     )
     tcp = next(iter(meeteval.wer.tcpwer(ref, hyp_w, collar=TCP_COLLAR_S).values()))
-    out["tcpwer"] = tcp.error_rate
-    di = next(iter(meeteval.wer.greedy_dicpwer(ref, hyp_w).values()))
-    out["dicpwer"] = di.error_rate
-    orc = next(iter(meeteval.wer.greedy_orcwer(ref, hyp).values()))
-    out["orcwer"] = orc.error_rate
+    out.update(tcpwer=tcp.error_rate, tcp_errors=tcp.errors, tcp_length=tcp.length)
+    # The ORC-based measures run with the streams of one side as ORC's
+    # "hypothesis" (DI-cpWER: the reference speakers), and meeteval 0.4.3
+    # refuses more than 10 such streams ("Are you sure?"), even for its greedy
+    # matching. Earnings-22 calls have up to 13 reference speakers; those
+    # measures are then left out (NaN) rather than failing the session.
+    def orc_based(fn, a, b) -> float:
+        try:
+            return next(iter(fn(a, b).values())).error_rate
+        except RuntimeError as e:
+            if "Are you sure" not in str(e):
+                raise
+            return float("nan")
+
+    out["dicpwer"] = orc_based(meeteval.wer.greedy_dicpwer, ref, hyp_w)
+    out["orcwer"] = orc_based(meeteval.wer.greedy_orcwer, ref, hyp)
     out["attribution_loss"] = out["cpwer"] - out["dicpwer"]
     out["meeteval_s"] = round(time.perf_counter() - t, 1)
     return out
@@ -254,7 +329,10 @@ def meeting_metrics(
     duration: float | None,
     session_id: str,
     region: tuple[float, float] | None = None,
+    lang: str | None = None,
 ) -> dict:
+    """lang: the session language; anything but English (or None) switches
+    the text normaliser to the multilingual one (common.token_normalizer)."""
     for rows in (ref_segs, hyp_segs, hyp_word_segs):
         for r in rows:
             r["session_id"] = session_id
@@ -266,10 +344,13 @@ def meeting_metrics(
     out: dict = {}
     if hyp_rttm is not None:
         out.update(diarization_metrics(ref_rttm, hyp_rttm, duration, region))
-    ref_n = normalize_seglst(ref_segs)
-    hyp_n = normalize_seglst(hyp_segs)
-    hyp_wn = normalize_seglst(hyp_word_segs)
-    out.update(wder(interpolate_words(ref_segs), interpolate_words(hyp_word_segs)))
+    ref_n = normalize_seglst(ref_segs, lang)
+    hyp_n = normalize_seglst(hyp_segs, lang)
+    hyp_wn = normalize_seglst(hyp_word_segs, lang)
+    ref_w, hyp_w = interpolate_words(ref_segs, lang), interpolate_words(hyp_word_segs, lang)
+    out.update(wder(ref_w, hyp_w))
+    t0, t1 = region or (0.0, duration or max([w.end for w in ref_w + hyp_w] + [0.0]))
+    out.update(gap_metrics(ref_w, hyp_w, t0, t1))
     out.update(wer_metrics(ref_n, hyp_n, hyp_wn))
     # Speakers that actually carry words, for the transcript-level count.
     out["hyp_speakers_words"] = len({r["speaker"] for r in hyp_wn})
@@ -285,6 +366,7 @@ def main() -> None:
     ap.add_argument("--hyp-rttm", type=Path)
     ap.add_argument("--duration", type=float)
     ap.add_argument("--session-id", default="s")
+    ap.add_argument("--language", help="session language (default English normaliser)")
     a = ap.parse_args()
     doc = json.loads(a.hyp_json.read_text(encoding="utf-8"))
     segs, words = hyp_from_export(doc, a.session_id)
@@ -296,6 +378,7 @@ def main() -> None:
         read_rttm(a.hyp_rttm) if a.hyp_rttm else None,
         a.duration,
         a.session_id,
+        lang=a.language,
     )
     print(json.dumps(res, indent=2, default=str))
 

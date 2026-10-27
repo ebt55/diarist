@@ -67,7 +67,11 @@ def ensure(kind: str) -> Path:
     return dest
 
 
-def build_reference(zip_path: Path, out: Path) -> int:
+def reference_rows(zip_path: Path, meeting: str = MEETING, session_id: str = "ami") -> list[dict]:
+    """One row per manually transcribed word of `meeting`, speaker = the
+    participant's global id. `words_pc` is the word with the punctuation
+    tokens that follow it attached (the manual transcript's own casing and
+    punctuation, docs/research/18)."""
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
         agents: dict[str, str] = {}
@@ -75,36 +79,47 @@ def build_reference(zip_path: Path, out: Path) -> int:
         if meetings:
             root = ET.fromstring(z.read(meetings))
             for m in root.iter():
-                if m.tag.endswith("meeting") and m.get("observation") == MEETING:
+                if m.tag.endswith("meeting") and m.get("observation") == meeting:
                     for s in m:
                         if s.tag.endswith("speaker") and s.get("nxt_agent"):
                             agents[s.get("nxt_agent")] = s.get("global_name") or s.get("nxt_agent")
         rows = []
         for n in sorted(names):
             base = n.rsplit("/", 1)[-1]
-            if not (base.startswith(MEETING + ".") and base.endswith(".words.xml")):
+            if not (base.startswith(meeting + ".") and base.endswith(".words.xml")):
                 continue
             letter = base.split(".")[1]
             spk = agents.get(letter, letter)
             root = ET.fromstring(z.read(n))
+            last = None
             for el in root.iter():
-                if not el.tag.endswith("w") or el.get("punc") == "true":
+                if not el.tag.endswith("w"):
                     continue
                 text = (el.text or "").strip()
+                if el.get("punc") == "true":
+                    if last is not None and text:
+                        last["words_pc"] += text
+                    continue
                 st, en = el.get("starttime"), el.get("endtime")
                 if not text or st is None or en is None:
+                    last = None
                     continue
-                rows.append(
-                    {
-                        "session_id": "ami",
-                        "speaker": spk,
-                        "start_time": round(float(st), 3),
-                        "end_time": round(max(float(en), float(st)), 3),
-                        "words": text,
-                        "timing": "word",
-                    }
-                )
+                last = {
+                    "session_id": session_id,
+                    "speaker": spk,
+                    "start_time": round(float(st), 3),
+                    "end_time": round(max(float(en), float(st)), 3),
+                    "words": text,
+                    "timing": "word",
+                    "words_pc": text,
+                }
+                rows.append(last)
     rows.sort(key=lambda r: (r["start_time"], r["end_time"]))
+    return rows
+
+
+def build_reference(zip_path: Path, out: Path) -> int:
+    rows = reference_rows(zip_path)
     write_jsonl(out, rows)
     return len(rows)
 
