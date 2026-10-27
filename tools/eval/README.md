@@ -11,7 +11,7 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `configs.toml` | The configurations: baselines, `--verbatim`, decoder lookahead and diarizer preset variants (per-config `engine_args`) |
 | `fleurs_fetch.py` | About 10 minutes of the FLEURS test split per language (CC-BY-4.0) for the WER-only mode |
 | `nemo_direct.py` | Runs `nemo-speech transcribe` directly with the app's file-job flags plus extra flags (spikes on runtime options the app does not pass) |
-| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, and `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) |
+| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, `loops` (the repeated-token loop collapse measured on cached runs or on a copy of a data root, against the references and the Rust rule) and `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
 | `public_data.py` | Shared helpers of the public-set fetch scripts: pinned curl downloads with SHA-256 checks, 16 kHz conversion, reference and session-list writing |
 | `ami_test_fetch.py`, `icsi_fetch.py`, `notsofar_fetch.py`, `earnings22_fetch.py`, `alimeeting_fetch.py`, `summre_fetch.py`, `indic_fetch.py` | One per public set (docs/05 "Extend"): fetch a pinned slice into `.work/public/<set>/` and write its references and session list |
@@ -67,10 +67,10 @@ Per session and config, run.py:
 
 1. converts the audio once to 16 kHz mono PCM WAV with ffmpeg (`.work/wav/<session>.wav`; a WAV that already is 16 kHz mono is used as is);
 2. selects the config's ASR and diarizer in its own scratch data root (`.work/data/<config>`, SQLite DB plus audio) and runs `diarist-cli transcribe <wav> --language <lang> --rttm --format json --out ... [--engine-arg=<flag> ...]`;
-3. exports the transcript RTTM (`diarist-cli export --format rttm`) and copies the standalone diarizer RTTM that `--rttm` keeps and the runtime's own words JSON (`engine.words.json`), all under `.work/runs/<config>/<session>/` with a `run.json` (wall times, VRAM, engine version, engine args, binary hash);
+3. exports the transcript RTTM (`diarist-cli export --format rttm`) and copies the standalone diarizer RTTM that `--rttm` keeps and the runtime's own words JSON (`engine.words.json`), all under `.work/runs/<config>/<session>/` with a `run.json` (wall times, the transcribe step's alone as `asr_wall_s`, VRAM, engine version, engine args, binary hash, the `right_context`, `diar_preset` and `device` the CLI passed, `punctuation` and `collapse_loops` as the data root ran, the run's `loops` counts from `engine_info.loops`, and `diar_pass`, false with `--no-diar-pass`);
 4. scores against the reference and writes `metrics.json` there, then the report.
 
-A finished run is cached by (session, config) and is redone when the config's ASR, diarizer, language, engine args or `punctuation` change, so re-running only recomputes the metrics. Delete `.work/runs/<config>/<session>` (or pass `--force`) to transcribe again.
+A finished run is cached by (session, config) and is redone when the config's ASR, diarizer, language, engine args, `punctuation` or `collapse_loops` change (a run cached before the loop collapse existed counts as `collapse_loops = false`, so the shipped configs transcribe again once), so re-running only recomputes the metrics. `--no-diar-pass` does not enter the key: a run without the standalone pass is reused, and its report has no standalone-diarizer rows. Delete `.work/runs/<config>/<session>` (or pass `--force`) to transcribe again.
 
 Report naming: sessions appear under their `label` (docs/05 shorthand such as "Aug 2", "Sep 5"); tables hold numbers only.
 
@@ -82,15 +82,19 @@ Report naming: sessions appear under their `label` (docs/05 shorthand such as "A
 | `nemotron_en` | nemotron-en | fallback EN model, selected with `diarist-cli models select asr nemotron-en` in its own data root |
 | `nemotron35_verbatim` | nemotron-3.5 | `--verbatim`: in nemo-speech 0.2.0 this disables ITN, not filler removal; no ITN grammars are configured, so it changes nothing |
 | `en_rc_13`, `en_rc_max` | nemotron-en | decoder lookahead 1.12 s (`--asr.streaming.rnnt_right_context 13`; `-1` resolves to the same) |
-| `n35_rc_3`, `n35_rc_6`, `n35_rc_13`, `n35_rc_max` | nemotron-3.5 | lookahead 320 ms, 560 ms, 1.12 s; `-1` resolves to 3 on the pinned GGUF |
+| `n35_rc_3`, `n35_rc_13`, `n35_rc_max` | nemotron-3.5 | lookahead 320 ms, 1.12 s; `-1` resolves to 3 on the pinned GGUF |
+| `en_rc_1`, `n35_rc_1`, `en_rc_6`, `n35_rc_6` | both | the live setting on the file path (0.1.0-beta.5, docs/plans/16 section 5): lookahead 160 ms (the runtime default, live up to 0.1.0-beta.4) and 560 ms (live since 0.1.0-beta.5), each with `--asr.diar.preset v3-streaming`, the live diarizer geometry, passed explicitly because a rebuilt diarist-cli otherwise applies the manifest's file values (docs/eval/2026-10-27-live-lookahead.md) |
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 13 and `--asr.diar.preset v3-offline` passed explicitly (the measurements behind 0.1.0-beta.2's defaults) |
 | `shipped_n35`, `shipped_en` | both | no `engine_args`: the app's own defaults. With a 0.1.0-beta.2 build (`tools/eval/.bin/diarist-cli.exe`; the earlier build is kept as `diarist-cli-0.1.0-beta.1.exe`) run.json records lookahead 13 and preset v3-offline, and `levers.py diff --a n35_rc_13_diar_off --b shipped_n35 --sessions ami,aug2,aug9,sep5,sep7,seplog,aug14` shows identical words, times and tags |
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 1.12 s plus `--asr.diar.preset v3-offline` in the fused pass (21 s diarizer chunks); the standalone `--rttm` pass stays on `v3-streaming` |
+| `shipped_en_loops_off` | nemotron-en | `shipped_en` with `collapse_loops = false`: the data root runs with `transcript.collapse_loops = off`, as every build before 0.1.0-beta.5, for comparisons with the older tables (docs/eval/2026-10-26-loop-collapse.md) |
 | `shipped_en_punct` | nemotron-en | `shipped_en` with `punctuation = true`: the data root runs with `transcript.punctuation = auto` and the manifest's punctuation model selected. Words, times and speakers are unchanged, so cpWER, tcpWER and WDER equal `shipped_en`'s; DER, JER and ORC-WER move because segments end at sentence ends (docs/eval/2026-10-26-punctuation.md section 12) |
 
 To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest names from `manifests/models.json`), `language`, a `description` and optionally `engine_args`: a list of flags for `nemo-speech transcribe`, one item per argument (`["--asr.streaming.rnnt_right_context", "13"]`). They reach the transcribe step only, not the standalone diarize pass.
 
-Punctuation is off in every config's data root (run.py writes `transcript.punctuation = off`), so the tables measure the speech model and the diarizer. `punctuation = true` turns it on for one config (`auto`, with the manifest's required punctuation model, or the one named by `punctuation_model`); the model must be in the models folder, else `models select punctuation` fails and the run stops.
+Punctuation is off in every config's data root (run.py writes `transcript.punctuation = off`), so the tables measure the speech model and the diarizer. `punctuation = true` turns it on for one config (`auto`, with the manifest's required punctuation model, or the one named by `punctuation_model`); the model must be in the models folder, else `models select punctuation` fails and the run stops. The beta.5 release check (docs/eval/2026-10-27-beta5-release.md) ran copies of `shipped_en` and `shipped_n35` with `punctuation = true`, the app's own default.
+
+The repeated-token loop collapse (docs/plans/16 section 12.3) runs at the app's default, on, in every config's data root (run.py writes `transcript.collapse_loops = on`); `collapse_loops = false` turns it off for one config. A build without the collapse makes run.py warn (the run has no `engine_info.loops`).
 
 ## WER-only mode (FLEURS)
 
