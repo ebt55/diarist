@@ -246,6 +246,7 @@ fn after_the_canceller_the_owners_level_comes_from_words_it_left_alone() {
             db: Some(OWNER),
             source: OwnerSource::Quiet,
             words: 22,
+            low: false,
         }
     );
     assert_eq!(
@@ -274,13 +275,16 @@ fn the_owners_level_falls_back_in_order() {
         (OwnerSource::Clean, 25, Some(OWNER + 2.0))
     );
     let l = stats(&words[..19]).owner(true, Some(FLOOR));
-    assert_eq!((l.source, l.words, l.db), (OwnerSource::None, 19, None));
+    assert_eq!(
+        (l.source, l.words, l.db, l.low),
+        (OwnerSource::TooFew, 19, None, false)
+    );
     // Cut words never count after the canceller, whatever their level.
     let loud: Vec<GateWord> = (0..30)
         .map(|k| cut(w(k * 1_000, "o", 1, OWNER, false, None), 3.0))
         .collect();
     let l = stats(&loud).owner(true, Some(FLOOR));
-    assert_eq!((l.source, l.words), (OwnerSource::None, 0));
+    assert_eq!((l.source, l.words), (OwnerSource::TooFew, 0));
     // Before the canceller: quiet words, else every word in no run.
     let raw: Vec<GateWord> = (0..25)
         .map(|k| w(k * 1_000, "o", 1, OWNER, k < 10, None))
@@ -288,7 +292,7 @@ fn the_owners_level_falls_back_in_order() {
     let l = stats(&raw).owner(false, Some(FLOOR));
     assert_eq!((l.source, l.words), (OwnerSource::Unmatched, 25));
     let l = stats(&raw[..19]).owner(false, Some(FLOOR));
-    assert_eq!((l.source, l.db), (OwnerSource::None, None));
+    assert_eq!((l.source, l.words, l.db), (OwnerSource::TooFew, 19, None));
 }
 
 #[test]
@@ -298,26 +302,80 @@ fn an_owners_level_near_the_floor_is_unknown_after_the_canceller_only() {
             .map(|k| cut(w(k * 1_000, "x", 1, FLOOR + over, false, None), 0.5))
             .collect()
     };
-    // Meeting 21's residue read 11.2 dB over the floor: unknown.
-    let l = stats(&at(11.2)).owner(true, Some(FLOOR));
-    assert_eq!((l.source, l.words, l.db), (OwnerSource::None, 30, None));
-    // Just under and at the plausibility margin.
+    // Meeting 21's 35 clean words sat 3.3 dB over the floor: implausible.
+    let l = stats(&at(3.3)).owner(true, Some(FLOOR));
     assert_eq!(
-        stats(&at(OWNER_PLAUSIBLE_DB - 0.1))
-            .owner(true, Some(FLOOR))
-            .db,
-        None
+        (l.source, l.words, l.db, l.low),
+        (OwnerSource::Implausible, 30, None, false)
     );
+    // Just under and at the plausibility margin, the presence margin.
+    assert_eq!(OWNER_PLAUSIBLE_DB, PRESENCE_DB);
+    let l = stats(&at(OWNER_PLAUSIBLE_DB - 0.1)).owner(true, Some(FLOOR));
+    assert_eq!((l.source, l.db), (OwnerSource::Implausible, None));
     let l = stats(&at(OWNER_PLAUSIBLE_DB)).owner(true, Some(FLOOR));
     assert_eq!(
-        (l.source, l.db),
-        (OwnerSource::Quiet, Some(FLOOR + OWNER_PLAUSIBLE_DB))
+        (l.source, l.db, l.low),
+        (OwnerSource::Quiet, Some(FLOOR + OWNER_PLAUSIBLE_DB), true)
     );
-    // No floor to check against: the estimate stands.
-    assert_eq!(stats(&at(11.2)).owner(true, None).db, Some(FLOOR + 11.2));
-    // Before the canceller the estimator is today's: no check.
-    let l = stats(&at(11.2)).owner(false, Some(FLOOR));
-    assert_eq!((l.source, l.db), (OwnerSource::Quiet, Some(FLOOR + 11.2)));
+    // A quiet owner 6 to 15 dB over the floor is trusted and marked low;
+    // from 15 dB on not low.
+    let l = stats(&at(11.2)).owner(true, Some(FLOOR));
+    assert_eq!(
+        (l.source, l.db, l.low),
+        (OwnerSource::Quiet, Some(FLOOR + 11.2), true)
+    );
+    let l = stats(&at(OWNER_LOW_DB - 0.1)).owner(true, Some(FLOOR));
+    assert!(l.low && l.db.is_some());
+    let l = stats(&at(OWNER_LOW_DB)).owner(true, Some(FLOOR));
+    assert_eq!((l.db, l.low), (Some(FLOOR + OWNER_LOW_DB), false));
+    // No floor to check against: the estimate stands, not low.
+    let l = stats(&at(3.3)).owner(true, None);
+    assert_eq!((l.db, l.low), (Some(FLOOR + 3.3), false));
+    // Before the canceller the estimator is today's: no check, never low.
+    let l = stats(&at(3.3)).owner(false, Some(FLOOR));
+    assert_eq!(
+        (l.source, l.db, l.low),
+        (OwnerSource::Quiet, Some(FLOOR + 3.3), false)
+    );
+}
+
+#[test]
+fn an_implausible_set_falls_through_to_the_next() {
+    // After the canceller: 25 words left alone at the floor while the far
+    // end was silent (a silent owner's noise), and 40 of the owner's over
+    // the far end, left alone, 25 dB over it.
+    let mut words: Vec<GateWord> = (0..25)
+        .map(|k| cut(w(k * 1_000, "n", 1, FLOOR + 2.0, false, None), 0.3))
+        .collect();
+    words.extend((0..40).map(|k| cut(w(k * 1_000 + 500, "o", 2, FLOOR + 25.0, true, None), 1.0)));
+    let l = stats(&words).owner(true, Some(FLOOR));
+    assert_eq!(
+        (l.source, l.words, l.db, l.low),
+        (OwnerSource::Clean, 65, Some(FLOOR + 25.0), false)
+    );
+    // Every set with enough words implausible: the last one tried counts.
+    let mut words: Vec<GateWord> = (0..25)
+        .map(|k| cut(w(k * 1_000, "n", 1, FLOOR + 2.0, false, None), 0.3))
+        .collect();
+    words.extend((0..10).map(|k| cut(w(k * 1_000 + 500, "r", 2, FLOOR + 4.0, true, None), 1.0)));
+    let l = stats(&words).owner(true, Some(FLOOR));
+    assert_eq!(
+        (l.source, l.words, l.db),
+        (OwnerSource::Implausible, 35, None)
+    );
+    // The first set too small, the second implausible (meeting 21: 16 clean
+    // words with the far end silent, 35 in all at +3.3 dB).
+    let mut words: Vec<GateWord> = (0..16)
+        .map(|k| cut(w(k * 1_000, "n", 1, FLOOR + 3.3, false, None), 0.3))
+        .collect();
+    words.extend((0..19).map(|k| cut(w(k * 1_000 + 500, "r", 2, FLOOR + 3.3, true, None), 1.0)));
+    let l = stats(&words).owner(true, Some(FLOOR));
+    assert_eq!(
+        (l.source, l.words, l.db),
+        (OwnerSource::Implausible, 35, None)
+    );
+    assert_eq!(OwnerSource::Implausible.as_str(), "implausible");
+    assert_eq!(OwnerSource::TooFew.as_str(), "too_few");
 }
 
 #[test]
@@ -337,12 +395,19 @@ fn the_gate_reports_the_owners_level_and_its_source() {
     let r = gate(&words, &f, Some(FLOOR), &opts(true));
     assert_eq!(
         (r.owner_source, r.owner_words, r.owner_db, r.floor_db),
-        (OwnerSource::None, 0, None, Some(FLOOR))
+        (OwnerSource::TooFew, 0, None, Some(FLOOR))
     );
     let r = gate(&words, &f, Some(FLOOR), &opts(false));
     assert_eq!(
-        (r.owner_source, r.owner_words, r.owner_db),
-        (OwnerSource::Quiet, 30, Some(FLOOR + 10.0))
+        (r.owner_source, r.owner_words, r.owner_db, r.owner_low),
+        (OwnerSource::Quiet, 30, Some(FLOOR + 10.0), false)
+    );
+    // Left alone by the canceller at +10: trusted and low.
+    let alone: Vec<GateWord> = words.iter().cloned().map(|x| cut(x, 0.5)).collect();
+    let r = gate(&alone, &f, Some(FLOOR), &opts(true));
+    assert_eq!(
+        (r.owner_source, r.owner_words, r.owner_db, r.owner_low),
+        (OwnerSource::Quiet, 30, Some(FLOOR + 10.0), true)
     );
     // A tweak's owner's level is the one reported (the evaluation's).
     let r = gate_with(&words, &f, Some(FLOOR), &opts(false), &|c| {

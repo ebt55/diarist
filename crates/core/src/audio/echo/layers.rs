@@ -34,19 +34,30 @@
 //!
 //! The owner's level ([`CalibrationStats::owner`], its source in
 //! [`OwnerSource`]) is the median level of words in no text run, from at
-//! least [`OWNER_MIN_WORDS`] of them:
+//! least [`OWNER_MIN_WORDS`] of them (plan 16 sections 12.2.2 and 12.7):
 //!
 //! - before the canceller (the raw gate of the transfer, the live gate and
 //!   Stop): of those spoken while the far end was silent, else of all words
-//!   in no run, else unknown;
+//!   in no run, else unknown (`too_few`);
 //! - after the canceller only of words it left alone (cut by under
-//!   [`super::transfer::ATTENUATION_DB`]: its residue is cut, the owner's own
-//!   words are not), the far end silent, else any, else unknown; and unknown
-//!   when the estimate sits under the floor plus [`OWNER_PLAUSIBLE_DB`]. On
-//!   meeting 21 (a talk on speakers, the owner nearly silent) the words in no
-//!   run were the canceller's residue and read 11.2 dB over the floor, the
-//!   owner sits 21 to 30 dB over it on meetings 13 and 15 to 20; the transfer
-//!   gate then uses its floor rule (plan 16 section 12.2.2).
+//!   [`super::transfer::ATTENUATION_DB`]), the far end silent, else any.
+//!   The canceller's residue of loud echo is cut by more; most of the
+//!   owner's own words are not, but not all: over continuous echo they lose
+//!   0.9 dB at the median and 4.0 dB at the 90th percentile on the spliced
+//!   double-talk set, and on the FLEURS fixture whose owner talks only over
+//!   loud far-end speech 23 dB over the floor, 161 of 212 are cut by 3 dB
+//!   or more (docs/eval/2026-10-26-echo-owner-level.md). A set whose median
+//!   sits under the floor plus [`OWNER_PLAUSIBLE_DB`] (the presence margin:
+//!   a level that close to the floor is not near-end speech) is not the
+//!   owner's and the next set is tried; unknown when every set of enough
+//!   words is that close (`implausible`; meeting 21, a talk on speakers with
+//!   the owner nearly silent: its 35 clean words sit 3.3 dB over the floor)
+//!   or none has enough (`too_few`). An estimate under the floor plus
+//!   [`OWNER_LOW_DB`] is trusted and marked low (`engine_info.echo.
+//!   owner_low`): an owner that close to the floor cannot be told from echo
+//!   at the floor by level. The owner sits 21 to 30 dB over the floor on
+//!   meetings 13 and 15 to 20. With the level unknown the transfer gate uses
+//!   its floor rule ([`super::transfer`]).
 //!
 //! After the post-pass canceller the decision also runs on the raw mic's
 //! words and is carried over to the cancelled ones ([`super::transfer`],
@@ -85,9 +96,12 @@ pub const POCKET_WORDS: usize = 2;
 pub const POCKET_GAP_MS: i64 = 300;
 /// Words the owner's level needs.
 pub const OWNER_MIN_WORDS: usize = 20;
+/// After the canceller a set of words whose median sits under the floor
+/// plus this (dB) is not the owner's (module docs): the presence margin.
+pub const OWNER_PLAUSIBLE_DB: f32 = PRESENCE_DB;
 /// After the canceller an owner's level under the floor plus this (dB) is
-/// unknown (module docs).
-pub const OWNER_PLAUSIBLE_DB: f32 = 15.0;
+/// trusted and marked low (module docs).
+pub const OWNER_LOW_DB: f32 = 15.0;
 /// Text-matched words with a coefficient the calibration needs.
 pub const CALIBRATE_MIN_MATCHED: usize = 20;
 /// Owner-level words with a coefficient the keep bound needs.
@@ -372,8 +386,11 @@ pub enum OwnerSource {
     Clean,
     /// Before the canceller: any word in no run.
     Unmatched,
-    /// Too few words, or after the canceller an implausible estimate.
-    None,
+    /// Unknown: no set has [`OWNER_MIN_WORDS`] words.
+    TooFew,
+    /// Unknown, after the canceller: every set with enough words has its
+    /// median under the floor plus [`OWNER_PLAUSIBLE_DB`].
+    Implausible,
 }
 
 impl OwnerSource {
@@ -382,7 +399,8 @@ impl OwnerSource {
             Self::Quiet => "quiet",
             Self::Clean => "clean",
             Self::Unmatched => "unmatched",
-            Self::None => "none",
+            Self::TooFew => "too_few",
+            Self::Implausible => "implausible",
         }
     }
 }
@@ -394,9 +412,11 @@ pub struct OwnerLevel {
     pub db: Option<f32>,
     pub source: OwnerSource,
     /// The words of the set it came from; when unknown, of the last set
-    /// tried (too few, or with a median under the floor plus
-    /// [`OWNER_PLAUSIBLE_DB`]).
+    /// tried (`too_few`) or of the last implausible one (`implausible`).
     pub words: usize,
+    /// After the canceller: the estimate sits under the floor plus
+    /// [`OWNER_LOW_DB`] (trusted, module docs).
+    pub low: bool,
 }
 
 /// How many settled words each set of [`CalibrationStats::owner`] holds
@@ -483,7 +503,9 @@ impl CalibrationStats {
 
     /// The owner's level (module docs): `canceller` when the words were
     /// transcribed from the canceller's output, `floor_db` the floor of
-    /// what was transcribed (the plausibility check, after the canceller).
+    /// what was transcribed (the plausibility check and the low mark, after
+    /// the canceller). The sets are tried in order; after the canceller one
+    /// whose median is implausible does not stop the search.
     pub fn owner(&self, canceller: bool, floor_db: Option<f32>) -> OwnerLevel {
         let unmatched: Vec<f32>;
         let sets: [(&[f32], OwnerSource); 2] = if canceller {
@@ -498,27 +520,36 @@ impl CalibrationStats {
                 (&unmatched, OwnerSource::Unmatched),
             ]
         };
-        let Some(&(set, source)) = sets.iter().find(|s| s.0.len() >= OWNER_MIN_WORDS) else {
+        // The floor the estimate is checked against (after the canceller).
+        let check = floor_db.filter(|_| canceller);
+        let mut implausible: Option<usize> = None;
+        for &(set, source) in sets.iter().filter(|s| s.0.len() >= OWNER_MIN_WORDS) {
+            let db = percentile(&mut set.to_vec(), 0.5);
+            let over = db.zip(check).map(|(o, f)| o - f);
+            if over.is_some_and(|d| d < OWNER_PLAUSIBLE_DB) {
+                implausible = Some(set.len());
+                continue;
+            }
             return OwnerLevel {
-                db: None,
-                source: OwnerSource::None,
-                words: sets[1].0.len(),
-            };
-        };
-        let db = percentile(&mut set.to_vec(), 0.5);
-        let implausible =
-            canceller && matches!((db, floor_db), (Some(o), Some(f)) if o < f + OWNER_PLAUSIBLE_DB);
-        if implausible {
-            return OwnerLevel {
-                db: None,
-                source: OwnerSource::None,
+                db,
+                source,
                 words: set.len(),
+                low: over.is_some_and(|d| d < OWNER_LOW_DB),
             };
         }
-        OwnerLevel {
-            db,
-            source,
-            words: set.len(),
+        match implausible {
+            Some(words) => OwnerLevel {
+                db: None,
+                source: OwnerSource::Implausible,
+                words,
+                low: false,
+            },
+            None => OwnerLevel {
+                db: None,
+                source: OwnerSource::TooFew,
+                words: sets[1].0.len(),
+                low: false,
+            },
         }
     }
 
@@ -650,10 +681,11 @@ pub struct LayerReport {
     /// The owner's level and the floor the decision used.
     pub owner_db: Option<f32>,
     pub floor_db: Option<f32>,
-    /// Where the owner's level came from, and from how many words
-    /// ([`OwnerLevel`]).
+    /// Where the owner's level came from, from how many words, and whether
+    /// it is low ([`OwnerLevel`]).
     pub owner_source: OwnerSource,
     pub owner_words: usize,
+    pub owner_low: bool,
 }
 
 impl LayerReport {
@@ -724,6 +756,7 @@ pub fn gate_with(
         floor_db: ctx.floor_db,
         owner_source: owner.source,
         owner_words: owner.words,
+        owner_low: owner.low,
     }
 }
 

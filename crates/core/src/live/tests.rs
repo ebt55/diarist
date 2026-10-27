@@ -1656,6 +1656,12 @@ fn an_echo_step_that_fails_leaves_the_mic_ungated_and_says_why() {
 /// loopback is what an AGC raising it by 0 to 12 dB made of it, and
 /// `loopback.gain` says so.
 fn echo_wavs(folder: &Path, echo: bool, gain: bool) {
+    echo_wavs_owner(folder, echo, gain, true);
+}
+
+/// [`echo_wavs`]; without `owner` the owner never speaks (a talk on
+/// speakers: the far end, then the mic's noise alone).
+fn echo_wavs_owner(folder: &Path, echo: bool, gain: bool, owner: bool) {
     use crate::audio::echo::synth::{add_delayed, add_noise, db, monologue, to_i16};
     let n = 60 * 16_000;
     let (far, _) = monologue(51, 28 * 16_000, db(-28.0));
@@ -1664,7 +1670,9 @@ fn echo_wavs(folder: &Path, echo: bool, gain: bool) {
     lb[..far.len()].copy_from_slice(&far);
     add_noise(&mut lb, 53, db(-65.0));
     let mut mic = vec![0.0f32; n];
-    mic[32 * 16_000..].copy_from_slice(&own);
+    if owner {
+        mic[32 * 16_000..].copy_from_slice(&own);
+    }
     if echo {
         add_delayed(&mut mic, &lb, 48, db(-10.0));
     }
@@ -1703,10 +1711,10 @@ struct EchoRun {
     aec_left: bool,
 }
 
-/// The fake file engine's mic words (`p<s>` each second) stored as the live
-/// run's mic utterances, one per second.
-fn live_mic_like_the_file_engine(store: &SqliteStore, run: RunId, secs: u64) {
-    for s in 0..secs {
+/// The fake file engine's mic words (`p<s>` each second `s` of `secs`)
+/// stored as the live run's mic utterances, one per second.
+fn live_mic_seconds(store: &SqliteStore, run: RunId, secs: std::ops::Range<u64>) {
+    for s in secs {
         store
             .append_live_utterance(
                 run,
@@ -1741,14 +1749,27 @@ fn echo_post_pass_full(
     gain: bool,
     live_mic: bool,
 ) -> EchoRun {
+    echo_post_pass_case(mode, echo, user_off, gain, live_mic.then_some(0..60), true)
+}
+
+/// [`echo_post_pass_full`]; `live_mic`: the seconds of the live run's mic
+/// words; `owner`: whether the owner speaks ([`echo_wavs_owner`]).
+fn echo_post_pass_case(
+    mode: Option<&str>,
+    echo: bool,
+    user_off: bool,
+    gain: bool,
+    live_mic: Option<std::ops::Range<u64>>,
+    owner: bool,
+) -> EchoRun {
     let dir = tempfile::tempdir().unwrap();
     let (_ctx, store, file) = context(dir.path(), None);
     if let Some(m) = mode {
         store.set_setting(settings::ECHO_MODE, m).unwrap();
     }
     let (meeting, live) = interrupted_meeting(&store, dir.path(), "Echo", false);
-    if live_mic {
-        live_mic_like_the_file_engine(&store, live, 60);
+    if let Some(secs) = live_mic {
+        live_mic_seconds(&store, live, secs);
     }
     if user_off {
         let mut info = store.get_run(live).unwrap().engine_info;
@@ -1756,7 +1777,7 @@ fn echo_post_pass_full(
         store.set_run_engine_info(live, info).unwrap();
     }
     let folder = dir.path().join("audio").join(&meeting.uid);
-    echo_wavs(&folder, echo, gain);
+    echo_wavs_owner(&folder, echo, gain, owner);
     let job = PostPassJob {
         job_id: JobId::new(),
         meeting: meeting.id,
@@ -1876,6 +1897,40 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
         .iter()
         .filter(|w| w.reason == Some(crate::types::EchoReason::Transfer))
         .all(|w| w.start_ms < 30_000));
+    // The owner's level (plan 16 section 12.7): from the words the canceller
+    // left alone while the far end was silent, far over the floor; so no
+    // floor rule. The raw gate's level, floor and share are the raw mic's.
+    assert_eq!(
+        (
+            e["owner_source"].as_str(),
+            e["owner_low"].as_bool(),
+            e["owner_words"].as_u64().is_some_and(|n| n >= 20)
+        ),
+        (Some("quiet"), Some(false), true),
+        "{e}"
+    );
+    let (owner, floor) = (
+        e["owner_db"].as_f64().unwrap(),
+        e["floor_db"].as_f64().unwrap(),
+    );
+    assert!(owner > floor + 15.0, "{e}");
+    assert!(t["raw_owner_db"].as_f64().is_some(), "{e}");
+    assert!(t["raw_floor_db"].as_f64().is_some(), "{e}");
+    assert!(
+        t.get("owner_db").is_none() && t.get("floor_db").is_none(),
+        "{e}"
+    );
+    let share = t["raw_dropped"].as_f64().unwrap() / t["raw_words"].as_f64().unwrap();
+    assert!(
+        (t["raw_echo_share"].as_f64().unwrap() - share).abs() < 1e-4,
+        "{e}"
+    );
+    assert_eq!(
+        t["floor_rule"],
+        serde_json::json!({"tier": null, "f_db": null, "removed": 0}),
+        "{e}"
+    );
+    assert_eq!(t["floor"], 0, "{e}");
     // off: no canceller, no echo key, no list, every word.
     let r = echo_post_pass_with(Some("off"), true, false, false);
     assert!(
@@ -1949,6 +2004,79 @@ fn post_pass_gates_the_echoed_half_and_off_changes_nothing() {
     assert!(e["erle_db"].as_f64().unwrap() >= 20.0, "{e}");
     let kept = mic_words(&r.store, r.report.current_run);
     assert!((32..60).all(|s| kept.contains(&s)), "{kept:?}");
+}
+
+#[test]
+fn a_silent_owner_leaves_the_owners_level_unknown_and_the_floor_rule_in_force() {
+    use crate::audio::echo::transfer::{FLOOR_MARGIN_DB, FLOOR_MARGIN_SILENT_DB};
+    // A talk on speakers with the owner silent (plan 16 section 12.7): the
+    // far end for 28 s, then the mic's noise alone. After the canceller the
+    // words it left alone are the noise words, at the floor: implausible.
+    let check = |r: &EchoRun| -> serde_json::Value {
+        let run = r.store.get_run(r.report.current_run).unwrap();
+        let e = run.engine_info["echo"].clone();
+        assert_eq!(e["aec"], true, "{e}");
+        assert_eq!(
+            (
+                e["owner_source"].as_str(),
+                e["owner_db"].as_f64(),
+                e["owner_low"].as_bool(),
+                e["owner_words"].as_u64().is_some_and(|n| n >= 20)
+            ),
+            (Some("implausible"), None, Some(false), true),
+            "{e}"
+        );
+        let t = &e["transfer"];
+        assert!(t["raw_owner_db"].as_f64().is_some(), "{e}");
+        assert!(t["raw_floor_db"].as_f64().is_some(), "{e}");
+        assert_eq!(t["floor_rule"]["removed"], t["floor"], "{e}");
+        let kept: Vec<i64> = r
+            .store
+            .get_words(run.meeting_id, i64::MIN, i64::MAX)
+            .unwrap()
+            .iter()
+            .filter(|w| w.text.starts_with('p') && w.raw_label.is_none())
+            .map(|w| w.start_ms / 1_000)
+            .collect();
+        // The noise words after the far end stopped stay: no raw echo word
+        // is near them.
+        assert!((30..60).all(|s| kept.contains(&s)), "{kept:?}");
+        e
+    };
+    // The raw mic transcribed (60 words, about half of them echo): the
+    // general tier, F_u.
+    let r = echo_post_pass_case(None, true, false, false, None, false);
+    let e = check(&r);
+    let t = &e["transfer"];
+    assert_eq!(t["source"], "transcribed", "{e}");
+    assert!(t["raw_echo_share"].as_f64().unwrap() < 0.9, "{e}");
+    assert_eq!(
+        (
+            t["floor_rule"]["tier"].as_str(),
+            t["floor_rule"]["f_db"].as_f64()
+        ),
+        (Some("unknown"), Some(f64::from(FLOOR_MARGIN_DB))),
+        "{e}"
+    );
+    // The live run heard only the far end (its mic words while it talked,
+    // every one echo): both signatures of a silent owner, the silent tier.
+    let r = echo_post_pass_case(None, true, false, false, Some(0..28), false);
+    let e = check(&r);
+    let t = &e["transfer"];
+    assert_eq!(
+        (t["source"].as_str(), t["raw_words"].as_u64()),
+        (Some("live"), Some(28)),
+        "{e}"
+    );
+    assert_eq!(t["raw_echo_share"], 1.0, "{e}");
+    assert_eq!(
+        (
+            t["floor_rule"]["tier"].as_str(),
+            t["floor_rule"]["f_db"].as_f64()
+        ),
+        (Some("silent"), Some(f64::from(FLOOR_MARGIN_SILENT_DB))),
+        "{e}"
+    );
 }
 
 #[test]
