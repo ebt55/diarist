@@ -11,9 +11,14 @@
 //! context and the sentence starts), each channel is segmented on its own
 //! with the run's segment options (`engine_info.segmentation`, else the
 //! defaults) and the segments are ordered by start time as the post-pass
-//! does. The result is a new run of the same kind with
+//! does. The removed words are the engine's raw words, so the channels'
+//! repeated-token loops are collapsed again before punctuation (plan 16
+//! section 12.3; a loop removed as echo comes back whole, as one word per
+//! burst). The result is a new run of the same kind with
 //! `engine_info.echo.restored: true` (with `restored_from`,
-//! `restored_words` and `dropped: 0`), `engine_info.punctuation` replaced
+//! `restored_words`, `restored_merged`, how many of the restored words the
+//! collapse merged into a loop, and `dropped: 0`), `engine_info.punctuation`
+//! and `engine_info.loops` replaced
 //! and an empty `echo_dropped`; speakers carry over by identity
 //! ([`RunStore::carry_over_identity`]), and the new run becomes current
 //! only while `run` still is ([`RunStore::set_current_run_if`]; otherwise
@@ -27,6 +32,7 @@ use crate::error::{CoreError, Result};
 use crate::punct::rebuild::{rebuild_transcript, run_language, source_run, store_rebuild};
 use crate::punct::{punctuate_loaded, PunctSource};
 use crate::store::{CarryOverReport, RunStore, StoreError};
+use crate::transcript::loops::{self, collapse_channels_marked};
 use crate::transcript::{SegmentOptions, TranscriptWord, ME_LABEL};
 use crate::types::{Channel, MeetingId, MeetingStatus, RunId};
 
@@ -40,6 +46,9 @@ pub struct EchoRestore {
     pub from_run: RunId,
     /// Words put back.
     pub restored: usize,
+    /// Of them, merged into a repeated-token loop by the collapse (plan 16
+    /// section 12.3): `restored - merged` show as words of their own.
+    pub merged: u64,
     pub carry_over: CarryOverReport,
 }
 
@@ -114,6 +123,10 @@ pub fn restore_echo_dropped(
         channels.insert(0, (Channel::Mic, Vec::new()));
     }
     let restored = dropped.len();
+    // The restored words are marked, so the loop collapse can say how many
+    // of them merged into a loop.
+    let mut marks = vec![false; channels[0].1.len()];
+    marks.resize(channels[0].1.len() + restored, true);
     channels[0]
         .1
         .extend(dropped.into_iter().map(|d| TranscriptWord {
@@ -128,6 +141,14 @@ pub fn restore_echo_dropped(
             margin: None,
             overlap: false,
         }));
+    // The removed words are raw: a loop dropped as echo comes back whole and
+    // is collapsed again (plan 16 section 12.3), the marks telling how many
+    // restored words merged into one; the counts include the old run's.
+    // Then every channel in time order (the collapse already sorted them;
+    // with it off the restored words go into place here).
+    let (loops, merged) =
+        collapse_channels_marked(&mut channels, loops::enabled(store), &mut [marks]);
+    let loops = loops.on_top_of(&old.engine_info);
     for (_, words) in channels.iter_mut() {
         words.sort_by_key(|w| w.start_ms);
     }
@@ -150,9 +171,14 @@ pub fn restore_echo_dropped(
     info["echo"]["restored"] = serde_json::json!(true);
     info["echo"]["restored_from"] = serde_json::json!(run.0);
     info["echo"]["restored_words"] = serde_json::json!(restored);
+    // Of them, merged into a repeated-token loop by the collapse (each
+    // burst kept as one word), so `restored_words - restored_merged` of
+    // them show.
+    info["echo"]["restored_merged"] = serde_json::json!(merged);
     info["echo"]["dropped"] = serde_json::json!(0);
     // Replaced wholesale: the old run's block describes other words.
     info["punctuation"] = punctuation.to_json();
+    info["loops"] = loops.to_json();
     let (new, report) = store_rebuild(store, meeting, run, old.kind, info, Some(&[]), &transcript)?;
     // Only now that the new run is current: an earlier restore of this run
     // is replaced. A punctuation copy of one is not a restore (it inherited
@@ -172,7 +198,7 @@ pub fn restore_echo_dropped(
         }
     }
     log::info!(
-        "meeting {meeting}: {restored} echo words restored into \"me\" as run {new} (from run {run}, kept); carry-over {} matched, {} named, {} need review",
+        "meeting {meeting}: {restored} echo words restored into \"me\" as run {new} (from run {run}, kept; {merged} of them merged into repeated-token loops); carry-over {} matched, {} named, {} need review",
         report.matched.len(),
         report.named.len(),
         report.needs_review.len()
@@ -182,6 +208,7 @@ pub fn restore_echo_dropped(
         run: new,
         from_run: run,
         restored,
+        merged,
         carry_over: report,
     })
 }
@@ -646,5 +673,94 @@ mod tests {
             SqliteStore::open_in_memory().unwrap(),
         ));
         restore_keeps_punctuation_copies(std::sync::Arc::new(MemoryStore::new()));
+    }
+
+    /// Plan 16 section 12.3: `echo_dropped` holds raw words, so a mic loop
+    /// the gate removed comes back whole and is collapsed again; the counts
+    /// add the old run's (its words were collapsed when it was built).
+    fn restore_collapses_a_dropped_loop(store: &dyn RunStore) {
+        let loop_words: Vec<EchoDroppedWord> = (0..4)
+            .map(|k| EchoDroppedWord {
+                start_ms: 2_080,
+                end_ms: 2_160 + k * 10,
+                text: if k == 3 { "one.".into() } else { "one".into() },
+                coefficient: 0.8,
+                reason: None,
+            })
+            .chain(std::iter::once(EchoDroppedWord {
+                start_ms: 2_470,
+                end_ms: 2_700,
+                text: "two".into(),
+                coefficient: 0.77,
+                reason: None,
+            }))
+            .collect();
+        let earlier = serde_json::json!({"applied": true, "runs": 1, "words_removed": 2,
+            "per_channel": {"loopback": {"runs": 1, "words_removed": 2}, "mic": {"runs": 0, "words_removed": 0}},
+            "rule": {"min_run": 4, "frame_ms": 80, "split_ms": 400}});
+        let setup = |store: &dyn RunStore| {
+            let (m, run) = meeting(store);
+            store.set_echo_dropped(run, &loop_words).unwrap();
+            let mut info = store.get_run(run).unwrap().engine_info;
+            info["loops"] = earlier.clone();
+            store.set_run_engine_info(run, info).unwrap();
+            (m, run)
+        };
+        let (m, run) = setup(store);
+        let r = restore_echo_dropped(store, &PunctSource::None, run).unwrap();
+        assert_eq!(mic_texts(store, m), ["hello", "one.", "two", "bye"]);
+        let kept = store
+            .get_words(m, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.text == "one.")
+            .unwrap();
+        assert_eq!((kept.start_ms, kept.end_ms), (2_080, 2_190));
+        assert_eq!(r.restored, 5, "every dropped word was put back");
+        // Three of the five merged into the loop's one word: the details
+        // can say so instead of claiming five words are back.
+        assert_eq!(r.merged, 3);
+        let info = store.get_run(r.run).unwrap().engine_info;
+        assert_eq!(
+            (
+                info["echo"]["restored_words"].as_u64(),
+                info["echo"]["restored_merged"].as_u64()
+            ),
+            (Some(5), Some(3))
+        );
+        let loops = crate::transcript::loops::LoopReport::of_engine_info(&info).unwrap();
+        assert_eq!(
+            (loops.applied, loops.runs, loops.words_removed),
+            (true, 2, 5)
+        );
+        assert_eq!(loops.per_channel["mic"].words_removed, 3);
+        assert_eq!(loops.per_channel["loopback"].words_removed, 2);
+        // With the collapse off the loop comes back as it was; the old run's
+        // counts stay (its words are still the collapsed ones).
+        store
+            .set_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS, "off")
+            .unwrap();
+        let (m2, run2) = setup(store);
+        let r2 = restore_echo_dropped(store, &PunctSource::None, run2).unwrap();
+        assert_eq!(
+            mic_texts(store, m2),
+            ["hello", "one", "one", "one", "one.", "two", "bye"]
+        );
+        let info = store.get_run(r2.run).unwrap().engine_info;
+        assert_eq!(info["loops"]["applied"], false);
+        assert_eq!(info["loops"]["words_removed"], 2);
+        assert_eq!(
+            (r2.merged, &info["echo"]["restored_merged"]),
+            (0, &serde_json::json!(0))
+        );
+        store
+            .remove_setting(crate::settings::TRANSCRIPT_COLLAPSE_LOOPS)
+            .unwrap();
+    }
+
+    #[test]
+    fn restore_collapses_a_loop_that_was_removed_as_echo() {
+        restore_collapses_a_dropped_loop(&SqliteStore::open_in_memory().unwrap());
+        restore_collapses_a_dropped_loop(&MemoryStore::new());
     }
 }

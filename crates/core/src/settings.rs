@@ -93,6 +93,11 @@ pub const TRANSCRIPT_PUNCTUATION: &str = "transcript.punctuation";
 /// ONNX Runtime intra-op threads of the punctuation model, no UI; clamped
 /// to 1 to the machine's cores ([`crate::punct::threads`]).
 pub const TRANSCRIPT_PUNCTUATION_THREADS: &str = "transcript.punctuation_threads";
+/// Repeated-token loops (the decoder's bursts of one token) collapse to one
+/// word in the post-pass, imports, Restore and rebuilds (plan 16 section
+/// 12.3): `on` or `off`, no UI ([`collapse_loops`],
+/// [`crate::transcript::loops`]).
+pub const TRANSCRIPT_COLLAPSE_LOOPS: &str = "transcript.collapse_loops";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`,
@@ -130,6 +135,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (PLAYBACK_NORMALIZE, "true"),
     (TRANSCRIPT_PUNCTUATION, "auto"),
     (TRANSCRIPT_PUNCTUATION_THREADS, "4"),
+    (TRANSCRIPT_COLLAPSE_LOOPS, "on"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -324,6 +330,12 @@ pub fn default_language(settings: &Settings) -> String {
     } else {
         lang.to_owned()
     }
+}
+
+/// `transcript.collapse_loops`: on unless it reads as false (`off`, `false`,
+/// `no`, `0`); anything unreadable is the default, on.
+pub fn collapse_loops(settings: &Settings) -> bool {
+    get_bool(settings, TRANSCRIPT_COLLAPSE_LOOPS)
 }
 
 /// The TypeScript module with [`DEFAULTS`]

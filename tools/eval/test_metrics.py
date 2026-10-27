@@ -1,4 +1,5 @@
-"""Sanity checks for metrics.py on synthetic meetings (no GPU, no private data).
+"""Sanity checks for metrics.py on synthetic meetings, and for levers.py's loop rule
+against crates/core/src/transcript/loops.rs (no GPU, no private data).
 
   uv run python -I -m pytest test_metrics.py   (or: uv run python -I test_metrics.py)
 """
@@ -9,6 +10,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import levers as L  # noqa: E402
 import metrics as M  # noqa: E402
 from common import RttmRow, normalize_token, seglst_to_rttm  # noqa: E402
 
@@ -84,6 +86,52 @@ def test_normaliser_drops_fillers_and_punctuation():
     assert normalize_token("Um,") == ()
     assert normalize_token("Budget.") == ("budget",)
     assert normalize_token("OK") == ("okay",)
+
+
+# crates/core/src/transcript/loops.rs `NORM_PAIRS`: the Rust `norm` of each
+# text (combining vowel signs kept, tone marks, viramas and control
+# characters dropped, Rust's white space trimmed).
+NORM_PAIRS = [
+    ("नहीं", "नहीं"),
+    ("ที่", "ที"),
+    ("தமிழ்", "தமிழ"),
+    ("Ко-ко,", "коко"),
+    ("a\x1cb", "ab"),
+    ("İ", "i"),
+    ("Ⅻ", "ⅻ"),
+    (" ok\xa0", "ok"),
+    ("đâu?", "đâu"),
+]
+
+
+def test_loop_norm_is_the_rust_norm():
+    for text, want in NORM_PAIRS:
+        assert L.loop_norm(text) == want, (text, L.loop_norm(text), want)
+    # Devanagari is collapsible (a script with spaces), Thai never.
+    assert L.loop_eligible(L.loop_norm("नहीं"))
+    assert not L.loop_eligible(L.loop_norm("ที่"))
+    # Digits only, in any script, are never collapsed.
+    assert not L.loop_eligible(L.loop_norm("٣٣"))
+
+
+def _words(starts, text="no"):
+    return [{"start": t, "end": t + 80, "text": text, "norm": L.loop_norm(text), "speaker": "spk_0", "seg": None}
+            for t in starts]
+
+
+def test_loop_rule_matches_loops_rs():
+    # crates/core/src/transcript/loops.rs `real_repeats_after_a_burst_stay`
+    # and `a_train_of_bursts_keeps_one_word_per_burst`.
+    w = _words([0] * 5 + [300, 600, 900])
+    assert L.loop_removed(w, rule="plan") == 7
+    assert L.loop_removed(w) == 4
+    assert L.loop_removed(_words([0, 0, 0, 250], "I")) == 2
+    assert L.loop_removed(_words([0, 80, 161, 241], "and")) == 0
+    assert L.loop_removed(_words([0, 80, 161, 241], "and"), rule="plan") == 3
+    assert L.loop_removed(_words([1000 + (k // 8) * 160 for k in range(24)], "the")) == 21
+    # Never more than the plan's rule.
+    w = _words([0, 0, 0, 0, 300, 600, 900, 1200, 1500])
+    assert L.loop_removed(w) == L.loop_removed(w, rule="plan") == 0
 
 
 if __name__ == "__main__":

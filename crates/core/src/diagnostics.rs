@@ -425,8 +425,14 @@ fn last_echo_note(e: &serde_json::Value) -> String {
     if e["restored"].as_bool() == Some(true) {
         let r = n("restored_words");
         let were = if r == 1 { "was" } else { "were" };
+        // Restore collapses repeated-token loops again (plan 16 section
+        // 12.3): restored copies of a burst show as one word.
+        let merged = match n("restored_merged") {
+            0 => String::new(),
+            m => format!(" ({m} merged into repeated-token loops)"),
+        };
         format!(
-            "{heard}; its {r} removed {} {were} put back with Restore.",
+            "{heard}; its {r} removed {} {were} put back with Restore{merged}.",
             words(r)
         )
     } else if e["user_off"].as_bool() == Some(true) {
@@ -1156,6 +1162,16 @@ mod tests {
         assert!(
             restored.ends_with("(coupling 0.70); its 1 removed word was put back with Restore."),
             "{restored}"
+        );
+        let merged = note(serde_json::json!({
+            "coupled": true, "coupling": 0.7, "restored": true, "restored_words": 5,
+            "restored_merged": 3, "dropped": 0
+        }));
+        assert!(
+            merged.ends_with(
+                "its 5 removed words were put back with Restore (3 merged into repeated-token loops)."
+            ),
+            "{merged}"
         );
         let user_off = note(serde_json::json!({
             "coupled": true, "coupling": 0.7, "user_off": true, "dropped": 0

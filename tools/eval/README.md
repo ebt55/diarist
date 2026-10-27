@@ -14,7 +14,7 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
 | `sessions.example.toml` | Template for `sessions.toml` (gitignored, holds the private paths) |
-| `test_metrics.py` | Synthetic sanity checks for the metrics (no GPU, no private data) |
+| `test_metrics.py` | Synthetic sanity checks for the metrics and for `levers.py loops` against the Rust rule (no GPU, no private data) |
 
 ## Setup
 

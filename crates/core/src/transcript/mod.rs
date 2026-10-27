@@ -10,7 +10,10 @@
 //! are segmented one channel at a time and their segments ordered by start
 //! time ([`interleave_segments`], [`build_transcript_channels`]), so speech
 //! that overlaps in time stays in readable per-speaker segments instead of
-//! alternating word by word.
+//! alternating word by word. Before segmentation every build collapses the
+//! decoder's repeated-token loops ([`loops`], plan 16 section 12.3).
+
+pub mod loops;
 
 use std::collections::HashMap;
 use std::ops::Range;

@@ -28,6 +28,8 @@ export interface EchoInfo {
   userOff: boolean;
   restored: boolean;
   restoredWords: number;
+  /** Of the restored words, merged into a repeated-token loop (plan 16 section 12.3; 0 for older runs). */
+  restoredMerged: number;
   error: string | null;
 }
 
@@ -48,6 +50,7 @@ export function echoInfo(engineInfo: unknown): EchoInfo | null {
     userOff: o.user_off === true,
     restored: o.restored === true,
     restoredWords: num(o.restored_words) ?? 0,
+    restoredMerged: num(o.restored_merged) ?? 0,
     error: typeof o.error === "string" ? o.error : null,
   };
 }
@@ -84,7 +87,10 @@ export function echoLine(e: EchoInfo | null): EchoLine | null {
   }
   if (e.restored) {
     return {
-      text: `${detected(e)}: the ${words(e.restoredWords)} removed from "me" are back in this transcript.`,
+      text:
+        e.restoredMerged > 0
+          ? `${detected(e)}: the ${words(e.restoredWords)} removed from "me" are back in this transcript, ${e.restoredMerged.toLocaleString("en-US")} of them merged into repeated-token loops.`
+          : `${detected(e)}: the ${words(e.restoredWords)} removed from "me" are back in this transcript.`,
       action: "remove",
       actionLabel: "Remove echo words again",
       aec: e.aec,

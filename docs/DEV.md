@@ -425,8 +425,11 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   `me` (engine labels kept, each channel re-segmented with the run's
   `engine_info.segmentation` and interleaved as the post-pass does), carries
   names, colours and reassignments over and makes the old run's merges
-  again, writes `engine_info.echo.restored: true` (`restored_from`,
-  `restored_words`, `dropped: 0`) and an empty `echo_dropped`, and makes it
+  again, collapses the channels' repeated-token loops again (the restored
+  words are raw), writes `engine_info.echo.restored: true` (`restored_from`,
+  `restored_words`, `restored_merged`: how many of them merged into a
+  burst, which the details line names, `dropped: 0`) and an empty
+  `echo_dropped`, and makes it
   current; the old run stays, and restoring it again replaces the earlier
   restored run. A restored run offers "Remove echo words again"
   (`remove_restored_echo(run_id)`: the old run becomes current, nothing is
@@ -475,9 +478,11 @@ Plan 16 section 3.8; also in `settings::DEFAULTS`:
 |---|---|---|
 | `transcript.punctuation` | `auto` | `auto`: the post-pass, imports, Restore and "Add punctuation" punctuate the words when a punctuation model is selected, installed and covers the run's language (`punct::load`); `off`: never (`engine_info.punctuation.reason` is `off`). Nothing live is punctuated in beta.5 |
 | `transcript.punctuation_threads` | `4` | ONNX Runtime intra-op threads, clamped to 1 to the machine's cores (`punct::threads`); no UI |
+| `transcript.collapse_loops` | `on` | Repeated-token loops (plan 16 section 12.3, `transcript::loops`): the post-pass, imports, Restore and every punctuation rebuild (Add and Remove) keep each burst of one word that the speech model wrote several times in one 80 ms frame as one word; `off` keeps every word (`engine_info.loops.applied` is `false`). No UI and no CLI command: with Diarist closed, `sqlite3 "<data folder>\diarist.db" "INSERT OR REPLACE INTO settings (key, value) VALUES ('transcript.collapse_loops', 'off')"` sets it, and deleting the row restores the default. It applies to transcripts built after the change; turning it off does not bring collapsed words back into an existing transcript (neither does Remove punctuation), because a rebuild starts from the current run's words. Only the earlier run or a new transcription has them: the meeting folder's words JSON for the post-pass and imports, the run a Restore or rebuild was made from, and the kept live run of a promoted one |
 | `selected_model.punctuation` | `""` | The selected punctuation model file, like the other roles; the scan picks the recommended one |
 
-Punctuation never changes a word, its times or its speaker: the display
+Punctuation never changes a word, its times or its speaker (the loop
+collapse, behind its own setting above, does): the display
 text goes to `words.text`, the speech model's text to `words.raw_text`
 where they differ (docs/02). `diarist-cli punctuate <meeting>` (or
 `--all-missing`) adds it to finished meetings as a new run, `--remove`
@@ -497,8 +502,11 @@ meetings a crash left behind:
   stays current, so the post-pass carries its names over; such copies are
   never taken for the live run.
 - `processing` without WAVs: a finished `post_pass` run that is current is
-  kept (the live run is deleted unless `keep_live_runs` or the post-pass
-  recorded `engine_info.unplaced_names`); otherwise the live
+  kept (the live run is deleted unless `keep_live_runs`, the post-pass
+  recorded `engine_info.unplaced_names`, or the run is a promoted live run
+  whose loop collapse removed words, `promoted_live` with
+  `loops.words_removed` above 0, since those words exist only in the live
+  run); otherwise the live
   run becomes current with `engine_info.recovery` explaining why, and the
   meeting is done.
 
