@@ -221,7 +221,7 @@ With F_u = 12 dB, F_s = 18 dB, the silent tier at 99.8 percent and the talking-o
 | Meetings 17 and 18 within 2 words of before | identical (17: 160 kept, 0 far-active cut; 18: 757, 27) | met |
 | Meeting 21's other layers, measured | after the canceller the utterance sweep 9 → 0 and the level layer 0 → 0 (it is off after the canceller); the 3 level drops are the raw gate's and stay (raw path); the transfer 1 → 221 words beyond the layers | measured |
 
-The (b) and (b′) rows of 12.2.3's first bar (the owner's WER within 2 points of the full fixture's with the layer on) stay missed at every F and with the owner's level known (78.20 and 27.01 against 12.69): the post-canceller correlation layer's loss, chunk M's.
+The (b) and (b′) rows of 12.2.3's first bar (the owner's WER within 2 points of the full fixture's with the layer on) stay missed at every F and with the owner's level known (78.20 and 27.01 against 12.69): the post-canceller correlation layer's loss, chunk M's (section 8: no variant qualified, nothing changed).
 
 On meeting 21 the owner's class of the matcher (8 non-duplicate words) goes from 5 to 2 kept at every F, 9 to ∞: the 3 words are candidates the canceller cut, 0 to 6 dB over the floor; the one word of the owner's class the canceller left alone is kept, and the analysis counts about two words of the owner's own in the whole recording.
 
@@ -290,3 +290,76 @@ The duplicate matcher stays blind to meeting 21's garbled residue, as the review
 - The tier on meeting 21: the silent tier needs three signatures, and meeting 21 has all three (35 words the canceller left alone, their median 3.3 dB over the floor; 5 of them 18 dB or more over it, at most `SILENT_MAX_HIGH_WORDS` = 10, the talking-owner guard of plan 16 section 12.8; 7,606 of 7,611 raw words flagged). With the general tier alone it would keep 155 words with 120 far-active cut ones (section 3).
 - No estimate of the owner's level on any recording or fixture sits between 6 and 15 dB over the floor, so `owner_low` is false everywhere here.
 - Every copy of the owner's data (database, meeting folders, cached transcripts, dumps, logs, the rebuilt classes file) lived only in a scratch folder outside the repository and was deleted after the runs, the guard's re-run included. The FLEURS fixtures' audio and words of section 3 (FLEURS speech over meeting 12's far end) are kept outside the repository for chunk M.
+
+## 8. The post-canceller correlation layer (chunk M, plan 16 section 12.7 (iv))
+
+After the canceller the correlation layer scores the cancelled words on the raw mic with the fixed band 0.60 / 0.70 / 0.95 (`band_after_canceller`). On the FLEURS fixtures whose owner talks only over loud far-end speech it removes the owner's own words: on (b) 161 of the 212 words in the owner's utterances (the canceller alone 9.48 percent WER, the shipped decision 78.20), on (b′) 48 (47 of them in the utterances; 27.01 percent against 8.06 with the layer off). Chunk M swept the variants of 12.7 (iv) against the ship rule fixed there before the sweep. **No variant qualifies, and nothing changes in beta.5**: the shipped code is a1d7a54's.
+
+**Method** (27 Oct, CPU, on a1d7a54; the sweep's harness changes are not part of the release). Every variant is the shipped transfer gate (`transfer::gate_with`, `Rule::SHIPPED`) with the post-canceller layers changed in one way:
+
+- (1) the cancelled words scored against the canceller's output (`score_sources` over the cancelled mic) instead of the raw mic, the band re-swept from 0.30 / 0.50 / 0.70 upward: keep bound 0.30, 0.40, 0.50 or 0.60, drop bound 0.70, 0.80 or 0.90 (the neighbours' bound halfway), and the shipped band;
+- (2) `correlation_min_attenuation_db` 3: the layer removes only words the canceller cut by 3 dB or more;
+- (3) the layer removes only words at most X dB over the cancelled mic's floor, X 12, 15 or 18 (a context field of the sweep, off by default);
+- (4) each band of (1) alone, with (2), and with (3) at each X (60 rows).
+
+The data: the kept passes of (b), (b′) and the full FLEURS fixture (section 3), re-decided with `DIARIST_ECHO_REUSE=1`; the spliced set (`aec_postpass.rs`; its three transcriptions on the GPU once through the shared queue, then cached); meeting 12's replay (its cancelled and raw mic transcribed once more on the GPU, 47.5 and 54.3 s); and meetings 14, 16, 20 and 21 replayed from their stored words (`echo_sample.rs`). The "today" row reproduces sections 3 and 6 exactly: 12 1,578 kept with 10 duplicates (0.63 percent), labels 1,413 / 1,437 of 1,462, clean owner's 1,523 of 1,524; 14 308 kept, none, 301 of 301; 16 230, none, 227 of 228; 20 1,245, 1.45 percent, 15 far-active cut; 21 77 kept, 42 far-active cut; FLEURS 12.69, the spliced set 8.1 (17 words outside the clips), (b) 78.20, (b′) 27.01. The real post-pass of meeting 12 ran again too: 1,578 kept, 10 duplicates, labels 96.65 / fair 98.29 percent.
+
+**The ship rule** (12.7 (iv); "today" is a1d7a54): at least 24 of (b′)'s 48 recovered; residual duplicates on 12, 14, 16 and 20 within 0.5 points of 0.63, 0.00, 0.00 and 1.45 percent; far-active cut words kept on 20 and 21 at most 15 and 42; the spliced set at most 8.1 percent, FLEURS at most 12.69; the clean owner's words on 12, 14 and 16 at least 1,523, 301 and 227. "Recovered": the owner's words in the utterances that the variant keeps and today's decision removes (none of the variants removes one that today keeps). A cell with a range covers the rows of its group.
+
+| Variant | (b): "me" WER; owner's words kept of 212 (recovered) | (b′): the same | FLEURS WER | Spliced WER | 12: residual duplicates %; clean owner's of 1,524 | 14: the same, of 301 | 16: the same, of 228 | 20: residual duplicates %; far-active cut kept | 21: kept; far-active cut kept | Ship rule |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **today** (a1d7a54): raw mic, 0.60 / 0.70 / 0.95 | 78.20; 48 (+0) | 27.01; 164 (+0) | 12.69 | 8.1 | 0.63; 1523 | 0.00; 301 | 0.00; 227 | 1.45; 15 | 77; 42 | the reference |
+| the layer off (the bound on any variant) | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.37; 1524 | 0.00; 301 | 0.00; 228 | 1.88; 31 | 110; 74 | 12 duplicates +0.74; 20 far-active cut 31; 21 far-active cut 74 |
+| (2) only words the canceller cut by 3 dB or more | 72.04; 62 (+14) | 22.27; 174 (+10) | 12.18 | 8.1 | 0.82; 1524 | 0.00; 301 | 0.00; 228 | 1.67; 15 | 78; 42 | (b′) recovers 10 |
+| (3) only words at most 12 dB over the floor | 11.85; 205 (+157) | 8.06; 210 (+46) | 10.41 | 8.1 | 1.31; 1523 | 0.00; 301 | 0.00; 227 | 1.90; 25 | 107; 72 | 12 duplicates +0.68; 20 far-active cut 25; 21 far-active cut 72 |
+| (3) only words at most 15 dB over the floor | 15.64; 195 (+147) | 7.58; 208 (+44) | 10.41 | 8.1 | 1.19; 1523 | 0.00; 301 | 0.00; 227 | 1.90; 25 | 106; 71 | 12 duplicates +0.56; 20 far-active cut 25; 21 far-active cut 71 |
+| (3) only words at most 18 dB over the floor | 33.18; 153 (+105) | 8.06; 207 (+43) | 10.49 | 8.1 | 1.01; 1523 | 0.00; 301 | 0.00; 227 | 1.76; 18 | 105; 70 | 20 far-active cut 18; 21 far-active cut 70 |
+| (1), (4) the cancelled mic, 0.30 / 0.50 / 0.70: alone, with (2), with (3) at 12, 15, 18 | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.13–1.31; 1524 | 0.00; 301 | 0.00; 228 | 1.81–1.89; 30–31 | 112; 76 | 12 duplicates +0.62 to +0.68; 20 far-active cut 30 to 31; 21 far-active cut 76 |
+| (1), (4) the cancelled mic, 0.30 / 0.55 / 0.80: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.31–1.37; 1524 | 0.00; 301 | 0.00; 228 | 1.81–1.89; 30–31 | 112; 76 | 12 duplicates +0.68 to +0.74; 20 far-active cut 30 to 31; 21 far-active cut 76 |
+| (1), (4) the cancelled mic, 0.30 / 0.60 / 0.90: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.37; 1524 | 0.00; 301 | 0.00; 228 | 1.88–1.89; 31 | 112; 76 | 12 duplicates +0.74; 20 far-active cut 31; 21 far-active cut 76 |
+| (1), (4) the cancelled mic, 0.40 / 0.55 / 0.70: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.25–1.37; 1524 | 0.00; 301 | 0.43; 228 | 1.96–1.97; 32 | 121; 85 | 12 duplicates +0.62 to +0.74; 20 duplicates +0.51 to +0.52; 20 far-active cut 32; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.40 / 0.60 / 0.80: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.37; 1524 | 0.00; 301 | 0.43; 228 | 1.96–1.97; 32 | 121; 85 | 12 duplicates +0.74; 20 duplicates +0.51 to +0.52; 20 far-active cut 32; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.40 / 0.65 / 0.90: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.37; 1524 | 0.00; 301 | 0.43; 228 | 1.96–1.97; 32 | 121; 85 | 12 duplicates +0.74; 20 duplicates +0.51 to +0.52; 20 far-active cut 32; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.50 / 0.60 / 0.70: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.38–1.44; 1524 | 0.00; 301 | 0.43; 228 | 2.11–2.12; 34 | 121; 85 | 12 duplicates +0.75 to +0.81; 20 duplicates +0.66 to +0.67; 20 far-active cut 34; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.50 / 0.65 / 0.80: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.11–2.12; 34 | 121; 85 | 12 duplicates +0.80; 20 duplicates +0.66 to +0.67; 20 far-active cut 34; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.50 / 0.70 / 0.90: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.11; 34 | 121; 85 | 12 duplicates +0.80; 20 duplicates +0.66; 20 far-active cut 34; 21 far-active cut 85 |
+| (1), (4) the cancelled mic, 0.60 / 0.65 / 0.70: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.37–1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.19–2.20; 35 | 122; 86 | 12 duplicates +0.74 to +0.80; 20 duplicates +0.74 to +0.75; 20 far-active cut 35; 21 far-active cut 86 |
+| (1), (4) the cancelled mic, 0.60 / 0.70 / 0.80: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.19; 35 | 122; 86 | 12 duplicates +0.80; 20 duplicates +0.74; 20 far-active cut 35; 21 far-active cut 86 |
+| (1), (4) the cancelled mic, 0.60 / 0.75 / 0.90: the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.19; 35 | 122; 86 | 12 duplicates +0.80; 20 duplicates +0.74; 20 far-active cut 35; 21 far-active cut 86 |
+| (1), (4) the cancelled mic, 0.60 / 0.70 / 0.95 (the shipped band): the same five | 10.90; 207 (+159) | 8.06; 210 (+46) | 10.32 | 8.1 | 1.43; 1524 | 0.00; 301 | 0.43; 228 | 2.19; 35 | 122; 86 | 12 duplicates +0.80; 20 duplicates +0.74; 20 far-active cut 35; 21 far-active cut 86 |
+
+Every row misses at least one bar. No row moves the spliced set (8.1 percent; the layer removes 2 of its words today, turning it off gives back none of the owner's, and the words outside the clips go from 17 to 18 to 21), meeting 14 (0.00 percent, 301 of 301) or the clean owner's words on 12, 14 and 16 below today.
+
+**Read.**
+
+- (2) recovers little: the owner's words the layer removes are mostly ones the canceller cut by 3 dB or more (146 of (b)'s 161, 38 of (b′)'s 48), so it gives back 14 and 10, under the bar of 24.
+- (1) is the layer turned off on every fixture. Scored on the canceller's output, the layer removes none of the words of (b), (b′), FLEURS or the spliced set at any band, and on the meetings almost none: at 0.30 / 0.50 / 0.70, 18 of the 324 that today's layer removes on 12, 10 of 298 on 20, none of 132 on 21; at the shipped band none anywhere. The canceller takes out what correlates with the loopback, its residue included, so the cancelled mic cannot tell the residue from the owner by correlation. With the band's keep bound over the cancelled mic's coefficients, the text layer's two-word tie-breaker also fires less (21: 1,633 text words today, 1,614 to 1,602), which is why the bands from keep 0.40 up do worse than the layer off.
+- (3) recovers the owner's words (43 to 46 on (b′), 105 to 157 on (b)) and frees the canceller's residue on 20 and 21 with them: far-active cut kept 18 to 25 and 70 to 72, and on 12 0.38 to 0.68 points more duplicates.
+
+**Why the layer is the only thing that removes this residue, at the owner's level.** The words today's layer removes, by level over the cancelled mic's floor (from the X rows, which change nothing but that filter):
+
+| Words today's layer removes | 12 dB or less over the floor | 12 to 18 dB | over 18 dB |
+|---|---|---|---|
+| meeting 21 (132) | 58 | 46 | 28 |
+| meeting 20 (298) | 250 | 38 | 10 |
+| meeting 12 (324) | 275 | 35 | 14 |
+| (b): the owner's words (161) | 6 | 52 | 103 |
+| (b′): the owner's words (47 of 48) | 0 | 4 | 43 |
+
+74 of meeting 21's 132 sit 12 dB or more over the floor, where 155 of (b)'s 161 owner's words sit: no level limit separates the residue from a quiet owner's double talk. With the layer off, the other layers take back only part of it: on 21 the transfer removes 99 more words (320 against 221) and 33 stay (110 kept against 77, 32 of them far-active cut); on 20 the other layers remove 269 of the 298 and 29 stay (1,274 kept against 1,245; far-active cut 31 against 15). What stays is out of the other layers' reach by construction. The text layer needs runs of words repeated from the loopback, and these words are in none. The level layer is off after the canceller. The transfer removes a word only when it overlaps flagged raw words and no unflagged one, and only under its level line: on 20 the known guard, 12 dB under the owner (about 16 dB over the floor); on 21 the silent tier's F_s, 18 dB over the floor. The raw mic still carries the echo under such a word, and so it does under the owner's words spoken over the far end: that correlation is what both have in common, and the layer cannot tell them apart.
+
+**The silent tier** (plan 16 section 12.8). Of the owner's words on (b) that (3) at X = 12 would recover, 38 are transfer candidates the canceller cut by 3 dB or more, 12 to 18 dB over the floor (51 such cut words in all): the silent tier's F_s would take them if the recording qualified for the tier ((b) does not: its level is `clean`). Any change that gives these words back raises the silent tier's visible cost in this regime from about 3 words (plan 16 section 12.8 (ii)) towards those 38.
+
+**Beyond the list, the lead for beta.6.** One rule outside 12.7 (iv) was measured, not as a candidate (the rule was fixed before the sweep): the layer spares a word within M dB of the owner's level when that level is known, so a recording whose level is unknown (meeting 21) does not move.
+
+| Variant | (b): "me" WER; owner's words kept of 212 (recovered) | (b′): the same | FLEURS WER | Spliced WER | 12: residual duplicates %; clean owner's of 1,524 | 14: the same, of 301 | 16: the same, of 228 | 20: residual duplicates %; far-active cut kept | 21: kept; far-active cut kept | Ship rule |
+|---|---|---|---|---|---|---|---|---|---|---|
+| spare words within 6 dB of a known owner's level | 27.01; 169 (+121) | 11.37; 200 (+36) | 11.34 | 8.1 | 0.76; 1523 | 0.00; 301 | 0.00; 227 | 1.60; 16 | 77; 42 | 20 far-active cut 16 |
+| spare words within 9 dB of a known owner's level | 12.32; 202 (+154) | 8.06; 207 (+43) | 10.74 | 8.1 | 0.95; 1523 | 0.00; 301 | 0.00; 227 | 1.76; 18 | 77; 42 | 20 far-active cut 18 |
+| spare words within 12 dB of a known owner's level | 11.37; 206 (+158) | 7.58; 208 (+44) | 10.58 | 8.1 | 1.01; 1523 | 0.00; 301 | 0.00; 227 | 1.90; 25 | 77; 42 | 20 far-active cut 25 |
+
+At M = 6 it misses one bar by one word (meeting 20's far-active cut words, 16 against 15); the recovered words on (b) in the silent tier's band are 11, 36 and 38 transfer candidates at M = 6, 9 and 12. The beta.6 item: start from this rule; measure more meetings with a known owner's level (12, 14, 16 and 20 here: on 14 and 16 it changes nothing, on 12 it keeps 4 to 14 more of the layer's words, 0.76 to 1.01 percent duplicates), read whether meeting 20's one extra word is real echo, and re-run the spliced set and FLEURS with the final M; carry the silent-tier note above with it.
+
+**KNOWN-ISSUES.** The echo row gains plan 16 section 12.7 (iv)'s sentence: after the canceller, the author's own words spoken entirely over loud far-end speech can be removed with the echo (about one in four at −38 dBFS on a fixture: (b′), 48 of 212; three in four 6.5 dB quieter: (b), 161 of 212).
+
+The copies of the owner's data for this section (the database, meetings 12, 14, 16, 20 and 21, the cached transcripts, the rebuilt classes file, the logs with their decisions) lived in a scratch folder outside the repository and were deleted after the runs; the FLEURS fixtures' kept audio and words were read in place and left there.
