@@ -58,14 +58,14 @@ Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 
 Why not the top two: they give no word timestamps, and speaker assignment needs the start and end of every word. They also run only inside a Python stack.
 
-Both Nemotron streaming models are safe on long files (**measured**, docs/research/08 section 7): on the 77-minute recording each found all 8 labels, dropped nothing, and tagged speakers at 99.9 percent agreement with the standalone diarizer; live, both keep two channels in real time and show a word's first text about 0.5 s after it is spoken at the live lookahead of section 3 (0.14 s at the runtime default; docs/eval/2026-10-27-live-lookahead.md). The choice between them comes from the eval harness with the shipped file setting: lookahead 13 (below) and the diarizer's offline geometry (section 2) (**measured**, 16 Oct 2026, docs/eval/2026-10-16-shipped_en.md and -shipped_n35.md: the app's own defaults with nothing passed, word for word and tag for tag the same as the configurations measured in docs/research/12). cpWER on the Zoom meetings is against Zoom's own machine transcript, so it mixes Zoom's errors in; AMI ES2002a has a word-level manual reference. WDER is the share of words given to the wrong speaker, near = within a second of a speaker change.
+Both Nemotron streaming models are safe on long files (**measured**, docs/research/08 section 7): on the 77-minute recording each found all 8 labels, dropped nothing, and tagged speakers at 99.9 percent agreement with the standalone diarizer; live, both keep two channels in real time and show a word's first text about 0.5 s after it is spoken at the live lookahead of section 3 (0.14 s at the runtime default; docs/eval/2026-10-27-live-lookahead.md). The choice between them comes from the eval harness with the shipped file setting: lookahead 13 (below) and the diarizer's offline geometry (section 2) (**measured**, 16 Oct 2026, docs/eval/2026-10-16-shipped_en.md and -shipped_n35.md: the app's own defaults with nothing passed, word for word and tag for tag the same as the configurations measured in docs/research/12). Since 0.1.0-beta.5 the EN model's cpWER is the release check's (docs/eval/2026-10-27-beta5-release.md): the repeated-token loop collapse takes 0.1 point off Aug 9 and Sep 7 and moves nothing else at this precision, and punctuation moves no word; WDER is the 16 Oct run's. cpWER on the Zoom meetings is against Zoom's own machine transcript, so it mixes Zoom's errors in; AMI ES2002a has a word-level manual reference. WDER is the share of words given to the wrong speaker, near = within a second of a speaker change.
 
 | Session (minutes, speakers) | EN cpWER | EN WDER (near) | 3.5 cpWER | 3.5 WDER (near) |
 |---|---|---|---|---|
 | Aug 2 (44, 6) | 9.5 | 0.3 (5.6) | 10.3 | 0.2 (5.5) |
-| Aug 9 (44, 3) | 8.1 | 0.3 (6.8) | 8.4 | 0.3 (5.7) |
+| Aug 9 (44, 3) | 8.0 | 0.3 (6.8) | 8.4 | 0.3 (5.7) |
 | Sep 5 (45, 5) | 4.7 | 0.2 (7.3) | 5.1 | 0.2 (7.8) |
-| Sep 7 (48, 5) | 7.2 | 0.3 (12.7) | 7.5 | 0.2 (5.7) |
+| Sep 7 (48, 5) | 7.1 | 0.3 (12.7) | 7.5 | 0.2 (5.7) |
 | Sep Logistics (46, 1; single-speaker control) | 7.0 | 0.0 | 6.6 | 0.0 |
 | AMI ES2002a (21, 4; far-field, word-level reference) | 18.0 | 2.3 (6.3) | 20.7 | 2.2 (6.2) |
 

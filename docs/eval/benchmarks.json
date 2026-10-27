@@ -1,6 +1,6 @@
 {
   "$comment": "Benchmark data for the charts on diarist.dev/models/. Every number is copied from the file named in each block's `from` field; the website build fails if this file is missing or malformed. Published numbers are from leaderboards cited in docs/04; measured numbers are from docs/eval on the machine below.",
-  "updated": "2026-10-16",
+  "updated": "2026-10-27",
   "machine": "Windows 11, RTX 3080 10 GB, driver 610.88",
   "diarization_published": {
     "from": "docs/04-model-guide.md, section 2 (table)",
@@ -33,15 +33,15 @@
     ]
   },
   "asr_measured": {
-    "from": "docs/eval/2026-10-16-shipped_en.md and docs/eval/2026-10-16-shipped_n35.md (cpWER column of the transcript attribution tables); session names, minutes and groups from docs/05-eval-data.md and the same tables; the per-model summary is in docs/04-model-guide.md, section 3",
-    "source": "docs/eval, 16 Oct 2026, the shipped 0.1.0-beta.2 configuration (file lookahead 1.12 s, diarizer offline geometry)",
+    "from": "docs/eval/2026-10-27-beta5-release.md (cpWER column of the gate-set table), which equals docs/eval/2026-10-16-shipped_en.md and docs/eval/2026-10-16-shipped_n35.md except where the loop collapse removed words (EN: Aug 9 and Sep 7, 0.1 point each); session names, minutes and groups from docs/05-eval-data.md and the same tables; the per-model summary is in docs/04-model-guide.md, section 3",
+    "source": "docs/eval, 27 Oct 2026, the shipped 0.1.0-beta.5 configuration (file lookahead 1.12 s, diarizer offline geometry, the repeated-token loop collapse and punctuation on; punctuation never changes a word, so cpWER is the same with and without it)",
     "metric": "cpWER, percent, lower is better",
     "series": { "en": "Nemotron Speech Streaming EN 0.6B", "n35": "Nemotron 3.5 ASR Streaming 0.6B" },
     "sessions": [
       { "name": "Aug 2", "group": "tuning", "minutes": 44, "speakers": 6, "en": 9.5, "n35": 10.3 },
-      { "name": "Aug 9", "group": "tuning", "minutes": 44, "speakers": 3, "en": 8.1, "n35": 8.4 },
+      { "name": "Aug 9", "group": "tuning", "minutes": 44, "speakers": 3, "en": 8.0, "n35": 8.4 },
       { "name": "Sep 5", "group": "held-out", "minutes": 45, "speakers": 5, "en": 4.7, "n35": 5.1 },
-      { "name": "Sep 7", "group": "held-out", "minutes": 48, "speakers": 5, "en": 7.2, "n35": 7.5 },
+      { "name": "Sep 7", "group": "held-out", "minutes": 48, "speakers": 5, "en": 7.1, "n35": 7.5 },
       { "name": "Sep Logistics", "group": "single-speaker control", "minutes": 46, "speakers": 1, "en": 7.0, "n35": 6.6 },
       { "name": "AMI ES2002a", "group": "public AMI meeting, far-field mix, word-level reference", "minutes": 21, "speakers": 4, "en": 18.0, "n35": 20.7 }
     ],
@@ -60,9 +60,9 @@
     ]
   },
   "speed_measured": {
-    "from": "docs/eval/2026-10-16-shipped_n35.md and docs/eval/2026-10-16-shipped_en.md (GPU wall time: 324 minutes of audio in 10.6 and 10.9 minutes, 30.6 and 29.9 times real time, including a standalone diarization pass the app does not run; the speech pass alone 78 and 76 times), summarised in docs/04-model-guide.md, section 3 and README.md (What it does); live first text about 0.2 s from docs/research/08-runtime-cli-contract.md, section 7",
+    "from": "docs/eval/2026-10-16-shipped_n35.md and docs/eval/2026-10-16-shipped_en.md (GPU wall time: 324 minutes of audio in 10.6 and 10.9 minutes, 30.6 and 29.9 times real time, including a standalone diarization pass the app does not run; the speech pass alone 78 and 76 times), summarised in docs/04-model-guide.md, section 3 and README.md (What it does); live first text about 0.5 s since 0.1.0-beta.5 (live lookahead 6: median 0.48 to 0.52 s after a word ends, against 0.14 s at the runtime default; docs/eval/2026-10-27-live-lookahead.md)",
     "import_realtime_factor": 30,
-    "live_first_text_s": 0.2
+    "live_first_text_s": 0.5
   },
   "languages_measured": {
     "from": "docs/eval/2026-10-16-fleurs.md (rows n35_rc_13, the file setting, and en_rc_13 for the EN model; card column) and docs/04-model-guide.md, section 6",
