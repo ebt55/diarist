@@ -32,7 +32,9 @@ The setup screen checks:
   NVIDIA card and a desktop CPU only; the CPU runtime transcribes at about 5
   times real time ([KNOWN-ISSUES.md](KNOWN-ISSUES.md)).
 - **Disk**: free space where the data folder is. The defaults need about
-  1.3 GB while downloading and 1.2 GB after.
+  1.4 GB while downloading and 1.3 GB after (measured with the CUDA runtime
+  on 28 Oct 2026: 1.27 GB, because the unpacked runtime is larger than its
+  download).
 
 Then press **Install engine** (98 MB) and **Install recommended models**
 (1.0 GB: the speaker model, the English speech model and the punctuation
@@ -169,7 +171,8 @@ the program folder).
 
 - **"Delete the application data" unticked (default)**: the program is
   removed and your transcripts and recordings stay. The uninstaller asks
-  whether to remove the downloaded engine and models (about 1.6 GB); they can
+  whether to remove the downloaded engine and models (about 1.3 GB with the
+  defaults); they can
   be downloaded again.
 - **Ticked**: the data folder is removed too, including transcripts and
   recordings. For a moved data folder only Diarist's own items are

@@ -130,7 +130,7 @@ Other requirements:
 - Windows 10 (1803 or newer) or Windows 11, 64-bit. WebView2 is already present on these; the installer fetches it if not.
 - Windows 11 22H2 or newer for operating-system echo cancellation when recording without headphones; older builds fall back to our own echo gate (Phase 3).
 - RAM: the engine process uses about 300 MB (**measured**); 8 GB total is an estimate for a comfortable machine; the CPU package needs RAM for the models themselves (about 1.5 GB) plus working memory.
-- Disk: 1.6 GB for engine and models; recordings about 90 MB per hour as stereo FLAC with 30-day retention by default; the transcript database is small (a year of daily meetings is tens of MB).
+- Disk: about 1.3 GB for the engine and the default models (**measured** 1.27 GB with the CUDA runtime, 28 Oct 2026); recordings about 90 MB per hour as stereo FLAC with 30-day retention by default; the transcript database is small (a year of daily meetings is tens of MB).
 - The engine binaries are unsigned by NVIDIA; Windows Smart App Control, when enabled, may block them until the app is signed (planned).
 
 ## 5. Adding or updating models and the engine yourself (ComfyUI-style)
