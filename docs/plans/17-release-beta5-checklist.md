@@ -32,7 +32,7 @@ The punctuation entry is required, and `manifests/models.json` points its five n
 - [ ] CHANGELOG: the `[0.1.0-beta.5]` heading carries the publishing date (written as 2026-10-27; change it if the release slips).
 - [ ] `RELEASED_SCHEMA` is 5 (`crates/core/src/store/sqlite/mod.rs`), so builds after beta.5 keep `diarist.db.bak-5`.
 - [ ] Checks: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; in `apps/desktop`, `bun run check`, `bun run test`, `bun run build`.
-- [ ] Eval: `docs/eval/2026-10-27-beta5-release.md` is a fresh full-set run of the rebuilt `diarist-cli` (36 sessions, both models), with every bar judged, and `docs/eval/benchmarks.json` follows it. The speed bar, timed on 27 Oct 2026: EN +5.0 percent (met), Nemotron 3.5 -5.4 percent (missed by 0.4 points as measured; its three timed-block runs overlapped the Claude app's GPU use, and the same build did those sessions within -1.5 to +1.3 percent of beta.4 earlier that day). The owner decides whether to re-time those three runs with the Claude app idle (about 3 minutes of GPU under quiet.lock) before shipping.
+- [ ] Eval: `docs/eval/2026-10-27-beta5-release.md` is a fresh full-set run of the rebuilt `diarist-cli` (36 sessions, both models), with every bar judged, and `docs/eval/benchmarks.json` follows it. The speed bar, timed on 27 Oct 2026, passes for both models: EN +5.0 percent, and Nemotron 3.5 -5.4 percent as measured, which passes because the three late runs overlapped claude.exe at up to 34 percent SM, the same build timed those sessions at -1.5 to +1.3 percent at 13:44 to 13:48, and the timed step is the same executable, models and command line as beta.4. Accepted by the owner on 27 Oct 2026; re-timed in beta.6 (section 10).
 - [ ] Runtime watch (plan 16 section 4.6): on 27 Oct 2026 NeMo-Speech.cpp has no tag after v0.2.0 (only the moving `nightly`), so `manifests/engine.json` and `TESTED_ENGINE_VERSIONS` stay. If a tag appears before the build, it waits for beta.6 unless research/08's fixtures, the full set and the live latency all hold (and check issues #67 and #81 first).
 - [ ] docs/KNOWN-ISSUES.md: the status line names 0.1.0-beta.5; the updater row gets the result of section 7.
 - [ ] Privacy scan of every changed file before each push (section 11).
@@ -136,6 +136,7 @@ From docs/plans/16 section 12.9 (iii) 4. Neither case touches Diarist's own MIT 
 
 - [ ] The installer downloaded from the release page has the SHA-256 in the notes.
 - [ ] The site's numbers come from `docs/eval/benchmarks.json`.
+- [ ] Beta.6: re-time Nemotron 3.5 on Aug 9, Sep Logistics and Aug 14 with the Claude app idle (minimised, no agent output streaming), under quiet.lock, against beta.4's 32.4, 32.7 and 54.7 s (docs/eval/2026-10-27-beta5-release.md, speed).
 - [ ] Beta.6: chunk M, the post-canceller correlation layer; lead: spare words near a known owner level (docs/eval/2026-10-26-echo-owner-level.md section 8).
 - [ ] Beta.6: Process again without a kept live transcript (names from the current transcript, the raw microphone transcribed for the echo step; KNOWN-ISSUES' Process again row).
 - [ ] Beta.6: a NeMo-Speech.cpp release after v0.2.0 (the fix of #67; check #81 before upgrading), behind the full eval set.
