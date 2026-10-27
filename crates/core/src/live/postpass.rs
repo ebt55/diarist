@@ -945,6 +945,19 @@ fn gate_mic(
                 {
                     o.extend(cs);
                 }
+                // The raw gate's owner's level, floor and share of flagged
+                // words, and the level guard's floor rule: its tier and
+                // margin, null with the owner's level known (plan 16
+                // sections 12.2.2 step 4 and 12.7).
+                info["raw_owner_db"] = serde_json::json!(t.raw.owner_db.map(super::round3));
+                info["raw_floor_db"] = serde_json::json!(t.raw.floor_db.map(super::round3));
+                info["raw_echo_share"] =
+                    serde_json::json!((t.raw_echo_share * 10_000.0).round() / 10_000.0);
+                info["floor_rule"] = serde_json::json!({
+                    "tier": t.floor_rule.map(|f| f.tier),
+                    "f_db": t.floor_rule.map(|f| super::round3(f.f_db)),
+                    "removed": c.floor,
+                });
                 transfer_info = Some(info);
                 transfer_log = format!(
                     "; transfer from the {} mic words ({} of {} echo, {:.1} s): {} of {} candidates (text {}, level {}, plain {}), {} beyond the layers, {} without a raw word",
@@ -960,6 +973,14 @@ fn gate_mic(
                     t.counts.transfer,
                     c.unmatched
                 );
+                if let Some(f) = t.floor_rule {
+                    transfer_log.push_str(&format!(
+                        " (floor rule, {} tier, at {} dB: {})",
+                        f.tier.as_str(),
+                        f.f_db,
+                        c.floor
+                    ));
+                }
                 let mut r = t.after;
                 r.reasons = t.reasons;
                 r.counts = t.counts;
@@ -1014,6 +1035,13 @@ fn gate_mic(
     });
     if let Some(r) = &report {
         layer_summary(&mut summary, r, correlation);
+    }
+    // Where the owner's level came from, and whether it is low (plan 16
+    // sections 12.2.2 step 4 and 12.7).
+    if let Some(r) = &report {
+        summary["owner_source"] = serde_json::json!(r.owner_source);
+        summary["owner_words"] = serde_json::json!(r.owner_words);
+        summary["owner_low"] = serde_json::json!(r.owner_low);
     }
     if let Some(t) = transfer_info {
         summary["transfer"] = t;
