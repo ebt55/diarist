@@ -786,3 +786,68 @@ Branch `claude/beta5-echo-owner-level`, on top of `8b053bc`. Owns the same files
 | 6. `transfer.owner_db` and `floor_db` describe the raw mic under the cancelled mic's names; `TransferCounts.floor` not serialised | Accepted: `raw_owner_db`, `raw_floor_db`, `raw_echo_share`; serialised |
 | 8. The post-canceller correlation layer removes the owner's words over continuous far-end speech ((b) 161 of 212, (b′) 48 of 213); pre-existing and larger | Accepted: chunk M in beta.5 as a timeboxed sweep with a ship rule, else a KNOWN-ISSUES row and a beta.6 plan |
 | The coding agent's restated bar for (b) ("within 2 points of the variant's own known figure") | Accepted in form, rejected as measured: the comparison is made with the correlation layer off, or it measures nothing |
+
+### 12.8 Adjudication of chunk I's residual risk: the silent tier on a talking owner (27 Oct 2026)
+
+Fable 5.1, read only, on `claude/beta5-echo-owner-level` at `b1d4de0` and `docs/eval/2026-10-26-echo-owner-level.md` on that branch. File references are to that commit.
+
+#### (i) When it fires
+
+The silent tier (`F_s` = 18 dB, `transfer.rs:83`) needs three things at once (`Rule::floor_rule`, `transfer.rs:158-180`):
+
+1. **The owner's level is unknown and `implausible`** (`layers.rs:509-553`). After the canceller, the estimator tries `clean_quiet`, then `clean` (`layers.rs:511-515`): words in no text run that the canceller cut by under 3 dB (`layers.rs:464-471`). A set counts only with 20 or more words (`layers.rs:526`, `OWNER_MIN_WORDS`). It is `implausible` when its **median** sits under floor + 6 (`layers.rs:527-531`). So `implausible` means that floor-level words the canceller left alone outnumber the owner's own uncut words in no run. Meeting 21 has 35 such words in 51.6 min; every other canceller meeting has 307 to 1,559 clean owner words. The module docs (`transfer.rs:29-30`, `:78-79`) say "all at the floor"; the code checks only the median.
+2. **The raw echo share is at least 0.998** (`SILENT_SHARE`, `transfer.rs:92`). Owner words in far-end pauses are unflagged and break the share. Owner words spoken over the far end are mostly flagged by the raw gate, so they do not protect against it. The one-to-three-utterance fixtures reach 99.91 to 99.92 %.
+3. **The words at risk** are transfer candidates, cut by 3 dB or more, at a level after the canceller between floor + 12 and floor + 18 (`transfer.rs:344-363`). Owner words in pauses are never candidates.
+
+Exposure by owner:
+- **Talks normally (+27 to +30):** none that the measurement can see. About 40 spoken words make the level known, and F = 18 costs nothing at this level.
+- **Talks little at a normal level:** fires, costing at most a word or two.
+- **Quiet owner, about +23 over the floor** (fixture (b); this owner recorded at +21 on meeting 15): this is the owner the tier can hurt. They speak several sentences over a long talk, never in its pauses, quietly.
+- **Near the floor (`owner_low`):** already covered by the KNOWN-ISSUES `owner_low` sentence.
+
+The case is uncommon but not contrived, and the product ships to other PCs and gains.
+
+#### (ii) The consequence
+
+- **Words cut:** at +23, the silent tier's own cost is about 41 of 212 double-talk words (19 %); at +28, 2 of 213; at +30, 0.
+- **Masked today:** the post-canceller correlation layer already removes 161 of (b)'s 212 words, so the visible increment is about 3 words. If chunk M recovers those, the silent tier becomes the largest remaining loss in this regime.
+- **Recovery:** every removal carries `EchoReason::Transfer`; "Show them" lists them and Restore returns them all (wholesale). `engine_info.echo` records `owner_source`, `raw_echo_share` and `floor_rule`, so the case can be diagnosed afterwards. A kept live run does not help for double-talk words.
+
+#### (iii) Ruling: (b), ship with a guard; (a) as the fall-back if the guard cannot be set
+
+**The condition.** The silent tier also requires that the number of `clean` words (in no run, cut under 3 dB) at or over **floor + 18 dB** is at most `SILENT_MAX_HIGH_WORDS` = **5**. The owner's uncut words sit at or over +18 in 94 to 100 % of cases on every meeting and fixture, and 90 % on (b). Residue the canceller left alone sits at the floor. With the guard, the code matches what `transfer.rs:29-30` already claims. It can only move a recording from the silent tier to the general one (fewer removals), never the other way.
+
+**The fixer's work** (branch `claude/beta5-echo-owner-level`, on `b1d4de0`):
+1. `layers.rs`: `OWNER_HIGH_DB: f32 = 18.0`. `OwnerLevel` gains `high: usize`: clean words at or over floor + `OWNER_HIGH_DB`, computed in every branch of `owner()`, and 0 before the canceller or without a floor. `LayerReport` gains `owner_high`. Update the module docs.
+2. `transfer.rs`: `SILENT_MAX_HIGH_WORDS: usize = 5`. `Rule` gains `silent_max_high`, which `SHIPPED` sets. The silent arm of `floor_rule` adds `owner_high <= self.silent_max_high`. `transfer_with` takes the value and passes it on; `transfer` passes 0; `gate_with` passes `after.owner_high`. Update the module docs.
+3. `postpass.rs` (`gate_mic`): `summary["owner_high"]` beside `owner_low`. Append only.
+4. Tests:
+   - The silent-tier unit test: `(Implausible, 0.9993, 5)` gives silent; `(…, 6)` gives unknown; `(TooFew, 1.0, 0)` gives unknown.
+   - A gate test step: six owner words left alone at −30 dBFS over the far end. `owner_source` stays `Implausible`, `owner_high` is 7, `floor_rule` is `{Unknown, 12.0}`, `reasons[..3]` is `[Transfer, None, None]` and `transfer.floor` is 1.
+   - `layers/tests.rs`: `high` on the three cases (40, 0, 0), and 0 before the canceller.
+   - The CPU post-pass test asserts `owner_high` in `engine_info.echo`.
+5. Measure on the CPU replay (`echo_sample.rs`): `owner_high` for every meeting and fixture row of the eval's section 1. Let c21 be meeting 21's value:
+   - c21 ≤ 2: ship with N = 5.
+   - c21 from 3 to 5: set N = 2 × c21.
+   - c21 > 5: the guard does not separate. Drop it, ship (a) with the row below, and reword `transfer.rs:29-30` to "median at the floor".
+6. Eval note: a section 3 paragraph with the `owner_high` column, c21 and N; section 7's tier bullet gains the third condition; `docs/KNOWN-ISSUES.md:45` gains the sentence below.
+
+**Bars that must still hold:**
+- Meeting 21: `implausible`, tier silent, 77 kept, 42 far-active cut.
+- Meetings 12 to 20: post-pass rows identical to eval section 6.
+- Every live and Stop row identical.
+- (b) at 10.90 % with `F_u` = 12, and (b′) at 7.11 % with the layer off.
+- The one-to-three-utterance fixtures unchanged.
+- Spliced 8.1, FLEURS 12.69, (c) within 1 point.
+
+Expected change: none on any measured recording.
+
+**KNOWN-ISSUES sentence** (either outcome; adjust the figure if N moves): "On a long talk where the author says almost nothing, the gate reads the microphone as silent and removes what is left of the echo more firmly (the run's details record `floor_rule.tier: silent`). If the author did speak a few sentences, quietly and only while the other side was talking, some of those words can go with the echo: measured on a fixture 23 dB over the noise floor, up to about one in five of the words said over the other side; none at the author's own recording level (docs/eval/2026-10-26-echo-owner-level.md, section 3). Show them lists them with the reason, and Restore puts them back."
+
+#### (iv) Close-call reasoning
+
+**Not (c), holding chunk I back:** meeting 21's echo is the largest open item of 12.1, and the silent tier takes it from 155/120 to 77/42 with the controls, live and Stop unchanged.
+
+**Not plain (a), shipping as it is:** the standing rule puts the owner's words first, the exposed owner is a real one, and the guard is a small CPU-only change whose only failure mode is losing echo removal.
+
+**What tipped it:** the share does not separate a silent owner from a talking one (99.91 to 99.93 on both), so all of today's protection rests on the median of the clean set. A count of uncut words over +18 is the direct signature of a talking owner.
