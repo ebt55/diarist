@@ -16,7 +16,7 @@ The speech runtime with its models, and since 0.1.0-beta.5 a small punctuation m
 | Horizon-Labs punctuation-restoration-small, its int8-embedding ONNX file and tokenizer | Adds `.` `,` `?` and sentence capitals to the finished words after Stop and on imports, on the CPU (section 8) | 256 MB plus a 33 MB tokenizer | Apache-2.0 (declared in its model card); base model MIT |
 | ONNX Runtime 1.31.0 (Microsoft), CPU build, installed beside the punctuation model as `diarist-onnxruntime.dll` | Runs the punctuation model inside Diarist's own process | 16 MB | MIT |
 
-First-run download with the defaults: engine plus diarizer plus the EN model plus the punctuation model (306 MB with its tokenizer, ONNX Runtime and licence files), about 1.2 GB. With every optional model: 2.6 GB.
+First-run download with the defaults: engine plus diarizer plus the EN model plus the punctuation model (306 MB with its tokenizer, ONNX Runtime and licence files), 1.23 GB with the CUDA runtime (1,229,458,484 bytes). With every optional model: 2.68 GB.
 
 ## 2. Speaker diarization: why Nemotron 3
 
