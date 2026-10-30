@@ -1,6 +1,6 @@
 # 0.1.0-beta.6: missed words, the runtime gate, and a visible recording state
 
-Status: planned 30 Oct 2026 (a Friday) by Fable 5.1 from docs/research/21 (the runtime after PR #87, Nemotron 3.5 Transcribe 30B, code-switching), the beta.5 release check (docs/eval/2026-10-27-beta5-release.md), the public baseline (docs/eval/2026-10-27-baseline-public.md), plan 16 sections 12.4 and 12.7 to 12.9, plan 17 section 10, and the code at `00cc9a6` (0.1.0-beta.5 plus the post-release docs). Implementation by Opus 5.5 agents, one chunk per agent, each behind the checks in section 13. No code, build, GPU run or download happened while this was written. Every measurement rule that decides a chunk is written here before the run, so the orchestrator applies it without coming back to the planner; where a bar is amended after a sweep (chunk M), the amendment and its reason are marked. The private notes were read for state only; no meeting detail from them is in this file.
+Status: planned 30 Oct 2026 (a Friday) by Fable 5.1 from docs/research/21 (the runtime after PR #87, Nemotron 3.5 Transcribe 30B, code-switching), the beta.5 release check (docs/eval/2026-10-27-beta5-release.md), the public baseline (docs/eval/2026-10-27-baseline-public.md), plan 16 sections 12.4 and 12.7 to 12.9, plan 17 section 10, and the code at `00cc9a6` (0.1.0-beta.5 plus the post-release docs). Implementation by Opus 5.5 agents, one chunk per agent, each behind the checks in section 13. No code, build, GPU run or download happened while this was written. Every measurement rule that decides a chunk is written here before the run, so the orchestrator applies it without coming back to the planner; where a bar is amended after a sweep (chunk M, section 5.1) or after a measurement it was waiting for (chunk R after N2, section 4.4), the amendment and its reason are marked, and it is made before the run it governs. The private notes were read for state only; no meeting detail from them is in this file.
 
 The owner's standing priority (16 Oct 2026): measured accuracy and speed first, features after. Their verdict on beta.5's words: "not mind blowing, but okay". Their asks for beta.6: the plan, the new runtime evaluated, a taskbar "recording" label and a crisper recording indicator. The Settings layout tweak was withdrawn.
 
@@ -51,7 +51,7 @@ The owner's standing priority (16 Oct 2026): measured accuracy and speed first, 
 | Id | Decision | Where |
 |---|---|---|
 | D1 | Missed words are attacked with what is on this PC: a gap characterisation and a gap-fill measurement from cached runs (CPU only), then a second file pass that fills the EN model's gaps with Nemotron 3.5's words if the pre-fixed bars hold; the phase control on v0.2.0; the names spike L on the surviving re-converted EN file. Lookahead has nothing left to give; endpointing-off is measured only on 0.3.0 | section 3 |
-| D2 | Runtime v0.3.0 is adopted in beta.6 only from a tagged release whose tag exists by Friday 6 Nov 2026, and only if the five measurements of research/21 section 1.7 pass as restated in 4.2. Otherwise beta.6 ships on 0.2.0 and the runtime is beta.7's first chunk. Never the nightly, never a build of ours | section 4 |
+| D2 | Runtime v0.3.0 is adopted in beta.6 only from a tagged release whose tag exists by Friday 6 Nov 2026, and only if the five measurements of research/21 section 1.7 pass as restated in 4.2 and amended in 4.4 (31 Oct, after N2, before any 0.3.0 run). Otherwise beta.6 ships on 0.2.0 and the runtime is beta.7's first chunk. Never the nightly, never a build of ours | section 4 |
 | D3 | Chunk M is in beta.6 as a timeboxed continuation with the rule's form fixed now (spare within M dB of a known owner level, M in {6, 9, 12}), the fixtures regenerated plus one fresh confirmation fixture, and one amendment to plan 16 section 12.7 (iv)'s bars made before any new run: meeting 20's far-active proxy becomes a labelled bar read by the owner from the audio. If the owner declines to label, the old bar stands and M stays out | section 5 |
 | D4 | The code-switching measurement is not worth a 3.5 re-conversion now; the design in research/21 section 3.3 waits for NVIDIA's republished GGUF (then it is a manifest bump plus that measurement) or for a user report. The 120 s repro zip is not downloaded | section 6 |
 | D5 | The Transcribe 30B spike is the owner's call; recommended in its cheapest form after the runtime decision, on an idle machine, with pre-fixed bars; nothing from it ships in beta.6; the upstream request for MoE expert offload is filed now | section 7 |
@@ -125,6 +125,8 @@ Plan 16 section 12.4's brief, applied to the file of section 1: research/12's AM
 
 ### 4.2 The five measurements, with bars (research/21 section 1.7, restated as rules)
 
+**Amended by 4.4 on 31 Oct 2026, before any 0.3.0 run: items 1 and 2 are replaced there by bars R1 to R5; items 3 to 5 and the variant stand.**
+
 All on the tagged Windows CUDA archive, with `DIARIST_EVAL_ENGINE_DIR` pointing at it and new config names (`*_030`), on an idle machine through the shared GPU queue. About 1.5 hours of GPU in all, 2 with the phase offsets.
 
 1. **Deleted words.** Gate set and broad set (29 sessions, 1,341 min), both models, 0.3.0 against the cached v0.2.0 runs: deletions, gaps of 2 and 5 s or more, AMI ES2002a cpWER. Bar: pooled deletions per model no higher than v0.2.0's by more than the phase noise band of N2 item 1 (if N2 has not run, R runs the three phase offsets first; the band is never set after the 0.3.0 numbers are seen); no session's cpWER worse by more than 0.5; no new gap of 5 s or more that the phase controls do not also show. About 35 minutes of GPU (the v0.2.0 side is cached), plus the 30 minutes of phase offsets if N2 has not run.
@@ -142,6 +144,79 @@ If any bar fails, beta.6 stays on 0.2.0 and the eval note says which bar and by 
 `manifests/engine.json` (three packages: name pattern `nemo-speech-0.3.0-windows-x86_64-<backend>`, URL, SHA-256, size; the CUDA entry's `licence` becomes "Apache-2.0; bundles NVIDIA cuBLAS and cuBLASLt under the CUDA EULA, redistributed by NVIDIA in the archive"); `TESTED_ENGINE_VERSIONS` (`manifest.rs:20`) gains `"0.3.0"` and keeps `"0.2.0"` so a user who has not updated the engine is not warned; the `supervisor.rs` package-name tests; the WebSocket fixtures; research/08 sections 4 and 6 (the new `audio_processed` meaning, rarer empty deltas, words inside the audio, exit codes); INSTALL, README and the setup screen's download and disk figures (+406 MB for CUDA); the KNOWN-ISSUES rows for #67 (fixed in the release) and #81; optionally `EXPECTED_REALTIME_FACTOR` after item 4. The Vulkan and CPU packages are taken on the same tag with the smoke test of docs/KNOWN-ISSUES.md's package row (5-minute AMI clip through the app's path) and no more, as in beta.2. Installed users keep 0.2.0 until they take the new engine from Settings; the app's "Check for newer runtime" offers it.
 
 Ownership: `manifests/engine.json`, `crates/core/src/models/manifest.rs` (the constant and its tests), `crates/core/src/engine/live_ws/supervisor.rs` (tests only), `crates/core/src/engine/nemo_cli.rs` (`EXPECTED_REALTIME_FACTOR` only), `docs/research/fixtures/ws_session_events.jsonl`, `docs/research/08-runtime-cli-contract.md`, docs/INSTALL.md, README.md, docs/04 sizes, `docs/KNOWN-ISSUES.md` runtime rows, `docs/eval/<date>-runtime-030.md`, `tools/eval/configs.toml` (the `*_030` configs). Must not touch `transcript/**`, `audio/**`, `punct/**`.
+
+### 4.4 Addendum, 31 Oct 2026: R's bars after N2
+
+Written by the planner on 31 Oct 2026 from N2's note (docs/eval/2026-10-30-phase-control.md, commit `f9da9d3` on `claude/beta6-phase-names`) and the v0.3.0 tag, **before any run on 0.3.0: no 0.3.0 number exists or has been seen.** The bars R1 to R5 below replace 4.2 items 1 and 2 for chunk R and are fixed now; 4.2 items 3 to 5 and the endpointing variant stand as written. Nothing in this section changes after a 0.3.0 number is seen; a miss by any margin is a miss, and the eval note records the margin (section 13).
+
+**The gate is met.** NVIDIA tagged `v0.3.0` on 30 Oct 2026 at 11:24 UTC (tag object `69154fd`, commit `20999cc`, which contains #87's `c540e21`), with the three Windows x86-64 archives and a `.sha256` file each: CUDA 508,625,181 bytes, Vulkan 22,417,032, CPU 8,694,509 (reported to the planner on 31 Oct; R verifies the digests itself, 4.2 item 4). The date of 4.1 is met with a week to spare, and the CUDA figure is the +406 MB the plan carries.
+
+#### 4.4.1 What N2 showed, and what it does to 4.2's bars
+
+N2 ran v0.2.0 on the gate set (324 min, both models) at three input offsets, −70 ms (trimmed) and +20 and +40 ms (leading silence), beside the cached unmodified run (the note, "Results: the phase control"). The phase alone moved:
+
+- pooled deletions by at most 2.70 % (EN) and 3.30 % (3.5): the band 4.2 item 1 reads, now fixed;
+- deletions per session by up to 11.8 % (EN, Sep 5) and 8.5 % (3.5, Aug 14), in both directions;
+- AMI ES2002a cpWER by +0.00 to +0.35 with EN (18.03 → 18.03, 18.38, 18.30) and by +0.62 to +1.00 with 3.5 (20.67 → 21.29, 21.67, 21.55); Aug 14's by about +2 points for both models, from speaker attribution (WDER 19.4 → 21.1 and 21.8 with EN) while its WER moved by at most 0.35;
+- the gaps of 5 s or more: 1 to 3 new and 1 to 2 gone per offset with EN, 5 to 8 new and 4 to 6 gone with 3.5, at different places at each offset (`tools/eval/phase.py --json` lists them per session).
+
+So four of 4.2's clauses compare one phase draw with another using a tolerance smaller than the draw: item 2's ES2002a bar of +0.1 (inside the phase move for both models, by a factor of ten for 3.5; N2's note says so in its last "What else" bullet); item 1's per-session 0.5 (Aug 14 with both models and ES2002a with 3.5 move more than that on v0.2.0 alone); item 2's zero tolerance on the public groups' pooled cpWER and WDER; and item 1's "no new gap of 5 s or more that the phase controls do not also show" (the controls show different new gaps at every offset, so a 0.3.0 run at its own phase would show gaps none of them show). The draw is not even the same on both sides: #87 moved the runtime's internal chunk phase by 70 ms (research/21 section 1.3), so 0.3.0 on the unmodified input is a different phase from v0.2.0 on the unmodified input by construction. Research/19's build of `main` read +3.3 % EN deletions at a single phase, 0.6 points above EN's band, and N2 cannot say whether that was the runtime or the draw. The remedy is to compare like with like, which is what changes below.
+
+For the record: N2's input-gain report closed that lever by its rule (the note, "Rule 2"), and spike L failed its kill rule at every boost (docs/eval/2026-10-30-names-spike.md); neither bears on R.
+
+#### 4.4.2 The ruling
+
+Principle: where both runtimes can be run at the same four input conditions (the gate set), the mean over the four conditions decides and the phase averages out; where one phase per side is all there is (the broad set, the public groups), a tolerance fixed here from N2's numbers applies, and a per-session trip escalates to the four-condition comparison instead of failing R outright. Pooled numbers decide; per-session clauses catch a broken session, not a drift. Each model is judged on its own numbers by the same rule, and R passes only if both models pass, because one runtime serves both.
+
+**R1. Deletions, gate set, like for like.** 0.3.0 runs the gate set at N2's four conditions (unmodified, −70, +20, +40 ms), both models. Bar: the mean pooled deletions over 0.3.0's four runs at most v0.2.0's four-run mean plus the band: **EN at most 1,458.85** (mean 1,420.5 of 1,409, 1,401, 1,425 and 1,447, × 1.0270); **3.5 at most 1,980.00** (mean 1,916.75 of 1,879, 1,941, 1,911 and 1,936, × 1.0330). No condition is compared with its namesake. The single-phase difference (0.3.0 unmodified against `rs_*_shipped`) is reported beside research/19's +3.3 % and +1.0 %, for the record only.
+
+**R2. Deletions, broad set (29 sessions, 1,341 min), one phase each side.** Pooled deletions per model at most v0.2.0's × 1.0270 (EN) and × 1.0330 (3.5); the v0.2.0 side is rescored from `rs_*_shipped` with today's `metrics.py` and written into the eval note before the first 0.3.0 run. Pooled over 1,341 min the phase noise is smaller than on the 324 min the band was measured on, so the band is generous here, and it stays as fixed.
+
+**R3. Gaps of 5 s or more.** Gate set: the mean over 0.3.0's four runs of the pooled count at most the largest any v0.2.0 phase run showed, **EN 25, 3.5 33** (N2: 23, 25, 22, 23 and 30, 30, 31, 33); the mean over the four runs of the count of new gaps against `rs_*_shipped` (phase.py's `new_5s`) at most N2's largest, **EN 3, 3.5 8**. Broad set: pooled count at most v0.2.0's × 1.10 per model (the gate's largest phase move in this count: EN 23 → 25, 3.5 30 → 33); the new gaps listed with their times, report only. Gaps of 2 s or more: report.
+
+**R4. Per-session cpWER.** Gate set: 0.3.0's four-run mean per session at most v0.2.0's four-run mean plus the larger of 0.5 and that session's own four-run range (N2's per-session tables; the range exceeds 0.5 only on Aug 14, 2.08 EN and 2.24 3.5, and on ES2002a with 3.5, 1.00). Ceilings, cpWER in percent, two decimals as `metrics.py` prints them:
+
+| Session (min) | EN: v0.2.0 mean of four / ceiling | 3.5: v0.2.0 mean of four / ceiling |
+|---|---|---|
+| Aug 2 (44) | 9.57 / 10.07 | 10.54 / 11.04 |
+| Aug 9 (44) | 7.94 / 8.44 | 8.46 / 8.96 |
+| Sep 7 (48) | 7.19 / 7.69 | 7.58 / 8.08 |
+| Sep 5 (45) | 4.87 / 5.37 | 5.23 / 5.73 |
+| Sep Logistics (46) | 7.12 / 7.62 | 6.50 / 7.00 |
+| Aug 14 (77) | 45.11 / 47.19 | 44.17 / 46.41 |
+| AMI ES2002a (21) | 18.19 / 18.69 | 21.30 / 22.30 |
+
+Broad set: a session whose 0.3.0 cpWER on the unmodified input is worse than v0.2.0's by more than 0.5 does not fail R by itself. It is re-run at the three offsets on both runtimes and judged by the gate rule (mean against mean plus the larger of 0.5 and the session's v0.2.0 range); if it still fails, R fails. About 3 minutes of GPU per escalated session and model; on N2's gate rate (1 session in 7 with EN, 2 in 7 with 3.5 move more than 0.5 at some offset) about 4 to 12 of the 58 session-model pairs trip by phase alone.
+
+**R5. Speakers (replaces 4.2 item 2).** On `pub-meeting` (8 sessions, 373 min) and `pub-far` (36 sessions, 360 min), 0.3.0 on the unmodified input, both models: pooled cpWER and pooled WDER per group at most the public baseline's plus **0.2 for EN and 0.4 for 3.5** (baselines EN 29.9 / 4.8 and 42.7 / 8.8; 3.5 32.2 / 5.0 and 44.4 / 9.6; docs/eval/2026-10-27-baseline-public.md "Pooled"). Derivation: ES2002a's four-run cpWER range (0.35 EN, 1.00 3.5) over √8 for pub-meeting's eight sessions is 0.12 and 0.35, rounded up; the same figures apply to pub-far (36 sessions, so conservative there) and to WDER (the phase moves on ES2002a and Aug 14 are speaker attribution, 4.4.1). Both tolerances sit below #81's single-session signal (+0.7 EN, +0.9 3.5) and below #87's own pooled main-against-v0.2.0 gap (+0.66 and +0.64 on 16 and 6 AMI sessions, research/21 section 1.3), so a regression of #81's size still fails. **AMI ES2002a is report only for both models:** 0.3.0's four-run table beside v0.2.0's (EN 18.03 to 18.38, 3.5 20.67 to 21.67), with a sentence if 0.3.0's mean lies outside that range; it keeps its R4 ceiling (18.69 EN, 22.30 3.5). The +0.1 bar is withdrawn for both models, not only for 3.5: one 21-minute session cannot resolve 0.1 for either (EN's own phase range is 0.35), and judging the two models by different instruments would make the verdict depend on which model is noisier. Each model's speaker verdict rests on its own R5 numbers.
+
+**R6 to R8.** 4.2 items 3 (live), 4 (package: the digests against NVIDIA's `.sha256` files, the sizes above, extracted size, peak VRAM, × real time not worse than beta.5's, driver 610.88) and 5 (our tests) unchanged. The endpointing variant unchanged, report only.
+
+As 4.2 says: if any of R1 to R8 fails for either model, beta.6 stays on 0.2.0 and the eval note says which bar and by how much.
+
+#### 4.4.3 R's measurement plan, as changed
+
+1. R's branch carries N2's tooling: `run.py`'s `audio_shift_ms` key and `tools/eval/phase.py` from `f9da9d3` on `claude/beta6-phase-names` (merged first, or taken onto R's branch); the `*_030` configs are appended to `configs.toml` after N2's, as 11.3 orders.
+2. Before the first 0.3.0 run: the v0.2.0 side is rescored with today's `metrics.py` (`--metrics-only`: `rs_*_shipped` for the 36 sessions, the public baseline's `shipped_*` runs for the 44) and every reference number of R1 to R5 is written into `docs/eval/<date>-runtime-030.md` under "Rules", with this section quoted.
+3. Configs: `shipped_en_030`, `shipped_en_030_ph70`, `_ph20`, `_ph40` and the same for 3.5 on the gate set; `shipped_en_030` and `shipped_n35_030` on the broad set and the public groups. `phase.py --base rs_en_shipped --configs <the four 0.3.0 configs>` (and 3.5) gives R1, R3 and R4's gate numbers; `phase.py --base shipped_en_030 --configs <its three offsets>` gives 0.3.0's own phase band, report only, beside N2's.
+4. The gate set's unmodified 0.3.0 run is the timed run of item 4 (quiet.lock, pmon); every other run is untimed and shares the GPU with nothing but the desktop (3.5's rules).
+5. R4's escalation runs after the broad set is scored and only for the sessions that trip; the eval note lists them.
+6. The note's order: R1 to R5 with their numbers, then R6 to R8, then the variant; each bar quoted with its number before the verdict (section 13).
+
+#### 4.4.4 GPU cost, for scheduling
+
+| Step | Runs | Transcribe, at 100 × real time for 0.3.0 (research/19 section 6) and 80 × for v0.2.0 | Lock time with N2's harness overhead (about +25 %) |
+|---|---|---|---|
+| Gate set, four conditions, both models (R1, R3, R4, R5's AMI table; the unmodified run timed) | 8 × 324 min | 26 min | 33 min |
+| Broad set, both models (R2, R3, R4) | 2 × 1,341 min | 27 min | 34 min |
+| Public groups, both models (R5) | 2 × 733 min | 15 min | 19 min |
+| R4 escalations, 4 to 12 session-model pairs | 6 runs each | 12 to 36 min | 15 to 45 min |
+| Endpointing variant | 2 × 324 min | 6 min | 8 min |
+| Live fixtures and tests (item 3) | | | 15 min |
+| Vulkan and CPU smoke on the 5-minute clip (4.3) | | | 5 min |
+| **Total** | | | **about 2 h 10 min to 2 h 40 min** |
+
+Against 4.2's 1.5 to 2 hours: the 30 contingent minutes for v0.2.0's offsets are spent (N2 ran them) and go to 0.3.0's offsets instead; the escalations are the net addition. If 0.3.0 runs at 80 × rather than 100 ×, add about a fifth. Three idle windows fit it: the gate's four conditions with the timed run (about 35 minutes); the broad set and the public groups (about 55 minutes); the escalations, the live tests and the variant (30 to 70 minutes). Nothing runs while the owner uses the PC.
 
 ## 5. D3: chunk M, continued (chunk M2)
 
@@ -253,7 +328,7 @@ Process again without a kept live transcript (names from the current transcript,
 | N3 | The second file pass in the app | Only if 3.3's rule passes | full set, about 45 min for the fused config | after N1 passes |
 | M2 | Chunk M continued with the fixed form and the labelled bar | Plan 17 section 10; the owner's words outrank | a few min (fixtures) | now (code and CPU replays); the owner's labels when the list exists |
 | L | Names spike on the surviving EN file (brief) | Plan 16 section 12.4; the one unmeasured lever on names | 30 min | any idle window |
-| R | Runtime 0.3.0 | The owner's ask, gated by section 4 | about 1.5 to 2 h | only if the tag exists by 6 Nov |
+| R | Runtime 0.3.0 | The owner's ask, gated by section 4 | about 2 h 10 min to 2 h 40 min (4.4.4) | the tag exists (30 Oct); after 4.4 is in and N2's tooling is on R's branch |
 | T | Transcribe 30B spike (brief; owner's call) | Section 7 | none (CPU, 1.5 to 3 h, idle machine) | after R's decision, if the owner says yes |
 | H | Release: version, CHANGELOG, KNOWN-ISSUES, plan 19 checklist, benchmarks.json, eval tables from a fresh run of the rebuilt `diarist-cli` | Every release | full set once, about 45 to 65 min | last |
 
@@ -279,7 +354,7 @@ GPU time is the scarce thing and the owner's use of the PC comes first (the heav
 ## 12. D9: the release shape
 
 - **Freeze** when V, Q and U have merged and every measured chunk has either merged or been closed by its rule: N3 merged or N1 closed; M2 merged or closed; L's note written. With an idle machine for the GPU items this is about one week, so the freeze is expected around Friday 6 Nov 2026, the same day the runtime gate closes.
-- **If v0.3.0 is tagged by then,** R runs its 1.5 to 2 hours of GPU and lands or does not by its bars, about one idle-GPU day with the queueing; the freeze moves to R's decision.
+- **v0.3.0 was tagged on 30 Oct,** so R runs its 2 h 10 min to 2 h 40 min of GPU (4.4.4) and lands or does not by the bars of 4.4, about one idle-GPU day with the queueing; the freeze moves to R's decision.
 - **H** then runs the full set once from the rebuilt `diarist-cli` (both models, shipped configs, every bar of docs/eval/2026-10-27-beta5-release.md "Release bars" against beta.5's numbers: pooled cpWER per model not worse, no session worse by more than 0.5 unless the words show why, no new gap of 5 s or more, speed within 5 percent for the same measurement, with N3's second pass reported separately), writes `docs/eval/<date>-beta6-release.md` and `docs/plans/19-release-beta6-checklist.md` on plan 17's pattern (build, PDB, draft, publish, `updater/latest.json`, the update from beta.5 on this machine; no schema change is planned, so no new `diarist.db.bak`), and the owner publishes.
 - **The CHANGELOG entry** states, in the owner's plain words: the recording indicator; the second pass if it ships, with its measured gain and cost; the echo rule if it ships; the runtime if it ships, with its size; the punctuation model's pin and the authors' licence files; the re-timing result.
 - **Beta.7** opens with whichever of these did not land (the runtime first if it was the tag), the items of 10.2, and the Transcribe design if T's bars held.
@@ -296,7 +371,7 @@ GPU time is the scarce thing and the owner's use of the PC comes first (the heav
 | Live | `cargo test -p diarist-core --test live_ws_gpu`, `live_carry_repro`, `echo_sample` | R; M2 (`echo_sample`, `echo_fleurs`, `aec_postpass`) |
 | Rust equals Python | the Rust fill reproduces the measurement's fused words on every session | N3 |
 
-Standing rules, as plan 16 section 7.2: one agent per chunk, disjoint files, small commits on the chunk's branch, no bare `git stash`, no private data in committed files (the privacy scan of plan 17 section 11 before every push; never `tools/eval/sessions.toml`, `.work`, run folders or audio), no GPU jobs or heavy builds while the owner's jobs use the machine, never the owner's name or email in any web request (User-Agent `diarist/<version>`), measurement rules quoted with their numbers in the eval note before the verdict, and a bar is never moved after its numbers are seen (section 5.1's amendment is made here, before M2's run, and is the only one).
+Standing rules, as plan 16 section 7.2: one agent per chunk, disjoint files, small commits on the chunk's branch, no bare `git stash`, no private data in committed files (the privacy scan of plan 17 section 11 before every push; never `tools/eval/sessions.toml`, `.work`, run folders or audio), no GPU jobs or heavy builds while the owner's jobs use the machine, never the owner's name or email in any web request (User-Agent `diarist/<version>`), measurement rules quoted with their numbers in the eval note before the verdict, and a bar is never moved after its numbers are seen (section 5.1's amendment is made here, before M2's run, and section 4.4's on 31 Oct, before any 0.3.0 run; there are no others).
 
 ## 14. Decisions only the owner can make
 
