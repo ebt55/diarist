@@ -185,3 +185,82 @@ asr = "nemotron-en"
 diarizer = "nemotron-3-diarization"
 language = "en"
 collapse_loops = false
+
+# --- Phase control and input gain on runtime 0.2.0 (0.1.0-beta.6 chunk N2, docs/plans/18 section 3.5) ---
+# `audio_shift_ms`: run.py prepares a copy of the 16 kHz WAV (.work/wav/<session>.shift<n>ms.wav),
+# positive = that much leading digital silence, negative = that much trimmed from the start, and
+# moves the hypothesis times back by the same amount before scoring, so gaps and the scored region
+# are read on the unmodified audio's timeline. `audio_peak_dbfs`: the copy is scaled so that its
+# largest sample over the whole file sits at that level. Both are in the cache key and run.json.
+# Loop collapse off and punctuation off, as in the cached v0.2.0 runs these are read against
+# (research/19's rs_*_shipped, made by a 0.1.0-beta.4 build, which had no collapse).
+
+[shipped_en_ph0]
+description = "Nemotron EN, the app's file pass, loop collapse off, unmodified audio: the control that this build reproduces the cached v0.2.0 runs"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+
+[shipped_en_ph70]
+description = "Nemotron EN, the app's file pass, loop collapse off, the first 70 ms of the audio trimmed (the encoder phase of runtime PR #46)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = -70
+
+[shipped_en_ph20]
+description = "Nemotron EN, the app's file pass, loop collapse off, 20 ms of leading digital silence"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 20
+
+[shipped_en_ph40]
+description = "Nemotron EN, the app's file pass, loop collapse off, 40 ms of leading digital silence"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 40
+
+[shipped_n35_ph0]
+description = "Nemotron 3.5, the app's file pass, loop collapse off, unmodified audio: the control that this build reproduces the cached v0.2.0 runs"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+
+[shipped_n35_ph70]
+description = "Nemotron 3.5, the app's file pass, loop collapse off, the first 70 ms of the audio trimmed"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = -70
+
+[shipped_n35_ph20]
+description = "Nemotron 3.5, the app's file pass, loop collapse off, 20 ms of leading digital silence"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 20
+
+[shipped_n35_ph40]
+description = "Nemotron 3.5, the app's file pass, loop collapse off, 40 ms of leading digital silence"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 40
+
+[shipped_en_peak3]
+description = "Nemotron EN, the app's file pass, loop collapse off, the input scaled to a peak of -3 dBFS over the whole file (report only)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_peak_dbfs = -3.0
