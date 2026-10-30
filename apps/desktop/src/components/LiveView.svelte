@@ -306,8 +306,8 @@
     font-weight: 650;
   }
   .rec-dot {
-    width: 11px;
-    height: 11px;
+    width: 12px;
+    height: 12px;
   }
   .timer {
     min-width: 54px;
