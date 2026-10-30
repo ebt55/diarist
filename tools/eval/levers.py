@@ -658,7 +658,10 @@ def _gap_session(s, runs: Path, configs: list[str], levels_dir: Path) -> dict:
     for c in configs:
         gaps[c] = M.word_gaps(ref_w, hyp[c], t0, t1)
         mj = _load(runs / c / s.id / "metrics.json") or {}
-        check[c] = (mj.get("gaps"), mj.get("gaps_5s")) == (len(gaps[c]), sum(g["len"] >= M.GAP_LONG_S for g in gaps[c]))
+        # None: a metrics.json from before metrics.py counted gaps (research/19
+        # counted them with a scratch script), so there is nothing to compare.
+        mine = (len(gaps[c]), sum(g["len"] >= M.GAP_LONG_S for g in gaps[c]))
+        check[c] = None if "gaps" not in mj else (mj["gaps"], mj.get("gaps_5s")) == mine
     lev = audio_levels(s.audio, levels_dir / f"{s.id}.npy")
     n100 = len(lev) // 10
     lev100 = lev[: n100 * 10].reshape(-1, 10).mean(axis=1)
@@ -758,9 +761,15 @@ def cmd_gaps_why(a) -> None:
             continue
         recs.append(_gap_session(s, runs, configs, levels))
         print(f"[{sid}] done", file=sys.stderr)
-    bad = [(r["label"], c) for r in recs for c, ok in r["gaps_match_metrics"].items() if not ok]
-    print(f"Sessions: {len(recs)}; gap counts equal to metrics.json on {2 * len(recs) - len(bad)} of {2 * len(recs)} runs"
-          + (f" (differ: {bad})" if bad else ""))
+    checks = [(r["label"], c, ok) for r in recs for c, ok in r["gaps_match_metrics"].items()]
+    bad = [(lab, c) for lab, c, ok in checks if ok is False]
+    unrecorded = sum(1 for *_, ok in checks if ok is None)
+    print(f"Sessions: {len(recs)}; gap counts equal to metrics.json on {sum(1 for *_, ok in checks if ok)} of "
+          f"{len(checks)} runs, {unrecorded} without gap counts in metrics.json"
+          + (f", differ: {bad}" if bad else ""))
+    for c in configs:
+        print(f"Totals, {names[c]}: {sum(len(r['models'][c]) for r in recs)} gaps of 2 s or more, "
+              f"{sum(1 for r in recs for g in r['models'][c] if g['len'] >= 5.0)} of 5 s or more")
     sets: list[tuple[str, list[dict]]] = []
     present = [g for g in (*GAP_GATE_GROUPS, "broad", "talks", "pub-meeting", "pub-far", "pub-phone", "pub-lang")
                if any(r["group"] == g for r in recs)]
