@@ -264,3 +264,71 @@ diarizer = "nemotron-3-diarization"
 language = "en"
 collapse_loops = false
 audio_peak_dbfs = -3.0
+
+# --- Runtime 0.3.0 (0.1.0-beta.6 chunk R, docs/plans/18 sections 4.2 and 4.4) ---
+# Run with DIARIST_EVAL_ENGINE_DIR at the tagged nemo-speech-0.3.0-windows-x86_64-cuda package
+# (the name says which runtime; run.json records engine_version). The app's file pass, loop
+# collapse off and punctuation off, as the v0.2.0 runs they are read against (research/19's
+# rs_*_shipped, N2's shipped_*_ph*, the public baseline's shipped_*). The offsets are N2's.
+
+[shipped_en_030]
+description = "Nemotron EN on runtime 0.3.0, the app's file pass, loop collapse off, unmodified audio"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+
+[shipped_en_030_ph70]
+description = "Nemotron EN on runtime 0.3.0, the app's file pass, loop collapse off, the first 70 ms of the audio trimmed"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = -70
+
+[shipped_en_030_ph20]
+description = "Nemotron EN on runtime 0.3.0, the app's file pass, loop collapse off, 20 ms of leading digital silence"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 20
+
+[shipped_en_030_ph40]
+description = "Nemotron EN on runtime 0.3.0, the app's file pass, loop collapse off, 40 ms of leading digital silence"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 40
+
+[shipped_n35_030]
+description = "Nemotron 3.5 on runtime 0.3.0, the app's file pass, loop collapse off, unmodified audio"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+
+[shipped_n35_030_ph70]
+description = "Nemotron 3.5 on runtime 0.3.0, the app's file pass, loop collapse off, the first 70 ms of the audio trimmed"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = -70
+
+[shipped_n35_030_ph20]
+description = "Nemotron 3.5 on runtime 0.3.0, the app's file pass, loop collapse off, 20 ms of leading digital silence"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 20
+
+[shipped_n35_030_ph40]
+description = "Nemotron 3.5 on runtime 0.3.0, the app's file pass, loop collapse off, 40 ms of leading digital silence"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+collapse_loops = false
+audio_shift_ms = 40
