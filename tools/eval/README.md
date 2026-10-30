@@ -11,7 +11,8 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `configs.toml` | The configurations: baselines, `--verbatim`, decoder lookahead and diarizer preset variants (per-config `engine_args`) |
 | `fleurs_fetch.py` | About 10 minutes of the FLEURS test split per language (CC-BY-4.0) for the WER-only mode |
 | `nemo_direct.py` | Runs `nemo-speech transcribe` directly with the app's file-job flags plus extra flags (spikes on runtime options the app does not pass) |
-| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, `loops` (the repeated-token loop collapse measured on cached runs or on a copy of a data root, against the references and the Rust rule) and `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) |
+| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, `loops` (the repeated-token loop collapse measured on cached runs or on a copy of a data root, against the references and the Rust rule) `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) and `gaps-why` (every gap of 2 s or more of the EN and 3.5 runs by cause: quiet, overlapped, other; the other model's words inside it; docs/plans/18 section 3.2) |
+| `gapfill.py` | The gap fill of docs/plans/18 section 3.3 from cached runs: builds the fused words JSON (EN primary, Nemotron 3.5's words in EN's stretches of at least G), replays it through the app's file import without the GPU, records run.json; `rule` applies the plan's decision rule to the scored configs |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
 | `public_data.py` | Shared helpers of the public-set fetch scripts: pinned curl downloads with SHA-256 checks, 16 kHz conversion, reference and session-list writing |
 | `ami_test_fetch.py`, `icsi_fetch.py`, `notsofar_fetch.py`, `earnings22_fetch.py`, `alimeeting_fetch.py`, `summre_fetch.py`, `indic_fetch.py` | One per public set (docs/05 "Extend"): fetch a pinned slice into `.work/public/<set>/` and write its references and session list |
@@ -19,6 +20,7 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `smoke.py` | Clip smoke test: cuts 2 to 5 minutes of a session, runs the runtime on it via `nemo_direct.py`, scores it |
 | `sessions.example.toml` | Template for `sessions.toml` (gitignored, holds the private paths) |
 | `test_metrics.py` | Synthetic sanity checks for the metrics and for `levers.py loops` against the Rust rule (no GPU, no private data) |
+| `test_gapfill.py` | Synthetic checks of the gap fill (stretches, the 0.25 s margin, label mapping, the nearest-word fallback, the oracle) and of run.py's cache key for replayed configs |
 
 ## Setup
 
