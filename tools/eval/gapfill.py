@@ -359,7 +359,8 @@ def replay(config: str, cfg: dict, s, words: Path, rec: dict, data: Path, binary
         [str(binary), TEST_NAME, "--ignored", "--exact", "--nocapture", "--test-threads=1"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
     )
-    m = re.search(r"^meeting (\d+) \((\d+) words from ", p.stdout, re.M)
+    # The harness prints it after "test <name> ... " on the same line.
+    m = re.search(r"\bmeeting (\d+) \((\d+) words from ", p.stdout)
     if p.returncode != 0 or not m:
         raise RuntimeError(f"[{s.id}] replay import failed ({p.returncode}):\n{p.stdout[-1500:]}\n{p.stderr[-1500:]}")
     mid = int(m.group(1))
