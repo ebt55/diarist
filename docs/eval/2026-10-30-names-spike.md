@@ -21,3 +21,95 @@ The rule leaves these open; they were fixed here, before the first boosted run, 
 - **Control cost.** Clip WER of the control at boost b minus clip WER of the unboosted run, in points (speaker-agnostic, `levers.py boost`'s clip WER).
 - **Verdict.** The rule passes at a boost b in {0.5, 1, 2} when, at the file setting, the control at b costs at most 0.2 points and the fixed and inserted clauses hold at b on both the clip and the meeting. The name source passes if the rule passes at some b.
 - **GPU.** One batch through the shared queue (`gpu-run2.sh`, tier 2), untimed.
+
+## Setup
+
+| Item | Value |
+|---|---|
+| Machine, engine, diarizer | as in docs/eval/2026-10-30-phase-control.md: RTX 3080, driver 610.88, a byte copy of the app's nemo-speech 0.2.0 (`nemo-speech.exe` `d9527ade…3272`) and of its `Nemotron-3-Diarization.q8_0` (`08456d9e…a3a1`); one batch through the shared queue, 30 Oct 2026 23:54 to 31 Oct 00:01 IST |
+| ASR | the re-converted EN file above, SHA-256 checked after the copy; no run printed "boosting disabled" or any other boosting message |
+| Command (nemo_direct.py) | `nemo-speech transcribe <wav> --model <q8_0-pwf16.gguf> --stream --endpointing --diarize --diar-model <diarizer> --device cuda:0 --json --output <out> --force --asr.streaming.rnnt_right_context 13 --asr.diar.preset v3-offline [--speech-context <phrase> ...] [--speech-context-boost <b>]`; research/12's setting drops the two file-setting flags |
+| Clip | `ami_050-350.wav`, 300.0 s, SHA-256 `e0f33f0d7bad572cba3507edaed2154ea897dc0c8f9e432e216ad85d959a9b84`; 595 reference words |
+| Meeting | Aug 1 (47.4 min, 8,117 reference words), picked below; 5 names |
+
+## The meeting
+
+`names.py pick` over the 28 meetings, against the cached v0.2.0 EN runs (shipped file, file setting). The five with the most wrong occurrences of their speakers' names (counts only):
+
+| Session | Zoom labels | Names | Reference occurrences | Wrong in the cached EN run |
+|---|---|---|---|---|
+| Aug 1 | 3 | 5 | 21 | 13 |
+| Aug 2 | 6 | 10 | 22 | 11 |
+| Sep 1 | 3 | 5 | 19 | 6 |
+| Sep 2 | 3 | 4 | 13 | 6 |
+| Aug 4 | 3 | 5 | 7 | 6 |
+
+Over all 28 meetings: 262 reference occurrences of the speakers' names, 80 of them wrong. Aug 1 is the pick; the unboosted run of the re-converted file gets the same 13 of its 21 occurrences wrong, so the meeting has 13 targets.
+
+## Results
+
+### AMI clip, the file setting (the verdict)
+
+Reference occurrences: Craig 2, beagle 3, Planet of the Apes 1. The unboosted run gets one Craig and Planet of the Apes wrong, so the clip has 2 targets.
+
+| Run | Boost | Clip WER % | Words changed vs unboosted | Craig right | beagle right | Planet of the Apes right | Targets fixed | Insertions |
+|---|---|---|---|---|---|---|---|---|
+| unboosted | – | 15.63 | 0 | 1 | 3 | 0 | – | 0 |
+| three targets | 0.5 | 15.63 | 0 | 1 | 3 | 0 | 0 of 2 | 0 |
+| three targets | 1 | 15.63 | 0 | 1 | 3 | 0 | 0 of 2 | 0 |
+| three targets | 2 | 15.13 | 8 | 2 | 3 | 1 | 2 of 2 | 1 (beagle) |
+| 20 absent names | 0.5 | 15.13 | 5 | | | | | 0 |
+| 20 absent names | 1 | 14.29 | 11 | | | | | 0 |
+| 20 absent names | 2 | 14.45 | 13 | | | | | 0 |
+
+At boost 2 the two targets are fixed (in normalised words, "i am greg" becomes "i am craig" and "planet 8 it is" becomes "planet of the apes"), and the boost also turns a correct "beagles" into "beagle" and drops the three words after it ("about beagles i could do we might" becomes "about beagle we might"): one boosted phrase where the reference lacks it, 12 per hour of the clip. Boosts 0.5 and 1 change no word. The control inserts none of its 20 names at any boost and the clip's WER falls by 0.50 to 1.34 points, from 5 to 13 changes elsewhere in the clip.
+
+### AMI clip, research/12's setting (continuity only)
+
+| Run | Boost | Clip WER % | Words changed | Craig / beagle / Planet right | Targets fixed | Insertions |
+|---|---|---|---|---|---|---|
+| unboosted | – | 15.29 | 0 | 1 / 3 / 0 | – | 0 |
+| three targets | 0.5 | 15.29 | 0 | 1 / 3 / 0 | 0 of 2 | 0 |
+| three targets | 1 | 15.46 | 3 | 1 / 3 / 0 | 0 of 2 | 1 (beagle) |
+| three targets | 2 | 15.29 | 4 | 2 / 3 / 0 | 1 of 2 | 1 (beagle) |
+| 20 absent names | 0.5 / 1 / 2 | 15.29 / 15.46 / 15.46 | 0 / 1 / 6 | | | 0 |
+
+Research/12's pinned EN file at this setting: 15.1 %, Craig 1, beagle 3, Planet of the Apes 0; the re-converted 3.5 file there changed 19 words at boost 2 and 111 at boost 3, and the 20 absent names cost 22.7 points at boost 3. The EN file boosts far more gently at the plan's levels.
+
+### The owner's meeting, the file setting
+
+| Run | Boost | WER % | Words changed vs unboosted | Targets fixed | Right names broken | Insertions |
+|---|---|---|---|---|---|---|
+| unboosted | – | 3.91 | 0 | – (13 targets) | – | 0 |
+| speakers' names | 0.5 | 3.97 | 5 | 0 of 13 | 0 | 0 |
+| speakers' names | 1 | 3.97 | 7 | 0 of 13 | 0 | 0 |
+| speakers' names | 2 | 3.95 | 9 | 0 of 13 | 0 | 0 |
+
+Per name (P1 to P5, reference occurrences / right in every run): 2 / 0, 10 / 6, 1 / 1, 7 / 0, 1 / 1. No boost changes any name occurrence. WER against Zoom's transcript, which is itself a recogniser's (docs/05), so a name Zoom spelt differently counts as wrong here.
+
+## Verdict
+
+| Boost | Control cost on the clip (≤ 0.2) | Fixed, clip (≥ 1 of 2) | Fixed, meeting (≥ 7 of 13) | Insertions per phrase per hour, clip / meeting (≤ 1) | Rule at this boost |
+|---|---|---|---|---|---|
+| 0.5 | −0.50, holds | 0, fails | 0, fails | 0 / 0, holds | fails |
+| 1 | −1.34, holds | 0, fails | 0, fails | 0 / 0, holds | fails |
+| 2 | −1.18, holds | 2, holds | 0, fails | 12 (beagle) / 0, fails | fails |
+
+**The kill rule fails at every boost the plan lists: no name source is built.** Plan 18 section 3.6's consequence applies: the KNOWN-ISSUES names row quotes these numbers, and the lever waits for an upstream change to RNNT boosting or NVIDIA's republished GGUFs. On this file boosting is no longer the wrecking ball research/12 measured on the 3.5 file (no absent name is inserted at boosts up to 2), but it does not fix the owner's names at all, and the one level that fixes the clip's targets also breaks a correct word next to them.
+
+## GPU use
+
+One batch, lock held 6.0 min (23:54:44 to 00:00:44 IST); the 18 `nemo-speech` runs sum to 4.5 min. Untimed, no quiet.lock.
+
+## Reproduce
+
+```sh
+cd tools/eval
+ffmpeg -ss 50 -t 300 -i ES2002a.Mix-Headset.wav -ac 1 -ar 16000 .work/clips/ami_050-350.wav
+uv run python -I names.py pick --runs-dir <runs with rs_en_shipped> --config rs_en_shipped --write-phrases .work/spikes/names/meeting.phrases.txt
+uv run python -I nemo_direct.py .work/clips/ami_050-350.wav --asr <q8_0-pwf16.gguf> --out .work/spikes/names/clip_b2 -- \
+    --asr.streaming.rnnt_right_context 13 --asr.diar.preset v3-offline \
+    --speech-context Craig --speech-context beagle --speech-context "Planet of the Apes" --speech-context-boost 2
+uv run python -I names.py score --clip --phrases Craig beagle "Planet of the Apes" --base .work/spikes/names/clip_base --runs .work/spikes/names/clip_b2
+uv run python -I names.py score --session aug1 --phrases-file .work/spikes/names/meeting.phrases.txt --base .work/spikes/names/mtg_base --runs .work/spikes/names/mtg_b2
+```
