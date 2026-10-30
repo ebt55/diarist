@@ -237,6 +237,10 @@ def cached(config: str, sid: str, cfg: dict, lang: str | None = None) -> dict | 
         or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
         or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
         or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
+        # Replayed configs (gapfill.py, docs/plans/18 section 3.3): the source
+        # model of the words and the fill, as in configs.toml.
+        or (meta.get("replay") or None) != (cfg.get("replay") or None)
+        or (meta.get("gap_fill") or None) != (cfg.get("gap_fill") or None)
     ):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
@@ -1050,6 +1054,12 @@ def main() -> None:
     cfg = configs[a.config]
     if cfg.get("skip"):
         raise SystemExit(f"config {a.config} is not runnable: {cfg['skip']}")
+    if cfg.get("replay") and not (a.metrics_only or a.export_for_correction):
+        # Its words come from cached runs through the file import, never from
+        # a transcription: `gapfill.py run --config <c>`, then --metrics-only.
+        raise SystemExit(
+            f"config {a.config} is scored from replayed cached words (gapfill.py run); use --metrics-only"
+        )
     if a.fleurs:
         langs = list(FLEURS_TAGS) if a.fleurs == "all" else [x.strip() for x in a.fleurs.split(",") if x.strip()]
         for lang in langs:

@@ -13,6 +13,7 @@ over runs that run.py or nemo_direct.py already cached. Never touches the GPU.
   uv run python -I levers.py loops --db <copy of diarist.db> --meetings 12-21 [--analysis <loops json>]
   uv run python -I levers.py loops --configs pn_shipped_n35 --sessions present --runs-dir <.work/runs> --fleurs-root <.work/fleurs>
   uv run python -I levers.py --sessions-file sessions.public.toml baseline --configs shipped_en,shipped_n35
+  uv run python -I levers.py gaps-why --configs rs_en_shipped,rs_n35_shipped --runs-dir <.work/runs>
 
 offsets: word-start offset of each config against the base config on the
   same session: normalised words aligned by Levenshtein, starts compared on
@@ -36,6 +37,12 @@ boost: phrase hits, changes against the unboosted run, clip WER and the
 baseline: per-group session tables and pooled rows (cpWER, tcpWER, WER with
   del / ins / sub, WDER, DER, count error, gaps, speed) of one or more configs,
   as in docs/eval/2026-10-27-baseline-public.md.
+gaps-why: where the missed words are (docs/plans/18 section 3.2): every gap
+  of 2 s or more of two configs (EN and 3.5) by cause (quiet: the audio over
+  the gap more than 12 dB under the session's median speech level;
+  overlapped: two or more reference speakers among its words; other), with
+  the other model's words inside it and whether the other model misses the
+  same stretch. Numbers only.
 table: the lookahead summary, one row per config (quality on the short
   sessions, speed, and on the 77-minute session VRAM, tag agreement and the
   word-start offset against the same model's R = 1 config).
@@ -60,6 +67,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import math
 import os
 import statistics
 import sys
@@ -543,6 +551,253 @@ def cmd_baseline(a) -> None:
                 f"{q['w_del']} | {q['w_ins']} | {q['w_sub']} | {pc(q['wder'])} | {pc(q['der'])} | {q['abs_count']} | "
                 f"{q['gaps']} | {q['gaps_5s']} | {xrt} |"
             )
+
+
+GAP_GATE_GROUPS = ("tuning", "heldout", "control", "stress", "overlap")
+QUIET_DB = 12.0
+FILL_SHRINK_S = 0.25
+SIMULTANEOUS_S = 0.2
+
+
+def audio_levels(path: Path, cache: Path) -> "np.ndarray":
+    """Mean square of the audio per 10 ms frame (16 kHz mono float, ffmpeg),
+    cached as .npy (a level envelope, no audio)."""
+    import numpy as np
+
+    if cache.is_file():
+        return np.load(cache)
+    import subprocess
+
+    p = subprocess.Popen(
+        ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
+        stdout=subprocess.PIPE,
+    )
+    frames, rest = [], np.zeros(0, dtype=np.float32)
+    while True:
+        buf = p.stdout.read(16000 * 4 * 60)
+        if not buf:
+            break
+        x = np.concatenate([rest, np.frombuffer(buf, dtype=np.float32)])
+        n = len(x) // 160 * 160
+        frames.append((x[:n].astype(np.float64) ** 2).reshape(-1, 160).mean(axis=1))
+        rest = x[n:]
+    if p.wait() != 0:
+        raise RuntimeError(f"ffmpeg failed on {path.name}")
+    if len(rest):
+        frames.append(np.array([(rest.astype(np.float64) ** 2).mean()]))
+    out = np.concatenate(frames).astype(np.float32) if frames else np.zeros(0, dtype=np.float32)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, out)
+    return out
+
+
+def _db(x: float) -> float:
+    import math
+
+    return 10.0 * math.log10(max(float(x), 1e-12))
+
+
+def _union(rows, t0: float, t1: float) -> list[tuple[float, float]]:
+    iv = sorted((max(r.start, t0), min(r.end, t1)) for r in rows if r.end > t0 and r.start < t1)
+    out: list[list[float]] = []
+    for a, b in iv:
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _simultaneous_s(rows, a: float, b: float) -> float:
+    """Time inside [a, b] with two or more distinct reference speakers active
+    (reference RTTM)."""
+    ev = []
+    for r in rows:
+        s, e = max(r.start, a), min(r.end, b)
+        if e > s:
+            ev += [(s, 1, r.speaker), (e, -1, r.speaker)]
+    ev.sort(key=lambda x: (x[0], x[1]))
+    active: Counter = Counter()
+    last, total = a, 0.0
+    for t, d, spk in ev:
+        if sum(1 for v in active.values() if v > 0) >= 2:
+            total += t - last
+        last = t
+        active[spk] += d
+    return total
+
+
+def _gap_session(s, runs: Path, configs: list[str], levels_dir: Path) -> dict:
+    """The gaps of each config on one session (research/19 section 0, as
+    metrics.py counts them) with their cause and the other config's words."""
+    import numpy as np
+    from rapidfuzz.distance import Levenshtein
+
+    import metrics as M
+    import run as R
+    from common import interpolate_words
+
+    metas = {c: json.loads((runs / c / s.id / "run.json").read_text(encoding="utf-8")) for c in configs}
+    ref_segs, ref_rttm, _ = R.load_reference(s)
+    meta0 = metas[configs[0]]
+    duration = meta0.get("audio_s")
+    region = R.scored_region(s, ref_segs, duration)
+    lang = meta0.get("language") or s.language
+    ref_w = interpolate_words(ref_segs, lang)
+    hyp: dict[str, list] = {}
+    gaps: dict[str, list[dict]] = {}
+    check: dict[str, bool] = {}
+    for c in configs:
+        doc = json.loads((runs / c / s.id / "transcript.json").read_text(encoding="utf-8"))
+        _, words = M.hyp_from_export(doc, s.id)
+        if region:
+            lo, hi = region
+            words = [r for r in words if lo <= (r["start_time"] + r["end_time"]) / 2 <= hi]
+        hyp[c] = interpolate_words(words, lang)
+    t0, t1 = region or (0.0, duration or max([w.end for c in configs for w in hyp[c]] + [w.end for w in ref_w] + [0.0]))
+    for c in configs:
+        gaps[c] = M.word_gaps(ref_w, hyp[c], t0, t1)
+        mj = _load(runs / c / s.id / "metrics.json") or {}
+        check[c] = (mj.get("gaps"), mj.get("gaps_5s")) == (len(gaps[c]), sum(g["len"] >= M.GAP_LONG_S for g in gaps[c]))
+    lev = audio_levels(s.audio, levels_dir / f"{s.id}.npy")
+    n100 = len(lev) // 10
+    lev100 = lev[: n100 * 10].reshape(-1, 10).mean(axis=1)
+    centres = (np.arange(n100) + 0.5) * 0.1
+    inside = np.zeros(n100, dtype=bool)
+    for a, b in _union(ref_rttm, t0, t1):
+        inside |= (centres >= a) & (centres < b)
+    speech_db = float(np.median(10 * np.log10(np.maximum(lev100[inside], 1e-12)))) if inside.any() else float("nan")
+    ref_mid = sorted(((w.start + w.end) / 2, w.word, w.speaker) for w in ref_w)
+    ref_t = [x[0] for x in ref_mid]
+    out = {"session": s.id, "label": s.label, "group": s.group, "speech_db": speech_db, "gaps_match_metrics": check,
+           "models": {}}
+    for c in configs:
+        other = [x for x in configs if x != c][0]
+        o_words = sorted(hyp[other], key=lambda w: (w.start, w.end))
+        o_starts = [w.start for w in o_words]
+        rows = []
+        for g in gaps[c]:
+            a, b = g["start"], g["end"]
+            i0, i1 = bisect.bisect_left(ref_t, a + M.GAP_MARGIN_S), bisect.bisect_right(ref_t, b - M.GAP_MARGIN_S)
+            at_stake = ref_mid[i0:i1]
+            spk = {x[2] for x in at_stake}
+            f0, f1 = int(a * 100), max(int(math.ceil(b * 100)), int(a * 100) + 1)
+            seg = lev[f0:f1]
+            rel = (_db(seg.mean()) - speech_db) if len(seg) else float("nan")
+            k = bisect.bisect_left(o_starts, a + FILL_SHRINK_S)
+            o_in = []
+            while k < len(o_words) and o_words[k].start <= b - FILL_SHRINK_S:
+                if o_words[k].end <= b - FILL_SHRINK_S:
+                    o_in.append(o_words[k].word)
+                k += 1
+            correct = sum(
+                op.src_end - op.src_start
+                for op in Levenshtein.opcodes([x[1] for x in at_stake], o_in) if op.tag == "equal"
+            )
+            cover = sum(max(0.0, min(b, h["end"]) - max(a, h["start"])) for h in gaps[other])
+            simult = _simultaneous_s(ref_rttm, a, b)
+            cls = "quiet" if rel < -QUIET_DB else ("overlapped" if len(spk) >= 2 else "other")
+            rows.append({
+                "len": g["len"], "ref_words": g["ref_words"], "rel_db": round(rel, 2), "ref_speakers": len(spk),
+                "simultaneous_s": round(simult, 2), "cls": cls, "other_words": len(o_in), "other_correct": correct,
+                "other_cover": round(cover / (b - a), 3) if b > a else 0.0,
+            })
+        out["models"][c] = rows
+    return out
+
+
+def _gap_tally(recs: list[dict], c: str, long_only: bool = False) -> dict:
+    rows = [g for r in recs for g in r["models"][c] if not long_only or g["len"] >= 5.0]
+    t: dict = {"gaps": len(rows), "ref_words": sum(g["ref_words"] for g in rows)}
+    for cls in ("quiet", "overlapped", "other"):
+        sub = [g for g in rows if g["cls"] == cls]
+        t[cls] = (len(sub), sum(g["ref_words"] for g in sub))
+    t["simultaneous"] = sum(1 for g in rows if g["simultaneous_s"] >= SIMULTANEOUS_S)
+    t["quiet_and_overlapped"] = sum(1 for g in rows if g["rel_db"] < -QUIET_DB and g["ref_speakers"] >= 2)
+    t["has_words"] = sum(1 for g in rows if g["other_words"] > 0)
+    t["other_words"] = sum(g["other_words"] for g in rows)
+    t["other_correct"] = sum(g["other_correct"] for g in rows)
+    t["both_miss"] = sum(1 for g in rows if g["other_cover"] >= 0.5)
+    lv = sorted(g["rel_db"] for g in rows if g["rel_db"] == g["rel_db"])
+    t["median_rel_db"] = lv[len(lv) // 2] if lv else float("nan")
+    for cls in ("quiet", "overlapped", "other"):
+        sub = [g for g in rows if g["cls"] == cls]
+        t[f"{cls}_has_words"] = sum(1 for g in sub if g["other_words"] > 0)
+        t[f"{cls}_correct"] = sum(g["other_correct"] for g in sub)
+    return t
+
+
+def cmd_gaps_why(a) -> None:
+    """Plan 18 section 3.2: where the missed words are. For every gap of 2 s
+    or more (research/19 section 0, metrics.word_gaps, exactly as metrics.json
+    counts them) of each of two configs: its length, the reference words in
+    it, the RMS level of the audio over the gap against the session's median
+    speech level (median of 100 ms frame levels inside the reference RTTM's
+    speech), the distinct reference speakers of those words, the time with two
+    or more reference speakers active at once (reference RTTM), and the other
+    config's words: those whose span lies inside the gap shrunk by 0.25 s at
+    both ends (what a fill could insert), how many of them the reference words
+    of the gap align with as equal (Levenshtein), and whether the other
+    config's own gaps cover at least half of this one. Cause classes in this
+    order: quiet (more than 12 dB under the session's median speech level),
+    overlapped (two or more reference speakers among the gap's words), other.
+    Numbers only; no text is printed."""
+    sessions = load_sessions(a.sessions_file)
+    configs = [x.strip() for x in a.configs.split(",") if x.strip()]
+    if len(configs) != 2:
+        raise SystemExit("--configs takes two configs, e.g. rs_en_shipped,rs_n35_shipped")
+    names = dict(zip(configs, [x.strip() for x in (a.names or "EN,3.5").split(",")]))
+    runs = Path(a.runs_dir) if a.runs_dir else RUNS
+    levels = Path(a.levels_dir) if a.levels_dir else WORK / "levels"
+    groups = [g.strip() for g in a.groups.split(",")] if a.groups else None
+    recs = []
+    for sid, s in sessions.items():
+        if groups and s.group not in groups:
+            continue
+        if not all((runs / c / sid / "transcript.json").is_file() for c in configs):
+            continue
+        recs.append(_gap_session(s, runs, configs, levels))
+        print(f"[{sid}] done", file=sys.stderr)
+    bad = [(r["label"], c) for r in recs for c, ok in r["gaps_match_metrics"].items() if not ok]
+    print(f"Sessions: {len(recs)}; gap counts equal to metrics.json on {2 * len(recs) - len(bad)} of {2 * len(recs)} runs"
+          + (f" (differ: {bad})" if bad else ""))
+    sets: list[tuple[str, list[dict]]] = []
+    present = [g for g in (*GAP_GATE_GROUPS, "broad", "talks", "pub-meeting", "pub-far", "pub-phone", "pub-lang")
+               if any(r["group"] == g for r in recs)]
+    if any(r["group"] in GAP_GATE_GROUPS for r in recs):
+        sets.append(("gate", [r for r in recs if r["group"] in GAP_GATE_GROUPS]))
+    for g in present:
+        if g not in GAP_GATE_GROUPS:
+            sets.append((g, [r for r in recs if r["group"] == g]))
+    sets.append(("all", recs))
+
+    def pct(n, d):
+        return f"{100 * n / d:.0f}" if d else "–"
+
+    for long_only in (False, True):
+        title = "gaps of 5 s or more" if long_only else "gaps of 2 s or more"
+        print(f"\n### Cause classes, {title}\n")
+        print("| Set | Model | Sessions | Gaps | Ref words | Quiet: gaps (words) | Overlapped: gaps (words) | "
+              "Other: gaps (words) | Quiet and overlapped | Two speakers at once ≥ 0.2 s | Median level vs speech, dB |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for name, rs in sets:
+            for c in configs:
+                t = _gap_tally(rs, c, long_only)
+                print(f"| {name} | {names[c]} | {len(rs)} | {t['gaps']} | {t['ref_words']} | "
+                      + " | ".join(f"{t[k][0]} ({t[k][1]})" for k in ("quiet", "overlapped", "other"))
+                      + f" | {t['quiet_and_overlapped']} | {t['simultaneous']} | {t['median_rel_db']:.1f} |")
+        print(f"\n### The other model inside them, {title}\n")
+        print("| Set | Model | Gaps | Other has words: gaps (%) | Its words inside | Of them matching the reference | "
+              "Other also has a gap over half of it: gaps (%) | Has words by class: quiet / overlapped / other |")
+        print("|---|---|---|---|---|---|---|---|")
+        for name, rs in sets:
+            for c in configs:
+                t = _gap_tally(rs, c, long_only)
+                print(f"| {name} | {names[c]} | {t['gaps']} | {t['has_words']} ({pct(t['has_words'], t['gaps'])}) | "
+                      f"{t['other_words']} | {t['other_correct']} | {t['both_miss']} ({pct(t['both_miss'], t['gaps'])}) | "
+                      + " / ".join(f"{t[f'{k}_has_words']} of {t[k][0]}" for k in ("quiet", "overlapped", "other")) + " |")
+    if a.json_out:
+        Path(a.json_out).write_text(json.dumps(recs, indent=1) + "\n", encoding="utf-8")
 
 
 def cmd_punct(a) -> None:
@@ -1287,6 +1542,13 @@ def main() -> None:
     p.add_argument("--db", help="a copy of a data root's diarist.db: its meetings' current runs instead of eval runs")
     p.add_argument("--meetings", default="1-1000", help="meeting ids for --db, e.g. 12-21")
     p.add_argument("--analysis", help="a word-error analysis's loops JSON, for the EN-only share (--db)")
+    p = sub.add_parser("gaps-why")
+    p.add_argument("--configs", default="rs_en_shipped,rs_n35_shipped", help="two configs: the first EN, the second 3.5")
+    p.add_argument("--names", default="EN,3.5")
+    p.add_argument("--runs-dir", help="the .work/runs folder holding both configs (read only)")
+    p.add_argument("--groups", help="comma-separated groups (default: every session with both runs)")
+    p.add_argument("--levels-dir", help="cache of 10 ms level envelopes (default .work/levels)")
+    p.add_argument("--json-out", help="per-gap numbers (no text) as JSON")
     p = sub.add_parser("baseline")
     p.add_argument("--configs", required=True)
     p.add_argument("--groups", help="comma-separated groups (default: every group, in report order)")
@@ -1294,7 +1556,7 @@ def main() -> None:
     p.add_argument("--pool", action="append", help="extra pooled row NAME=REGEX over session labels (repeatable)")
     a = ap.parse_args()
     {"offsets": cmd_offsets, "tags": cmd_tags, "diff": cmd_diff, "ami-misses": cmd_ami_misses, "clip-score": cmd_clip_score, "table": cmd_table, "boost": cmd_boost, "fleurs-utts": cmd_fleurs_utts, "compare": cmd_compare,
-     "punct": cmd_punct, "loops": cmd_loops, "baseline": cmd_baseline}[a.cmd](a)
+     "punct": cmd_punct, "loops": cmd_loops, "baseline": cmd_baseline, "gaps-why": cmd_gaps_why}[a.cmd](a)
 
 
 if __name__ == "__main__":
