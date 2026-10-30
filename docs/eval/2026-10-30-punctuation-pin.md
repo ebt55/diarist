@@ -86,4 +86,4 @@ The only difference a run records is the revision in `engine_info.punctuation` (
 
 ## The dated snapshot (prepared, not uploaded)
 
-`C:\Users\ebin\claude-ground\diarist-releases\models-2026-10-v1.1.1-snapshot\` (outside the repository) holds `punctuation-model-card-0cea764.md` (14,142 bytes, `4f4ec573…`) and `punctuation-model-info-2026-10-30.json` (4,319 bytes, `f8055030…`), with a `CONTENTS.md` giving their sizes, hashes and sources. Where they are published (extra assets on `models-2026-10`, or the first release of a models repository) is the owner's decision; nothing was uploaded and the `models-2026-10` folder was not changed.
+The owner's local release folder `models-2026-10-v1.1.1-snapshot` (beside `models-2026-10`, outside the repository) holds `punctuation-model-card-0cea764.md` (14,142 bytes, `4f4ec573…`) and `punctuation-model-info-2026-10-30.json` (4,319 bytes, `f8055030…`), with a `CONTENTS.md` giving their sizes, hashes and sources. Where they are published (extra assets on `models-2026-10`, or the first release of a models repository) is the owner's decision; nothing was uploaded and the `models-2026-10` folder was not changed.
