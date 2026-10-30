@@ -393,6 +393,13 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   recording?", `stop_armed`) and a second press within 3 s stops. The
   wording lives in `lib/stopConfirm.ts` (and `live.rs` for the
   notification).
+- While recording (and stopping) the app says so outside its window: the
+  window title reads "● Recording · Diarist", the taskbar button carries a
+  red dot overlay (described as "Recording" to screen readers) and the tray
+  icon has the red dot in its corner (`taskbar.rs`, `tray.rs`; the frames
+  are `branding/recording/`). The overlay is set again when the window comes
+  back from the tray or changes DPI; Windows shows it only while the window
+  has a taskbar button and badges are on in the taskbar settings.
 - The live server starts when the start sheet opens or Ctrl+Alt+R starts a
   recording, not at launch (`engine.preload` = true starts it at launch), and
   stops after `engine.idle_minutes` (default 10, 0 = never) without a
