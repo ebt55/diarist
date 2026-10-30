@@ -19,6 +19,8 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `smoke.py` | Clip smoke test: cuts 2 to 5 minutes of a session, runs the runtime on it via `nemo_direct.py`, scores it |
 | `sessions.example.toml` | Template for `sessions.toml` (gitignored, holds the private paths) |
 | `test_metrics.py` | Synthetic sanity checks for the metrics and for `levers.py loops` against the Rust rule (no GPU, no private data) |
+| `phase.py` | The phase control of docs/plans/18 section 3.5 from scored runs: deletions, gaps and AMI cpWER per offset against a base config, the band, and the new and gone gaps of 5 s or more |
+| `names.py` | Spike L (word boosting for names, docs/plans/18 section 3.6): `pick` ranks the owner's Zoom meetings by name errors of a cached run (counts only), `score` reads nemo_direct runs against the kill rule |
 
 ## Setup
 
@@ -88,9 +90,11 @@ Report naming: sessions appear under their `label` (docs/05 shorthand such as "A
 | `shipped_n35`, `shipped_en` | both | no `engine_args`: the app's own defaults. With a 0.1.0-beta.2 build (`tools/eval/.bin/diarist-cli.exe`; the earlier build is kept as `diarist-cli-0.1.0-beta.1.exe`) run.json records lookahead 13 and preset v3-offline, and `levers.py diff --a n35_rc_13_diar_off --b shipped_n35 --sessions ami,aug2,aug9,sep5,sep7,seplog,aug14` shows identical words, times and tags |
 | `n35_rc_13_diar_off`, `en_rc_13_diar_off` | both | lookahead 1.12 s plus `--asr.diar.preset v3-offline` in the fused pass (21 s diarizer chunks); the standalone `--rttm` pass stays on `v3-streaming` |
 | `shipped_en_loops_off` | nemotron-en | `shipped_en` with `collapse_loops = false`: the data root runs with `transcript.collapse_loops = off`, as every build before 0.1.0-beta.5, for comparisons with the older tables (docs/eval/2026-10-26-loop-collapse.md) |
+| `shipped_en_ph0`, `_ph70`, `_ph20`, `_ph40` and the same for `shipped_n35` | both | the phase control on runtime 0.2.0 (docs/eval/2026-10-30-phase-control.md): `audio_shift_ms` -70, +20, +40 (0 for the control), loop collapse off as in research/19's cached runs |
+| `shipped_en_peak3` | nemotron-en | the input scaled to a peak of -3 dBFS (`audio_peak_dbfs`), loop collapse off; report only (the same note) |
 | `shipped_en_punct` | nemotron-en | `shipped_en` with `punctuation = true`: the data root runs with `transcript.punctuation = auto` and the manifest's punctuation model selected. Words, times and speakers are unchanged, so cpWER, tcpWER and WDER equal `shipped_en`'s; DER, JER and ORC-WER move because segments end at sentence ends (docs/eval/2026-10-26-punctuation.md section 12) |
 
-To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest names from `manifests/models.json`), `language`, a `description` and optionally `engine_args`: a list of flags for `nemo-speech transcribe`, one item per argument (`["--asr.streaming.rnnt_right_context", "13"]`). They reach the transcribe step only, not the standalone diarize pass.
+To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest names from `manifests/models.json`), `language`, a `description` and optionally `engine_args`: a list of flags for `nemo-speech transcribe`, one item per argument (`["--asr.streaming.rnnt_right_context", "13"]`). They reach the transcribe step only, not the standalone diarize pass. Two more optional keys prepare the audio: `audio_shift_ms` (positive: that much leading digital silence; negative: that much trimmed from the start; the hypothesis times are moved back before scoring) and `audio_peak_dbfs` (one gain, so the file's largest sample sits at that level). The prepared WAV goes to `.work/wav/<session>.<variant>.wav`; both keys are in the cache key and `run.json` records them with the gain and both WAVs' SHA-256.
 
 Punctuation is off in every config's data root (run.py writes `transcript.punctuation = off`), so the tables measure the speech model and the diarizer. `punctuation = true` turns it on for one config (`auto`, with the manifest's required punctuation model, or the one named by `punctuation_model`); the model must be in the models folder, else `models select punctuation` fails and the run stops. The beta.5 release check (docs/eval/2026-10-27-beta5-release.md) ran copies of `shipped_en` and `shipped_n35` with `punctuation = true`, the app's own default.
 
