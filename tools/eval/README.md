@@ -98,6 +98,18 @@ Punctuation is off in every config's data root (run.py writes `transcript.punctu
 
 The repeated-token loop collapse (docs/plans/16 section 12.3) runs at the app's default, on, in every config's data root (run.py writes `transcript.collapse_loops = on`); `collapse_loops = false` turns it off for one config. A build without the collapse makes run.py warn (the run has no `engine_info.loops`).
 
+## Replayed configs (gap fill, no GPU)
+
+Configs with a `replay` key (`en_replay`, `n35_replay`, `en_fill_n35_g10`, `_g15`, `_g20`, `n35_fill_en_g*`, `en_fill_oracle_g*`; docs/plans/18 section 3.3) are never transcribed. `gapfill.py run` builds each session's words JSON from the cached runtime words of other configs: the `replay` model's own words, plus, with `gap_fill`, the second model's words in the first model's stretches of at least `g_s` seconds without a word. It then imports that JSON through the app's file import, with the loop collapse and punctuation at the app's defaults, into `.work/data/<config>`, exports it, and writes run.json with every input's SHA-256. `run.py --metrics-only` scores it like any cached run; without `--metrics-only` run.py refuses a replay config. `gapfill.py rule` applies the plan's decision rule to the scored configs. The import runs in the ignored test `punct::onnx::tests::cli_check_root` of diarist-core, so it needs that test binary (`cargo test --release --locked -p diarist-core --lib --no-run`) and a diarist-cli from the same tree. The punctuation entry's files must sit in `DIARIST_EVAL_MODELS_DIR`.
+
+```sh
+uv run python -I gapfill.py --sessions-file <sessions.toml> run --config en_fill_n35_g20 --sessions all     --source en=<runs>/rs_en_shipped --source n35=<runs>/rs_n35_shipped
+uv run python -I run.py --config en_fill_n35_g20 --sessions-file <sessions.toml> --metrics-only --no-report
+uv run python -I gapfill.py --sessions-file <sessions.toml> rule --public-sessions-file sessions.public.toml
+```
+
+The measurement and its verdict: `docs/eval/2026-10-30-gapfill.md`.
+
 ## WER-only mode (FLEURS)
 
 `fleurs_fetch.py` streams `data/<config>/audio/test.tar.gz` and `test.tsv` of `google/fleurs` and stops after about 10 minutes per language (de, es, fr, it, pt, hi, ja, en; one recording per sentence, joined with 1.5 s of silence) into `.work/fleurs/<lang>/`. The parquet conversion is not used: each language is a single row group whose audio column is one dictionary page, so any read downloads the whole file. `run.py --fleurs <langs>` transcribes each slice with `--no-diarize` and scores the whole slice: WER with the harness normaliser for en; for the other languages NFKC, casefold and punctuation and symbols removed, with combining marks kept; CER for ja. `--fleurs-language given` passes the tag the runtime honours (`ja-JP`, `es-US`, `pt-BR`; bare `de`, `fr`, `it`, `hi`, `en`), `short` the app's bare code, `auto` detection.
