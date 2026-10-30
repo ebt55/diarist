@@ -41,24 +41,27 @@ terms.
 ## In the installer
 
 The Windows app is a Rust binary with a Svelte web front end, built with
-Tauri 2. Its Rust dependency tree (413 third-party crates for
-`x86_64-pc-windows-msvc`, counted with `cargo metadata` on 15 Oct 2026) is
+Tauri 2. Its Rust dependency tree (451 third-party crates for
+`x86_64-pc-windows-msvc`, counted with `cargo metadata` on 30 Oct 2026) is
 under permissive licences:
 
 | Licence (as declared) | Crates | Examples |
 |---|---|---|
-| MIT OR Apache-2.0 (any order) | 253 | tauri, serde, tokio, rusqlite, ureq, rubato, wasapi |
-| MIT | 82 | auto-launch, bytes, derive_more |
+| MIT OR Apache-2.0 (any order) | 279 | tauri, serde, tokio, rusqlite, ureq, rubato, wasapi, ort |
+| MIT | 87 | auto-launch, bytes, derive_more |
 | MPL-2.0 | 17 | symphonia (audio decoding), cssparser, selectors |
 | Unicode-3.0 | 18 | the icu_* crates |
 | Unlicense OR MIT | 11 | memchr, aho-corasick, walkdir |
-| Apache-2.0 | 4 | hound, tao, zopfli, sync_wrapper |
-| ISC, BSD-2/3-Clause, Zlib, 0BSD, CC0 or MIT-0 alternatives | 27 | rustls, ring, libloading, brotli, zlib-rs, subtle |
+| Apache-2.0 | 7 | hound, tao, tokenizers, zopfli, sync_wrapper |
+| ISC, BSD-2/3-Clause, Zlib, 0BSD, BSL-1.0, CC0 or MIT-0 alternatives | 31 | rustls, ring, libloading, brotli, zlib-rs, subtle |
 | CDLA-Permissive-2.0 | 1 | webpki-roots |
 
 MPL-2.0 is a file-level copyleft: the symphonia, cssparser and selectors
 sources are used unmodified and are available from crates.io. The bundled
-SQLite (through `libsqlite3-sys`) is in the public domain.
+SQLite (through `libsqlite3-sys`) is in the public domain. The bundled
+Oniguruma regular-expression library (C, through `onig_sys`, which the
+punctuation model's tokenizer uses) is under the BSD 2-Clause licence,
+copyright K.Kosako.
 
 To regenerate the list, run from the repository root:
 
