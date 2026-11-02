@@ -1,9 +1,14 @@
 <script lang="ts">
   // One download (runtime package or model) with everything needed to get
   // it some way or other: progress, Retry (resumes), Copy link, the expected
-  // SHA-256 and size, and Open folder for a file fetched by hand.
+  // SHA-256 and size, and Open folder for a file fetched by hand. A
+  // multi-file download (a punctuation model, 8 files) stays one line: what
+  // is missing beside its action, and every file's address and hash behind
+  // "Files and addresses", a disclosure that opens by itself when the
+  // download fails (the addresses are what a download by hand needs).
   import type { Snippet } from "svelte";
   import { api, errorText } from "../lib/api";
+  import { filesDisclosure, filesSummary } from "../lib/downloadFiles";
   import { copyLinks, downloads, failureHint, sizeMb } from "../lib/downloads.svelte";
   import { formatBytes } from "../lib/format";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
@@ -44,6 +49,14 @@
 
   /** The files of a multi-file download (a punctuation model), in download order; empty for one file. */
   const files = $derived(item.files ?? []);
+  /** "2 of 8 files missing: LICENSE, NOTICE (13 kB)"; null for one file, or while none is there. */
+  const summary = $derived(filesSummary(item));
+  const failed = $derived(p?.state === "failed");
+  /** The disclosure of every file: closed, opened when the download fails; it never closes by itself. */
+  let listOpen = $state(false);
+  $effect.pre(() => {
+    if (failed) listOpen = true;
+  });
 
   async function copyLink() {
     try {
@@ -79,7 +92,7 @@
   }
 </script>
 
-<li class="dl" class:failed={p?.state === "failed"}>
+<li class="dl" class:failed>
   <div class="main">
     <span class="name">{item.label}</span>
     <span class="meta">
@@ -107,10 +120,13 @@
     {:else if p?.state === "failed"}
       <span class="err">Failed</span>
       <button type="button" class="btn small-btn" onclick={onretry} disabled={downloads.busy}>Retry</button>
-    {:else if action}
-      {@render action()}
     {:else}
-      <span class="muted">Not installed</span>
+      {#if summary}<span class="muted">{summary}</span>{/if}
+      {#if action}
+        {@render action()}
+      {:else if !summary}
+        <span class="muted">Not installed</span>
+      {/if}
     {/if}
   </div>
   {#if p?.state === "failed"}
@@ -120,34 +136,37 @@
     </div>
   {/if}
   {#if !(installed && tidy) && files.length > 0}
-    <div class="fetch">
-      <span class="label">Files</span>
-      <span class="val">{files.length} files, {item.size_bytes.toLocaleString()} bytes in all → <code class="sel">{item.dest}</code></span>
-      <span class="buttons">
-        <button type="button" class="link" onclick={copyLink}>Copy all links</button>
-        <button type="button" class="link" onclick={open}>Open folder</button>
-      </span>
-    </div>
-    <ul class="files" aria-label="Files of {item.label}">
-      {#each files as f (f.path)}
-        <li class="fetch file">
-          <span class="label">File</span>
-          <span class="val"><code class="sel">{f.path}</code>{#if f.present}{" "}<span class="ok">✓ there</span>{/if}</span>
-          <span class="buttons">
-            <button type="button" class="link" onclick={() => copyFileLink(f.url)} aria-label="Copy link of {f.path}">Copy link</button>
-          </span>
-          <span class="label">Address</span>
-          <span class="val"><code class="sel" title={f.url}>{f.url}</code></span>
-          <span></span>
-          <span class="label">SHA-256</span>
-          <span class="val"><code class="sel">{f.sha256 || "not given (recorded after the download)"}</code></span>
-          <span></span>
-          <span class="label">Size</span>
-          <span class="val mono">{f.size_bytes.toLocaleString()} bytes → <code class="sel">{f.dest}</code></span>
-          <span></span>
-        </li>
-      {/each}
-    </ul>
+    <details class="parts" bind:open={listOpen}>
+      <summary>{filesDisclosure(files.length)}</summary>
+      <div class="fetch">
+        <span class="label">Folder</span>
+        <span class="val"><code class="sel">{item.dest}</code> · {files.length} files, {item.size_bytes.toLocaleString()} bytes in all</span>
+        <span class="buttons">
+          <button type="button" class="link" onclick={copyLink}>Copy all links</button>
+          <button type="button" class="link" onclick={open}>Open folder</button>
+        </span>
+      </div>
+      <ul class="files" aria-label="Files of {item.label}">
+        {#each files as f (f.path)}
+          <li class="fetch file">
+            <span class="label">File</span>
+            <span class="val"><code class="sel">{f.path}</code>{#if f.present}{" "}<span class="ok">✓ there</span>{/if}</span>
+            <span class="buttons">
+              <button type="button" class="link" onclick={() => copyFileLink(f.url)} aria-label="Copy link of {f.path}">Copy link</button>
+            </span>
+            <span class="label">Address</span>
+            <span class="val"><code class="sel" title={f.url}>{f.url}</code></span>
+            <span></span>
+            <span class="label">SHA-256</span>
+            <span class="val"><code class="sel">{f.sha256 || "not given (recorded after the download)"}</code></span>
+            <span></span>
+            <span class="label">Size</span>
+            <span class="val mono">{f.size_bytes.toLocaleString()} bytes → <code class="sel">{f.dest}</code></span>
+            <span></span>
+          </li>
+        {/each}
+      </ul>
+    </details>
   {:else if !(installed && tidy)}
     <div class="fetch">
       <span class="label">Address</span>
@@ -235,6 +254,18 @@
   }
   .error-box p {
     margin: 2px 0;
+  }
+  .parts {
+    grid-column: 1 / -1;
+    font-size: 11px;
+  }
+  .parts summary {
+    width: max-content;
+    color: var(--fg-muted);
+    cursor: default;
+  }
+  .parts[open] summary {
+    margin-bottom: 3px;
   }
   .fetch {
     display: grid;
