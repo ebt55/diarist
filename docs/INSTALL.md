@@ -1,11 +1,11 @@
 # Installing Diarist
 
-Version 0.1.0-beta.5 (a beta pre-release). For which GPU and which models, see "Choosing your package and
+Version 0.1.0-beta.6 (a beta pre-release). For which GPU and which models, see "Choosing your package and
 models" in the [README](../README.md#choosing-your-package-and-models).
 
 ## 1. Install
 
-1. Download `Diarist_0.1.0-beta.5_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.6_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases).
 2. Run it. Windows SmartScreen warns because the installer is not code-signed
    yet: choose "More info", then "Run anyway". It installs for your user only,
@@ -36,9 +36,9 @@ The setup screen checks:
   on 28 Oct 2026: 1.27 GB, because the unpacked runtime is larger than its
   download).
 
-Then press **Install engine** (98 MB) and **Install recommended models**
-(1.0 GB: the speaker model, the English speech model and the punctuation
-model, which is seven files in one folder). Each item shows its
+Then press **Install engine** (102 MB) and **Install recommended models**
+(1.13 GB: the speaker model, the English speech model and the punctuation
+model, which is eight files in one folder). Each item shows its
 progress. An interrupted download resumes where it stopped: press **Retry**,
 or install again later. Every file is checked against its published SHA-256
 before it is used.

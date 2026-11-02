@@ -237,16 +237,16 @@ up runs everything.
 
 Now tell the user the plan and wait for a yes. For example:
 
-> I'll install Diarist 0.1.0-beta.5 (7 MB, per user, no administrator
+> I'll install Diarist 0.1.0-beta.6 (7 MB, per user, no administrator
 > rights) into `%LOCALAPPDATA%\Diarist`, then download the CUDA runtime
-> (98 MB, from NVIDIA's GitHub releases) and two models from Hugging Face,
-> Nemotron 3 Diarization (102 MB) and Nemotron Speech Streaming EN 0.6B
-> (668 MB), into `%LOCALAPPDATA%\app.diarist.desktop`. Every file is checked
+> (102 MB, from NVIDIA's GitHub releases) and two models from Hugging Face,
+> Nemotron 3 Diarization (107 MB) and Nemotron Speech Streaming EN 0.6B
+> (700 MB), into `%LOCALAPPDATA%\app.diarist.desktop`. Every file is checked
 > against the SHA-256 Diarist publishes. Nothing else on the PC changes.
 > Go ahead?
 
 Take the version from step 4a's output and the sizes from step 5a's if you
-want them exact; the numbers above are for 0.1.0-beta.5.
+want them exact; the numbers above are for 0.1.0-beta.6.
 
 ## 4. Install Diarist
 
@@ -352,7 +352,7 @@ Expected: exit code `0`, `diarist.exe present: True`, and the release's
 version. The program folder holds `diarist.exe` and `uninstall.exe`. The
 installer does not start the app. If WebView2 is missing (rare on Windows
 10 and 11), the installer fetches it from Microsoft. The installer contains
-only the app; as of 0.1.0-beta.5 there is no command-line tool to call.
+only the app; as of 0.1.0-beta.6 there is no command-line tool to call.
 
 ## 5. Place the runtime and models
 
@@ -381,15 +381,15 @@ foreach ($f in 'engine.json', 'models.json') {
 }
 $engines = Get-Content "$stage\engine.json" -Raw | ConvertFrom-Json
 $models = Get-Content "$stage\models.json" -Raw | ConvertFrom-Json
-$engines | Select-Object name, backend, version, tested, @{ n = 'MB'; e = { [math]::Ceiling($_.size_bytes / 1MB - 0.1) } } | Format-Table -AutoSize
-$models | Select-Object name, role, required, experimental, @{ n = 'MB'; e = { [math]::Ceiling($_.size_bytes / 1MB - 0.1) } } | Format-Table -AutoSize
+$engines | Select-Object name, backend, version, tested, @{ n = 'MB'; e = { [math]::Round($_.size_bytes / 1e6) } } | Format-Table -AutoSize
+$models | Select-Object name, role, required, experimental, @{ n = 'MB'; e = { [math]::Round($_.size_bytes / 1e6) } } | Format-Table -AutoSize
 ```
 
 The two tables list every runtime package and model with its size, rounded
-as the app shows it. For 0.1.0-beta.5: `cuda` 98, `vulkan` 19, `cpu` 6;
-`nemotron-3-diarization` 102, `nemotron-en` 668, `nemotron-3.5` 708,
-`parakeet-tdt` 681, `punctuation-horizon-small` 306. The names in the `name`
-column are the ones step 3 uses. The punctuation model is seven files in
+as the app shows it (decimal megabytes). For 0.1.0-beta.6: `cuda` 102, `vulkan` 19, `cpu` 6;
+`nemotron-3-diarization` 107, `nemotron-en` 700, `nemotron-3.5` 742,
+`parakeet-tdt` 714, `punctuation-horizon-small` 320. The names in the `name`
+column are the ones step 3 uses. The punctuation model is eight files in
 one folder, so step 5c does not place it; leave it to the app, which offers
 it once at its first start (Download / Later) and in Settings, Models.
 
@@ -444,7 +444,7 @@ if (Test-Path "$target\bin\nemo-speech.exe") {
 ```
 
 The last command asks the runtime about this PC. In its JSON, `version` is
-the runtime version (`0.2.0` for 0.1.0-beta.5). For the CUDA package,
+the runtime version (`0.2.0` for 0.1.0-beta.6). For the CUDA package,
 `driver_runtime_compatible` must be `true` and `devices` must list the GPU
 with `"type": "gpu"`; if not, the driver is too old or the GPU is not
 supported, and the Vulkan package is the fallback. If Windows refuses to run
