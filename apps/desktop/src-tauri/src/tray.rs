@@ -3,7 +3,8 @@
 //! (`live::toggle`): the in-app dialog when the window is on screen, else
 //! a second Stop within 3 s. The icon is the app icon's frame for the
 //! notification area's size and the taskbar's theme (`icons.rs`), chosen
-//! again when either changes.
+//! again when either changes; while recording, the same frame with the
+//! red dot drawn into its lower-right corner (`branding/recording/`).
 
 use std::sync::Mutex;
 
@@ -27,46 +28,23 @@ pub(crate) struct Tray {
     shown: Mutex<Option<Phase>>,
 }
 
-/// `base` with a red dot (white ring) in the lower right corner.
-fn with_red_dot(base: &Image<'_>) -> Image<'static> {
-    let (w, h) = (base.width() as i64, base.height() as i64);
-    let mut px = base.rgba().to_vec();
-    let r = (w.min(h) as f64) * 0.27;
-    let ring = r + (w.min(h) as f64 * 0.06).max(1.0);
-    let (cx, cy) = (w as f64 - ring - 0.5, h as f64 - ring - 0.5);
-    for y in 0..h {
-        for x in 0..w {
-            let d = ((x as f64 + 0.5 - cx).powi(2) + (y as f64 + 0.5 - cy).powi(2)).sqrt();
-            let i = ((y * w + x) * 4) as usize;
-            let color = if d <= r {
-                [0xDC, 0x26, 0x26, 0xFF]
-            } else if d <= ring {
-                [0xFF, 0xFF, 0xFF, 0xFF]
-            } else {
-                continue;
-            };
-            px[i..i + 4].copy_from_slice(&color);
-        }
-    }
-    Image::new_owned(px, w as u32, h as u32)
-}
-
 pub(crate) fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
     }
+    // A hidden window has no taskbar button, so its overlay went with it.
+    crate::taskbar::reapply(app);
 }
 
 /// Builds the tray (once, in setup). Failure leaves the app without a tray.
 pub(crate) fn build(app: &App) -> tauri::Result<()> {
-    let Some(idle) = crate::icons::tray_image() else {
+    let Some((idle, recording)) = crate::icons::tray_images() else {
         log::warn!("no app icon; the tray is not shown");
         return Ok(());
     };
     log::info!("tray icon {} px", idle.width());
-    let recording = with_red_dot(&idle);
     let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start recording", true, Some("Ctrl+Alt+R"))?;
     let open = MenuItem::with_id(app, ID_OPEN, "Open Diarist", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ID_QUIT, "Quit", true, None::<&str>)?;
@@ -108,7 +86,7 @@ pub(crate) fn rescale(app: &AppHandle) {
     let Some(tray) = app.try_state::<Tray>() else {
         return;
     };
-    let Some(idle) = crate::icons::tray_image() else {
+    let Some((idle, recording)) = crate::icons::tray_images() else {
         return;
     };
     let mut images = tray.images.lock().unwrap_or_else(|e| e.into_inner());
@@ -116,7 +94,6 @@ pub(crate) fn rescale(app: &AppHandle) {
         return;
     }
     log::info!("tray icon {} px", idle.width());
-    let recording = with_red_dot(&idle);
     *images = (idle, recording);
     let shown = *tray.shown.lock().unwrap_or_else(|e| e.into_inner());
     let _ = tray.icon.set_icon(Some(icon_for(&images, shown)));
@@ -124,7 +101,7 @@ pub(crate) fn rescale(app: &AppHandle) {
 
 /// The image for a phase: with the dot while recording or stopping.
 fn icon_for(images: &(Image<'static>, Image<'static>), phase: Option<Phase>) -> Image<'static> {
-    if matches!(phase, Some(Phase::Recording | Phase::Stopping)) {
+    if phase.is_some_and(crate::taskbar::is_recording) {
         images.1.clone()
     } else {
         images.0.clone()

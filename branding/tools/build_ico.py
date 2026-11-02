@@ -5,6 +5,10 @@
   stored as PNG, as `tauri icon` does.
 - theme/dark/<size>.png and theme/light/<size>.png at 16, 20, 24, 32 and 48 px, from
   icon-dark.svg and icon.svg, for the running app to follow the taskbar theme.
+- recording/overlay/<size>.png (16, 20, 24, 32, 40, 48 px), the taskbar overlay while recording,
+  and recording/dark/<size>.png and recording/light/<size>.png (16, 20, 24, 32, 48 px), the icon
+  pair while recording (the notification area), from the drawings in branding/recording/ (one SVG
+  per size, written by recording_svgs.py).
 
 Each image is rendered with resvg at its own size. Where branding/icon-sizes/<variant>-<size>.svg
 exists (16, 20 and 24 px, and 48 px for icon.svg), that pixel-snapped drawing is used
@@ -28,6 +32,8 @@ ICONS = ROOT / "apps" / "desktop" / "src-tauri" / "icons"
 MASTERS = {"dark": BRANDING / "icon-dark.svg", "light": BRANDING / "icon.svg"}
 ICO_SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
 THEME_SIZES = (16, 20, 24, 32, 48)
+RECORDING = BRANDING / "recording"
+RECORDING_SETS = {"overlay": (16, 20, 24, 32, 40, 48), "dark": THEME_SIZES, "light": THEME_SIZES}
 
 
 def source(variant, size):
@@ -86,6 +92,14 @@ def main():
             svg = source(variant, size)
             render(svg, size, folder / f"{size}.png")
             print(f"theme/{variant}/{size}.png  {rel(svg)}")
+
+    for name, sizes in RECORDING_SETS.items():
+        folder = ICONS / "recording" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for size in sizes:
+            svg = RECORDING / f"{name}-{size}.svg"
+            render(svg, size, folder / f"{size}.png")
+            print(f"recording/{name}/{size}.png  {rel(svg)}")
 
 
 if __name__ == "__main__":

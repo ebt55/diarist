@@ -40,6 +40,7 @@ pub mod events;
 mod icons;
 mod live;
 mod maintenance;
+mod taskbar;
 mod tray;
 
 use std::path::PathBuf;

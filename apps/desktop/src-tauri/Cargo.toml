@@ -48,10 +48,13 @@ png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 # Window and tray icons from the frames for the taskbar's theme and scale
-# (icons.rs). The version Tauri uses, so its HWND is this crate's type.
+# (icons.rs), and the taskbar overlay while recording (taskbar.rs: Shell and
+# Com for ITaskbarList3). The version Tauri uses, so its HWND is this crate's type.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
