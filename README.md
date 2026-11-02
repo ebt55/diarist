@@ -80,8 +80,9 @@ From [docs/04-model-guide.md](docs/04-model-guide.md). Numbers marked
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only (see below) | 681 MB | CC-BY-4.0 |
 | Horizon-Labs punctuation-restoration-small, int8 ONNX, with ONNX Runtime 1.31.0 (Microsoft) | Punctuation and sentence capitals after Stop and on imports, on the CPU; never changes a word | 306 MB | Apache-2.0 as declared in the model card (base model MIT); ONNX Runtime MIT |
 
-The default download (engine, diarizer, EN model, punctuation) is about
-1.2 GB; with every optional model, 2.5 GB.
+The default download (engine, diarizer, EN model, punctuation) is 1.23 GB
+with the CUDA runtime (1,229,458,484 bytes); with every optional model,
+2.68 GB.
 
 ### Which runtime package for which PC
 
