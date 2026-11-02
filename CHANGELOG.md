@@ -11,7 +11,10 @@ authors' v1.1.1, which adds their own licence files; the model itself is
 the same file. NVIDIA's runtime 0.3.0 was measured: it transcribes files
 40 to 47 percent faster, but missed two of the accuracy bars set before
 the measurement, by small margins, so this release stays on 0.2.0 and
-0.3.0 is next, for 0.1.0-beta.7. Measured on one PC.
+0.3.0 is next, for 0.1.0-beta.7. Transcripts of files are word for word
+those of 0.1.0-beta.5: on the evaluation set (36 recordings, 28 hours) every word
+is the same with both speech models, and word error stays at 10.85
+percent with the EN model and 11.30 with Nemotron 3.5. Measured on one PC.
 
 - Changed: while recording, Diarist says so outside its window. The window
   title reads "● Recording · Diarist" and the taskbar button carries a red
