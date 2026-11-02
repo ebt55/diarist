@@ -44,6 +44,7 @@ from common import (  # noqa: E402
     PUBLIC_GROUPS,
     REFS_OVERRIDE,
     REPO,
+    RttmRow,
     WORK,
     Session,
     lang_base,
@@ -152,6 +153,65 @@ def collapse_loops_of(cfg: dict) -> bool:
     return bool(cfg.get("collapse_loops", True))
 
 
+def audio_shift_ms(cfg: dict) -> int:
+    """configs.toml `audio_shift_ms` (docs/plans/18 section 3.5, the phase
+    control): a positive value prepends that much digital silence to the
+    16 kHz WAV, a negative one trims that much from its start. score() moves
+    the hypothesis times back by the same amount, so the reference timeline,
+    the scored region and the gaps are those of the unmodified audio."""
+    return int(cfg.get("audio_shift_ms") or 0)
+
+
+def audio_peak_dbfs(cfg: dict) -> float | None:
+    """configs.toml `audio_peak_dbfs` (docs/plans/18 section 3.5, the input
+    gain report): the WAV is scaled so that its largest sample over the whole
+    file sits at this level (dBFS, full scale 32768)."""
+    v = cfg.get("audio_peak_dbfs")
+    return None if v is None else float(v)
+
+
+def prepare_audio(wav: Path, rid: str, cfg: dict) -> tuple[Path, float, dict]:
+    """The config's audio_shift_ms / audio_peak_dbfs applied to a 16 kHz mono
+    16-bit WAV, written once to .work/wav/<rid>.<variant>.wav. Returns the
+    WAV to transcribe, its duration and what was done (for run.json); the
+    unmodified WAV comes back unchanged when the config asks for neither."""
+    import wave
+
+    import numpy as np
+
+    shift, peak = audio_shift_ms(cfg), audio_peak_dbfs(cfg)
+    if not shift and peak is None:
+        return wav, probe(wav)["duration"], {}
+    with wave.open(str(wav), "rb") as w:
+        if (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (1, 2, 16000):
+            raise SystemExit(f"{wav}: prepare_audio needs a 16 kHz mono 16-bit WAV")
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    info: dict = {"audio_source_sha256": sha256_file(wav)}
+    n = round(abs(shift) * 16000 / 1000)
+    if shift > 0:
+        x = np.concatenate([np.zeros(n, dtype="<i2"), x])
+    elif shift < 0:
+        x = x[n:]
+    tag = f"shift{shift:+d}ms" if shift else ""
+    if peak is not None:
+        top = int(np.abs(x.astype(np.int32)).max())
+        gain = (32768.0 * 10 ** (peak / 20)) / top if top else 1.0
+        x = np.clip(np.round(x.astype(np.float64) * gain), -32768, 32767).astype("<i2")
+        info["audio_gain_db"] = round(20 * math.log10(gain), 2)
+        tag += f"peak{peak:g}dB"
+    out = WORK / "wav" / f"{rid}.{tag}.wav"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp.wav")
+    with wave.open(str(tmp), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(x.tobytes())
+    tmp.replace(out)
+    info["audio_sha256"] = sha256_file(out)
+    return out, len(x) / 16000.0, info
+
+
 def set_setting(data: Path, key: str, value: str) -> None:
     """Writes one setting into the data root's database, as the app's
     Settings would (diarist-cli has no settings verb)."""
@@ -241,6 +301,8 @@ def cached(config: str, sid: str, cfg: dict, lang: str | None = None) -> dict | 
         # model of the words and the fill, as in configs.toml.
         or (meta.get("replay") or None) != (cfg.get("replay") or None)
         or (meta.get("gap_fill") or None) != (cfg.get("gap_fill") or None)
+        or int(meta.get("audio_shift_ms") or 0) != audio_shift_ms(cfg)
+        or meta.get("audio_peak_dbfs") != audio_peak_dbfs(cfg)
     ):
         log(f"[{sid}] cached run used different settings; transcribing again")
         return None
@@ -293,6 +355,9 @@ def transcribe(
     d.mkdir(parents=True, exist_ok=True)
     if wav is None:
         wav, duration = wav_for(s)
+    prep: dict = {}
+    if audio_shift_ms(cfg) or audio_peak_dbfs(cfg) is not None:
+        wav, duration, prep = prepare_audio(wav, rid, cfg)
     lang = language or cfg["language"]
     log(f"[{rid}] diarist-cli transcribe ({duration / 60:.1f} min, config {config}, language {lang})")
     gpu.wait_idle(GPU_IDLE_MIB)
@@ -362,6 +427,11 @@ def transcribe(
         "collapse_loops": collapse_loops_of(cfg),
         "loops": {k: loops.get(k) for k in ("applied", "runs", "words_removed")} if loops else None,
         "diar_pass": bool(diarize and diar_pass),
+        # Prepared audio (docs/plans/18 section 3.5): the shift and peak the
+        # config asked for, the gain applied and both WAVs' SHA-256.
+        "audio_shift_ms": audio_shift_ms(cfg),
+        "audio_peak_dbfs": audio_peak_dbfs(cfg),
+        **prep,
         "engine_version": eng["engine"] if eng else None,
         "asr_file": eng["asr"] if eng else None,
         "diarizer_file": eng["diar"] if eng else None,
@@ -429,15 +499,25 @@ def score(s: Session, config: str, meta: dict) -> dict:
     ref_segs, ref_rttm, ref_src = load_reference(s)
     doc = json.loads((d / "transcript.json").read_text(encoding="utf-8"))
     hyp_segs, hyp_words = M.hyp_from_export(doc, s.id)
-    write_jsonl(d / "hyp.seglst.jsonl", hyp_segs)
     hyp_rttm = read_rttm(d / "hyp.rttm")
     duration = meta.get("audio_s")
+    # A shifted input (audio_shift_ms): hypothesis times back on the
+    # unmodified audio's timeline, before anything is scored or written.
+    shift_s = int(meta.get("audio_shift_ms") or 0) / 1000.0
+    if shift_s:
+        for r in (*hyp_segs, *hyp_words):
+            r["start_time"] = round(r["start_time"] - shift_s, 3)
+            r["end_time"] = round(r["end_time"] - shift_s, 3)
+        hyp_rttm = [RttmRow(r.rec, r.start - shift_s, r.dur, r.speaker) for r in hyp_rttm]
+        duration = round(duration - shift_s, 3) if duration else duration
+    write_jsonl(d / "hyp.seglst.jsonl", hyp_segs)
     region = scored_region(s, ref_segs, duration)
     lang = meta.get("language") or s.language
     t0 = time.perf_counter()
     res = M.meeting_metrics(ref_segs, ref_rttm, hyp_segs, hyp_words, hyp_rttm, duration, s.id, region, lang)
     if (d / "diarizer.rttm").is_file():
-        raw = M.diarization_metrics(ref_rttm, read_rttm(d / "diarizer.rttm"), duration, region)
+        diar = [RttmRow(r.rec, r.start - shift_s, r.dur, r.speaker) for r in read_rttm(d / "diarizer.rttm")]
+        raw = M.diarization_metrics(ref_rttm, diar, duration, region)
         res.update({f"diar_{k}": v for k, v in raw.items()})
     res.update(
         session=s.id,
@@ -927,6 +1007,8 @@ def run_fleurs(config: str, cfg: dict, langs: list[str], mode: str, force: bool,
                 or list(meta.get("engine_args") or []) != list(cfg.get("engine_args") or [])
                 or bool(meta.get("punctuation", False)) != punctuation_of(cfg)
                 or bool(meta.get("collapse_loops", False)) != collapse_loops_of(cfg)
+                or int(meta.get("audio_shift_ms") or 0) != audio_shift_ms(cfg)
+                or meta.get("audio_peak_dbfs") != audio_peak_dbfs(cfg)
             ):
                 meta = None
         except (OSError, ValueError):
