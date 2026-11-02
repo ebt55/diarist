@@ -11,7 +11,8 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `configs.toml` | The configurations: baselines, `--verbatim`, decoder lookahead and diarizer preset variants (per-config `engine_args`) |
 | `fleurs_fetch.py` | About 10 minutes of the FLEURS test split per language (CC-BY-4.0) for the WER-only mode |
 | `nemo_direct.py` | Runs `nemo-speech transcribe` directly with the app's file-job flags plus extra flags (spikes on runtime options the app does not pass) |
-| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, `loops` (the repeated-token loop collapse measured on cached runs or on a copy of a data root, against the references and the Rust rule) and `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) |
+| `levers.py` | Analyses over cached runs: word-start offsets between configs, tag agreement with the standalone diarizer, transcript diffs, session-by-config tables, AMI misses, boosting and FLEURS per-utterance reports, punctuation share, `loops` (the repeated-token loop collapse measured on cached runs or on a copy of a data root, against the references and the Rust rule) `baseline` (per-group and pooled tables: cpWER, tcpWER, WER with del / ins / sub, WDER, DER, count error, gaps, speed) and `gaps-why` (every gap of 2 s or more of the EN and 3.5 runs by cause: quiet, overlapped, other; the other model's words inside it; docs/plans/18 section 3.2) |
+| `gapfill.py` | The gap fill of docs/plans/18 section 3.3 from cached runs: builds the fused words JSON (EN primary, Nemotron 3.5's words in EN's stretches of at least G), replays it through the app's file import without the GPU, records run.json; `rule` applies the plan's decision rule to the scored configs |
 | `gpu.py` | nvidia-smi sampling: waits for an idle GPU, records peak VRAM deltas |
 | `public_data.py` | Shared helpers of the public-set fetch scripts: pinned curl downloads with SHA-256 checks, 16 kHz conversion, reference and session-list writing |
 | `ami_test_fetch.py`, `icsi_fetch.py`, `notsofar_fetch.py`, `earnings22_fetch.py`, `alimeeting_fetch.py`, `summre_fetch.py`, `indic_fetch.py` | One per public set (docs/05 "Extend"): fetch a pinned slice into `.work/public/<set>/` and write its references and session list |
@@ -19,6 +20,7 @@ Dev-only evaluation harness (Phase 4, `docs/plans/05-phase4-eval-harness.md`). I
 | `smoke.py` | Clip smoke test: cuts 2 to 5 minutes of a session, runs the runtime on it via `nemo_direct.py`, scores it |
 | `sessions.example.toml` | Template for `sessions.toml` (gitignored, holds the private paths) |
 | `test_metrics.py` | Synthetic sanity checks for the metrics and for `levers.py loops` against the Rust rule (no GPU, no private data) |
+| `test_gapfill.py` | Synthetic checks of the gap fill (stretches, the 0.25 s margin, label mapping, the nearest-word fallback, the oracle) and of run.py's cache key for replayed configs |
 
 ## Setup
 
@@ -95,6 +97,18 @@ To add a config, add a table to `configs.toml` with `asr`, `diarizer` (manifest 
 Punctuation is off in every config's data root (run.py writes `transcript.punctuation = off`), so the tables measure the speech model and the diarizer. `punctuation = true` turns it on for one config (`auto`, with the manifest's required punctuation model, or the one named by `punctuation_model`); the model must be in the models folder, else `models select punctuation` fails and the run stops. The beta.5 release check (docs/eval/2026-10-27-beta5-release.md) ran copies of `shipped_en` and `shipped_n35` with `punctuation = true`, the app's own default.
 
 The repeated-token loop collapse (docs/plans/16 section 12.3) runs at the app's default, on, in every config's data root (run.py writes `transcript.collapse_loops = on`); `collapse_loops = false` turns it off for one config. A build without the collapse makes run.py warn (the run has no `engine_info.loops`).
+
+## Replayed configs (gap fill, no GPU)
+
+Configs with a `replay` key (`en_replay`, `n35_replay`, `en_fill_n35_g10`, `_g15`, `_g20`, `n35_fill_en_g*`, `en_fill_oracle_g*`; docs/plans/18 section 3.3) are never transcribed. `gapfill.py run` builds each session's words JSON from the cached runtime words of other configs: the `replay` model's own words, plus, with `gap_fill`, the second model's words in the first model's stretches of at least `g_s` seconds without a word. It then imports that JSON through the app's file import, with the loop collapse and punctuation at the app's defaults, into `.work/data/<config>`, exports it, and writes run.json with every input's SHA-256. `run.py --metrics-only` scores it like any cached run; without `--metrics-only` run.py refuses a replay config. `gapfill.py rule` applies the plan's decision rule to the scored configs. The import runs in the ignored test `punct::onnx::tests::cli_check_root` of diarist-core, so it needs that test binary (`cargo test --release --locked -p diarist-core --lib --no-run`) and a diarist-cli from the same tree. The punctuation entry's files must sit in `DIARIST_EVAL_MODELS_DIR`.
+
+```sh
+uv run python -I gapfill.py --sessions-file <sessions.toml> run --config en_fill_n35_g20 --sessions all     --source en=<runs>/rs_en_shipped --source n35=<runs>/rs_n35_shipped
+uv run python -I run.py --config en_fill_n35_g20 --sessions-file <sessions.toml> --metrics-only --no-report
+uv run python -I gapfill.py --sessions-file <sessions.toml> rule --public-sessions-file sessions.public.toml
+```
+
+The measurement and its verdict: `docs/eval/2026-10-30-gapfill.md`.
 
 ## WER-only mode (FLEURS)
 

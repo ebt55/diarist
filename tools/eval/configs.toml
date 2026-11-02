@@ -185,3 +185,115 @@ asr = "nemotron-en"
 diarizer = "nemotron-3-diarization"
 language = "en"
 collapse_loops = false
+
+# --- Gap fill, measured from cached runs (0.1.0-beta.6 chunk N1, docs/plans/18 section 3.3) ---
+# `replay` configs never transcribe (run.py refuses them without --metrics-only).
+# `gapfill.py run --config <c> --source en=<runs of the EN file pass> --source
+# n35=<runs of the 3.5 file pass>` writes each session's words JSON from the
+# cached runtime words of the `replay` model (with the second model's words in
+# its stretches of at least `g_s` seconds when `gap_fill` is set), imports it
+# through the app's file import (loop collapse and punctuation at the app's
+# defaults) and exports it; `run.py --config <c> --metrics-only` scores it.
+# `replay` and `gap_fill` are in the cache key. The fill rule and the points
+# the plan leaves open are in gapfill.py's docstring.
+
+[en_replay]
+description = "Nemotron EN's cached file-pass words replayed through the file import with the beta.5 defaults (loop collapse on, punctuation auto): EN alone, the gap fill's comparison"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+
+[n35_replay]
+description = "Nemotron 3.5's cached file-pass words replayed through the file import with the beta.5 defaults: 3.5 alone"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "n35"
+
+[en_fill_n35_g10]
+description = "Nemotron EN primary, its stretches of 1.0 s or more without a word filled with Nemotron 3.5's words (plan 18 section 3.3), replayed through the file import"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 1.0 }
+
+[en_fill_n35_g15]
+description = "Nemotron EN primary, stretches of 1.5 s or more filled with Nemotron 3.5's words (plan 18 section 3.3), replayed through the file import"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 1.5 }
+
+[en_fill_n35_g20]
+description = "Nemotron EN primary, stretches of 2.0 s or more filled with Nemotron 3.5's words (plan 18 section 3.3), replayed through the file import"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 2.0 }
+
+# For the record only (plan 18 section 3.3): 3.5 primary with EN filling, and
+# the oracle (a stretch is filled only where 3.5's words score better against
+# the reference than nothing), each at the G that rule 1 picks.
+
+[n35_fill_en_g10]
+description = "Nemotron 3.5 primary, stretches of 1.0 s or more filled with Nemotron EN's words (record only)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "n35"
+gap_fill = { fill = "en", g_s = 1.0 }
+
+[n35_fill_en_g15]
+description = "Nemotron 3.5 primary, stretches of 1.5 s or more filled with Nemotron EN's words (record only)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "n35"
+gap_fill = { fill = "en", g_s = 1.5 }
+
+[n35_fill_en_g20]
+description = "Nemotron 3.5 primary, stretches of 2.0 s or more filled with Nemotron EN's words (record only)"
+asr = "nemotron-3.5"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "n35"
+gap_fill = { fill = "en", g_s = 2.0 }
+
+[en_fill_oracle_g10]
+description = "Oracle bound of the fill at 1.0 s: a stretch is filled only where 3.5's words beat leaving it empty against the reference (record only)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 1.0, oracle = true }
+
+[en_fill_oracle_g15]
+description = "Oracle bound of the fill at 1.5 s (record only)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 1.5, oracle = true }
+
+[en_fill_oracle_g20]
+description = "Oracle bound of the fill at 2.0 s (record only)"
+asr = "nemotron-en"
+diarizer = "nemotron-3-diarization"
+language = "en"
+punctuation = true
+replay = "en"
+gap_fill = { fill = "n35", g_s = 2.0, oracle = true }
