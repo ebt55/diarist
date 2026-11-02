@@ -1,6 +1,6 @@
 # Eval: release check for 0.1.0-beta.6 (3 Nov 2026)
 
-The release check of the beta.6 integration branch against 0.1.0-beta.5 (`docs/eval/2026-10-27-beta5-release.md`). It uses the same 36 sessions (the owner's 35 Zoom recordings plus AMI ES2002a), the same models, runtime and file-pass settings, and the same scoring definitions. diarist-cli was rebuilt from the integration tree at `592b355` (plan 18's chunks V, Q, U, N1, N2 with spike L and R, and chunk H). It runs the app's shipped defaults: the loop collapse on and punctuation on (`transcript.punctuation = auto` with the manifest's punctuation model, now pinned at v1.1.1). Both ASR models are scored: Nemotron EN (the default) and Nemotron 3.5. This part of the check is untimed and covers accuracy only. Its speed section waits for the timed gate-set block under quiet.lock. Numbers are percentages unless a column says otherwise.
+The release check of the beta.6 integration branch against 0.1.0-beta.5 (`docs/eval/2026-10-27-beta5-release.md`). It uses the same 36 sessions (the owner's 35 Zoom recordings plus AMI ES2002a), the same models, runtime and file-pass settings, and the same scoring definitions. diarist-cli was rebuilt from the integration tree at `592b355` (plan 18's chunks V, Q, U, N1, N2 with spike L and R, and chunk H). It runs the app's shipped defaults: the loop collapse on and punctuation on (`transcript.punctuation = auto` with the manifest's punctuation model, now pinned at v1.1.1). Both ASR models are scored: Nemotron EN (the default) and Nemotron 3.5. The accuracy runs were untimed. The speed bar was measured afterwards, in a separate timed gate-set block under quiet.lock (Speed, gate set). Numbers are percentages unless a column says otherwise.
 
 Nothing in beta.6 touches the file transcription path:
 
@@ -11,13 +11,13 @@ Nothing in beta.6 touches the file transcription path:
 
 So the words should be identical to beta.5's. The bars below are those of the beta.5 note's "Release bars", judged against beta.5's numbers.
 
-Result: the three accuracy bars pass, and the words are the same as beta.5's.
+Result: all four bars pass, and the words are the same as beta.5's.
 
 - **Words.** Every one of the 72 runs (36 sessions, two models) has the same runtime words as the cached v0.2.0 run of that session: 270,703 with EN and 262,632 with Nemotron 3.5. After the loop collapse and punctuation, every run has the same transcript words (text, the speech model's own text, times and speaker) and the same segments as beta.5's import path: 270,265 and 262,622 words, 13,093 and 11,972 segments.
 - **Scores.** Every score equals beta.5's on every session: cpWER, tcpWER, WER with its deletions, insertions and substitutions, WDER, DER, count error and both gap counts. cpWER, tcpWER, WDER, DER, count error and the gaps also equal the beta.5 note's printed tables. Its WER, del, ins and sub columns came from another script, which counts a few words differently (Data and metrics), so beta.5 is rescored here with `metrics.py`.
 - **Pooled cpWER.** 10.85 with EN and 11.30 with Nemotron 3.5, as in beta.5. No session is worse, and no gap is new or gone.
 - **Punctuation.** It ran on all 72 runs at the v1.1.1 pin (`0cea764`) and added the same marks and capitals as in beta.5.
-- **Speed.** This part is untimed; the speed bar waits for the timed gate-set block.
+- **Speed.** Timed in a separate block on an idle machine. Pooled over the gate set: 78.0 times real time with EN (beta.5 81.3, 4.1 percent slower) and 81.4 with Nemotron 3.5 (beta.5 78.6, 3.6 percent faster). Both are within the 5 percent bar.
 
 ## Setup
 
@@ -33,7 +33,7 @@ Result: the three accuracy bars pass, and the words are the same as beta.5's.
 | Configs | `rel6_shipped_en` and `rel6_shipped_n35`: copies of `configs.toml`'s `shipped_en` and `shipped_n35` with `punctuation = true` (the app's default; the loop collapse is on by default), under new names so nothing came from a cache. `--transcribe-only --no-diar-pass`, then `--metrics-only` |
 | Settings recorded in run.json | `right_context` 13, `diar_preset` v3-offline, `device` cuda:0, `language` en, `engine_args` empty, `punctuation` true, `collapse_loops` true, `diar_pass` false |
 | Engine command | the beta.5 note's, unchanged |
-| GPU | every run through the shared GPU queue; untimed, no quiet.lock (2 and 3 Nov 2026, about 23:13 to 00:45 IST) |
+| GPU | every run through the shared GPU queue. The accuracy runs were untimed, without quiet.lock (2 and 3 Nov 2026, about 23:13 to 00:54 IST); the timed block ran under quiet.lock (3 Nov 2026, 03:17 to 03:31 IST, Speed below) |
 
 ## Data and metrics
 
@@ -56,7 +56,7 @@ Quoted from plan 18 section 12, which restates the beta.5 note's release bars fo
 - **Pooled cpWER per model not worse than beta.5.** Beta.5: 10.85 (EN), 11.30 (Nemotron 3.5), all 36 sessions.
 - **No session worse by more than 0.5 cpWER points**, unless the words show why.
 - **No new gap of 5 s or more** against the beta.5 run of the same session and model.
-- **Speed within 5 % of beta.5 for the same measurement.** This bar waits for the timed block: the gate set under quiet.lock with `nvidia-smi pmon -s u -d 1`, as in the beta.5 note and the 31 Oct re-time (`docs/eval/2026-10-31-retime-n35.md`).
+- **Speed within 5 % of beta.5 for the same measurement.** Pooled × real time of the `nemo-speech transcribe` step over the gate set, per model, against beta.5's 81.3 (EN) and 78.6 (Nemotron 3.5). It is timed under quiet.lock with `nvidia-smi pmon -s u -d 1`, as in the beta.5 note and the 31 Oct re-time (`docs/eval/2026-10-31-retime-n35.md`). A run counts only when it is valid.
 
 ## Results
 
@@ -203,7 +203,57 @@ Its wall time (`engine_info.punctuation.wall_s`) is untimed here: no quiet.lock,
 
 ### Speed, gate set
 
-Pending the timed block. This part ran without quiet.lock, so its wall times are not a measurement. The block times the gate set's 14 runs (configs renamed so they transcribe again, `--transcribe-only --no-diar-pass`) under quiet.lock with `nvidia-smi pmon -s u -d 1`, against beta.5's 81.3 (EN) and 78.6 (Nemotron 3.5) times real time. Beta.5's Nemotron 3.5 figure is from the block the 31 Oct re-time explained: 118.6 s on an idle machine for the three sessions the beta.5 block timed at 131.8 s.
+**The block.** One block on 3 Nov 2026, 03:17:41 to 03:27:06 IST.
+
+- **Locks.** quiet.lock throughout, and gpu.lock through the shared queue.
+- **pmon.** `nvidia-smi pmon -s u -d 1` ran for the whole block.
+- **Configs.** `rel6_shipped_en_t` and `rel6_shipped_n35_t`: the release configs, renamed so they transcribe again. The same diarist-cli build, with `--transcribe-only --no-diar-pass`.
+- **The machine.**
+  - The owner was away, and the browser, the VPN client and another desktop app had been closed.
+  - A 60 s pmon check just before the block was clean: claude.exe peaked at 12 percent SM and nothing else rose above 0.
+  - nvidia-smi before the block: 0 %, 894 MiB, 44 °C, P8.
+  - CPU load: 3.8 percent (ten samples of 2 s, 0.6 to 7.9).
+- **No cold start.** The WAVs were converted, and the engine, model and WAV files read once, before the block, so no conversion or cold read fell inside it.
+- **Validity, as in the beta.5 note.** A run is valid when no process other than nemo-speech is above 5 percent SM in any sample of its window, claude.exe excepted. claude.exe's peak was 0 percent SM in every run.
+
+**Two EN runs were re-timed.** Sep 7 and Aug 14 were invalid: explorer.exe drew 6 percent SM in one sample of each.
+
+- After a fresh 60 s pmon check (no process above 0 percent), both were re-timed once, 03:28:48 to 03:30:38, under quiet.lock (config `rel6_shipped_en_t2`).
+- Both re-times are valid: 38.1 and 58.3 s, against the invalid runs' 38.0 and 58.2 s.
+- The table uses the re-times. Every other run is from the block, and all 14 rows are valid.
+
+| Session | Model | Min | beta.5 s | beta.5 × real time | beta.6 s | beta.6 × real time | Change in × real time | Timing |
+|---|---|---|---|---|---|---|---|---|
+| Aug 2 | EN | 44 | 32.4 | 81 | 33.4 | 78 | -3.0 % | block |
+| Aug 9 | EN | 44 | 33.9 | 79 | 34.5 | 77 | -1.7 % | block |
+| Sep 7 | EN | 48 | 35.9 | 79 | 38.1 | 75 | -5.8 % | re-time |
+| Sep 5 | EN | 45 | 32.9 | 82 | 33.8 | 80 | -2.7 % | block |
+| Sep Logistics | EN | 46 | 33.1 | 83 | 34.5 | 79 | -4.1 % | block |
+| Aug 14 | EN | 77 | 55.4 | 83 | 58.3 | 79 | -5.0 % | re-time |
+| AMI ES2002a | EN | 21 | 15.6 | 82 | 16.7 | 76 | -6.6 % | block |
+| Aug 2 | 3.5 | 44 | 32.9 | 79 | 32.4 | 81 | +1.5 % | block |
+| Aug 9 | 3.5 | 44 | 36.9 | 72 | 32.3 | 82 | +14.2 % | block |
+| Sep 7 | 3.5 | 48 | 34.5 | 83 | 35.0 | 82 | -1.4 % | block |
+| Sep 5 | 3.5 | 45 | 32.6 | 83 | 32.8 | 82 | -0.6 % | block |
+| Sep Logistics | 3.5 | 46 | 35.6 | 77 | 33.7 | 81 | +5.6 % | block |
+| Aug 14 | 3.5 | 77 | 59.3 | 78 | 56.5 | 82 | +5.0 % | block |
+| AMI ES2002a | 3.5 | 21 | 15.5 | 82 | 16.1 | 79 | -3.7 % | block |
+| gate pooled | EN | 324 | 239.2 | 81.3 | 249.3 | 78.0 | -4.1 % | |
+| gate pooled | 3.5 | 324 | 247.3 | 78.6 | 238.8 | 81.4 | +3.6 % | |
+
+Reading it:
+
+- **EN** pools at 78.0 times real time against beta.5's 81.3: 4.1 percent slower, inside the 5 percent bar.
+  - Every EN session timed 1.7 to 6.6 percent slower than in beta.5's block; the 21-minute AMI file, where loading the model weighs most, is the slowest.
+  - Beta.5's EN figure was itself 5.0 percent above beta.4's 77.4, which the beta.5 note puts down to two slow beta.4 runs. Against beta.4, beta.6's EN is 0.8 percent faster.
+  - The timed step is the same executable, models and command line in all three releases (Setup), so no code cause is expected. The spread is that of the machine between sessions.
+- **Nemotron 3.5** pools at 81.4 against beta.5's 78.6: 3.6 percent faster. Against beta.4's 83.1 it is 2.0 percent slower.
+- **The three sessions of the 31 Oct re-time** (Aug 9, Sep Logistics, Aug 14):
+  - beta.6 takes 32.3, 33.7 and 56.5 s, 122.5 s in all;
+  - the re-time took 118.6 s, so 3.3 percent more seconds now;
+  - beta.4 took 119.8 s, so 2.3 percent more;
+  - that re-time's bar allowed 125.8 s.
+  - The beta.5 block's 131.8 s for these sessions came from the environment, as that re-time found.
 
 ## Verdict on the bars
 
@@ -212,7 +262,7 @@ Pending the timed block. This part ran without quiet.lock, so its wall times are
 | Pooled cpWER per model not worse than beta.5 | EN 10.85 → 10.85, Nemotron 3.5 11.30 → 11.30 (all 36); every set equal | met |
 | No session worse by more than 0.5 cpWER points | no session changed at all, with either model; every word is the same | met |
 | No new gap of 5 s or more | 0 new and 0 gone, of 5 s or more and of 2 s or more, with either model | met |
-| Speed within 5 % of beta.5 | pending the timed gate-set block | pending |
+| Speed within 5 % of beta.5 | all 14 gate runs timed and valid (two EN runs re-timed once): pooled × real time EN 78.0 against 81.3 (-4.1 %), Nemotron 3.5 81.4 against 78.6 (+3.6 %) | met |
 
 ## Integration checks on the same tree
 
