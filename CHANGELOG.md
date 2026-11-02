@@ -30,7 +30,13 @@ the measurement, by small margins, so this release stays on 0.2.0 and
   tokenizer are byte for byte the files 0.1.0-beta.5 installed, so nothing
   is downloaded again and the punctuation is the same. A model folder set
   up by 0.1.0-beta.5 keeps punctuating; Settings lists it as missing the two
-  new files (13 KB together) until "Download recommended" fetches them.
+  new files (13 kB together) until "Download recommended" fetches them.
+- Changed: a download made of several files (the punctuation model's 8)
+  is one line in Settings and on the first-run screen: what is missing
+  beside its Download button, "2 of 8 files missing: LICENSE, NOTICE
+  (13 kB)" for a model folder from 0.1.0-beta.5, with every file's address
+  and SHA-256 under "Files and addresses", which opens by itself when a
+  download fails.
 - Changed: download sizes on the first-run screen and in Settings are in
   decimal megabytes and gigabytes, as the documentation gives them (the EN
   model is 700 MB, the default download 1.23 GB with the CUDA runtime).

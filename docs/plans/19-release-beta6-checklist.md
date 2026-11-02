@@ -67,7 +67,7 @@ bun run tauri build
 
 - [ ] Outputs: `target\release\bundle\nsis\Diarist_0.1.0-beta.6_x64-setup.exe` and its `.sig` (the updater signature), `target\release\diarist.exe`, `target\release\diarist.pdb`.
 - [ ] SHA-256 and size of the installer: `Get-FileHash -Algorithm SHA256 <installer>` and `(Get-Item <installer>).Length`.
-- [ ] Smoke test the built exe without installing it, so this machine's installed 0.1.0-beta.5 stays in place for section 6: close the installed app, then start `target\release\diarist.exe` with `DIARIST_DATA_DIR` set to an empty scratch folder. It shows the setup screen with "Install engine (102 MB)" and "Install recommended models (1.13 GB: diarizer, the EN model and Horizon-Labs punctuation small)", each of the punctuation model's eight files listed with its address and hash (`LICENSE` and `NOTICE` from huggingface.co), and "0.1.0-beta.6" in Settings, About.
+- [ ] Smoke test the built exe without installing it, so this machine's installed 0.1.0-beta.5 stays in place for section 6: close the installed app, then start `target\release\diarist.exe` with `DIARIST_DATA_DIR` set to an empty scratch folder. It shows the setup screen with "Install engine (102 MB)" and "Install recommended models (1.13 GB: diarizer, the EN model and Horizon-Labs punctuation small)", the punctuation model as one line whose "Files and addresses" lists its eight files with their addresses and hashes (`LICENSE` and `NOTICE` from huggingface.co), and "0.1.0-beta.6" in Settings, About.
 
 ## 5. Archive the PDB, then draft the release (**owner**)
 
@@ -91,7 +91,7 @@ The installed 0.1.0-beta.5 reads `updater/latest.json` on `main`, and draft asse
 
 - [ ] Commit `updater/latest.json` on `main` and push (after the privacy scan).
 - [ ] `curl.exe -s https://raw.githubusercontent.com/ebt55/diarist/main/updater/latest.json` shows 0.1.0-beta.6 (that address caches for up to five minutes).
-- [ ] At once, in the installed 0.1.0-beta.5: Settings, About, Check for updates offers 0.1.0-beta.6; Install and restart. Expected: download, signature check, the installer runs, the app restarts as 0.1.0-beta.6 with the same meetings, and Diagnostics shows no new failures. No migration runs: `diarist.db.bak-3` stays and no new `.bak` appears. Settings, Models lists the punctuation model with two files missing (`LICENSE` and `NOTICE`, 13 kB together) while punctuation keeps working; "Download recommended" fetches those two files and nothing else (docs/KNOWN-ISSUES.md, the upgrader row).
+- [ ] At once, in the installed 0.1.0-beta.5: Settings, About, Check for updates offers 0.1.0-beta.6; Install and restart. Expected: download, signature check, the installer runs, the app restarts as 0.1.0-beta.6 with the same meetings, and Diagnostics shows no new failures. No migration runs: `diarist.db.bak-3` stays and no new `.bak` appears. Settings, Models shows the punctuation row as "2 of 8 files missing: LICENSE, NOTICE (13 kB)" while punctuation keeps working; "Download recommended" fetches those two files and nothing else (docs/KNOWN-ISSUES.md, the upgrader row).
 - [ ] Going back to 0.1.0-beta.5, if it is ever needed: install its installer again; it opens the same database (schema 5).
 - [ ] If any of it fails: revert the manifest commit on `main` and push at once, so no other installed copy is offered the update, then keep the app log (`logs\diarist.log` in the data folder) for the cause. The published release stays: its installer still works when downloaded by hand.
 - [ ] Record the outcome in the KNOWN-ISSUES updater row.
@@ -107,6 +107,8 @@ Plan 18 section 8.1 item 5: chunk Q prepared the dated snapshot of the model at 
 - [ ] Beta.7: runtime 0.3.0 first (docs/eval/2026-10-31-runtime-030.md; R's prepared adoption patch and the re-recorded WebSocket fixture are in the `beta6-r` worktree's `tools/eval/.work`). Check NeMo-Speech.cpp issues #67 and #81 first.
 - [ ] Beta.7, with 0.3.0: `models::setup`'s `EXTRACTION_FACTOR` of 1.4 (the extracted runtime against its zip, from 0.2.0's CUDA package: 102 MB zipped, 141 MB extracted) underestimates 0.3.0's Vulkan and CPU packages, which grow from 22.4 to 77.1 MB (3.4 times) and from 8.7 to 33.1 MB (3.8 times) when extracted (CUDA 508.6 to 683.7 MB, 1.34 times). The setup screen's disk check then asks for too little for those two packages; a per-package figure or a larger factor fixes it.
 - [ ] Beta.7: chunk M2, if the owner's labels pass and it was not merged into beta.6 (section 1).
+- [ ] Beta.7: the first-run screen, opened from Settings by a 0.1.0-beta.5 upgrader, quotes the full recommended size, and `disk_needed_bytes` counts the punctuation model's full 372 MB, although a pull fetches only the 13 kB that are missing.
+- [ ] Beta.7: a pull re-hashes every file already present in full, and its progress total is the model's full 320 MB rather than the bytes it fetches.
 - [ ] Beta.7: Process again without a kept live transcript (plan 18 section 10.2).
 - [ ] The Tauri bump of plan 18 section 10.1 item 2 (Dependabot alert #1, `glib` 0.18.5, a Linux-only GTK dependency) is not in beta.6.
 
