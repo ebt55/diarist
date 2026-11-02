@@ -829,10 +829,12 @@ mod tests {
     /// The shipped punctuation model's manifest name (plan 16 section 3.13.7).
     const PUNCTUATION_MODEL: &str = "punctuation-horizon-small";
 
-    /// Candidate A as plan 16 section 3.13.7 fixes it: the upstream int8
-    /// file and tokenizer from Hugging Face at the pinned revision, the
-    /// licence texts and the renamed ONNX Runtime 1.31.0 DLL from the
-    /// project's models release, and the description block.
+    /// Candidate A as plan 16 section 3.13.7 fixes it, at the v1.1.1 pin of
+    /// docs/plans/18 section 8: the upstream int8 file, tokenizer, LICENSE
+    /// and NOTICE from Hugging Face at the pinned revision, Diarist's
+    /// provenance notice, ONNX Runtime's licence texts and the renamed ONNX
+    /// Runtime 1.31.0 DLL from the project's models release, and the
+    /// description block.
     #[test]
     fn the_punctuation_entry_is_candidate_a_with_every_file() {
         use crate::punct::spec::{
@@ -846,7 +848,10 @@ mod tests {
         assert!(e.required && e.direct && !e.experimental && !e.streaming);
         assert_eq!(e.pull_name, "");
         assert_eq!(e.repo, "Horizon-Labs/punctuation-restoration-small");
-        let rev = "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1";
+        // v1.1.1 (28 Oct 2026), which added LICENSE and NOTICE; its model
+        // and tokenizer are byte-identical to beta.5's ee31fdf, so their
+        // SHA-256 and sizes below are the ones beta.5 pinned.
+        let rev = "0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d";
         assert_eq!(e.revision, rev);
         let hf = format!("https://huggingface.co/{}/resolve/{rev}/", e.repo);
         assert_eq!(e.file, "onnx/model_quantized.onnx");
@@ -856,17 +861,26 @@ mod tests {
             "5679870be92c7fa47c9be9b2872fac389ef28d43d2c33f35e1315b93a82f4ace"
         );
         assert_eq!(e.primary_size_bytes(), 268_414_381);
-        assert!(e.licence.starts_with("Apache-2.0") && e.licence.ends_with("base model MIT"));
+        assert_eq!(
+            e.licence,
+            "Apache-2.0 (LICENSE and NOTICE in the repository from v1.1.1, 0cea764; model files \
+             byte-identical to ee31fdf); base model MIT"
+        );
         assert_eq!(
             e.dir.as_deref(),
             Some("horizon-labs/punctuation-restoration-small")
         );
+        // No revision in the folder: an installed copy stays where it is
+        // when the pin moves (docs/plans/18 section 8.1 item 1).
         assert_eq!(
             e.dest_dir(Path::new("M")),
             Path::new("M")
                 .join("horizon-labs")
                 .join("punctuation-restoration-small")
         );
+        let mut beta5 = e.clone();
+        beta5.revision = "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1".into();
+        assert_eq!(beta5.dest_dir(Path::new("M")), e.dest_dir(Path::new("M")));
 
         // Every other file, in download order, with its size and SHA-256.
         let release = "https://github.com/ebt55/diarist/releases/download/models-2026-10/";
@@ -883,11 +897,20 @@ mod tests {
                     34_363_286,
                     "f34b44a6dc8a0eef651bfa10e8325057530152606a69d9c3b6ae02efb1558f0a"
                 ),
+                // The authors' files from v1.1.1. LICENSE is the canonical
+                // Apache License 2.0 text, the bytes beta.5 installed as
+                // LICENSE-Apache-2.0.txt.
                 (
-                    "LICENSE-Apache-2.0.txt",
+                    "LICENSE",
                     11_358,
                     "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
                 ),
+                (
+                    "NOTICE",
+                    1_567,
+                    "74b3592d7abe959e9f2c3693203a60e3844d482742aaffb599105ec063b30af3"
+                ),
+                // Diarist's dated provenance record of ee31fdf, unchanged.
                 (
                     "NOTICE-punctuation.txt",
                     2_179,
@@ -910,8 +933,10 @@ mod tests {
                 ),
             ]
         );
+        // From the authors at the pin: the tokenizer, LICENSE and NOTICE;
+        // the rest from the project's release.
         for f in &e.files {
-            let host = if f.path == "tokenizer.json" {
+            let host = if ["tokenizer.json", "LICENSE", "NOTICE"].contains(&f.path.as_str()) {
                 hf.as_str()
             } else {
                 release
@@ -922,7 +947,7 @@ mod tests {
             e.size_bytes,
             268_414_381 + e.files.iter().map(|f| f.size_bytes).sum::<u64>()
         );
-        assert_eq!(e.size_bytes, 320_389_931);
+        assert_eq!(e.size_bytes, 320_391_498);
         // The scanner matches the primary file by its own size.
         let matched = m.match_file("model_quantized.onnx", 268_414_381).unwrap();
         assert_eq!(matched.name, PUNCTUATION_MODEL);

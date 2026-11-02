@@ -174,6 +174,103 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
+    /// The shipped punctuation entry with every address on `base` and stand-in
+    /// bytes (`body`) for each file, keeping its folder, file names and
+    /// order: the layout and the rule of the real entry, without its 306 MB.
+    fn shipped_punct_with(base: &str, body: &dyn Fn(&str) -> Vec<u8>) -> ModelEntry {
+        let mut e = crate::models::Manifest::builtin()
+            .model("punctuation-horizon-small")
+            .unwrap()
+            .clone();
+        for f in &mut e.files {
+            let b = body(&f.path);
+            f.url = format!("{base}/{}", f.path);
+            f.size_bytes = b.len() as u64;
+            f.sha256 = sha(&b);
+        }
+        let b = body(&e.file);
+        e.url = format!("{base}/{}", e.file);
+        e.sha256 = sha(&b);
+        e.size_bytes = b.len() as u64 + e.files.iter().map(|f| f.size_bytes).sum::<u64>();
+        e
+    }
+
+    /// A beta.5 install (docs/plans/18 section 8.1 items 1 and 6): the model
+    /// and tokenizer of ee31fdf, which v1.1.1 left byte-identical, in the
+    /// same folder (the entry's `dir` has no revision), with beta.5's
+    /// `LICENSE-Apache-2.0.txt` and without `LICENSE` and `NOTICE`. The next
+    /// fetch downloads only those two; the model, the tokenizer and the
+    /// runtime are never requested, and the old licence copy is left alone.
+    #[test]
+    fn a_beta5_install_gets_only_the_two_new_licence_files() {
+        let body = |path: &str| format!("bytes of {path}").into_bytes();
+        let names: Vec<String> = {
+            let e = crate::models::Manifest::builtin()
+                .model("punctuation-horizon-small")
+                .unwrap()
+                .clone();
+            e.files.iter().map(|f| f.path.clone()).collect()
+        };
+        let served: Vec<(&'static str, Vec<u8>)> = names
+            .iter()
+            .map(|p| p.as_str())
+            .chain(["onnx/model_quantized.onnx"])
+            .map(|p| (&*String::leak(p.to_owned()), body(p)))
+            .collect();
+        let (base, seen) = serve(served);
+        let e = shipped_punct_with(&base, &body);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let root = e.dest_dir(&paths.models());
+        assert_eq!(
+            root,
+            paths
+                .models()
+                .join("horizon-labs")
+                .join("punctuation-restoration-small")
+        );
+        // What beta.5 put there: every file of its list, verified.
+        let beta5 = [
+            "tokenizer.json",
+            "LICENSE-Apache-2.0.txt",
+            "NOTICE-punctuation.txt",
+            "onnxruntime-LICENSE.txt",
+            "onnxruntime-ThirdPartyNotices.txt",
+            "diarist-onnxruntime.dll",
+            "onnx/model_quantized.onnx",
+        ];
+        for p in beta5 {
+            let dest = rel_path(&root, p);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, body(p)).unwrap();
+            record_sha256(&dest, &sha(&body(p)));
+        }
+        let model = root.join("onnx").join("model_quantized.onnx");
+        let before = std::fs::metadata(&model).unwrap().modified().unwrap();
+
+        let mut last = (0, None);
+        let got = fetch_entry(&e, &paths, &mut |d, t| last = (d, t)).unwrap();
+        assert_eq!(got, model);
+        assert_eq!(*seen.lock().unwrap(), ["/LICENSE", "/NOTICE"]);
+        assert_eq!(last.1, Some(e.size_bytes));
+        assert_eq!(
+            std::fs::metadata(&model).unwrap().modified().unwrap(),
+            before,
+            "the model file is not rewritten"
+        );
+        for p in ["LICENSE", "NOTICE"] {
+            assert_eq!(std::fs::read(root.join(p)).unwrap(), body(p), "{p}");
+        }
+        assert!(
+            root.join("LICENSE-Apache-2.0.txt").is_file(),
+            "a file the list no longer names stays"
+        );
+        // Everything there now: nothing is fetched again.
+        seen.lock().unwrap().clear();
+        fetch_entry(&e, &paths, &mut |_, _| {}).unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn a_bad_file_stops_before_the_primary() {
         let (model, tok, dll) = (vec![1u8; 300], vec![2u8; 20], vec![3u8; 10]);
