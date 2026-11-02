@@ -2,6 +2,65 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## [0.1.0-beta.6] - 2026-11-03
+
+The sixth beta pre-release. While recording, Diarist now says so outside
+its window: the window title reads "● Recording · Diarist" and the
+taskbar button carries a red dot. The punctuation model moves to its
+authors' v1.1.1, which adds their own licence files; the model itself is
+the same file. NVIDIA's runtime 0.3.0 was measured: it transcribes files
+40 to 47 percent faster, but missed two of the accuracy bars set before
+the measurement, by small margins, so this release stays on 0.2.0 and
+0.3.0 is next, for 0.1.0-beta.7. Measured on one PC.
+
+- Changed: while recording, Diarist says so outside its window. The window
+  title reads "● Recording · Diarist" and the taskbar button carries a red
+  dot, which screen readers announce as "Recording". The tray icon's
+  recording dot is redrawn: sharp at every display scale, it no longer
+  covers two of the icon's three lines, and it stays apart from the icon on
+  light and dark taskbars. In the app the recording dot no longer fades to
+  pale pink; it stays solid with a thin halo (none with reduced motion). The
+  dot shows on the taskbar button while the window has one, and when taskbar
+  badges are turned on in Windows' taskbar settings.
+- Changed: the punctuation model is pinned to Horizon-Labs' v1.1.1
+  (`0cea764`). Its authors added a `LICENSE` (the Apache License 2.0 text)
+  and a `NOTICE` (their copyright line and the base model's MIT notice) to
+  the model's repository, and Diarist now installs those two files beside
+  the model instead of the licence text it hosted itself. The model and its
+  tokenizer are byte for byte the files 0.1.0-beta.5 installed, so nothing
+  is downloaded again and the punctuation is the same. A model folder set
+  up by 0.1.0-beta.5 keeps punctuating; Settings lists it as missing the two
+  new files (13 KB together) until "Download recommended" fetches them.
+- Changed: download sizes on the first-run screen and in Settings are in
+  decimal megabytes and gigabytes, as the documentation gives them (the EN
+  model is 700 MB, the default download 1.23 GB with the CUDA runtime).
+  The documentation's figures are restated the same way. LICENSES.md
+  counts the crates of the current build (451, with ONNX Runtime's `ort`
+  and the tokenizer) and carries the notice of Oniguruma, the C library
+  the punctuation model's tokenizer builds into the app.
+- Measured: Nemotron 3.5's speed. Timed again on an idle PC, the three
+  recordings that looked slow in the 0.1.0-beta.5 check took 118.6 s
+  against 0.1.0-beta.4's 119.8 s; the slower 0.1.0-beta.5 figure came from
+  other apps using the GPU during that measurement
+  (docs/eval/2026-10-31-retime-n35.md).
+- Measured, not adopted: NeMo-Speech.cpp 0.3.0. On the same recordings it
+  transcribes files 40 to 47 percent faster (113.9 and 115.8 times real
+  time, against 81.3 and 78.6), and it passes the deletion, live, package
+  and test bars. It missed two accuracy bars fixed before the runs, by
+  small margins: with the EN model, word error on the public meeting
+  recordings came to 30.10 percent against a bar of 30.08; with
+  Nemotron 3.5, the broad set had 84 gaps of 5 s or more against a bar of
+  83.6. Diarist stays on 0.2.0; 0.3.0 is the first item for 0.1.0-beta.7
+  (docs/eval/2026-10-31-runtime-030.md).
+- Measured, did not ship: filling the EN model's silent stretches with
+  Nemotron 3.5's words (word error 10.85 to 10.87 on the evaluation set,
+  against a required gain of 0.2; docs/eval/2026-10-30-gapfill.md), and
+  word boosting for names (0 of 13 names fixed on one of the author's
+  meetings at any boost; docs/eval/2026-10-30-names-spike.md).
+- Known: after the echo canceller, your own words spoken entirely over
+  loud speech from the other side can still be removed; headphones avoid
+  it. docs/KNOWN-ISSUES.md has this and the other open rows.
+
 ## [0.1.0-beta.5] - 2026-10-27
 
 The fifth beta pre-release. Transcripts get punctuation and sentence
