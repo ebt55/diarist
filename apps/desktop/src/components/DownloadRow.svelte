@@ -97,7 +97,7 @@
         ><span class="fill" style="width: {pct}%"></span></span
       >
       <span class="mono small">
-        {pct}% · {formatBytes(p.done)}{speed !== null ? ` · ${(speed / 1048576).toFixed(1)} MB/s` : ""}{pct === 100
+        {pct}% · {formatBytes(p.done)}{speed !== null ? ` · ${(speed / 1e6).toFixed(1)} MB/s` : ""}{pct === 100
           ? " · checking"
           : ""}
       </span>

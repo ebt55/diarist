@@ -4,6 +4,7 @@
 // with per-item progress from `models:progress`. The backend resumes a
 // partial download and checks every file's SHA-256 before it is used.
 import { api, errorText, onEvent } from "./api";
+import { formatBytes } from "./format";
 import type { DownloadItem } from "./generated/DownloadItem";
 import type { DownloadProgress } from "./generated/DownloadProgress";
 import { downloadLinks } from "./links";
@@ -24,12 +25,12 @@ export interface ItemProgress {
 }
 
 /**
- * Megabytes the way docs/04 quotes download sizes: MiB, rounded up unless
- * barely over (engine 98 MB, diarizer 102 MB, EN model 668 MB, both 770 MB).
+ * A download's size the way the README and docs/04 quote it: decimal units,
+ * as file managers show them (engine 102 MB, diarizer 107 MB, EN model
+ * 700 MB, the default models 1.13 GB). Up to 0.1.0-beta.5 this was MiB.
  */
 export function sizeMb(bytes: number): string {
-  const mb = bytes / 1048576;
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.max(0, Math.ceil(mb - 0.1))} MB`;
+  return formatBytes(bytes);
 }
 
 class Downloads {
