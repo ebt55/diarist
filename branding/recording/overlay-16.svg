@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <title>Diarist recording overlay (16 px)</title>
+  <!-- Taskbar overlay at 16 px: a 10 px red disc in a 2 px white ring (14 px across), centred. Written by tools/recording_svgs.py. -->
+  <circle cx="8" cy="8" r="7" fill="#ffffff"/>
+  <circle cx="8" cy="8" r="5" fill="#dc2626"/>
+</svg>

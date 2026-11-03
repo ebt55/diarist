@@ -90,26 +90,32 @@
     "direct": true,
     "experimental": false,
     "repo": "Horizon-Labs/punctuation-restoration-small",
-    "revision": "ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1",
+    "revision": "0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d",
     "file": "onnx/model_quantized.onnx",
-    "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1/onnx/model_quantized.onnx",
-    "size_bytes": 320389931,
+    "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d/onnx/model_quantized.onnx",
+    "size_bytes": 320391498,
     "sha256": "5679870be92c7fa47c9be9b2872fac389ef28d43d2c33f35e1315b93a82f4ace",
-    "licence": "Apache-2.0 (declared in the model card; no LICENSE file in the repository at this revision); base model MIT",
+    "licence": "Apache-2.0 (LICENSE and NOTICE in the repository from v1.1.1, 0cea764; model files byte-identical to ee31fdf); base model MIT",
     "streaming": false,
     "languages": ["en", "de", "fr", "es", "it", "pt", "hi", "ko", "ru", "tr", "vi", "nl", "ja", "ar", "uk", "pl", "nb", "nn", "fi", "zh", "cs", "bg", "sk", "sv", "hr", "ro", "et", "da", "hu", "el", "lt", "lv", "mt", "sl", "he"],
     "files": [
       {
         "path": "tokenizer.json",
-        "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/ee31fdfc5304f876ea3b0dd72d30eda7e940b2b1/tokenizer.json",
+        "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d/tokenizer.json",
         "size_bytes": 34363286,
         "sha256": "f34b44a6dc8a0eef651bfa10e8325057530152606a69d9c3b6ae02efb1558f0a"
       },
       {
-        "path": "LICENSE-Apache-2.0.txt",
-        "url": "https://github.com/ebt55/diarist/releases/download/models-2026-10/LICENSE-Apache-2.0.txt",
+        "path": "LICENSE",
+        "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d/LICENSE",
         "size_bytes": 11358,
         "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "path": "NOTICE",
+        "url": "https://huggingface.co/Horizon-Labs/punctuation-restoration-small/resolve/0cea764aa6fc55c8bdfc20a5f0bb4dc27b64753d/NOTICE",
+        "size_bytes": 1567,
+        "sha256": "74b3592d7abe959e9f2c3693203a60e3844d482742aaffb599105ec063b30af3"
       },
       {
         "path": "NOTICE-punctuation.txt",

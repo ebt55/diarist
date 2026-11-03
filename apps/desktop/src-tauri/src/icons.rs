@@ -15,6 +15,15 @@
 //! changes and when it gets the focus (a cheap registry read), so a taskbar
 //! switched between light and dark is followed at the latest the next time
 //! the window is used.
+//!
+//! While recording, the tray shows the same pair with a red dot cut into the
+//! lower-right corner (`branding/recording/<light|dark>-<size>.svg`, frames
+//! in `icons/recording/<light|dark>/`), and the taskbar button carries an
+//! overlay, a red dot in a white ring (`branding/recording/overlay-*.svg`,
+//! frames in `icons/recording/overlay/` at the small-icon size for 100 to
+//! 300 percent; set by `taskbar.rs`). All are drawn on the pixel grid.
+
+use tauri::image::Image;
 
 /// Logical sizes: the small icon (title bar, notification area) and the
 /// taskbar button's icon.
@@ -23,23 +32,39 @@ const TASKBAR: u32 = 24;
 
 /// The frames of each set, smallest first.
 const FRAMES: [u32; 5] = [16, 20, 24, 32, 48];
+/// The overlay's frames: the small-icon size at 100, 125, 150, 200, 250
+/// and 300 percent.
+const OVERLAY_FRAMES: [u32; 6] = [16, 20, 24, 32, 40, 48];
 
 macro_rules! frames {
     ($set:literal) => {
         [
-            include_bytes!(concat!("../icons/theme/", $set, "/16.png")).as_slice(),
-            include_bytes!(concat!("../icons/theme/", $set, "/20.png")).as_slice(),
-            include_bytes!(concat!("../icons/theme/", $set, "/24.png")).as_slice(),
-            include_bytes!(concat!("../icons/theme/", $set, "/32.png")).as_slice(),
-            include_bytes!(concat!("../icons/theme/", $set, "/48.png")).as_slice(),
+            include_bytes!(concat!("../icons/", $set, "/16.png")).as_slice(),
+            include_bytes!(concat!("../icons/", $set, "/20.png")).as_slice(),
+            include_bytes!(concat!("../icons/", $set, "/24.png")).as_slice(),
+            include_bytes!(concat!("../icons/", $set, "/32.png")).as_slice(),
+            include_bytes!(concat!("../icons/", $set, "/48.png")).as_slice(),
         ]
     };
 }
 
 /// `icon.svg`, the ink page, for a light taskbar.
-static LIGHT: [&[u8]; 5] = frames!("light");
+static LIGHT: [&[u8]; 5] = frames!("theme/light");
 /// `icon-dark.svg`, the paper page, for a dark taskbar.
-static DARK: [&[u8]; 5] = frames!("dark");
+static DARK: [&[u8]; 5] = frames!("theme/dark");
+/// The ink page with the recording dot, for a light taskbar.
+static REC_LIGHT: [&[u8]; 5] = frames!("recording/light");
+/// The paper page with the recording dot, for a dark taskbar.
+static REC_DARK: [&[u8]; 5] = frames!("recording/dark");
+/// The taskbar overlay while recording.
+static OVERLAY: [&[u8]; 6] = [
+    include_bytes!("../icons/recording/overlay/16.png").as_slice(),
+    include_bytes!("../icons/recording/overlay/20.png").as_slice(),
+    include_bytes!("../icons/recording/overlay/24.png").as_slice(),
+    include_bytes!("../icons/recording/overlay/32.png").as_slice(),
+    include_bytes!("../icons/recording/overlay/40.png").as_slice(),
+    include_bytes!("../icons/recording/overlay/48.png").as_slice(),
+];
 
 /// `(small, taskbar)` edge lengths in pixels for a DPI (96 = 100 percent):
 /// 16 and 24 at 100 percent, 20 and 30 at 125, 24 and 36 at 150, 32 and 48
@@ -50,15 +75,33 @@ pub(crate) fn icon_edges(dpi: u32) -> (u32, u32) {
     (at(SMALL), at(TASKBAR))
 }
 
-/// The frame drawn for `px`: the smallest one at least that big (Windows
-/// then only ever scales down), else the largest. Returns its size and PNG.
-pub(crate) fn frame(light: bool, px: u32) -> (u32, &'static [u8]) {
-    let set = if light { &LIGHT } else { &DARK };
-    let i = FRAMES
+/// The index of the frame drawn for `px`: the smallest one at least that
+/// big (Windows then only ever scales down), else the largest.
+fn pick(frames: &[u32], px: u32) -> usize {
+    frames
         .iter()
         .position(|&f| f >= px)
-        .unwrap_or(FRAMES.len() - 1);
-    (FRAMES[i], set[i])
+        .unwrap_or(frames.len() - 1)
+}
+
+/// The app icon's frame for `px` and the taskbar's theme: its size and PNG.
+pub(crate) fn frame(light: bool, px: u32) -> (u32, &'static [u8]) {
+    let i = pick(&FRAMES, px);
+    (FRAMES[i], if light { LIGHT[i] } else { DARK[i] })
+}
+
+/// The same, with the recording dot.
+pub(crate) fn recording_frame(light: bool, px: u32) -> (u32, &'static [u8]) {
+    let i = pick(&FRAMES, px);
+    (FRAMES[i], if light { REC_LIGHT[i] } else { REC_DARK[i] })
+}
+
+/// The taskbar overlay's frame for a DPI: the small-icon size (16 px at
+/// 100 percent, 32 at 200), the size the shell draws overlays at.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn overlay_frame(dpi: u32) -> (u32, &'static [u8]) {
+    let i = pick(&OVERLAY_FRAMES, icon_edges(dpi).0);
+    (OVERLAY_FRAMES[i], OVERLAY[i])
 }
 
 /// RGBA pixels of an 8-bit RGBA PNG (the frames are written that way).
@@ -160,6 +203,12 @@ mod win {
         Some((dpi, sf, bf))
     }
 
+    /// The overlay for the window's DPI, as an icon the caller owns.
+    pub(super) fn overlay_icon(hwnd: HWND) -> Option<(HICON, u32)> {
+        let (size, png) = super::overlay_frame(unsafe { GetDpiForWindow(hwnd) });
+        icon_from_png(png, size).map(|icon| (icon, size))
+    }
+
     /// The DPI of the taskbar that holds the notification area.
     pub(super) fn taskbar_dpi() -> u32 {
         unsafe {
@@ -169,6 +218,15 @@ mod win {
             }
         }
     }
+}
+
+/// The taskbar overlay for the window's DPI, as an icon the caller owns
+/// (and destroys), and its size.
+#[cfg(windows)]
+pub(crate) fn overlay_icon(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Option<(windows::Win32::UI::WindowsAndMessaging::HICON, u32)> {
+    win::overlay_icon(hwnd)
 }
 
 /// What the icons were last chosen for: (light taskbar, window DPI).
@@ -201,27 +259,33 @@ pub(crate) fn refresh(window: &tauri::Window, force: bool) {
             None => log::warn!("window icons not set from the {theme} frames"),
         }
         crate::tray::rescale(window.app_handle());
+        // The overlay's frame follows the DPI too.
+        crate::taskbar::reapply(window.app_handle());
     }
     #[cfg(not(windows))]
     let _ = (window, force, &CHOSEN);
 }
 
-/// The tray's image: the frame for the notification area's size at the
-/// taskbar's DPI, from the set for the taskbar's theme.
-pub(crate) fn tray_image() -> Option<tauri::image::Image<'static>> {
+/// The tray's images, idle and recording: the frames for the notification
+/// area's size at the taskbar's DPI, from the sets for the taskbar's theme.
+pub(crate) fn tray_images() -> Option<(Image<'static>, Image<'static>)> {
     #[cfg(windows)]
     let dpi = win::taskbar_dpi();
     #[cfg(not(windows))]
     let dpi = 96;
     let (small, _) = icon_edges(dpi);
-    let (size, png) = frame(taskbar_is_light(), small);
-    match decode_rgba(png) {
-        Ok((rgba, w, h)) => Some(tauri::image::Image::new_owned(rgba, w, h)),
+    let light = taskbar_is_light();
+    let image = |(size, png): (u32, &[u8])| match decode_rgba(png) {
+        Ok((rgba, w, h)) => Some(Image::new_owned(rgba, w, h)),
         Err(e) => {
             log::warn!("tray icon frame {size} px not decoded: {e}");
             None
         }
-    }
+    };
+    Some((
+        image(frame(light, small))?,
+        image(recording_frame(light, small))?,
+    ))
 }
 
 #[cfg(test)]
@@ -270,5 +334,76 @@ mod tests {
                 assert_eq!(rgba[mid], 255, "{set} {size}");
             }
         }
+    }
+
+    /// The RGBA of pixel (x, y) in a square frame.
+    fn pixel(rgba: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * size + x) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    }
+
+    /// The recording red, `#dc2626`.
+    const RED: [u8; 4] = [0xdc, 0x26, 0x26, 0xff];
+
+    #[test]
+    fn recording_frames_are_the_icon_with_a_red_dot() {
+        let sets = [("light", &LIGHT, &REC_LIGHT), ("dark", &DARK, &REC_DARK)];
+        for (set, idle_set, recording_set) in sets {
+            for ((idle, png), size) in idle_set.iter().zip(recording_set.iter()).zip(FRAMES) {
+                let (rec, w, h) = decode_rgba(png).unwrap_or_else(|e| panic!("{set} {size}: {e}"));
+                assert_eq!((w, h), (size, size), "{set}");
+                let (idle, ..) = decode_rgba(idle).expect("idle frame");
+                // The dot's centre, three quarters across and down, is the
+                // recording red; away from the lower-right corner the
+                // pixels are the icon's own.
+                let dot = size * 3 / 4;
+                assert_eq!(pixel(&rec, size, dot, dot), RED, "{set} {size}");
+                let away = [
+                    (size / 4, size / 4),
+                    (1, size / 2),
+                    (size / 2, size / 4),
+                    (size / 4, size * 3 / 4),
+                ];
+                for (x, y) in away {
+                    assert_eq!(
+                        pixel(&rec, size, x, y),
+                        pixel(&idle, size, x, y),
+                        "{set} {size} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(std::ptr::eq(recording_frame(true, 20).1, REC_LIGHT[1]));
+        assert!(std::ptr::eq(recording_frame(false, 32).1, REC_DARK[3]));
+        // 175 percent: the 32 px frame, scaled down by Windows.
+        assert_eq!(recording_frame(false, 28).0, 32);
+    }
+
+    #[test]
+    fn overlay_frames_decode_at_their_size() {
+        for (png, size) in OVERLAY.iter().zip(OVERLAY_FRAMES) {
+            let (rgba, w, h) = decode_rgba(png).unwrap_or_else(|e| panic!("overlay {size}: {e}"));
+            assert_eq!((w, h), (size, size));
+            // Red in the middle, a white ring around it, clear corners.
+            assert_eq!(pixel(&rgba, size, size / 2, size / 2), RED, "{size}");
+            assert_eq!(pixel(&rgba, size, 0, 0)[3], 0, "{size}");
+            assert_eq!(pixel(&rgba, size, size - 1, size - 1)[3], 0, "{size}");
+            let ring = (0..size / 2)
+                .map(|y| pixel(&rgba, size, size / 2, y))
+                .any(|p| p == [0xff, 0xff, 0xff, 0xff]);
+            assert!(ring, "{size}: no white ring above the dot");
+        }
+    }
+
+    #[test]
+    fn the_overlay_frame_is_the_small_icon_size() {
+        // 100, 125, 150, 175, 200, 250, 300 and 400 percent.
+        let picked: Vec<u32> = [96, 120, 144, 168, 192, 240, 288, 384]
+            .iter()
+            .map(|&d| overlay_frame(d).0)
+            .collect();
+        assert_eq!(picked, [16, 20, 24, 32, 32, 40, 48, 48]);
+        assert!(std::ptr::eq(overlay_frame(192).1, OVERLAY[3]));
+        assert_eq!(overlay_frame(0).0, 16);
     }
 }

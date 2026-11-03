@@ -206,7 +206,7 @@ Reading it:
   - The same build timed those three sessions at 13:44 to 13:48 in 32.0, 33.2 and 55.2 s, within -1.5 to +1.3 percent of beta.4's 32.4, 32.7 and 54.7. Those runs were left out only for Surfshark's single samples.
   - The block's second half is where claude.exe drew the GPU most (above).
   - Nothing in the measured step changed between the releases: `nemo-speech transcribe` is the same executable, with the same models and the same command line (Setup), so a code cause is not expected.
-- Accepted by the owner on 27 Oct 2026; re-timed in beta.6: the three 3.5 runs (Aug 9, Sep Logistics, Aug 14) with the Claude desktop app idle (minimised, no agent output streaming), about 3 minutes of GPU under quiet.lock.
+- Accepted by the owner on 27 Oct 2026; re-timed in beta.6: the three 3.5 runs (Aug 9, Sep Logistics, Aug 14) with the Claude desktop app idle (minimised, no agent output streaming), about 3 minutes of GPU under quiet.lock. Added 2 Nov 2026: re-timed on 31 Oct 2026 on an idle machine (`docs/eval/2026-10-31-retime-n35.md`), the same executable, models and command line took 32.1, 32.1 and 54.4 s, 118.6 s pooled against beta.4's 119.8 s (1.0 percent faster, no process but nemo-speech above 0 percent SM in any pmon sample), so the block's 131.8 s for these sessions came from the environment.
 
 ### Release bars
 

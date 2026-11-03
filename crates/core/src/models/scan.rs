@@ -1162,6 +1162,112 @@ mod tests {
         );
     }
 
+    /// docs/plans/18 section 8.1 item 6: a punctuation entry whose model and
+    /// tokenizer are there with the right hashes stays selectable while
+    /// licence files the entry lists are missing (a beta.5 install, which
+    /// has `LICENSE-Apache-2.0.txt` and not v1.1.1's `LICENSE` and
+    /// `NOTICE`). Only the download row says two files are missing, and the
+    /// next pull or "Download recommended" fetches them; the selection
+    /// survives their arrival.
+    #[test]
+    fn missing_licence_files_never_block_punctuation() {
+        use crate::punct::spec::rel_path;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let body = |path: &str| -> Vec<u8> {
+            match path {
+                "tokenizer.json" => b"{}".to_vec(),
+                p => format!("bytes of {p}").into_bytes(),
+            }
+        };
+        let sha = |b: &[u8]| -> String {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(b)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect()
+        };
+        // The shipped entry, its folder, names and description block, with
+        // stand-in bytes for each file.
+        let mut entry = Manifest::builtin()
+            .model("punctuation-horizon-small")
+            .unwrap()
+            .clone();
+        for f in &mut entry.files {
+            let b = body(&f.path);
+            f.size_bytes = b.len() as u64;
+            f.sha256 = sha(&b);
+        }
+        let b = body(&entry.file);
+        entry.sha256 = sha(&b);
+        entry.size_bytes = b.len() as u64 + entry.files.iter().map(|f| f.size_bytes).sum::<u64>();
+        let manifest = Manifest {
+            models: vec![entry.clone()],
+            engines: vec![],
+        };
+        let root = entry.dest_dir(&paths.models());
+        for p in [
+            "tokenizer.json",
+            "LICENSE-Apache-2.0.txt",
+            "NOTICE-punctuation.txt",
+            "onnxruntime-LICENSE.txt",
+            "onnxruntime-ThirdPartyNotices.txt",
+            "diarist-onnxruntime.dll",
+            "onnx/model_quantized.onnx",
+        ] {
+            let dest = rel_path(&root, p);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, body(p)).unwrap();
+        }
+
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = file_at(&r, "onnx/model_quantized.onnx");
+        assert_eq!(f.role, ModelRole::Punctuation, "{:?}", r.errors);
+        assert_eq!(
+            f.manifest_name.as_deref(),
+            Some("punctuation-horizon-small")
+        );
+        assert_eq!(f.capabilities.punctuation, entry.punctuation);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let id = f.id;
+        let selected = || store.get_settings().unwrap().0["selected_model.punctuation"].clone();
+        assert_eq!(selected(), id.to_string());
+        assert_eq!(
+            crate::models::selected_file(&store, ModelRole::Punctuation)
+                .unwrap()
+                .map(|f| f.id),
+            Some(id)
+        );
+        // The download row: not complete, exactly the two new files missing.
+        let row = |files: &[ModelFile]| {
+            crate::models::download_items(&paths, &manifest, files, "cuda")
+                .into_iter()
+                .find(|i| i.name == "punctuation-horizon-small")
+                .unwrap()
+        };
+        let item = row(&r.files);
+        assert!(!item.installed);
+        let missing: Vec<&str> = item
+            .files
+            .iter()
+            .filter(|p| !p.present)
+            .map(|p| p.path.as_str())
+            .collect();
+        assert_eq!(missing, ["LICENSE", "NOTICE"]);
+
+        // The two files arrive (a pull, or Download recommended): the same
+        // file, still selected, and the row is complete.
+        for p in ["LICENSE", "NOTICE"] {
+            std::fs::write(root.join(p), body(p)).unwrap();
+        }
+        let r = scan(&paths, &store, &manifest).unwrap();
+        let f = file_at(&r, "onnx/model_quantized.onnx");
+        assert_eq!((f.id, f.role), (id, ModelRole::Punctuation));
+        assert_eq!(selected(), id.to_string());
+        assert!(row(&r.files).installed);
+    }
+
     /// The real data layout when `DIARIST_MODELS_DIR` and
     /// `DIARIST_ENGINE_DIR` are set (read-only: files are only listed).
     #[test]

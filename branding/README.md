@@ -17,11 +17,12 @@ does not.
 | `icon-sizes/` | Both icons redrawn on the pixel grid at 16, 20 and 24 px (`light-*`, `dark-*`), and `icon.svg` at 48 px, used for those frames. |
 | `logo-mono.svg` | One colour (`currentColor`): favicons, monochrome tray, embossing, single-ink print. |
 | `tray-recording.svg` | One-colour mark with the red recording dot. |
+| `recording/` | The recording indicator, one drawing per pixel size: `overlay-<size>.svg` (16 to 48 px), the taskbar overlay, a red dot in a white ring; `light-<size>.svg` and `dark-<size>.svg` (16, 20, 24, 32, 48 px), the app icon pair with the red dot cut into its lower-right corner, for the notification area. |
 | `wordmark.svg` | Mark plus the name, for light backgrounds. |
 | `wordmark-dark.svg` | Mark plus the name, for dark backgrounds. |
 | `social.svg`, `social.png` | GitHub social preview, 1200 x 630. Not a README banner; the README header is the wordmark. |
 | `preview.png` | Contact sheet: the mark and both icons at 16 to 128 px on light and dark, mono and tray marks. |
-| `tools/` | `build_ico.py` (builds `icon.ico` and the theme frame sets) and `preview.py` (draws `preview.png`). |
+| `tools/` | `build_ico.py` (builds `icon.ico`, the theme frame sets and the recording frames), `recording_svgs.py` (writes `recording/` from the icons) and `preview.py` (draws `preview.png`). |
 | `explorations/` | The variants that were tried: the mark (`compare.png`) and the icon (`taskbar-sheet-*.png`, with the tools that draw them). |
 
 The Windows icon set in `apps/desktop/src-tauri/icons/` is generated from `icon-dark.svg`.
@@ -123,11 +124,17 @@ use the mono file where one ink is required.
 ## Tray
 
 The Windows notification area shows icons at 16 px at 100% scaling (20 px at 125%, 24 px at
-150%, 32 px at 200%). Today the app uses the colour window icon for the tray and paints the
-recording dot at runtime (`#dc2626` on a white ring, lower right), taking the frame for
+150%, 32 px at 200%). The app uses the colour window icon for the tray, taking the frame for
 the display's scale (`apps/desktop/src-tauri/src/icons.rs`); `icons/theme/` holds both
-icons for it to follow the taskbar theme. `logo-mono.svg` and `tray-recording.svg` are
-ready for a monochrome tray: rasterise them with the colour set to white for a dark
+icons for it to follow the taskbar theme. While recording it shows the same frame with the
+recording dot (`recording/<light|dark>-<size>.svg`, rendered to `icons/recording/`): the
+tile cut away around a `#dc2626` disc half the icon wide in the lower-right corner, with a
+clear gap instead of a ring, so the dot stays apart from the paper tile and the slate edge
+(red and slate are 1.0:1). The taskbar button gets an overlay at the small-icon size
+(`recording/overlay-<size>.svg`, 16 px at 100% to 48 px at 300%): the same red in a white
+ring, which the shell draws over the button's lower right. Red is 3.4:1 on the dark taskbar
+(`#202020`) and 4.4:1 on the light one (`#f3f3f3`). `logo-mono.svg` and `tray-recording.svg`
+are ready for a monochrome tray: rasterise them with the colour set to white for a dark
 taskbar or `#1b1f27` for a light one, at 16, 20, 24 and 32 px.
 
 ## Do not
@@ -155,6 +162,9 @@ cd apps/desktop && bunx tauri icon ../../branding/icon-dark.svg -o src-tauri/ico
 # Then, from the repository root (needs resvg on PATH): icon.ico from icon-dark.svg with 16,
 # 20, 24, 32, 48, 64, 128 and 256 px frames, and icons/theme/{light,dark}/<size>.png at 16,
 # 20, 24, 32 and 48 px from icon.svg and icon-dark.svg; 16, 20 and 24 px from icon-sizes/.
+# Also icons/recording/{overlay,light,dark}/<size>.png from recording/. When the icons change,
+# write recording/ again first (recording_svgs.py).
+uv run --with pillow python -I branding/tools/recording_svgs.py
 uv run --with pillow python -I branding/tools/build_ico.py
 
 # Contact sheet

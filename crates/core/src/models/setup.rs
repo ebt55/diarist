@@ -368,8 +368,9 @@ mod tests {
     }
 
     /// Every file of the shipped punctuation model together (plan 16
-    /// section 3.13.7); a required download, never a setup gate.
-    const PUNCTUATION_BYTES: u64 = 320_389_931;
+    /// section 3.13.7, with the authors' LICENSE and NOTICE of v1.1.1 from
+    /// docs/plans/18 section 8); a required download, never a setup gate.
+    const PUNCTUATION_BYTES: u64 = 320_391_498;
 
     /// A fresh data root's first-run items list the punctuation model as a
     /// required download with every file: the other files first, the
@@ -398,7 +399,8 @@ mod tests {
             names,
             [
                 "tokenizer.json",
-                "LICENSE-Apache-2.0.txt",
+                "LICENSE",
+                "NOTICE",
                 "NOTICE-punctuation.txt",
                 "onnxruntime-LICENSE.txt",
                 "onnxruntime-ThirdPartyNotices.txt",

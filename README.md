@@ -40,13 +40,13 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `Diarist_0.1.0-beta.5_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.6_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
    `%LOCALAPPDATA%\Diarist`.
 2. The first start shows a setup screen: it checks your GPU, driver and free
-   space, then **Install engine (98 MB)** and **Install recommended models
-   (1.0 GB)**: the diarizer, the EN model and the punctuation model. Every
+   space, then **Install engine (102 MB)** and **Install recommended models
+   (1.13 GB)**: the diarizer, the EN model and the punctuation model. Every
    file is checked against its published SHA-256.
 3. Press **Ctrl+O** to import a recording, or **R** to record a meeting.
 
@@ -73,15 +73,16 @@ From [docs/04-model-guide.md](docs/04-model-guide.md). Numbers marked
 
 | Component | What it does | Size | Licence |
 |---|---|---|---|
-| NeMo-Speech.cpp 0.2.0 (NVIDIA) | The inference runtime | 98 MB zip, 134 MB extracted (CUDA build) | Apache-2.0 |
-| Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers | 102 MB | OpenMDW-1.1 |
-| Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text, English (default) | 668 MB | NVIDIA Open Model License |
+| NeMo-Speech.cpp 0.2.0 (NVIDIA) | The inference runtime | 102 MB zip, 141 MB extracted (CUDA build) | Apache-2.0 |
+| Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers | 107 MB | OpenMDW-1.1 |
+| Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text, English (default) | 700 MB | NVIDIA Open Model License |
 | Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text, 40+ languages (optional) | 742 MB | OpenMDW-1.1 |
-| Parakeet TDT 0.6B v3, q8_0 | Experimental only (see below) | 681 MB | CC-BY-4.0 |
-| Horizon-Labs punctuation-restoration-small, int8 ONNX, with ONNX Runtime 1.31.0 (Microsoft) | Punctuation and sentence capitals after Stop and on imports, on the CPU; never changes a word | 306 MB | Apache-2.0 as declared in the model card (base model MIT); ONNX Runtime MIT |
+| Parakeet TDT 0.6B v3, q8_0 | Experimental only (see below) | 714 MB | CC-BY-4.0 |
+| Horizon-Labs punctuation-restoration-small, int8 ONNX, with ONNX Runtime 1.31.0 (Microsoft) | Punctuation and sentence capitals after Stop and on imports, on the CPU; never changes a word | 320 MB | Apache-2.0, with the authors' LICENSE and NOTICE from v1.1.1 (base model MIT); ONNX Runtime MIT |
 
-The default download (engine, diarizer, EN model, punctuation) is about
-1.2 GB; with every optional model, 2.5 GB.
+The default download (engine, diarizer, EN model, punctuation) is 1.23 GB
+with the CUDA runtime (1,229,460,051 bytes); with every optional model,
+2.68 GB.
 
 ### Which runtime package for which PC
 
@@ -187,7 +188,7 @@ deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 ## Status
 
-Version 0.1.0-beta.5, the fifth beta pre-release: file
+Version 0.1.0-beta.6, the sixth beta pre-release: file
 import and live recording work
 end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
 CPU runtime packages were tested on that machine's NVIDIA card and CPU only,

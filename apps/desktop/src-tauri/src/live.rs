@@ -287,11 +287,12 @@ pub(crate) fn handle(app: &AppHandle) -> Arc<LiveState> {
     Arc::clone(&app.state::<LiveHandle>().0)
 }
 
-/// Emits `live:state` and updates the tray.
+/// Emits `live:state` and updates the tray and the taskbar button.
 pub(crate) fn emit_state(app: &AppHandle) {
     let live = handle(app);
     let view = live.view(app.state::<Jobs>().0.is_paused());
     tray::update(app, view.phase, view.started_at);
+    crate::taskbar::update(app, view.phase);
     if let Err(e) = app.emit(EV_STATE, &view) {
         log::warn!("emit {EV_STATE} failed: {e}");
     }

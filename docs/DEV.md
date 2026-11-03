@@ -32,7 +32,7 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.5"
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.6"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
 cargo run -p diarist-cli -- models pull                 # required models, Diarist's own downloader, SHA-checked
@@ -393,6 +393,13 @@ diarist-cli record --seconds 60 --mic "CABLE Output" --loopback "Speakers (Hyper
   recording?", `stop_armed`) and a second press within 3 s stops. The
   wording lives in `lib/stopConfirm.ts` (and `live.rs` for the
   notification).
+- While recording (and stopping) the app says so outside its window: the
+  window title reads "● Recording · Diarist", the taskbar button carries a
+  red dot overlay (described as "Recording" to screen readers) and the tray
+  icon has the red dot in its corner (`taskbar.rs`, `tray.rs`; the frames
+  are `branding/recording/`). The overlay is set again when the window comes
+  back from the tray or changes DPI; Windows shows it only while the window
+  has a taskbar button and badges are on in the taskbar settings.
 - The live server starts when the start sheet opens or Ctrl+Alt+R starts a
   recording, not at launch (`engine.preload` = true starts it at launch), and
   stops after `engine.idle_minutes` (default 10, 0 = never) without a

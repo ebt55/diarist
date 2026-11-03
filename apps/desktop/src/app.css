@@ -266,7 +266,8 @@ input[type="checkbox"] {
   padding: 5px 7px;
 }
 
-/* Record / Stop: red, with a dot that pulses while recording. */
+/* Record / Stop: red, with a solid dot; while recording a thin halo of the
+   dot's own colour grows and fades around it (the dot itself never fades). */
 .btn-rec {
   border-color: var(--rec-solid);
   background: var(--rec-solid);
@@ -286,19 +287,23 @@ input[type="checkbox"] {
 .rec-dot {
   display: inline-block;
   flex: none;
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: currentColor;
 }
 
 .rec-dot.live {
-  animation: rec-pulse 1.4s ease-in-out infinite;
+  animation: rec-halo 2s ease-out infinite;
 }
 
-@keyframes rec-pulse {
-  50% {
-    opacity: 0.35;
+@keyframes rec-halo {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 60%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 0%, transparent);
   }
 }
 

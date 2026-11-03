@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <title>Diarist recording, for light backgrounds (24 px)</title>
+  <!-- icon-sizes/light-24.svg at 24 px with the lower-right corner cut away (1.5 px clear) and a 12 px red disc touching the right and bottom edges. Written by tools/recording_svgs.py. -->
+  <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+    <rect width="24" height="24" fill="#fff"/>
+    <circle cx="18" cy="18" r="7.5" fill="#000"/>
+  </mask>
+  <g mask="url(#cut)">
+    <svg x="0" y="0" width="24" height="24" viewBox="0 0 24 24">
+      <path fill="#64748b" d="M5.25 0H18L24 6V18.75A5.25 5.25 0 0 1 18.75 24H5.25A5.25 5.25 0 0 1 0 18.75V5.25A5.25 5.25 0 0 1 5.25 0Z"/>
+      <path fill="#1b1f27" d="M5.25 1H17.586L23 6.414V18.75A4.25 4.25 0 0 1 18.75 23H5.25A4.25 4.25 0 0 1 1 18.75V5.25A4.25 4.25 0 0 1 5.25 1Z"/>
+      <path fill="#64748b" d="M18 0V4.5A1.5 1.5 0 0 0 19.5 6H24Z"/>
+      <rect x="4" y="4" width="11" height="3" rx="0.75" fill="#5b86b5"/>
+      <rect x="4" y="10" width="16" height="3" rx="0.75" fill="#ffa446"/>
+      <rect x="4" y="16" width="8" height="3" rx="0.75" fill="#f26767"/>
+    </svg>
+  </g>
+  <circle cx="18" cy="18" r="6" fill="#dc2626"/>
+</svg>
