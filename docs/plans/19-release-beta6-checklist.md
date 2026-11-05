@@ -1,6 +1,6 @@
 # 0.1.0-beta.6 release checklist
 
-Status: prepared 2 Nov 2026 by chunk H of docs/plans/18, nothing published. The release is hand-built as in `docs/DEV.md` ("Desktop app (Tauri)": update endpoint, versioning, release PDB), like 0.1.0-beta.5 (docs/plans/17-release-beta5-checklist.md). Unlike beta.5 it needs no models release first: the punctuation entry's two new files (`LICENSE` and `NOTICE`) come from the model's own repository on Hugging Face, and its other files stay on `models-2026-10`, unchanged. It has no database change either. Steps marked **owner** publish something, push to `main`, or need the signing key; nothing happens there without the owner's go.
+Status: prepared 2 Nov 2026 by chunk H of docs/plans/18. Published on 5 Nov 2026 as a pre-release, and the update from 0.1.0-beta.5 verified (section 6). The release is hand-built as in `docs/DEV.md` ("Desktop app (Tauri)": update endpoint, versioning, release PDB), like 0.1.0-beta.5 (docs/plans/17-release-beta5-checklist.md). Unlike beta.5 it needs no models release first: the punctuation entry's two new files (`LICENSE` and `NOTICE`) come from the model's own repository on Hugging Face, and its other files stay on `models-2026-10`, unchanged. It has no database change either. Steps marked **owner** publish something, push to `main`, or need the signing key; nothing happens there without the owner's go.
 
 ## 1. Decisions
 
@@ -20,18 +20,20 @@ Every decision is settled. Each row says what reversing it would take.
 
 - [ ] Every beta.6 branch is committed on `claude/beta6-integration` (draft PR "Diarist 0.1.0-beta.6"); the PR is marked ready and merged into `main` (**owner**), and the build runs from that commit with a clean tree.
 - [ ] Version `0.1.0-beta.6` in the workspace `Cargo.toml`, `Cargo.lock`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/package.json`, README.md (download name and status line), docs/INSTALL.md, docs/DEV.md and docs/SETUP-WITH-AN-AGENT.md. `cargo run --release -p diarist-cli -- --version` prints `diarist-cli 0.1.0-beta.6`.
-- [ ] CHANGELOG: the `[0.1.0-beta.6]` heading carries the publishing date (written as 2026-11-03; change it to the day the release is published).
+- [x] CHANGELOG: the `[0.1.0-beta.6]` heading carries the publishing date (written as 2026-11-03; change it to the day the release is published). Changed to 2026-11-05 after the release. The GitHub release notes were not edited.
 - [ ] `RELEASED_SCHEMA` is 5 (`crates/core/src/store/sqlite/mod.rs`) and no beta.6 branch added a migration (checked at integration, 2 Nov 2026), so beta.6 opens a beta.5 database as it is and makes no new `diarist.db.bak-<n>`.
 - [ ] Checks: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; in `apps/desktop`, `bun run check`, `bun run test`, `bun run build`; `tools/eval`'s `test_metrics.py` and `test_gapfill.py`.
 - [ ] Eval: `docs/eval/2026-11-03-beta6-release.md` is a fresh full-set run of the rebuilt `diarist-cli` (36 sessions, both models, the app's defaults), with every bar of the beta.5 note's "Release bars" judged, and `docs/eval/benchmarks.json` follows it. Its speed section is the timed gate-set block under quiet.lock with `nvidia-smi pmon -s u -d 1` (validity per run as in the beta.5 note and the 31 Oct re-time).
 - [ ] The GPU suites on the merged tip, each through the shared GPU queue: `acceptance_gpu`, `live_ws_gpu`, `live_carry_repro` (lookahead 6), `echo_sample`, `echo_fleurs`, `aec_postpass` and the Process again exact test. Results in the release note.
 - [ ] Runtime watch: 0.3.0 is tagged and measured, not adopted (section 1). Before beta.7 adopts it, check NeMo-Speech.cpp issues #67 and #81 and any tag after v0.3.0.
-- [ ] docs/KNOWN-ISSUES.md: the status line names 0.1.0-beta.6; the runtime 0.3.0 row and the names row are in; the updater row gets the result of section 6.
+- [x] docs/KNOWN-ISSUES.md: the status line names 0.1.0-beta.6; the runtime 0.3.0 row and the names row are in; the updater row gets the result of section 6 (recorded 5 Nov 2026, with a new row for the Defender block of section 3).
 - [ ] Privacy scan of every changed file before each push (section 9).
 
 ## 3. Owner tests on a build of the final tip
 
 Before the installer is published, on a release build of the commit that will ship. A test build of the integration branch for the recording checks is in `C:\Users\ebin\claude-ground\diarist-releases\0.1.0-beta.6-test\` (its `README.txt` has the steps; it runs against a scratch data root and never touches the installed app's folder). Quit the installed Diarist first: one instance runs at a time.
+
+Outcome: for the beta.5 to beta.6 tests the test build was the release exe (built from `106bdf2`), run on that folder's scratch data root, so the installed 0.1.0-beta.5 stayed in place for section 6. On 5 Nov 2026 Microsoft Defender's ransomware protection rule ("Use advanced protection against ransomware") blocked the new exe from starting, so the owner skipped the test build and checked the release through the update from beta.5 instead (section 6). docs/KNOWN-ISSUES.md now has a row for it, with the steps to allow it. Code signing is the lasting fix.
 
 ### 3.1 The recording indicator (chunk V's manual checks)
 
@@ -81,20 +83,20 @@ bun run tauri build
 The installed 0.1.0-beta.5 reads `updater/latest.json` on `main`, and draft assets are not public, so the manifest changes only after the release is public. Check for updates is manual, so the time between the manifest commit and the check below is the only exposure.
 
 - [ ] Before: this machine's installed copy (`%LOCALAPPDATA%\Diarist\diarist.exe`) is 0.1.0-beta.5, and its data folder has a byte copy elsewhere. Its database is at schema 5, and the folder holds `diarist.db.bak-3` (from the beta.4 to beta.5 update).
-- [ ] Publish the draft (it stays a pre-release). Publishing pushes the tag; the release workflow's guard job finds the installer on the release and builds nothing. If it fails with "Could not list releases", re-run it.
+- [x] Publish the draft (it stays a pre-release). Publishing pushes the tag; the release workflow's guard job finds the installer on the release and builds nothing. If it fails with "Could not list releases", re-run it. Published on 5 Nov 2026 as a pre-release: tag `v0.1.0-beta.6` at `106bdf2`, the installer 8,270,241 bytes with SHA-256 `a93aa938e5f076eff42622cec9dd11a9e9b91484bd283975f58ebb082b1a01d3`.
 - [ ] The asset answers publicly: `curl.exe -sIL https://github.com/ebt55/diarist/releases/download/v0.1.0-beta.6/Diarist_0.1.0-beta.6_x64-setup.exe` ends in `200` with the local size as `content-length`.
-- [ ] Write `updater/latest.json` from the `.sig` (from the repository root; node writes UTF-8 without a byte-order mark, which the updater's JSON parser needs):
+- [x] Write `updater/latest.json` from the `.sig` (from the repository root; node writes UTF-8 without a byte-order mark, which the updater's JSON parser needs):
 
   ```sh
   node -e "const fs=require('fs');const v='0.1.0-beta.6';const sig=fs.readFileSync('target/release/bundle/nsis/Diarist_'+v+'_x64-setup.exe.sig','utf8').trim();fs.writeFileSync('updater/latest.json',JSON.stringify({version:v,notes:'Diarist '+v+': see CHANGELOG.md',pub_date:new Date().toISOString().replace(/\.\d{3}Z$/,'Z'),platforms:{'windows-x86_64':{signature:sig,url:'https://github.com/ebt55/diarist/releases/download/v'+v+'/Diarist_'+v+'_x64-setup.exe'}}},null,2)+'\n')"
   ```
 
-- [ ] Commit `updater/latest.json` on `main` and push (after the privacy scan).
+- [x] Commit `updater/latest.json` on `main` and push (after the privacy scan). Done through PR #25 ("updater: offer 0.1.0-beta.6"), merged on 5 Nov 2026. The needle lists had been lost from their scratch folder, so the file was checked by hand instead: it holds only the version, date, signature and URL.
 - [ ] `curl.exe -s https://raw.githubusercontent.com/ebt55/diarist/main/updater/latest.json` shows 0.1.0-beta.6 (that address caches for up to five minutes).
-- [ ] At once, in the installed 0.1.0-beta.5: Settings, About, Check for updates offers 0.1.0-beta.6; Install and restart. Expected: download, signature check, the installer runs, the app restarts as 0.1.0-beta.6 with the same meetings, and Diagnostics shows no new failures. No migration runs: `diarist.db.bak-3` stays and no new `.bak` appears. Settings, Models shows the punctuation row as "2 of 8 files missing: LICENSE, NOTICE (13 kB)" while punctuation keeps working; "Download recommended" fetches those two files and nothing else (docs/KNOWN-ISSUES.md, the upgrader row).
+- [x] At once, in the installed 0.1.0-beta.5: Settings, About, Check for updates offers 0.1.0-beta.6; Install and restart. Expected: download, signature check, the installer runs, the app restarts as 0.1.0-beta.6 with the same meetings, and Diagnostics shows no new failures. No migration runs: `diarist.db.bak-3` stays and no new `.bak` appears. Settings, Models shows the punctuation row as "2 of 8 files missing: LICENSE, NOTICE (13 kB)" while punctuation keeps working; "Download recommended" fetches those two files and nothing else (docs/KNOWN-ISSUES.md, the upgrader row). Verified on 5 Nov 2026 on this machine: the update ran through Settings, About, Check for updates, and the meetings were intact. There was no schema change, so no new database backup. The punctuation row and Diagnostics after the update were not recorded.
 - [ ] Going back to 0.1.0-beta.5, if it is ever needed: install its installer again; it opens the same database (schema 5).
 - [ ] If any of it fails: revert the manifest commit on `main` and push at once, so no other installed copy is offered the update, then keep the app log (`logs\diarist.log` in the data folder) for the cause. The published release stays: its installer still works when downloaded by hand.
-- [ ] Record the outcome in the KNOWN-ISSUES updater row.
+- [x] Record the outcome in the KNOWN-ISSUES updater row. Recorded on 5 Nov 2026.
 
 ## 7. The punctuation snapshot (**owner**, does not block the release)
 

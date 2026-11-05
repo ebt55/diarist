@@ -63,6 +63,9 @@ machines and uninstalling: [docs/INSTALL.md](docs/INSTALL.md).
 The installer is not code-signed yet, so Windows SmartScreen asks before it
 runs ("More info", then "Run anyway"). The NVIDIA runtime it downloads is not
 signed either; Windows Smart App Control, when it is on, may block it.
+Microsoft Defender's ransomware protection rule, when an administrator has
+turned it on, can also block a new Diarist build from starting
+([how to allow it](docs/KNOWN-ISSUES.md#windows-and-the-installer)).
 
 ## Choosing your package and models
 
