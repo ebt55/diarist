@@ -2,7 +2,7 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [0.1.0-beta.6] - 2026-11-03
+## [0.1.0-beta.6] - 2026-11-05
 
 The sixth beta pre-release. While recording, Diarist now says so outside
 its window: the window title reads "● Recording · Diarist" and the

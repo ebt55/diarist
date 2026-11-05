@@ -13,7 +13,9 @@ models" in the [README](../README.md#choosing-your-package-and-models).
    pick another folder). It adds a Start menu entry and, if you tick it, a
    desktop shortcut. If WebView2 is missing (rare on Windows 10 and 11), the
    installer downloads it from Microsoft.
-3. Start Diarist.
+3. Start Diarist. Where an administrator has turned on Microsoft Defender's
+   ransomware protection rule, Windows Security can block `diarist.exe`
+   ([how to allow it](KNOWN-ISSUES.md#windows-and-the-installer)).
 
 The installer is about 7 MB. The speech engine and the models are not in
 it; the app downloads them on first use.
