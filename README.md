@@ -138,9 +138,15 @@ punctuation model adds `.` `,` `?` and sentence capitals after Stop and on
 imports, on the CPU (about 5 to 6 seconds per hour of audio), without
 changing a word; lines end at sentence ends where the pause allows. About two
 in three of its periods and question marks are where a person would put
-them (docs/04-model-guide.md, section 8). On clean meeting audio expect about
-one word in 15 to 20 to be wrong or missing; on far-field room recordings
-about one in 9.
+them (docs/04-model-guide.md, section 8).
+
+How many words come out wrong or missing depends on the recording. On public
+recordings with human-made transcripts (98 sessions, 32 hours, measured with
+0.1.0-beta.4, docs/eval/2026-10-27-baseline-public.md) it was 28 to 31
+percent of words on multi-speaker meetings recorded through headsets, 38 to
+40 percent through a single distant microphone, and 11 to 13 percent on
+earnings calls (*measured*). About four in five of those errors are words
+that were missed, not words that came out wrong.
 
 ### Speakers: limits worth knowing
 
