@@ -1224,12 +1224,6 @@ fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
     let rec = Recorder::start(ctx.clone(), StartOptions::default(), sink.clone()).unwrap();
     let m = rec.meeting_id();
     std::thread::sleep(Duration::from_millis(7_500));
-    // Under load the monitor can couple, or the gate hide its first words,
-    // a little later: wait for both (bounded) rather than trusting the sleep.
-    wait_until(Duration::from_secs(30), || {
-        rec.echo_state().is_some_and(|s| s.status == EchoStatus::Coupled)
-            && !rec.echo_hidden().is_empty()
-    });
     assert_eq!(rec.echo_state().unwrap().status, EchoStatus::Coupled);
     assert!(!rec.echo_off());
     // A view that opens now gets what the sink shows: the hidden words of
