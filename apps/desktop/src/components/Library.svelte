@@ -603,11 +603,24 @@
     color: var(--fg-muted);
     font-size: 12px;
   }
+  /* A quiet control in the caption row: muted like the count beside it, with a box only on
+     hover or focus. */
   .sort {
     min-width: 0;
     max-width: 60%;
     padding: 1px 4px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--fg-muted);
     font-size: 12px;
+  }
+  .sort:hover {
+    border-color: var(--border-strong);
+    color: var(--fg);
+  }
+  .sort option {
+    background: var(--bg-raised);
+    color: var(--fg);
   }
   .results,
   :global(.mlist) {

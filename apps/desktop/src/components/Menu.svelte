@@ -199,7 +199,7 @@
   .menu {
     position: fixed;
     z-index: 50;
-    min-width: 220px;
+    min-width: 160px;
     max-width: 340px;
     max-height: min(70vh, 520px);
     overflow-y: auto;
