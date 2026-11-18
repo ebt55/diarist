@@ -174,6 +174,10 @@
       </span>
     </label>
 
+    <p class="help note">
+      Recording other people needs their consent where the law asks for it. Headphones give the cleanest result.
+    </p>
+
     {#if devicesError}
       <p class="error" role="alert">Could not list audio devices: {devicesError}. The Windows defaults are used; check the sound settings.</p>
     {/if}
@@ -246,6 +250,9 @@
   .help {
     color: var(--fg-muted);
     font-size: 12px;
+  }
+  .note {
+    margin: 0 0 12px;
   }
   .error {
     margin: 0 0 12px;
