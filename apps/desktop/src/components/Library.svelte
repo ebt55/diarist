@@ -123,7 +123,7 @@
     try {
       await api.setAudioKeep(m.id, keep);
       app.patchMeeting(m.id, { audio_keep: keep });
-      app.toast("info", keep ? "Audio pinned: kept regardless of retention" : "Audio unpinned");
+      app.toast("info", keep ? "Audio pinned: it is never deleted automatically" : "Audio unpinned");
     } catch (e) {
       app.error(`Could not change the pin (${errorText(e)}). Try again, or restart Diarist if it keeps failing.`);
     }

@@ -450,7 +450,7 @@
       await api.setAudioKeep(meeting.id, keep);
       detail = detail && { ...detail, meeting: { ...detail.meeting, audio_keep: keep } };
       app.patchMeeting(meeting.id, { audio_keep: keep });
-      app.toast("info", keep ? "Audio pinned: kept regardless of retention" : "Audio unpinned");
+      app.toast("info", keep ? "Audio pinned: it is never deleted automatically" : "Audio unpinned");
     } catch (e) {
       app.error(`Could not change the pin (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
     }
@@ -780,7 +780,7 @@
             class:on={meeting.audio_keep}
             aria-pressed={meeting.audio_keep}
             onclick={togglePin}
-            title="Keep this meeting's audio regardless of retention (P)"
+            title="Pin this meeting's audio so it is never deleted automatically (P)"
           >
             <Icon name="pin" /><span class="btn-label">{meeting.audio_keep ? "Pinned" : "Pin audio"}</span>
           </button>

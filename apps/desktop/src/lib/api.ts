@@ -22,8 +22,6 @@ import type { ModelFileId } from "./generated/ModelFileId";
 import type { ModelRole } from "./generated/ModelRole";
 import type { MoveResult } from "./generated/MoveResult";
 import type { Readiness } from "./generated/Readiness";
-import type { RetentionPlan } from "./generated/RetentionPlan";
-import type { RetentionReport } from "./generated/RetentionReport";
 import type { RunId } from "./generated/RunId";
 import type { RuntimePackage } from "./generated/RuntimePackage";
 import type { RuntimeRelease } from "./generated/RuntimeRelease";
@@ -128,8 +126,6 @@ export const api = {
   restartApp: () => invoke<void>("restart_app"),
   migrateLegacyData: () => invoke<MoveResult>("migrate_legacy_data"),
   startFresh: () => invoke<void>("start_fresh"),
-  retentionPreview: () => invoke<RetentionPlan>("retention_preview"),
-  applyRetention: () => invoke<RetentionReport>("apply_retention"),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   checkForUpdate: () => invoke<UpdateCheck>("check_for_update"),
