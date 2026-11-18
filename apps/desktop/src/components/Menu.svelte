@@ -24,6 +24,7 @@
 
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { menuKey } from "../lib/menuKeys";
 
   interface Props {
     items: MenuItem[];
@@ -64,8 +65,16 @@
     const outside = (e: PointerEvent) => {
       if (el && !el.contains(e.target as Node)) close(false);
     };
+    // A key while the focus is not in the menu yet (or no longer) is the menu's too.
+    const strayKey = (e: KeyboardEvent) => {
+      if (el && !el.contains(e.target as Node)) onkeydown(e);
+    };
     window.addEventListener("pointerdown", outside, true);
-    return () => window.removeEventListener("pointerdown", outside, true);
+    window.addEventListener("keydown", strayKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", outside, true);
+      window.removeEventListener("keydown", strayKey, true);
+    };
   });
 
   function close(restore = true) {
@@ -87,31 +96,32 @@
     it.pick(color);
   }
 
+  /** Every key stays in the open menu (`menuKey`): none reaches the window's shortcuts. */
   function onkeydown(e: KeyboardEvent) {
     const n = stops.length;
     const it = activeItem;
-    switch (e.key) {
-      case "ArrowDown":
+    // Hints ("1".. on reassign and export items, "R", "L") act as accelerators.
+    const hints = items.map((x) => (x.kind === "item" && !x.disabled ? x.hint : undefined));
+    const action = menuKey(e.key, e, hints);
+    e.stopPropagation();
+    if (action.kind !== "swallow" || !action.keepDefault) e.preventDefault();
+    switch (action.kind) {
+      case "next":
         active = (active + 1) % Math.max(1, n);
         break;
-      case "ArrowUp":
+      case "prev":
         active = (active - 1 + n) % Math.max(1, n);
         break;
-      case "Home":
+      case "first":
         active = 0;
         break;
-      case "End":
+      case "last":
         active = n - 1;
         break;
-      case "ArrowRight":
-      case "ArrowLeft":
-        if (it?.kind === "swatches") {
-          const d = e.key === "ArrowRight" ? 1 : -1;
-          swatch = (swatch + d + it.colors.length) % it.colors.length;
-        }
+      case "swatch":
+        if (it?.kind === "swatches") swatch = (swatch + action.step + it.colors.length) % it.colors.length;
         break;
-      case "Enter":
-      case " ":
+      case "activate":
         if (it?.kind === "swatches") {
           const c = it.colors[swatch];
           if (c) pickSwatch(it, c);
@@ -119,20 +129,15 @@
           activate(stops[active] ?? -1);
         }
         break;
-      case "Escape":
-      case "Tab":
+      case "close":
         close();
         break;
-      default: {
-        // Digit hints ("1".. on reassign and export items) act as accelerators.
-        const key = e.key.toLowerCase();
-        const hit = items.findIndex((x) => x.kind === "item" && !x.disabled && x.hint?.toLowerCase() === key);
-        if (hit < 0 || e.ctrlKey || e.altKey) return;
-        activate(hit);
-      }
+      case "accelerator":
+        activate(action.index);
+        break;
+      case "swallow":
+        break;
     }
-    e.preventDefault();
-    e.stopPropagation();
   }
 </script>
 
