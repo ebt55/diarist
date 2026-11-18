@@ -103,6 +103,12 @@ jobs:
       - name: Eval harness unit tests
         working-directory: tools/eval
         shell: bash
+        env:
+          # test_metrics.py scores with meeteval, which has no Windows wheel:
+          # uv builds 0.4.3 from source, and its C++ uses designated
+          # initializers, which the runner's MSVC (14.51) accepts only under
+          # C++20 (error C7555). MSVC reads extra options from CL.
+          CL: /std:c++20
         run: |
           uv run --locked python -I test_metrics.py
           uv run --locked python -I test_gapfill.py
