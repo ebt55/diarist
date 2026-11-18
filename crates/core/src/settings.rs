@@ -11,9 +11,16 @@ use crate::store::{Store, StoreResult};
 use crate::types::ModelRole;
 use crate::views::{selection_key, Settings};
 
-/// Days a meeting's audio is kept; `0` keeps it forever. Pinned meetings
-/// are exempt.
+/// Days a meeting's audio is kept; `0` (the default since 0.1.0-beta.7)
+/// keeps it forever. Pinned meetings are exempt. A stored value is never
+/// rewritten: a user who set 7, 30 or 90 keeps it. Automatic deletion is
+/// gated by warnings ([`crate::retention`]).
 pub const AUDIO_RETENTION_DAYS: &str = "audio_retention_days";
+/// Retention bookkeeping as one JSON object, no UI
+/// ([`crate::retention::RetentionState`]): the answer to the first-deletion
+/// hold, when each meeting was first shown in a heads-up, and the one-time
+/// storage prompt. Unreadable or missing reads as nothing answered.
+pub const RETENTION_STATE: &str = "retention.state";
 /// `system`, `light` or `dark`.
 pub const THEME: &str = "theme";
 /// BCP-47 tag or `auto` for new recordings and imports.
@@ -104,7 +111,8 @@ pub const TRANSCRIPT_COLLAPSE_LOOPS: &str = "transcript.collapse_loops";
 /// `selected_model.punctuation`) default to "" (none;
 /// the model scan picks the recommended files).
 pub const DEFAULTS: &[(&str, &str)] = &[
-    (AUDIO_RETENTION_DAYS, "30"),
+    (AUDIO_RETENTION_DAYS, "0"),
+    (RETENTION_STATE, ""),
     (THEME, "system"),
     (DEFAULT_LANGUAGE, "en"),
     (POST_PASS_MODE, "always"),
@@ -373,7 +381,7 @@ mod tests {
     fn defaults_fill_gaps_and_removal_restores_them() {
         let store = MemoryStore::new();
         let s = effective(&store).unwrap();
-        assert_eq!(get(&s, AUDIO_RETENTION_DAYS), "30");
+        assert_eq!(get(&s, AUDIO_RETENTION_DAYS), "0");
         assert_eq!(get(&s, POST_PASS_MODE), "always");
         assert!(!get_bool(&s, KEEP_LIVE_RUNS));
         assert_eq!(default_language(&s), "en");
@@ -429,6 +437,37 @@ mod tests {
             10
         );
         assert_eq!(get(&Settings::default(), "unknown"), "");
+    }
+
+    /// Since 0.1.0-beta.7 audio is kept forever unless the user set a limit;
+    /// a stored limit (a beta.6 user's 30, say) is read as stored.
+    #[test]
+    fn audio_retention_defaults_to_keep_forever_and_a_stored_value_wins() {
+        let store = MemoryStore::new();
+        assert_eq!(default_of(AUDIO_RETENTION_DAYS), Some("0"));
+        assert_eq!(
+            get_u64(&effective(&store).unwrap(), AUDIO_RETENTION_DAYS),
+            0
+        );
+        assert!(
+            !store
+                .get_settings()
+                .unwrap()
+                .0
+                .contains_key(AUDIO_RETENTION_DAYS),
+            "the default is never written to the store"
+        );
+        for v in ["7", "30", "90"] {
+            store.set_setting(AUDIO_RETENTION_DAYS, v).unwrap();
+            let s = effective(&store).unwrap();
+            assert_eq!(get(&s, AUDIO_RETENTION_DAYS), v);
+            assert_eq!(get_u64(&s, AUDIO_RETENTION_DAYS), v.parse::<u64>().unwrap());
+        }
+        store.remove_setting(AUDIO_RETENTION_DAYS).unwrap();
+        assert_eq!(
+            get_u64(&effective(&store).unwrap(), AUDIO_RETENTION_DAYS),
+            0
+        );
     }
 
     #[test]
@@ -534,7 +573,7 @@ mod tests {
     #[test]
     fn export_bindings_setting_defaults() {
         let module = typescript_module();
-        assert!(module.contains("  \"audio_retention_days\": \"30\","));
+        assert!(module.contains("  \"audio_retention_days\": \"0\","));
         assert!(module.contains("  \"selected_model.asr\": \"\","));
         if let Some(dir) = std::env::var_os("TS_RS_EXPORT_DIR") {
             let path = std::path::PathBuf::from(dir).join("settingDefaults.ts");
