@@ -18,4 +18,9 @@ speaker_count: number,
 /**
  * First 200 characters of the current run's text ("" when there is none).
  */
-preview: string, audio_keep: boolean, };
+preview: string, audio_keep: boolean, 
+/**
+ * Unix ms when the meeting was added to Diarist (recording start or
+ * import time); `started_at` of an import is the file's own date.
+ */
+created_at: number, };

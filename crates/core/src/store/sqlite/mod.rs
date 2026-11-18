@@ -1112,6 +1112,7 @@ fn summary(conn: &Connection, m: Meeting) -> StoreResult<MeetingSummary> {
         speaker_count,
         preview,
         audio_keep: m.audio_keep,
+        created_at: m.created_at,
     })
 }
 

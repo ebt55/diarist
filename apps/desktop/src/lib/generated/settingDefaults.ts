@@ -34,6 +34,7 @@ export const SETTING_DEFAULTS = {
   "transcript.punctuation": "auto",
   "transcript.punctuation_threads": "4",
   "transcript.collapse_loops": "on",
+  "library.sort": "recorded_desc",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
