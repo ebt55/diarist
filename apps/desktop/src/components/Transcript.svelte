@@ -159,11 +159,12 @@
   /**
    * Moves the cursor to `speaker`'s next (`dir` 1) or previous line and
    * seeks there (H and L, the speaker menu). It starts at the cursor line,
-   * or with `fromPlayhead` at the playhead while playback runs.
+   * or with `fromPlayhead` at the playhead once it has moved from 0:00.
    */
   export function jumpSpeaker(speaker: SpeakerId, name: string, dir: JumpDir, fromPlayhead = false) {
     if (segments.length === 0) return;
-    const from = fromPlayhead && player.playing ? playheadFrom(segments, player.currentMs, dir) : cursor;
+    const atPlayhead = fromPlayhead && (player.playing || player.currentMs > 0);
+    const from = atPlayhead ? playheadFrom(segments, player.currentMs, dir) : cursor;
     const i = speakerLine(segments, from, speaker, dir);
     const seg = segments[i];
     if (!seg) {

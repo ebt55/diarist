@@ -544,7 +544,7 @@
     void edit("Mark reviewed", () => api.markReviewed(sp.id));
   }
 
-  /** A speaker's next or previous line, from the header: starts at the playhead while playing, else the cursor. */
+  /** A speaker's next or previous line, from the header: starts at the playhead, or the cursor before any playback. */
   function jumpSpeaker(sp: SpeakerView, dir: 1 | -1) {
     transcript?.jumpSpeaker(sp.id, sp.name, dir, true);
   }

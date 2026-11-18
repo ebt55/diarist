@@ -124,7 +124,7 @@
       app.patchMeeting(m.id, { audio_keep: keep });
       app.toast("info", keep ? "Audio pinned: kept regardless of retention" : "Audio unpinned");
     } catch (e) {
-      app.error(`Could not change the pin (${errorText(e)}); try again, or restart Diarist if it keeps failing`);
+      app.error(`Could not change the pin (${errorText(e)}). Try again, or restart Diarist if it keeps failing.`);
     }
   }
 
