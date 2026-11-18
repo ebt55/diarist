@@ -660,8 +660,11 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   `DIARIST_LEGACY_ROOT=<copy of an old root>` with `DIARIST_DATA_DIR=<empty
   folder>` (without `DIARIST_LEGACY_ROOT`, a `DIARIST_DATA_DIR` run never
   offers the move).
-- Retention runs at launch and every 24 h (`maintenance.rs`);
-  `diarist-cli retention --dry-run|--apply [--days N]` does the same from the CLI.
+- Retention runs at launch and every 24 h (`maintenance.rs`,
+  `retention::run_auto`), and deletes only what the warnings allow
+  (`crates/core/src/retention.rs`, "Warnings before deletion");
+  `diarist-cli retention --dry-run|--apply [--days N]` lists, and with
+  `--apply` deletes, what is past the limit, as Free up now does.
 - `health_check` is the Diagnostics checklist; `diagnostics_report` (Copy
   diagnostics) includes it.
 

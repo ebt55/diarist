@@ -144,9 +144,12 @@ access (the addresses and hashes are on the setup screen and in
 checks every file, restarts Diarist from there and then deletes the old
 copy.
 
-Recordings are kept as lossless FLAC for 30 days (Settings, "Keep audio for"),
-then deleted unless the meeting is pinned (P); transcripts are never deleted.
-Re-processing a meeting needs its audio.
+Recordings are kept as lossless FLAC, forever by default (Settings, "Keep
+audio for" is 0). If you set a day limit, Diarist warns before it deletes
+any audio: the first time with a dialog that lists the meetings, after that
+with a heads-up in the library 3 days ahead. A pinned meeting (P) is never
+deleted, and transcripts are never deleted. Re-processing a meeting needs its
+audio.
 
 ## 6. Updating
 
