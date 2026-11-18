@@ -1271,9 +1271,9 @@ fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
     let first_hidden = hidden.iter().map(|k| k.1).min().unwrap();
     wait_until(Duration::from_secs(30), || {
         rec.echo_hidden().is_empty()
-            && sink.words.lock().unwrap()[shown_before..].iter().any(|u| {
-                u.channel == Channel::Mic && !u.words.is_empty() && u.utt == first_hidden
-            })
+            && sink.words.lock().unwrap()[shown_before..]
+                .iter()
+                .any(|u| u.channel == Channel::Mic && !u.words.is_empty() && u.utt == first_hidden)
     });
     assert!(rec.echo_hidden().is_empty());
     let resent: Vec<WordsUpdate> = sink.words.lock().unwrap()[shown_before..]
