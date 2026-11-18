@@ -4,13 +4,14 @@
   "machine": "Windows 11, RTX 3080 10 GB, driver 610.88",
   "diarization_published": {
     "from": "docs/04-model-guide.md, section 2 (table)",
-    "source": "VoiceArena Diarization-Bench v1, 139 English conversations, collar 0, overlap scored",
-    "url": null,
+    "source": "VoiceArena Diarization Bench (early results), 139 English sessions, collar 0, overlap scored, accessed 18 Nov 2026",
+    "url": "https://voicearena.com/diarization-bench",
+    "accessed": "2026-11-18",
     "metric": "DER, percent, lower is better",
     "rows": [
       { "system": "Nemotron 3 Diarization", "value": 14.7, "licence": "OpenMDW-1.1", "local": true, "used": true },
+      { "system": "pyannoteAI Precision-3", "value": 18.7, "licence": "commercial API", "local": false, "used": false },
       { "system": "DiariZen s80-MD-v2", "value": 19.3, "licence": "weights CC BY-NC", "local": "yes, non-commercial", "used": false },
-      { "system": "pyannoteAI Precision-3", "value": 20.6, "licence": "commercial API", "local": false, "used": false },
       { "system": "pyannoteAI Precision-2", "value": 23.4, "licence": "commercial API", "local": false, "used": false },
       { "system": "Sortformer 4spk v2 (NVIDIA, previous generation)", "short": "Sortformer 4spk v2 (NVIDIA)", "value": 24.6, "licence": "CC-BY-4.0", "local": true, "used": false },
       { "system": "pyannote community-1", "value": 30.6, "licence": "CC-BY-4.0, gated", "local": "token required", "used": false }

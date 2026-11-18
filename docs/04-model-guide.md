@@ -20,13 +20,13 @@ First-run download with the defaults: engine plus diarizer plus the EN model plu
 
 ## 2. Speaker diarization: why Nemotron 3
 
-This is the headline feature and the one place where model choice changes the product. On the only independent benchmark that scores every system the same way (VoiceArena Diarization-Bench v1, 139 English conversations, collar 0, overlap scored, *published*):
+This is the headline feature and the one place where model choice changes the product. VoiceArena's Diarization Bench is a public leaderboard that scores every listed system on the same recordings: 139 English sessions (115 in person, 24 online, 2 to 8 speakers, about 22 hours), collar 0, overlapping speech scored (*published*, https://voicearena.com/diarization-bench, accessed 18 Nov 2026). The page calls its numbers early results and says close rankings may change as sessions are added. It does not say whether it is affiliated with any listed vendor. These numbers were not reproduced here.
 
 | System | DER, lower is better | Licence | Local, no gating |
 |---|---|---|---|
 | **Nemotron 3 Diarization** | **14.7** | OpenMDW-1.1 | yes |
+| pyannoteAI Precision-3 | 18.7 | commercial API | no |
 | DiariZen s80-MD-v2 | 19.3 | weights CC BY-NC | yes, non-commercial |
-| pyannoteAI Precision-3 | 20.6 | commercial API | no |
 | pyannoteAI Precision-2 | 23.4 | commercial API | no |
 | Sortformer 4spk v2 (NVIDIA, previous generation) | 24.6 | CC-BY-4.0 | yes |
 | pyannote community-1 (what most open tools ship) | 30.6 | CC-BY-4.0, gated | token required |
@@ -95,7 +95,7 @@ Why Parakeet TDT v3 is experimental only (**measured**, docs/research/08 section
 - But it silently dropped a 46-second span and two 10-second spans in the 77-minute file with no error. Cutting the file into 10-minute pieces recovered them, yet a 2-minute cut around the gap lost the same 46 seconds again. The drop depends on the audio content, not the file length, so no chunk size is safe. The same behaviour is reported for this model in another runtime (transcribe.cpp issue #71).
 - A transcript tool cannot ship a model that may skip a minute of a meeting without telling you. It stays reachable behind an experimental setting for short clips where punctuation matters, and a dual-pass mode that fills its gaps from Nemotron is possible later.
 
-Realistic expectation: on clean meeting audio about 1 word in 15 to 20 is wrong or missing with any of these models; on AMI-style far-field recordings about 1 in 9 (*published* AMI WER 11.3 for Parakeet v3). The product's value is in who said what, stored and searchable, not in a perfect verbatim.
+Realistic expectation, against transcripts made by people (**measured**, EN model, word error without speaker attribution): 16.6 percent of words wrong or missing on the AMI meeting ES2002a (docs/eval/2026-11-03-beta6-release.md), 28 percent on public meetings recorded through headset mixes, and 38 percent through one distant microphone (AMI and NOTSOFAR, docs/eval/2026-10-27-baseline-public.md). About four in five of those errors are missed words. On the author's Zoom meetings the EN model's words differ from Zoom's own machine transcript by about 7 in 100, but that is disagreement with another recogniser, not accuracy. The product's value is in who said what, stored and searchable, not in a perfect verbatim.
 
 ## 4. Which package for which PC
 

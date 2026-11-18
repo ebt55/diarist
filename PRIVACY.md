@@ -41,6 +41,21 @@ Like any download, these requests reveal your IP address to the server
 your computer or your use of the app is ever sent. The app never checks for
 updates or new runtimes by itself.
 
+## What an export contains
+
+An export is a file you save where you choose. Diarist sends it nowhere.
+Before you share a JSON export, know that it holds more than the text:
+
+- `source_path`: for an imported file, the full path of the original file on
+  your computer. That path can include your Windows user name. Recordings
+  have none.
+- `raw_text`: for each word the punctuation model changed, the speech
+  model's own words before punctuation.
+
+The meeting's title, date and language, the speakers' names and every
+word's times are in it too. The other formats hold no file path and no raw
+words.
+
 ## Recording other people
 
 Diarist records whatever your microphone and your computer's audio carry,

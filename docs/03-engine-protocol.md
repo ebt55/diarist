@@ -82,7 +82,7 @@ One `nemo-speech.exe serve` process with `--asr-model <nemotron-3.5>` and `--dia
 
 - File mode: real-time factor under 0.1 for ASR plus diarization on the RTX 3080 (one hour in under six minutes), measured on the eval set.
 - Live: first `Utterance` within 1.5 s of speech (measured at lookahead 6 with two sessions: an utterance's first words 0.48 to 0.52 s after they end at the median, 0.56 to 0.58 s at p90; 0.14 and 0.18 s at the runtime default 1; docs/eval/2026-10-27-live-lookahead.md); post-pass canonical transcript within 60 s of Stop for a one-hour meeting.
-- VRAM: ASR plus diarizer resident under 4 GB; the orchestrator checks free VRAM via NVML before opening live sessions and refuses with a clear message when under 2 GB free.
+- VRAM: ASR plus diarizer resident under 4 GB; the orchestrator checks free VRAM via NVML before opening live sessions and refuses with a clear message when under 2,560 MB free (`MIN_FREE_VRAM_MB` in `live/mod.rs`).
 
 ## Appendix: wire format for an FFI sidecar (only if built)
 

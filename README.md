@@ -24,16 +24,20 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## What it does
 
-- **Imports** recordings (m4a, mp3, wav, flac, ogg, mp4, mkv and more): about
-  30 times faster than real time on an RTX 3080 (*measured* over the whole
-  import), so an hour takes about two minutes.
+- **Imports** recordings (m4a, mp3, wav, flac, ogg, mp4, mkv and more). On
+  an RTX 3080 the speech step runs about 78 times faster than real time with
+  the EN model (*measured* on seven recordings, 324 minutes, 3 Nov 2026). That
+  step is speech recognition and speaker labels in one pass, model load
+  included. Converting the file and adding punctuation come on top, and the
+  whole import has not been timed on its own.
 - **Records live**: your microphone is "me", the system audio is split into
   the other speakers (up to 8). Text appears within about a second; when you
   stop, the recording is processed again for the final transcript, with
   punctuation.
 - **Speakers**: rename "Speaker 2" to "Alice" once and the name sticks, merge
   labels, recolour, fix a line that went to the wrong person.
-- **Search** every transcript at once (accent-insensitive, any language).
+- **Search** every transcript at once. Search is accent-insensitive. Words
+  inside Chinese and Japanese text are not found yet (a known issue).
 - **Export** Markdown, plain text, JSON, SRT or VTT.
 - **Keyboard first**: R records, Ctrl+K searches, Ctrl+Alt+R records from any
   app, `?` lists every shortcut.
@@ -79,7 +83,7 @@ From [docs/04-model-guide.md](docs/04-model-guide.md). Numbers marked
 | NeMo-Speech.cpp 0.2.0 (NVIDIA) | The inference runtime | 102 MB zip, 141 MB extracted (CUDA build) | Apache-2.0 |
 | Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers | 107 MB | OpenMDW-1.1 |
 | Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text, English (default) | 700 MB | NVIDIA Open Model License |
-| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text, 40+ languages (optional) | 742 MB | OpenMDW-1.1 |
+| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Speech to text, 40+ languages by its model card (optional) | 742 MB | OpenMDW-1.1 |
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only (see below) | 714 MB | CC-BY-4.0 |
 | Horizon-Labs punctuation-restoration-small, int8 ONNX, with ONNX Runtime 1.31.0 (Microsoft) | Punctuation and sentence capitals after Stop and on imports, on the CPU; never changes a word | 320 MB | Apache-2.0, with the authors' LICENSE and NOTICE from v1.1.1 (base model MIT); ONNX Runtime MIT |
 
@@ -122,12 +126,16 @@ engine unloads after 10 idle minutes):
 
 - **English meetings: the EN model** (default). It keeps more of what was
   said: cpWER 4.7 to 9.5 on four English Zoom meetings against 5.1 to 10.3
-  for Nemotron 3.5, and 18.0 against 20.7 on the AMI meeting (*measured*).
-  Speaker attribution is about the same. It drops quiet speech, though: for a
-  soft-spoken participant or a file recorded at a low level, use Nemotron 3.5.
-- **Other or mixed languages, or a 4 GB card: Nemotron 3.5.** 40+ languages
-  with automatic detection, 30 percent less VRAM. It drops about 40 percent of
-  filler words ("um", "uh").
+  for Nemotron 3.5, scored against Zoom's own machine transcripts, and 18.0
+  against 20.7 on the AMI meeting, scored against a human transcript
+  (*measured*). Speaker attribution is about the same. It drops quiet speech,
+  though: for a soft-spoken participant or a file recorded at a low level, use
+  Nemotron 3.5.
+- **Other or mixed languages, or a 4 GB card: Nemotron 3.5.** Its model card
+  lists 40+ languages. The app offers 30 of them, and eight had a 10-minute
+  smoke test here (docs/04-model-guide.md, section 6). It detects the language
+  by itself, uses 30 percent less VRAM, and drops about 40 percent of filler
+  words ("um", "uh").
 - **Parakeet TDT v3 is experimental and off by default.** It punctuates well
   and is about 0.6 WER points better, but it silently skipped a 46-second span
   of a 77-minute recording (*measured*), and no chunk size avoids it. Use it
@@ -137,8 +145,10 @@ Neither Nemotron model punctuates much, so since 0.1.0-beta.5 a small
 punctuation model adds `.` `,` `?` and sentence capitals after Stop and on
 imports, on the CPU (about 5 to 6 seconds per hour of audio), without
 changing a word; lines end at sentence ends where the pause allows. About two
-in three of its periods and question marks are where a person would put
-them (docs/04-model-guide.md, section 8).
+in three of its periods and question marks are where Zoom's own transcript put
+one. On the one meeting with a human transcript (AMI), 0.64 of its periods and
+0.39 of its question marks are where the person put one
+(docs/eval/2026-10-26-punctuation.md, section 12.2).
 
 How many words come out wrong or missing depends on the recording. On public
 recordings with human-made transcripts (98 sessions, 32 hours, measured with
@@ -150,9 +160,12 @@ that were missed, not words that came out wrong.
 
 ### Speakers: limits worth knowing
 
-- Speaker diarization is Nemotron 3 Diarization, the best system on the only
-  independent cross-system benchmark (DER 14.7 against 19 to 31 for the
-  alternatives). On our own Zoom meetings 0.2 to 0.3 percent of words went to
+- Speaker diarization is Nemotron 3 Diarization. On VoiceArena's public
+  Diarization Bench (139 English recordings, collar 0, early results,
+  [voicearena.com/diarization-bench](https://voicearena.com/diarization-bench),
+  accessed 18 Nov 2026) it has the lowest error of the six systems listed: DER
+  14.7, against 18.7 to 30.6 for the others. That is a published number, not
+  measured here. On our own Zoom meetings 0.2 to 0.3 percent of words went to
   the wrong speaker, 5.5 to 7.8 percent within a second of a speaker change
   with Nemotron 3.5 and 5.6 to 12.7 with the EN model (*measured*).
 - **At most 8 speakers per recording.** A ninth person is merged into an
@@ -167,8 +180,11 @@ that were missed, not words that came out wrong.
 - Windows 10 (1803 or newer) or Windows 11, 64-bit. WebView2 is preinstalled
   on these; the installer fetches it otherwise.
 - About 1.3 GB of disk for the engine and the default models; recordings use
-  about 90 MB per hour (lossless FLAC), kept 30 days by default (transcripts
-  are kept forever).
+  about 90 MB per hour (lossless FLAC). Recordings are kept 30 days by default,
+  then deleted unless the meeting is pinned (P). Setting "Keep audio for" to 0
+  keeps them forever. Transcripts are kept until you delete them. From
+  0.1.0-beta.7 the default becomes "keep forever", and Diarist warns before
+  any automatic deletion.
 - RAM: the engine uses about 300 MB (*measured*); 8 GB in total is comfortable.
 
 ## You own the folders
