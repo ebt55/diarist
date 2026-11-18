@@ -5,7 +5,7 @@
 //! DIARIST_ECHO_SAMPLE=<meeting audio folder: playback.flac, mic/loopback.words.json>
 //! DIARIST_ECHO_DB=<diarist.db, opened read-only>
 //! DIARIST_ECHO_OUT=<output folder>
-//! cargo test --release -p diarist-core --test aec_spike -- --nocapture
+//! cargo test --release -p diarist-core --test aec_spike -- --ignored --nocapture
 //! ```
 //!
 //! Reads the meeting folder and the database read-only. Writes to the
@@ -1196,6 +1196,7 @@ fn merge_spans(spans: &[(usize, usize)], min_len: usize) -> Vec<(usize, usize)> 
 }
 
 #[test]
+#[ignore = "needs DIARIST_ECHO_SAMPLE, DIARIST_ECHO_DB and DIARIST_ECHO_OUT"]
 fn aec_spike_meeting() -> Res<()> {
     let (Some(sample), Some(dbp), Some(outdir)) = (
         env_path("DIARIST_ECHO_SAMPLE"),

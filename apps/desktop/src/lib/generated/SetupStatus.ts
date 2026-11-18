@@ -29,7 +29,8 @@ recommended_backend: string,
 disk_free_bytes: number | null, 
 /**
  * Bytes the missing required downloads need on disk at their peak
- * (the engine zip and its extraction, the models).
+ * (the engine zip and its extraction, the models). A model with some
+ * of its files already there counts only the files still missing.
  */
 disk_needed_bytes: number, 
 /**

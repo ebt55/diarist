@@ -5,6 +5,8 @@
 //!
 //! Runs only with `DIARIST_LONGFILE_WAV` (the 16 kHz WAV), `DIARIST_ENGINE_DIR`
 //! and `DIARIST_MODELS_DIR` set; takes about 2.5 minutes on an RTX 3080.
+//! `#[ignore]`d so a plain `cargo test` reports it skipped: `cargo test -p
+//! diarist-core --test acceptance_gpu -- --ignored`.
 //! The reference is `tests/fixtures/cimc_nemotron35_buckets.json` (word counts
 //! per minute of the research/08 run, no audio or text).
 
@@ -31,6 +33,7 @@ fn find(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[test]
+#[ignore = "needs DIARIST_LONGFILE_WAV, DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn cimc_77_minutes_matches_the_reference() {
     let (Some(wav), Some(engine_dir), Some(models)) = (
         std::env::var_os("DIARIST_LONGFILE_WAV"),

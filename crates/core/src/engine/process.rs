@@ -388,6 +388,7 @@ mod tests {
     /// so it is not run by default).
     #[cfg(windows)]
     #[test]
+    #[ignore = "needs DIARIST_ENGINE_DIR and the GPU; run with --ignored"]
     fn real_doctor_from_a_long_data_root_when_available() {
         let Some(engine) = std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from) else {
             return;

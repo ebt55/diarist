@@ -1,7 +1,7 @@
 // `bun test` (apps/desktop): the one line a multi-file download's row gives
 // about its files (DownloadRow.svelte), and its disclosure's label.
 import { describe, expect, test } from "bun:test";
-import { filesDisclosure, filesSummary } from "../src/lib/downloadFiles";
+import { filesDisclosure, filesSummary, installModelsText, missingBytes } from "../src/lib/downloadFiles";
 import type { DownloadFile } from "../src/lib/generated/DownloadFile";
 
 const part = (path: string, size_bytes: number, present: boolean): DownloadFile => ({
@@ -63,5 +63,65 @@ describe("a multi-file download's summary", () => {
 
   test("the disclosure counts every file", () => {
     expect(filesDisclosure(8)).toBe("Files and addresses (8)");
+  });
+});
+
+/** A first-run model row as `setup_status` lists it. */
+const model = (name: string, label: string, size_bytes: number, installed: boolean, files: DownloadFile[] = []) => ({
+  name,
+  label,
+  size_bytes,
+  installed,
+  files,
+});
+const PUNCT_BYTES = 320_391_498;
+const diarizer = (installed: boolean) =>
+  model("nemotron-3-diarization", "Nemotron 3 Diarization: who spoke when", 107_012_128, installed);
+const en = (installed: boolean) =>
+  model("nemotron-en", "Nemotron Speech Streaming EN 0.6B: English speech to text (default)", 699_872_960, installed);
+const punct = (missing: string[]) =>
+  model(
+    "punctuation-horizon-small",
+    "Horizon-Labs punctuation small: adds . , ? and sentence capitals",
+    PUNCT_BYTES,
+    missing.length === 0,
+    punctuation(missing),
+  );
+const ALL_PUNCT = punctuation([]).map((f) => f.path);
+
+describe("what a download still fetches", () => {
+  test("a single-file model: all of it until installed", () => {
+    expect(missingBytes(en(false))).toBe(699_872_960);
+    expect(missingBytes(en(true))).toBe(0);
+  });
+
+  test("a multi-file model: only the files not there", () => {
+    expect(missingBytes(punct(["LICENSE", "NOTICE"]))).toBe(11_358 + 1_567);
+    expect(missingBytes(punct(ALL_PUNCT))).toBe(PUNCT_BYTES);
+    expect(missingBytes(punct([]))).toBe(0);
+  });
+});
+
+describe("the first-run button for the recommended models", () => {
+  test("a fresh install: every model at full size, diarizer first", () => {
+    expect(installModelsText([en(false), diarizer(false), punct(ALL_PUNCT)])).toBe(
+      "Install recommended models (1.13 GB: diarizer, the EN model and Horizon-Labs punctuation small)",
+    );
+  });
+
+  test("a beta.5 upgrader missing two licence files: those bytes and that model only", () => {
+    expect(installModelsText([diarizer(true), en(true), punct(["LICENSE", "NOTICE"])])).toBe(
+      "Install recommended models (13 kB: Horizon-Labs punctuation small)",
+    );
+  });
+
+  test("other languages name Nemotron 3.5; installed models are left out", () => {
+    const multi = model("nemotron-3.5", "Nemotron 3.5 ASR Streaming 0.6B: 40+ languages", 600_000_000, false);
+    expect(installModelsText([diarizer(true), punct([]), multi])).toBe(
+      "Install recommended models (600 MB: Nemotron 3.5)",
+    );
+    expect(installModelsText([diarizer(false), multi])).toBe(
+      "Install recommended models (707 MB: diarizer and Nemotron 3.5)",
+    );
   });
 });

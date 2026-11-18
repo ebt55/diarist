@@ -6,6 +6,7 @@
   // Import and Record say again what they miss when they are used.
   import { onMount } from "svelte";
   import { api, errorText, langApi } from "../lib/api";
+  import { EN_MODEL, installModelsText } from "../lib/downloadFiles";
   import { copyLinks, downloads, sizeMb } from "../lib/downloads.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
@@ -34,8 +35,6 @@
   /** The meetings' usual language: English gets the EN model, any other Nemotron 3.5. */
   let meetingLanguage = $state(canonical(app.setting("default_language")));
   let languageTable = $state.raw<LanguageTable>(LANGUAGE_TIERS);
-  /** Manifest name of the default English model (`manifests/models.json`). */
-  const EN_MODEL = "nemotron-en";
   const english = $derived(primarySubtag(meetingLanguage) === "en");
 
   const engines = $derived(status?.items.filter((i) => i.kind === "engine") ?? []);
@@ -53,14 +52,8 @@
         (english ? i.required : (i.required && i.name !== EN_MODEL) || i.name === MULTILINGUAL_MODEL),
     ) ?? [],
   );
-  const modelsBytes = $derived(models.reduce((n, m) => n + m.size_bytes, 0));
-  /** Required models besides the diarizer and the speech model (from beta.5, punctuation), by short name. */
-  const DIARIZER_MODEL = "nemotron-3-diarization";
-  const extras = $derived(
-    models
-      .filter((m) => m.name !== EN_MODEL && m.name !== MULTILINGUAL_MODEL && m.name !== DIARIZER_MODEL)
-      .map((m) => m.label.split(":")[0]?.trim() || m.name),
-  );
+  /** Only what is still missing: an upgrader opening this from Settings may lack two licence files. */
+  const modelsButton = $derived(installModelsText(models));
   const modelsMissing = $derived(models.filter((m) => !m.installed));
   const missingAll = $derived([...(engine && !engineInstalled ? [engine] : []), ...modelsMissing]);
   const gpu = $derived(status?.gpu ?? null);
@@ -290,9 +283,7 @@
             disabled={downloads.busy}
             title={engine && !engineInstalled ? "Installs the engine first, then the models" : ""}
           >
-            <Icon name="download" /> Install recommended models ({sizeMb(modelsBytes)}: {extras.length > 0
-              ? `diarizer, ${english ? "the EN model" : "Nemotron 3.5"} and ${extras.join(", ")}`
-              : `diarizer and ${english ? "the EN model" : "Nemotron 3.5"}`})
+            <Icon name="download" /> {modelsButton}
           </button>
         {/if}
       </div>

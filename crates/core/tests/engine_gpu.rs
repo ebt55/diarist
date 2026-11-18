@@ -3,7 +3,8 @@
 //! `DIARIST_MODELS_DIR` (holding the Nemotron 3.5 and Nemotron 3
 //! Diarization GGUFs) are set. Audio: a 30 s cut of the AMI ES2002a WAV from
 //! `DIARIST_AMI_WAV`, or `<models dir>/../data/samples/ES2002a.Mix-Headset.wav`.
-//! The cut is written to a temp folder.
+//! The cut is written to a temp folder. `#[ignore]`d so a plain `cargo test`
+//! reports them skipped: `cargo test -p diarist-core --test engine_gpu -- --ignored`.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -95,6 +96,7 @@ fn drain(rx: Receiver<EngineEvent>) -> Vec<EngineEvent> {
 }
 
 #[test]
+#[ignore = "needs DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn transcribes_a_30s_ami_cut() {
     let Some(env) = env() else {
         eprintln!("DIARIST_ENGINE_DIR / DIARIST_MODELS_DIR not set; skipping");
@@ -139,6 +141,7 @@ fn transcribes_a_30s_ami_cut() {
 }
 
 #[test]
+#[ignore = "needs DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn cancel_kills_the_child() {
     let Some(env) = env() else {
         return;
@@ -165,6 +168,7 @@ fn cancel_kills_the_child() {
 }
 
 #[test]
+#[ignore = "needs DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn bad_model_path_maps_to_an_error() {
     let Some(env) = env() else {
         return;
@@ -188,6 +192,7 @@ fn bad_model_path_maps_to_an_error() {
 }
 
 #[test]
+#[ignore = "needs DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn standalone_diarize_and_experimental_cascade() {
     let Some(env) = env() else {
         return;

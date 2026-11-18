@@ -455,6 +455,7 @@ mod tests {
 
     /// Reads every GGUF under `DIARIST_MODELS_DIR` (the real downloads).
     #[test]
+    #[ignore = "needs DIARIST_MODELS_DIR; run with --ignored"]
     fn real_models_when_available() {
         let Some(dir) = std::env::var_os("DIARIST_MODELS_DIR") else {
             return;

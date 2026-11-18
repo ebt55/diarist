@@ -40,7 +40,9 @@ tauri-plugin-autostart = "2.7"
 # Window size and position, stored under the data root.
 tauri-plugin-window-state = "2.5"
 # "Check for updates" against GitHub releases, signed with the updater key.
-tauri-plugin-updater = "2.14"
+# 2.14.1: zip 9 instead of zip 4 (Dependabot alerts 3 and 4); the same
+# sources, signature checks included, as 2.14.0.
+tauri-plugin-updater = "2.14.1"
 # "Press again to stop" while the window is hidden.
 tauri-plugin-notification = "2.7"
 # Decodes the tray's icon frames (icons/theme/*); already in the tree.
