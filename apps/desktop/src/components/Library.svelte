@@ -11,6 +11,7 @@
   import { app } from "../lib/state.svelte";
   import Brand from "./Brand.svelte";
   import Icon from "./Icon.svelte";
+  import RetentionNotice from "./RetentionNotice.svelte";
 
   interface Props {
     onimport: () => void;
@@ -300,6 +301,7 @@
     </section>
   {/if}
 
+  <RetentionNotice />
   <div class="list-meta" aria-live="polite">
     {#if showingResults}
       {#if searching && searchedQuery !== query.trim()}
