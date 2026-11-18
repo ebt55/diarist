@@ -229,6 +229,7 @@ impl State {
             speaker_count: speakers.len() as u32,
             preview,
             audio_keep: m.audio_keep,
+            created_at: m.created_at,
         }
     }
 

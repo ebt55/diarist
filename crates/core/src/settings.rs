@@ -98,6 +98,11 @@ pub const TRANSCRIPT_PUNCTUATION_THREADS: &str = "transcript.punctuation_threads
 /// 12.3): `on` or `off`, no UI ([`collapse_loops`],
 /// [`crate::transcript::loops`]).
 pub const TRANSCRIPT_COLLAPSE_LOOPS: &str = "transcript.collapse_loops";
+/// Order of the meeting list, set by its sort control: `recorded_desc`,
+/// `recorded_asc` (the recording's date, `started_at`), `added_desc` or
+/// `added_asc` (the date it was added, `created_at`). Unreadable values
+/// take the default.
+pub const LIBRARY_SORT: &str = "library.sort";
 
 /// Every known key with its default. Selections (`selected_engine`,
 /// `selected_model.asr`, `selected_model.diarizer`,
@@ -136,6 +141,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     (TRANSCRIPT_PUNCTUATION, "auto"),
     (TRANSCRIPT_PUNCTUATION_THREADS, "4"),
     (TRANSCRIPT_COLLAPSE_LOOPS, "on"),
+    (LIBRARY_SORT, "recorded_desc"),
 ];
 
 /// The default of `key`, if it is a known key.
@@ -383,6 +389,7 @@ mod tests {
         assert!(!get_bool(&s, CAPTURE_MIC_AGC) && !get_bool(&s, RECORD_DIARIZE_MIC));
         assert!(get_bool(&s, PLAYBACK_NORMALIZE));
         assert_eq!(get(&s, PLAYBACK_VOLUME), "1.0");
+        assert_eq!(get(&s, LIBRARY_SORT), "recorded_desc");
         // Punctuation: on when a model is installed, 4 threads, no selection.
         assert_eq!(get(&s, TRANSCRIPT_PUNCTUATION), "auto");
         assert_eq!(get_u64(&s, TRANSCRIPT_PUNCTUATION_THREADS), 4);

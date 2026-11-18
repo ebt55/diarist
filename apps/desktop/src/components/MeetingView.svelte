@@ -456,6 +456,16 @@
     }
   }
 
+  // A pin changed from the meeting list's menu: the header button follows.
+  $effect(() => {
+    const keep = app.meetings.find((m) => m.id === meetingId)?.audio_keep;
+    untrack(() => {
+      if (keep !== undefined && detail && detail.meeting.audio_keep !== keep) {
+        detail = { ...detail, meeting: { ...detail.meeting, audio_keep: keep } };
+      }
+    });
+  });
+
   async function deleteMeeting() {
     if (meeting) await app.deleteMeeting(meeting);
   }
@@ -534,9 +544,23 @@
     void edit("Mark reviewed", () => api.markReviewed(sp.id));
   }
 
+  /** A speaker's next or previous line, from the header: starts at the playhead, or the cursor before any playback. */
+  function jumpSpeaker(sp: SpeakerView, dir: 1 | -1) {
+    transcript?.jumpSpeaker(sp.id, sp.name, dir, true);
+  }
+
   function speakerMenu(sp: SpeakerView, x: number, y: number) {
     const others = roots.filter((r) => r.id !== sp.id);
+    // While recording there is no transcript to move in.
+    const jumps: MenuItem[] =
+      isLive || segments.length === 0
+        ? []
+        : [
+            { kind: "item", label: "Next line", hint: "L", run: () => jumpSpeaker(sp, 1) },
+            { kind: "item", label: "Previous line", hint: "H", run: () => jumpSpeaker(sp, -1) },
+          ];
     const items: MenuItem[] = [
+      ...jumps,
       { kind: "item", label: `Rename ${sp.name}…`, hint: "R", run: () => startRename(sp.id, null) },
       ...(sp.needs_review
         ? [{ kind: "item", label: "Mark reviewed", run: () => markReviewed(sp) } as MenuItem]
@@ -850,6 +874,7 @@
       onmenu={speakerMenu}
       onunmerge={(sp) => void edit("Unmerge", () => api.unmergeSpeaker(sp.id))}
       onreviewed={markReviewed}
+      onjump={isLive ? undefined : jumpSpeaker}
     />
 
     {#if isLive}
@@ -897,6 +922,7 @@
         {segments}
         {roots}
         {player}
+        complete={fullyLoaded}
         onchanged={reload}
         onrename={startRename}
       />
