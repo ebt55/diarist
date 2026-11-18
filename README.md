@@ -28,8 +28,8 @@ toolkit is needed; the GPU driver is the only prerequisite.
   an RTX 3080 the speech step runs about 78 times faster than real time with
   the EN model (*measured* on seven recordings, 324 minutes, 3 Nov 2026). That
   step is speech recognition and speaker labels in one pass, model load
-  included. Converting the file and adding punctuation come on top, and the
-  whole import has not been timed on its own.
+  included. Converting the file and adding punctuation are not in that
+  figure.
 - **Records live**: your microphone is "me", the system audio is split into
   the other speakers (up to 8). Text appears within about a second; when you
   stop, the recording is processed again for the final transcript, with
