@@ -540,7 +540,7 @@
       void loadReclaim();
       retentionChanged();
     } catch (e) {
-      app.error(`Could not unpin (${errorText(e)}); try again with P in the meeting`);
+      app.error(`Could not unpin (${errorText(e)}). Try again with P in the meeting`);
     }
   }
 

@@ -34,16 +34,16 @@
 
   let status = $state.raw<RetentionStatus | null>(null);
   let now = $state(Date.now());
-  /** This session: the hold was put off, a card was dismissed. */
+  /** This session: the hold was put off. */
   let holdLater = $state(false);
   let reviewing = $state(false);
-  let headsUpDismissed = $state(false);
-  let heldDismissed = $state(false);
+  /** This session: meetings a card's Dismiss hid. Meetings listed later still show. */
+  let dismissed = $state.raw(new Set<MeetingId>());
   /** The storage prompt stays up after it was marked seen, until dismissed. */
   let storageShown = $state<number | null>(null);
   let busy = $state(false);
   let dialog: HTMLDialogElement | undefined = $state();
-  /** Heads-up meetings already reported as seen this session. */
+  /** Heads-up meetings reported as seen since the last refresh (the backend keeps the first sighting). */
   const reported = new Set<MeetingId>();
   let lastFetch = 0;
 
@@ -51,8 +51,9 @@
   const isPinned = (id: MeetingId) => pinned.has(id);
   const holdList = $derived(status?.first_hold ? status.due.meetings : []);
   const holdUnpinned = $derived(withoutPinned(holdList, pinned));
-  const upcoming = $derived(status && !headsUpDismissed ? withoutPinned(status.upcoming, pinned) : []);
-  const held = $derived(status && !heldDismissed ? withoutPinned(status.held, pinned) : []);
+  const hidden = $derived(new Set([...pinned, ...dismissed]));
+  const upcoming = $derived(status ? withoutPinned(status.upcoming, hidden) : []);
+  const held = $derived(status ? withoutPinned(status.held, hidden) : []);
   const showHold = $derived(holdList.length > 0 && !holdLater);
 
   async function refresh() {
@@ -60,6 +61,7 @@
     try {
       const s = await retentionApi.status();
       now = Date.now();
+      reported.clear();
       status = s;
       if (s.storage_prompt && storageShown === null) storageShown = s.recordings_bytes;
     } catch (e) {
@@ -195,6 +197,10 @@
     }
   }
 
+  function dismiss(list: { meeting_id: MeetingId }[]) {
+    dismissed = new Set([...dismissed, ...list.map((n) => n.meeting_id)]);
+  }
+
   function openSettings(anchor: "retention" | "storage") {
     app.settingsAnchor = anchor;
     app.route = "settings";
@@ -206,6 +212,7 @@
   class="hold"
   aria-labelledby="hold-title"
   aria-describedby="hold-text"
+  onkeydown={(e) => e.stopPropagation()}
   oncancel={(e) => {
     e.preventDefault();
     askLater();
@@ -261,7 +268,7 @@
     </ul>
     <div class="actions">
       <button type="button" class="btn btn-danger" disabled={busy} onclick={deleteHeld}>Delete now</button>
-      <button type="button" class="btn" onclick={() => (heldDismissed = true)}>Dismiss</button>
+      <button type="button" class="btn" onclick={() => dismiss(held)}>Dismiss</button>
     </div>
   </section>
 {/if}
@@ -281,7 +288,7 @@
     </ul>
     <div class="actions">
       <button type="button" class="btn" onclick={() => openSettings("retention")}>Settings</button>
-      <button type="button" class="btn" onclick={() => (headsUpDismissed = true)}>Dismiss</button>
+      <button type="button" class="btn" onclick={() => dismiss(upcoming)}>Dismiss</button>
     </div>
   </section>
 {/if}
