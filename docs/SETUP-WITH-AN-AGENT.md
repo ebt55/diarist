@@ -201,7 +201,7 @@ The runtime package, from step 2:
 
 | What step 2 showed | Package | Why |
 |---|---|---|
-| NVIDIA GPU, compute capability 7.5 or higher, driver 580 or newer (CUDA 13.0 or higher) | `cuda` | The tested package; measured on an RTX 3080, about 30 times faster than real time. |
+| NVIDIA GPU, compute capability 7.5 or higher, driver 580 or newer (CUDA 13.0 or higher) | `cuda` | The tested package; measured on an RTX 3080, the speech step (speech and speaker labels in one pass, model load included) about 78 times faster than real time with the EN model. |
 | AMD or Intel GPU, an NVIDIA GPU with an older driver, or compute capability below 7.5 | `vulkan` | Runs on any current GPU driver; tested by Diarist on an NVIDIA card only (about 25 times faster than real time there), not on AMD or Intel. With an older NVIDIA driver, the user may prefer to update it from nvidia.com (they do that, not you) and use `cuda`. |
 | No usable GPU | `cpu` | Works, about 5 times faster than real time on a 12-core desktop CPU; live recording is not recommended. |
 
