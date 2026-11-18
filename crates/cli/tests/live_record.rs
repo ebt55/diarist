@@ -1,7 +1,9 @@
 //! Live recording end to end on real audio devices and the GPU, gated on
 //! `DIARIST_LIVE_TEST=1` plus `DIARIST_ENGINE_DIR` (an extracted
 //! runtime) and `DIARIST_MODELS_DIR` (EN model and Nemotron 3
-//! Diarization). Needs VB-Audio Virtual Cable.
+//! Diarization). Needs VB-Audio Virtual Cable. `#[ignore]`d so a plain
+//! `cargo test` reports it skipped: `cargo test -p diarist-cli --test
+//! live_record -- --ignored`.
 //!
 //! The mic is made deterministic: `diarist-cli play` renders a 60 s AMI cut
 //! into the cable's render side while the recorder captures "CABLE Output".
@@ -218,6 +220,7 @@ fn play_qpc(out: &std::process::Output) -> i64 {
 }
 
 #[test]
+#[ignore = "needs DIARIST_LIVE_TEST=1, DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR, VB-Cable and the GPU"]
 fn live_recording_end_to_end() {
     if std::env::var("DIARIST_LIVE_TEST").ok().as_deref() != Some("1") {
         return;

@@ -7,6 +7,8 @@
 //! the only one present. The `DIARIST_LIVE_*` knobs of
 //! [`streams_ami_in_real_time`] set the lookahead, the length, two sessions
 //! and the model for the live lookahead measurement (docs/plans/16 section 5).
+//! `#[ignore]`d so a plain `cargo test` reports it skipped: `cargo test -p
+//! diarist-core --test live_ws_gpu -- --ignored`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -88,6 +90,7 @@ fn percentile(v: &[f64], p: f64) -> Option<f64> {
 /// Prints per session the first-word latency of every utterance (median,
 /// p90, max), and the VRAM before, idle and at peak.
 #[test]
+#[ignore = "needs DIARIST_ENGINE_DIR, DIARIST_MODELS_DIR and the GPU"]
 fn streams_ami_in_real_time() {
     let (Some(engine_dir), Some(models)) = (
         std::env::var_os("DIARIST_ENGINE_DIR").map(PathBuf::from),

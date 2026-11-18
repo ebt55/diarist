@@ -4,6 +4,8 @@
 //! with `play_wav` while `start_capture` records "CABLE Output"; the packets
 //! must carry the tone with QPC timestamps that advance at 16 kHz.
 //! Override the endpoints with `DIARIST_CABLE_RENDER` / `DIARIST_CABLE_CAPTURE`.
+//! `#[ignore]`d so a plain `cargo test` reports it skipped: `cargo test -p
+//! diarist-core --test capture_device -- --ignored`.
 
 #![cfg(windows)]
 
@@ -58,6 +60,7 @@ fn tone(path: &std::path::Path, seconds: f32) {
 }
 
 #[test]
+#[ignore = "needs DIARIST_AUDIO_TEST=1 and VB-Audio Virtual Cable"]
 fn cable_tone_is_captured() {
     if !enabled() {
         return;

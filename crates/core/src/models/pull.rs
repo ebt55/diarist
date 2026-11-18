@@ -192,6 +192,7 @@ mod tests {
     /// `DIARIST_ENGINE_DIR` and `DIARIST_MODELS_DIR` are set: the
     /// runtime answers from its cache and we verify the hash.
     #[test]
+    #[ignore = "needs DIARIST_ENGINE_DIR and DIARIST_MODELS_DIR; run with --ignored"]
     fn real_pull_of_a_cached_model_when_available() {
         let (Some(engine), Some(models)) = (
             std::env::var_os("DIARIST_ENGINE_DIR"),

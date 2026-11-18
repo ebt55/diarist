@@ -1271,6 +1271,7 @@ mod tests {
     /// The real data layout when `DIARIST_MODELS_DIR` and
     /// `DIARIST_ENGINE_DIR` are set (read-only: files are only listed).
     #[test]
+    #[ignore = "needs DIARIST_MODELS_DIR; run with --ignored"]
     fn scans_the_real_models_when_available() {
         let Some(models) = std::env::var_os("DIARIST_MODELS_DIR") else {
             return;
