@@ -27,7 +27,7 @@ Words identical by construction: `git diff --stat origin/main...HEAD -- crates/c
 
 ## 3. Owner tests on a build of the final tip
 
-A test build of the integration branch is in `C:\Users\ebin\claude-ground\diarist-releases\0.1.0-beta.7-test\` (`app\diarist.exe`, `data\` with only `engine\` and `models\`, `start-beta7-test.cmd`, and `README.txt` with the steps). It runs against that scratch data root and never touches the installed app's folder. Quit the installed Diarist first: one instance runs at a time. If Microsoft Defender's ransomware rule blocks the exe, as it did for beta.6, see the KNOWN-ISSUES row.
+A test build of the integration branch is in `C:\Users\ebin\claude-ground\diarist-releases\0.1.0-beta.7-test\` (`app\diarist.exe`, `data\` with only `engine\` and `models\`, `start-beta7-test.cmd`, and `README.txt` with the steps). It runs against that scratch data root and never touches the installed app's folder. Quit the installed Diarist first: one instance runs at a time. On 18 Nov 2026 Microsoft Defender's ransomware protection rule blocked the test build's smoke start (event 1121, the rule "Use advanced protection against ransomware"), as it blocked beta.6's, so the build has not been run; see the KNOWN-ISSUES row for the steps to allow it. The test build's SHA-256 is `cf332de66246827d82299e9c55193c3a7f6f7d015f641e7d61db401eb620f60e`.
 
 ### 3.1 The list menu and the sort (issues 19 and 20)
 
