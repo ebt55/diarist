@@ -167,8 +167,8 @@ that were missed, not words that came out wrong.
 - Windows 10 (1803 or newer) or Windows 11, 64-bit. WebView2 is preinstalled
   on these; the installer fetches it otherwise.
 - About 1.3 GB of disk for the engine and the default models; recordings use
-  about 90 MB per hour (lossless FLAC), kept 30 days by default (transcripts
-  are kept forever).
+  about 90 MB per hour (lossless FLAC), kept until you set a day limit
+  (transcripts are kept forever).
 - RAM: the engine uses about 300 MB (*measured*); 8 GB in total is comfortable.
 
 ## You own the folders

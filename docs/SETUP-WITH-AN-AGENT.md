@@ -100,7 +100,7 @@ Ask these three questions together, and wait for the answers:
    models) in `%LOCALAPPDATA%\app.diarist.desktop`. Is that fine, or do you
    want it in another folder, for example on another drive?"** Plan about
    2 GB for the runtime and models plus about 90 MB per recorded hour
-   (recordings are kept 30 days by default). Another folder is set in step 4b.
+   (recordings are kept until a day limit is set). Another folder is set in step 4b.
 
 ## 2. Check the PC
 

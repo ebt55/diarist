@@ -51,7 +51,9 @@ your responsibility.
 ## Deleting your data
 
 - Delete a meeting in the app (Ctrl+Delete): its transcript and audio go.
-- Recordings older than the retention setting (30 days by default) are
-  deleted automatically unless pinned; transcripts stay until you delete them.
+- Recordings are kept until you delete them, by default. If you set a day
+  limit (Settings, "Keep audio for"), older recordings are deleted unless
+  pinned, and only after Diarist has warned you; transcripts stay until you
+  delete them.
 - Uninstalling with "Delete the application data" ticked removes the whole
   data folder. Unticked, your transcripts and recordings stay.
