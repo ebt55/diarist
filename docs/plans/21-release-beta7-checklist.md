@@ -46,7 +46,7 @@ A test build of the integration branch is in `C:\Users\ebin\claude-ground\diaris
 ### 3.4 Retention (issue 22)
 
 - [ ] A fresh root: Settings, "Keep audio for" reads 0 (keep forever), and Settings shows the space recordings use.
-- [ ] The README's scenario: three short imports aged with the python line, 30 days set on the scratch root only. First start: the hold dialog lists the overdue meeting and its size, with Delete as set, Keep everything, Review and pin (and Ask later); nothing is deleted before a choice. After Delete as set and the second aging step: the heads-up lists the meeting due within 3 days with Pin beside it, and the held card lists the overdue one ("Diarist kept it because it was not listed here in time") with Pin, Delete now, Dismiss.
+- [ ] The README's scenario: three short imports aged with the python line, 30 days set on the scratch root only. First start: the hold dialog lists the overdue meeting and its size, with Delete as set, Keep everything, Review and pin (and Ask later); nothing is deleted before a choice. After Delete as set and the second aging step: the heads-up ("Audio will be deleted soon") lists the meeting due within 3 days with Pin audio beside it, Change setting and Not now, and the held card ("Audio older than 30 days", "Diarist did not warn you about this audio in time, so it kept it") lists the overdue one with Pin audio, Delete audio and Not now.
 - [ ] Pinning from the list menu takes the meeting out of the notices, and so does deleting it (from the list menu or the meeting view), at once.
 
 ### 3.5 The record sheet

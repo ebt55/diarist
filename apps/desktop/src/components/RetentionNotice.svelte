@@ -17,7 +17,9 @@
     RETENTION_EVENT,
     RETENTION_UI_EVENT,
     deletedAsSetText,
+    headsUpText,
     headsUpTitle,
+    heldText,
     heldTitle,
     holdText,
     meetingBytes,
@@ -265,42 +267,42 @@
   {/if}
 </dialog>
 
-{#if held.length > 0}
+{#if held.length > 0 && status}
   <section class="card" aria-labelledby="held-title">
-    <h3 id="held-title">{heldTitle(held.length)}</h3>
-    <p class="text">Diarist kept it because it was not listed here in time. Pin what you want to keep, then delete the rest.</p>
+    <h3 id="held-title">{heldTitle(status.days)}</h3>
+    <p class="text">{heldText(status.days)}</p>
     <ul class="list">
       {#each held as n (n.meeting_id)}
         <li>
           <button type="button" class="link title" onclick={() => app.open(n.meeting_id)}>{n.title || "Untitled meeting"}</button>
           <span class="meta">{formatBytes(n.bytes)}</span>
-          <button type="button" class="btn pin-btn" onclick={() => togglePin(n.meeting_id)}><Icon name="pin" size={12} />Pin</button>
+          <button type="button" class="btn pin-btn" onclick={() => togglePin(n.meeting_id)}><Icon name="pin" size={12} />Pin audio</button>
         </li>
       {/each}
     </ul>
     <div class="actions">
-      <button type="button" class="btn btn-danger" disabled={busy} onclick={deleteHeld}>Delete now</button>
-      <button type="button" class="btn" onclick={() => dismiss(held)}>Dismiss</button>
+      <button type="button" class="btn btn-danger" disabled={busy} onclick={deleteHeld}>Delete audio</button>
+      <button type="button" class="btn" title="Hide this until Diarist starts again" onclick={() => dismiss(held)}>Not now</button>
     </div>
   </section>
 {/if}
 
-{#if upcoming.length > 0}
+{#if upcoming.length > 0 && status}
   <section class="card" aria-labelledby="headsup-title">
-    <h3 id="headsup-title">{headsUpTitle(upcoming.length)}</h3>
-    <p class="text">Transcripts stay. Pin a meeting to keep its audio.</p>
+    <h3 id="headsup-title">{headsUpTitle()}</h3>
+    <p class="text">{headsUpText(status.days)}</p>
     <ul class="list">
       {#each upcoming as n (n.meeting_id)}
         <li>
           <button type="button" class="link title" onclick={() => app.open(n.meeting_id)}>{n.title || "Untitled meeting"}</button>
           <span class="meta">{whenText(n.due_at, now)}</span>
-          <button type="button" class="btn pin-btn" onclick={() => togglePin(n.meeting_id)}><Icon name="pin" size={12} />Pin</button>
+          <button type="button" class="btn pin-btn" onclick={() => togglePin(n.meeting_id)}><Icon name="pin" size={12} />Pin audio</button>
         </li>
       {/each}
     </ul>
     <div class="actions">
-      <button type="button" class="btn" onclick={() => openSettings("retention")}>Settings</button>
-      <button type="button" class="btn" onclick={() => dismiss(upcoming)}>Dismiss</button>
+      <button type="button" class="btn" onclick={() => openSettings("retention")}>Change setting</button>
+      <button type="button" class="btn" title="Hide this until Diarist starts again" onclick={() => dismiss(upcoming)}>Not now</button>
     </div>
   </section>
 {/if}

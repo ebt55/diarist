@@ -3,7 +3,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   deletedAsSetText,
+  headsUpText,
   headsUpTitle,
+  heldText,
   heldTitle,
   holdText,
   meetingBytes,
@@ -81,8 +83,10 @@ describe("retention helpers", () => {
   test("texts are plain, with no semicolons", () => {
     const texts = [
       holdText(30, 2, 180_000_000),
-      headsUpTitle(1),
-      heldTitle(3),
+      headsUpTitle(),
+      headsUpText(30),
+      heldTitle(30),
+      heldText(30),
       storageText(10_400_000_000, 0),
       storageText(10_400_000_000, 30),
       deletedAsSetText(2, 180_000_000, 3),
@@ -90,10 +94,18 @@ describe("retention helpers", () => {
     ];
     for (const t of texts) expect(t).not.toContain(";");
     expect(holdText(30, 2, 180_000_000)).toBe(
-      "Keep audio for is set to 30 days. The audio of 2 meetings (180 MB) is older than that. " +
+      "Audio is set to be deleted after 30 days. The audio of 2 meetings (180 MB) is older than that. " +
         "Nothing has been deleted yet. Transcripts always stay.",
     );
-    expect(headsUpTitle(1)).toBe("Audio of 1 meeting will be deleted soon");
+    expect(headsUpTitle()).toBe("Audio will be deleted soon");
+    expect(headsUpText(30)).toBe(
+      "Audio is set to be deleted after 30 days. Pin a meeting to keep its audio. Transcripts stay.",
+    );
+    expect(heldTitle(30)).toBe("Audio older than 30 days");
+    expect(heldText(30)).toBe(
+      "Audio is set to be deleted after 30 days. Diarist did not warn you about this audio in time, so it kept it. " +
+        "Delete it now, or pin it to keep it. Transcripts stay either way.",
+    );
     expect(storageText(10_400_000_000, 0)).toBe(
       "Recordings now use 10.40 GB. Diarist keeps them until you set a limit.",
     );

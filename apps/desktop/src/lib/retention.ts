@@ -69,19 +69,37 @@ export function toReport(list: RetentionNotice[], reported: ReadonlySet<MeetingI
 /** The first-deletion hold's text. */
 export function holdText(days: number, meetings: number, bytes: number): string {
   return (
-    `Keep audio for is set to ${plural(days, "day")}. The audio of ${plural(meetings, "meeting")} ` +
+    `${limitText(days)} The audio of ${plural(meetings, "meeting")} ` +
     `(${formatBytes(bytes)}) is older than that. Nothing has been deleted yet. Transcripts always stay.`
   );
 }
 
+/** The setting, said plainly ("Keep audio for" is only its label in Settings). */
+export function limitText(days: number): string {
+  return `Audio is set to be deleted after ${plural(days, "day")}.`;
+}
+
 /** The heads-up's heading. */
-export function headsUpTitle(meetings: number): string {
-  return `Audio of ${plural(meetings, "meeting")} will be deleted soon`;
+export function headsUpTitle(): string {
+  return "Audio will be deleted soon";
+}
+
+/** The heads-up's text. */
+export function headsUpText(days: number): string {
+  return `${limitText(days)} Pin a meeting to keep its audio. Transcripts stay.`;
 }
 
 /** The held notice's heading. */
-export function heldTitle(meetings: number): string {
-  return `Audio of ${plural(meetings, "meeting")} is past Keep audio for`;
+export function heldTitle(days: number): string {
+  return `Audio older than ${plural(days, "day")}`;
+}
+
+/** The held notice's text: why this audio is still here, and what to do. */
+export function heldText(days: number): string {
+  return (
+    `${limitText(days)} Diarist did not warn you about this audio in time, so it kept it. ` +
+    "Delete it now, or pin it to keep it. Transcripts stay either way."
+  );
 }
 
 /** The storage prompt's text. */
