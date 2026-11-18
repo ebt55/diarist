@@ -8,6 +8,7 @@
   // It sits in the toast stack (Overlays.svelte), like the crash notice;
   // Escape inside it means Later.
   import { api, errorText, punctApi } from "../lib/api";
+  import { missingBytes } from "../lib/downloadFiles";
   import { downloads, sizeMb } from "../lib/downloads.svelte";
   import type { DownloadsNotice } from "../lib/punctuation";
   import { app } from "../lib/state.svelte";
@@ -33,7 +34,7 @@
   });
 
   const items = $derived(notice?.parts.flatMap((p) => p.items) ?? []);
-  const total = $derived(items.reduce((n, i) => n + i.size_bytes, 0));
+  const total = $derived(items.reduce((n, i) => n + missingBytes(i), 0));
   const running = $derived(items.find((i) => downloads.of(i.name)?.state === "running") ?? null);
   const pct = $derived.by(() => {
     const p = running ? downloads.of(running.name) : null;
@@ -102,7 +103,7 @@
       </p>
       <ul class="items">
         {#each part.items as item (item.name)}
-          <li>{item.label.split(":")[0]} · {sizeMb(item.size_bytes)}</li>
+          <li>{item.label.split(":")[0]} · {sizeMb(missingBytes(item))}</li>
         {/each}
       </ul>
     {/each}
