@@ -30,7 +30,7 @@
   function chipTitle(sp: SpeakerView, i: number): string {
     const key = i < 9 ? ` Key ${i + 1} on a segment gives it to this speaker.` : "";
     const jump = onjump ? " L and H go to the next and previous line." : "";
-    return `${sp.name}: double-click or R renames, Enter opens the menu.${jump}${key}`;
+    return `${sp.name}: click or Enter opens the menu, double-click or R renames.${jump}${key}`;
   }
 
   function editor(node: HTMLInputElement) {
@@ -68,7 +68,7 @@
   }
 </script>
 
-<div class="legend" role="toolbar" aria-label="Speakers (R renames, Enter opens the menu)">
+<div class="legend" role="toolbar" aria-label="Speakers (click or Enter opens the menu, R renames)">
   {#each roots as sp, i (sp.id)}
     <div class="item" style="--spk: {sp.color}">
       {#if renaming === sp.id}
@@ -93,6 +93,10 @@
           type="button"
           class="spk-chip"
           title={chipTitle(sp, i)}
+          onclick={(e) => {
+            // The second click of a double-click renames instead (below).
+            if (e.detail <= 1) menuAt(sp, e.currentTarget);
+          }}
           ondblclick={() => onstartrename(sp.id)}
           oncontextmenu={(e) => {
             e.preventDefault();
