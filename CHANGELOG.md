@@ -56,8 +56,10 @@ the same file. NVIDIA's runtime 0.3.0 was measured: it transcribes files
 the measurement, by small margins, so this release stays on 0.2.0 and
 0.3.0 is next, for 0.1.0-beta.7. Transcripts of files are word for word
 those of 0.1.0-beta.5: on the evaluation set (36 recordings, 28 hours) every word
-is the same with both speech models, and word error stays at 10.85
-percent with the EN model and 11.30 with Nemotron 3.5. Measured on one PC.
+is the same with both speech models, and speaker-attributed word error
+(cpWER) stays at 10.85 percent with the EN model and 11.30 with
+Nemotron 3.5. 35 of the 36 references are Zoom's machine transcripts.
+Measured on one PC.
 
 - Changed: while recording, Diarist says so outside its window. The window
   title reads "● Recording · Diarist" and the taskbar button carries a red
@@ -99,19 +101,26 @@ percent with the EN model and 11.30 with Nemotron 3.5. Measured on one PC.
   transcribes files 40 to 47 percent faster (113.9 and 115.8 times real
   time, against 81.3 and 78.6), and it passes the deletion, live, package
   and test bars. It missed two accuracy bars fixed before the runs, by
-  small margins: with the EN model, word error on the public meeting
-  recordings came to 30.10 percent against a bar of 30.08; with
+  small margins: with the EN model, cpWER on the public meeting
+  recordings, against their human transcripts, came to 30.10 percent
+  against a bar of 30.08; with
   Nemotron 3.5, the broad set had 84 gaps of 5 s or more against a bar of
   83.6. Diarist stays on 0.2.0; 0.3.0 is the first item for 0.1.0-beta.7
   (docs/eval/2026-10-31-runtime-030.md).
 - Measured, did not ship: filling the EN model's silent stretches with
-  Nemotron 3.5's words (word error 10.85 to 10.87 on the evaluation set,
+  Nemotron 3.5's words (cpWER 10.85 to 10.87 on the evaluation set,
   against a required gain of 0.2; docs/eval/2026-10-30-gapfill.md), and
   word boosting for names (0 of 13 names fixed on one of the author's
   meetings at any boost; docs/eval/2026-10-30-names-spike.md).
 - Known: after the echo canceller, your own words spoken entirely over
   loud speech from the other side can still be removed; headphones avoid
   it. docs/KNOWN-ISSUES.md has this and the other open rows.
+- Corrected 18 Nov 2026: this entry first said "word error" for figures
+  that are speaker-attributed word error (cpWER), where a word given to the
+  wrong speaker also counts as an error. On the evaluation set, 35 of the
+  36 references are Zoom's machine transcripts and only the AMI meeting has
+  a human one. The public meeting recordings are scored against human
+  transcripts.
 
 ## [0.1.0-beta.5] - 2026-10-27
 
@@ -122,9 +131,10 @@ collapsed, the live view runs with more lookahead and makes fewer
 mistakes, the echo gate removes far more of a loud echo's residue when
 you say almost nothing, and a finished recording can be processed again
 from its stored audio. Models now come through Diarist's own downloader.
-On the evaluation set (36 recordings, 28 hours) word error falls from
-11.01 to 10.85 percent with the EN model and stays at 11.30 with
-Nemotron 3.5; no recording got worse. Measured on one PC.
+On the evaluation set (36 recordings, 28 hours) speaker-attributed word
+error (cpWER) falls from 11.01 to 10.85 percent with the EN model and
+stays at 11.30 with Nemotron 3.5; no recording got worse. 35 of the 36
+references are Zoom's machine transcripts. Measured on one PC.
 
 - Added: punctuation and capitals. After Stop (on both channels) and on
   every import, a punctuation model reads the finished words and adds
@@ -173,7 +183,7 @@ Nemotron 3.5; no recording got worse. Measured on one PC.
   burst is now kept as one word spanning it. Repeats at speaking pace
   ("no no no no", a stutter, laughter), pairs, numbers and Chinese,
   Japanese and Thai words stay. On the evaluation set it removed 438 words
-  with the EN model (10 with Nemotron 3.5), word error fell on 21 of the
+  with the EN model (10 with Nemotron 3.5), cpWER fell on 21 of the
   36 recordings and rose on none; on the author's own meetings it removed
   215 words, at least 89 percent of them insertions that Whisper and
   Nemotron 3.5 do not have. The meeting details say how many bursts were
@@ -181,8 +191,9 @@ Nemotron 3.5; no recording got worse. Measured on one PC.
   word in transcripts built afterwards (no switch in the app, docs/DEV.md).
 - Changed: live recording runs both Nemotron models with 560 ms of
   lookahead (6 frames) instead of the runtime's 160 ms. The live text has
-  fewer errors (word error at the live setting on the hand-labelled AMI
-  meeting from 19.75 to 18.03 percent with the EN model and from 23.05 to
+  fewer errors (cpWER at the live setting on the hand-labelled AMI
+  meeting, against its human transcript, from 19.75 to 18.03 percent with
+  the EN model and from 23.05 to
   21.55 with Nemotron 3.5, and lower on all six Zoom meetings measured)
   and live words sit closer to their real times; the first words of an
   utterance show about half a second after they are spoken (median 0.48
@@ -245,6 +256,11 @@ Nemotron 3.5; no recording got worse. Measured on one PC.
   loud speech from the other side can still be removed (about one in four
   on a test fixture); headphones avoid it. docs/KNOWN-ISSUES.md has this
   and the other open rows.
+- Corrected 18 Nov 2026: this entry first said "word error" for figures
+  that are speaker-attributed word error (cpWER), where a word given to the
+  wrong speaker also counts as an error. On the evaluation set, 35 of the
+  36 references are Zoom's machine transcripts and only the AMI meeting has
+  a human one.
 
 ## [0.1.0-beta.4] - 2026-10-22
 
@@ -391,7 +407,8 @@ bug report.
   It now waits, and says which job is running.
 - Changed: imports and the post-pass after Stop use the speech model's full
   lookahead; live recording keeps the low-latency setting. On the full
-  evaluation set, word error on the hand-labelled meeting falls from 19.8 to
+  evaluation set, cpWER on the hand-labelled meeting (AMI, against its
+  human transcript) falls from 19.8 to
   18.3 percent (EN model) and from 23.0 to 20.8 (Nemotron 3.5), every other
   meeting improves too, and the speech pass runs about twice as fast.
 - Fixed: names given during a recording and edits made on the live
@@ -450,6 +467,10 @@ bug report.
   times real time, CPU 5 times).
 - Changed: Nemotron 3.5 drops far fewer phrases on public language clips at
   the file setting (measured on FLEURS slices).
+- Corrected 18 Nov 2026: this entry first said "word error" for the AMI
+  figures, which are speaker-attributed word error (cpWER) against the
+  meeting's human transcript. The other meetings of the evaluation set are
+  scored against Zoom's machine transcripts.
 
 ## [0.1.0-beta.1] - 2026-10-15
 

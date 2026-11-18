@@ -11,7 +11,7 @@ The speech runtime with its models, and since 0.1.0-beta.5 a small punctuation m
 | NeMo-Speech.cpp 0.2.0 (NVIDIA) | GGUF inference runtime, one zip per GPU backend | 102 MB zip, 141 MB extracted (CUDA build) | Apache-2.0 |
 | Nemotron 3 Diarization, q8_0 | Who spoke when, up to 8 speakers, streaming and file | 107 MB | OpenMDW-1.1 |
 | Nemotron Speech Streaming EN 0.6B, q8_0 | Speech to text for live and file mode, default for English | 700 MB | NVIDIA Open Model Licence |
-| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Recommended for non-English or mixed meetings: 40+ locales with automatic detection, 30 percent less VRAM | 742 MB | OpenMDW-1.1 |
+| Nemotron 3.5 ASR Streaming 0.6B, q8_0 | Recommended for non-English or mixed meetings: 40+ locales by its model card (30 offered in the app, eight smoke-tested here, section 6), automatic detection, 30 percent less VRAM | 742 MB | OpenMDW-1.1 |
 | Parakeet TDT 0.6B v3, q8_0 | Experimental only, off by default: better punctuation but drops speech (see section 3) | 714 MB | CC-BY-4.0 |
 | Horizon-Labs punctuation-restoration-small, its int8-embedding ONNX file and tokenizer | Adds `.` `,` `?` and sentence capitals to the finished words after Stop and on imports, on the CPU (section 8) | 268 MB plus a 34 MB tokenizer | Apache-2.0 (LICENSE and NOTICE in its repository from v1.1.1); base model MIT |
 | ONNX Runtime 1.31.0 (Microsoft), CPU build, installed beside the punctuation model as `diarist-onnxruntime.dll` | Runs the punctuation model inside Diarist's own process | 17 MB | MIT |
@@ -20,13 +20,13 @@ First-run download with the defaults: engine plus diarizer plus the EN model plu
 
 ## 2. Speaker diarization: why Nemotron 3
 
-This is the headline feature and the one place where model choice changes the product. On the only independent benchmark that scores every system the same way (VoiceArena Diarization-Bench v1, 139 English conversations, collar 0, overlap scored, *published*):
+This is the headline feature and the one place where model choice changes the product. VoiceArena's Diarization Bench is a public leaderboard that scores every listed system on the same recordings: 139 English sessions (115 in person, 24 online, 2 to 8 speakers, about 22 hours), collar 0, overlapping speech scored (*published*, https://voicearena.com/diarization-bench, accessed 18 Nov 2026). The page calls its numbers early results and says close rankings may change as sessions are added. It does not say whether it is affiliated with any listed vendor. These numbers were not reproduced here.
 
 | System | DER, lower is better | Licence | Local, no gating |
 |---|---|---|---|
 | **Nemotron 3 Diarization** | **14.7** | OpenMDW-1.1 | yes |
+| pyannoteAI Precision-3 | 18.7 | commercial API | no |
 | DiariZen s80-MD-v2 | 19.3 | weights CC BY-NC | yes, non-commercial |
-| pyannoteAI Precision-3 | 20.6 | commercial API | no |
 | pyannoteAI Precision-2 | 23.4 | commercial API | no |
 | Sortformer 4spk v2 (NVIDIA, previous generation) | 24.6 | CC-BY-4.0 | yes |
 | pyannote community-1 (what most open tools ship) | 30.6 | CC-BY-4.0, gated | token required |
@@ -53,7 +53,7 @@ Open ASR leaderboard average WER, lower is better (*published*, October 2026):
 | **Parakeet TDT 0.6B v3** (25 languages) | 6.34 | yes | yes | no |
 | Kyutai STT 2.6B | 6.4 | yes, 2.5 s delay | no | yes |
 | Nemotron Speech Streaming EN 0.6B | 6.93 at 1.1 s latency | yes | yes | yes |
-| **Nemotron 3.5 ASR Streaming 0.6B** (40+ locales) | not on the leaderboard yet; see measured comparison below | yes | yes | yes |
+| **Nemotron 3.5 ASR Streaming 0.6B** (40+ locales by its model card) | not on the leaderboard yet; see measured comparison below | yes | yes | yes |
 | Whisper large-v3 (for reference) | about 7.4 | approximate | no | no |
 
 Why not the top two: they give no word timestamps, and speaker assignment needs the start and end of every word. They also run only inside a Python stack.
@@ -67,14 +67,14 @@ Both Nemotron streaming models are safe on long files (**measured**, docs/resear
 | Sep 5 (45, 5) | 4.7 | 0.2 (7.3) | 5.1 | 0.2 (7.8) |
 | Sep 7 (48, 5) | 7.1 | 0.3 (12.7) | 7.5 | 0.2 (5.7) |
 | Sep Logistics (46, 1; single-speaker control) | 7.0 | 0.0 | 6.6 | 0.0 |
-| AMI ES2002a (21, 4; far-field, word-level reference) | 18.0 | 2.3 (6.3) | 20.7 | 2.2 (6.2) |
+| AMI ES2002a (21, 4; mix of headset microphones, word-level reference) | 18.0 | 2.3 (6.3) | 20.7 | 2.2 (6.2) |
 
 | | EN 0.6B | 3.5 0.6B |
 |---|---|---|
 | Speech pass, all seven sessions (324 min) | 255 s, 76 times real time | 249 s, 78 times real time |
 | Whole import incl. an extra diarization pass the app skips | 30 times real time | 31 times real time |
 | Peak VRAM, 77-minute file (docs/research/08; an upper bound at the shipped setting) | 2.6 GB | 1.8 GB |
-| Languages | English | 40+ locales, automatic detection |
+| Languages | English | 40+ locales by its model card, 30 offered, eight smoke-tested here (section 6), automatic detection |
 | Filler words ("um", "uh") | kept | about 40 percent dropped |
 | Quiet speech | dropped (below) | kept |
 
@@ -95,7 +95,7 @@ Why Parakeet TDT v3 is experimental only (**measured**, docs/research/08 section
 - But it silently dropped a 46-second span and two 10-second spans in the 77-minute file with no error. Cutting the file into 10-minute pieces recovered them, yet a 2-minute cut around the gap lost the same 46 seconds again. The drop depends on the audio content, not the file length, so no chunk size is safe. The same behaviour is reported for this model in another runtime (transcribe.cpp issue #71).
 - A transcript tool cannot ship a model that may skip a minute of a meeting without telling you. It stays reachable behind an experimental setting for short clips where punctuation matters, and a dual-pass mode that fills its gaps from Nemotron is possible later.
 
-Realistic expectation: on clean meeting audio about 1 word in 15 to 20 is wrong or missing with any of these models; on AMI-style far-field recordings about 1 in 9 (*published* AMI WER 11.3 for Parakeet v3). The product's value is in who said what, stored and searchable, not in a perfect verbatim.
+Realistic expectation, against transcripts made by people (**measured**, EN model, word error without speaker attribution): 16.6 percent of words wrong or missing on the AMI meeting ES2002a (docs/eval/2026-11-03-beta6-release.md), 28 percent on public meetings recorded through headset mixes, and 38 percent through one distant microphone (AMI and NOTSOFAR, docs/eval/2026-10-27-baseline-public.md). About four in five of those errors are missed words. On the author's Zoom meetings the EN model's words differ from Zoom's own machine transcript by about 7 in 100, but that is disagreement with another recogniser, not accuracy. The product's value is in who said what, stored and searchable, not in a perfect verbatim.
 
 ## 4. Which package for which PC
 
@@ -243,6 +243,6 @@ Since 0.1.0-beta.5 (**measured** in docs/eval/2026-10-26-punctuation.md, decided
 
 **Cost.** About 5 to 6 seconds of CPU per hour of audio at 4 threads, 0.65 GB of RAM while it runs (the model is unloaded after each job), no VRAM (**measured**: 5.3 to 5.6 s per hour over the 28 hours of the evaluation set with Diarist's own build, 3.2 to 8.1 per recording, the short ones highest, docs/eval/2026-10-27-beta5-release.md; 0.5 GB for a 21-minute meeting). Each job also loads the model and its tokenizer first, about 2 s (1.9 s measured in the spike).
 
-**How good it is.** Against Zoom's own transcripts of the author's meetings, about two in three of its periods and question marks are where Zoom put one (precision 0.65 and 0.70; on the far-field four-person AMI meeting its question marks are right 0.39 of the time), and about four in five of its commas (0.8), but it writes about one comma per sentence where Zoom writes about two, so it misses more than half of Zoom's commas. On read-speech imports (an audiobook, a talk read from a script) the speech model punctuates by itself (5 to 10 marks per 100 words) and its marks are kept; comma precision there is lower (en 0.70, es 0.75). docs/KNOWN-ISSUES.md lists what this means in use.
+**How good it is.** Against Zoom's own transcripts of the author's meetings, about two in three of its periods and question marks are where Zoom put one (precision 0.65 and 0.70; on the four-person AMI meeting, against its human transcript, its question marks are right 0.39 of the time), and about four in five of its commas (0.8), but it writes about one comma per sentence where Zoom writes about two, so it misses more than half of Zoom's commas. On read-speech imports (an audiobook, a talk read from a script) the speech model punctuates by itself (5 to 10 marks per 100 words) and its marks are kept; comma precision there is lower (en 0.70, es 0.75). docs/KNOWN-ISSUES.md lists what this means in use.
 
 **Older meetings** are not changed automatically: "Add punctuation" on a meeting, Settings' "Add punctuation to N older meetings", or `diarist-cli punctuate <meeting>` / `--all-missing` builds a punctuated copy and keeps the earlier run. Adding your own punctuation model is in section 5.

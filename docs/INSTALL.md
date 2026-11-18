@@ -145,11 +145,11 @@ checks every file, restarts Diarist from there and then deletes the old
 copy.
 
 Recordings are kept as lossless FLAC, forever by default (Settings, "Keep
-audio for" is 0). If you set a day limit, Diarist warns before it deletes
-any audio: the first time with a dialog that lists the meetings, after that
-with a heads-up in the library 3 days ahead. A pinned meeting (P) is never
-deleted, and transcripts are never deleted. Re-processing a meeting needs its
-audio.
+audio for" is 0 since 0.1.0-beta.7). If you set a day limit, Diarist checks
+at launch and once a day, and warns before it deletes any audio: the first
+time with a dialog that lists the meetings, after that with a heads-up in the
+library 3 days ahead. A pinned meeting (P) is never deleted. Transcripts are
+never deleted automatically. Re-processing a meeting needs its audio.
 
 ## 6. Updating
 
