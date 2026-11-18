@@ -46,6 +46,21 @@ export function withoutPinned<T extends { meeting_id: MeetingId }>(list: T[], pi
   return list.filter((n) => !pinned.has(n.meeting_id));
 }
 
+/** The entries whose meeting is in none of `hide` (pinned, dismissed, deleted). */
+export function notShown<T extends { meeting_id: MeetingId }>(list: T[], ...hide: ReadonlySet<MeetingId>[]): T[] {
+  return list.filter((n) => !hide.some((h) => h.has(n.meeting_id)));
+}
+
+/**
+ * Meetings deleted in the window stay hidden until a status read that began
+ * after their deletion comes back (`asked`: the deleted set when that read
+ * began). A read already in flight may still list them; a later meeting
+ * reusing the id shows again once a fresh read has dropped it.
+ */
+export function stillDeleted(deleted: ReadonlySet<MeetingId>, asked: ReadonlySet<MeetingId>): Set<MeetingId> {
+  return new Set([...deleted].filter((id) => !asked.has(id)));
+}
+
 /** Heads-up entries not yet reported as seen. */
 export function toReport(list: RetentionNotice[], reported: ReadonlySet<MeetingId>): MeetingId[] {
   return list.map((n) => n.meeting_id).filter((id) => !reported.has(id));

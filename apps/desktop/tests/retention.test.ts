@@ -7,6 +7,8 @@ import {
   heldTitle,
   holdText,
   meetingBytes,
+  notShown,
+  stillDeleted,
   storageText,
   toReport,
   whenText,
@@ -38,6 +40,22 @@ describe("retention helpers", () => {
     const list = [notice(1), notice(2), notice(3)];
     expect(withoutPinned(list, new Set([2])).map((n) => n.meeting_id)).toEqual([1, 3]);
     expect(withoutPinned(list, new Set())).toHaveLength(3);
+  });
+
+  test("a meeting deleted in the window leaves the notices at once", () => {
+    const list = [notice(1), notice(2), notice(3), notice(4)];
+    const shown = notShown(list, new Set([1]), new Set([2]), new Set([3]));
+    expect(shown.map((n) => n.meeting_id)).toEqual([4]);
+    expect(notShown(list)).toHaveLength(4);
+  });
+
+  test("a deleted meeting stays hidden until a read begun after its deletion", () => {
+    // Deleted while a read begun before was in flight: that read may still list it.
+    expect([...stillDeleted(new Set([5]), new Set())]).toEqual([5]);
+    // The read begun after the delete has dropped it: the id can show again (reuse).
+    expect([...stillDeleted(new Set([5]), new Set([5]))]).toEqual([]);
+    // A second delete during that read stays hidden.
+    expect([...stillDeleted(new Set([5, 6]), new Set([5]))]).toEqual([6]);
   });
 
   test("each heads-up meeting is reported once", () => {

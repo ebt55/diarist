@@ -21,8 +21,10 @@
     heldTitle,
     holdText,
     meetingBytes,
+    notShown,
     retentionApi,
     retentionChanged,
+    stillDeleted,
     storageText,
     toReport,
     whenText,
@@ -39,6 +41,8 @@
   let reviewing = $state(false);
   /** This session: meetings a card's Dismiss hid. Meetings listed later still show. */
   let dismissed = $state.raw(new Set<MeetingId>());
+  /** Meetings deleted in this window (the list menu, the meeting view), hidden at once. */
+  let deleted = $state.raw(new Set<MeetingId>());
   /** The storage prompt stays up after it was marked seen, until dismissed. */
   let storageShown = $state<number | null>(null);
   let busy = $state(false);
@@ -49,20 +53,21 @@
 
   const pinned = $derived(new Set(app.meetings.filter((m) => m.audio_keep).map((m) => m.id)));
   const isPinned = (id: MeetingId) => pinned.has(id);
-  const holdList = $derived(status?.first_hold ? status.due.meetings : []);
+  const holdList = $derived(status?.first_hold ? notShown(status.due.meetings, deleted) : []);
   const holdUnpinned = $derived(withoutPinned(holdList, pinned));
-  const hidden = $derived(new Set([...pinned, ...dismissed]));
-  const upcoming = $derived(status ? withoutPinned(status.upcoming, hidden) : []);
-  const held = $derived(status ? withoutPinned(status.held, hidden) : []);
+  const upcoming = $derived(status ? notShown(status.upcoming, pinned, dismissed, deleted) : []);
+  const held = $derived(status ? notShown(status.held, pinned, dismissed, deleted) : []);
   const showHold = $derived(holdList.length > 0 && !holdLater);
 
   async function refresh() {
     lastFetch = Date.now();
+    const asked = deleted;
     try {
       const s = await retentionApi.status();
       now = Date.now();
       reported.clear();
       status = s;
+      deleted = stillDeleted(deleted, asked);
       if (s.storage_prompt && storageShown === null) storageShown = s.recordings_bytes;
     } catch (e) {
       void api.log("warn", `retention status: ${errorText(e)}`);
@@ -114,7 +119,14 @@
     document.addEventListener("visibilitychange", onFocus);
     window.addEventListener(RETENTION_UI_EVENT, onUi);
     const off = onEvent<null>(RETENTION_EVENT, () => void refresh());
+    // A meeting deleted from the list menu or the meeting view leaves the
+    // notices at once; the refetch (here and in Settings) updates the sizes.
+    const offDeleted = app.onMeetingDeleted((id) => {
+      deleted = new Set([...deleted, id]);
+      retentionChanged();
+    });
     return () => {
+      offDeleted();
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
       window.removeEventListener(RETENTION_UI_EVENT, onUi);
