@@ -2,7 +2,7 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
-## [0.1.0-beta.7] - 2026-11-18
+## [0.1.0-beta.7] - 2026-11-19
 
 The seventh beta pre-release. Diarist now keeps recordings by default and
 never deletes audio without warning first. The meeting list gets a
