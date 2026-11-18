@@ -107,6 +107,9 @@ pub struct MeetingSummary {
     /// First 200 characters of the current run's text ("" when there is none).
     pub preview: String,
     pub audio_keep: bool,
+    /// Unix ms when the meeting was added to Diarist (recording start or
+    /// import time); `started_at` of an import is the file's own date.
+    pub created_at: i64,
 }
 
 /// Everything the meeting view header and legend need (`get_meeting`).

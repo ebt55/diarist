@@ -32,7 +32,7 @@ cargo fmt --all -- --check
 Dev CLI (exit codes: 0 ok, 1 error, 2 usage error):
 
 ```sh
-cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.6"
+cargo run -p diarist-cli -- version                     # prints "diarist-cli 0.1.0-beta.7"
 cargo run -p diarist-cli -- doctor                      # data root, selections, GPU, free VRAM
 cargo run -p diarist-cli -- models scan                 # find GGUFs under models\ and runtimes under engine\
 cargo run -p diarist-cli -- models pull                 # required models, Diarist's own downloader, SHA-checked
@@ -106,7 +106,13 @@ PCM16) and is barely transcribed. Record from an output at a normal volume.
 
 ### Gated tests
 
-Skipped unless the variables are set:
+Each needs the variables in its row, and each is `#[ignore]`d (since
+0.1.0-beta.7), so a plain `cargo test` reports it as ignored rather than as
+a pass that did nothing. Set the variables and add `-- --ignored` to the
+command, e.g. `cargo test -p diarist-core --test engine_gpu -- --ignored`,
+or for the library ones `cargo test -p diarist-core --lib models:: --
+--ignored`. The pull-request CI (`.github/workflows/ci.yml`) has no GPU and
+runs none of them.
 
 | Variable | Tests |
 |---|---|
@@ -118,7 +124,7 @@ Skipped unless the variables are set:
 | engine + models | `-p diarist-core --test live_ws_gpu`: 30 s of AMI streamed in real time to `nemo-speech serve`; words, `spk_N` tags, first-word latency (median, p90, max), VRAM. `DIARIST_LIVE_RIGHT_CONTEXT=<frames>` passes the live lookahead (unset: no flag, the runtime's 1 frame; the app ships 6 since 0.1.0-beta.5, so set 6 to test what ships), `DIARIST_LIVE_SECONDS` the seconds of AMI (30), `DIARIST_LIVE_SESSIONS=2` a second, undiarized session on the mic channel as a recording runs, `DIARIST_LIVE_ASR` the ASR file name (default the EN model, else 3.5) |
 | `DIARIST_AUDIO_TEST=1` (VB-Audio Cable) | `-p diarist-core --test capture_device`: a tone played into the cable is captured from `CABLE Output` at 16 kHz |
 | `DIARIST_LIVE_TEST=1` + engine + models (VB-Audio Cable) | `-p diarist-cli --test live_record` (about 80 s, one minute audible on the loopback output): cable as the mic, a second AMI cut on the default output (`DIARIST_LOOPBACK_RENDER` picks another output; `DIARIST_CABLE_RENDER` / `DIARIST_CABLE_CAPTURE` override the cable); WAV lengths, cross-correlation offsets, live latency, post-pass run, FLAC, rename carry-over |
-| `DIARIST_ECHO_MEETINGS` (live meeting folders, `;`-separated, read only; `DIARIST_ECHO_SAMPLE` for one) + `DIARIST_ECHO_DB` (a copy of the database) | `-p diarist-core --release --test echo_sample -- --nocapture`: per meeting the echo profile and its 7 s null (must never couple; `DIARIST_ECHO_NULL=1` replays the live monitor over the null too), then the layered gate on both paths: the post-pass path (the canceller where the post-pass runs it, its output's words from `mic-aec.words.json` or transcribed once with `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` and cached in `DIARIST_ECHO_OUT`; where it runs, the transfer gate with every guard (`transfer` lines) on the live run's mic words and on the raw mic transcribed once with the engine (timed, cached as `<uid>.raw-words.json`; `mic.words.json` without an engine), the shipped one's row in the table) and the live path (the live run's every revision through the live gate in arrival order, the monitor fed in 100 ms frames; a meeting without a live run stands in its stored transcripts). Prints the acceptance row per meeting and path (dropped per layer, residual duplicates with the chance level, owner's words kept; `DIARIST_ECHO_CLASSES` adds the meeting 12 labels), and on both paths the text layer at the 300 and 500 ms lag spreads (`spread` lines). `DIARIST_ECHO_SWEEP=1` adds the sweeps (text window, floor percentile, correlation look-back and bands, after-canceller variants), `DIARIST_ECHO_DUMP` a per-word feature TSV with text, and per raw source each cancelled word's raw neighbours and guard decisions (local analysis; delete it), `DIARIST_ECHO_KEEP=1` keeps the cached words (docs/eval/2026-10-21-echo-round2.md, "Transfer gate"). `DIARIST_ECHO_CLASSES_OUT` (a scratch folder) writes, for a meeting without a live run whose `mic.words.json` has words and no labels were given, the classes CSV `DIARIST_ECHO_CLASSES` reads, from the measurement's matcher (`<uid>.classes.csv`, with text: local only, delete it) |
+| `DIARIST_ECHO_MEETINGS` (live meeting folders, `;`-separated, read only; `DIARIST_ECHO_SAMPLE` for one) + `DIARIST_ECHO_DB` (a copy of the database) | `-p diarist-core --release --test echo_sample -- --ignored --nocapture`: per meeting the echo profile and its 7 s null (must never couple; `DIARIST_ECHO_NULL=1` replays the live monitor over the null too), then the layered gate on both paths: the post-pass path (the canceller where the post-pass runs it, its output's words from `mic-aec.words.json` or transcribed once with `DIARIST_ENGINE_DIR` + `DIARIST_MODELS_DIR` and cached in `DIARIST_ECHO_OUT`; where it runs, the transfer gate with every guard (`transfer` lines) on the live run's mic words and on the raw mic transcribed once with the engine (timed, cached as `<uid>.raw-words.json`; `mic.words.json` without an engine), the shipped one's row in the table) and the live path (the live run's every revision through the live gate in arrival order, the monitor fed in 100 ms frames; a meeting without a live run stands in its stored transcripts). Prints the acceptance row per meeting and path (dropped per layer, residual duplicates with the chance level, owner's words kept; `DIARIST_ECHO_CLASSES` adds the meeting 12 labels), and on both paths the text layer at the 300 and 500 ms lag spreads (`spread` lines). `DIARIST_ECHO_SWEEP=1` adds the sweeps (text window, floor percentile, correlation look-back and bands, after-canceller variants), `DIARIST_ECHO_DUMP` a per-word feature TSV with text, and per raw source each cancelled word's raw neighbours and guard decisions (local analysis; delete it), `DIARIST_ECHO_KEEP=1` keeps the cached words (docs/eval/2026-10-21-echo-round2.md, "Transfer gate"). `DIARIST_ECHO_CLASSES_OUT` (a scratch folder) writes, for a meeting without a live run whose `mic.words.json` has words and no labels were given, the classes CSV `DIARIST_ECHO_CLASSES` reads, from the measurement's matcher (`<uid>.classes.csv`, with text: local only, delete it) |
 | `DIARIST_PUNCT_MODEL` (a punctuation model folder: an `.onnx` with its `<file>.meet.json`, the tokenizer and `diarist-onnxruntime.dll`) | `-p diarist-core --lib punct::onnx::tests::real_model -- --ignored --test-threads=1`: loads the model, labels a 200-word English fixture twice (deterministic, every invariant holds), the module-identity check, RSS back after the session is dropped |
 | `DIARIST_PUNCT_CHECK_ROOT` (an empty scratch folder) + `DIARIST_PUNCT_CHECK_WORDS` (a cached `transcribe --json` output, default the 5-minute AMI fixture) | `-p diarist-core --lib punct::onnx::tests::cli_check_root -- --ignored`: a scratch data root with one meeting imported from the cached words (no engine, no GPU), for `diarist-cli --data-dir <root> --models-dir <model folder> punctuate <id>` and the exports before and after (plan 16 section 7.2 B) |
 | `DIARIST_RERUN_ROOT` (a copy of a data root: `diarist.db` with `-wal` and `-shm`, and the meeting's `audio\<uid>\`; it is migrated and written) + `DIARIST_RERUN_MEETING` (the meeting's id) + engine + models | `-p diarist-core --release --lib live::rerun::tests::a_stored -- --ignored --nocapture`: Process again from the copy's `playback.flac` with the engine its current run names must reproduce that run's words, `engine_info.echo` and `echo_dropped` exactly, apart from wall times and, without stored channel lengths, each channel's last word end (counts only) |
@@ -654,8 +660,11 @@ through `HKCU\Software\Diarist\DataRoot` (and removed afterwards).
   `DIARIST_LEGACY_ROOT=<copy of an old root>` with `DIARIST_DATA_DIR=<empty
   folder>` (without `DIARIST_LEGACY_ROOT`, a `DIARIST_DATA_DIR` run never
   offers the move).
-- Retention runs at launch and every 24 h (`maintenance.rs`);
-  `diarist-cli retention --dry-run|--apply [--days N]` does the same from the CLI.
+- Retention runs at launch and every 24 h (`maintenance.rs`,
+  `retention::run_auto`), and deletes only what the warnings allow
+  (`crates/core/src/retention.rs`, "Warnings before deletion");
+  `diarist-cli retention --dry-run|--apply [--days N]` lists, and with
+  `--apply` deletes, what is past the limit, as Free up now does.
 - `health_check` is the Diagnostics checklist; `diagnostics_report` (Copy
   diagnostics) includes it.
 

@@ -196,6 +196,7 @@ mod tests {
 
     /// The real runtime when `DIARIST_ENGINE_DIR` is set.
     #[test]
+    #[ignore = "needs DIARIST_ENGINE_DIR; run with --ignored"]
     fn real_doctor_when_available() {
         let Some(dir) = std::env::var_os("DIARIST_ENGINE_DIR") else {
             return;

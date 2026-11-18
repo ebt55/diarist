@@ -283,6 +283,9 @@ fn meeting_lifecycle(store: &dyn Store) {
     assert_eq!(s.uid.len(), 26);
 
     let d = store.get_meeting(id).unwrap();
+    // Date added: when the row was made, not the recording's own date.
+    assert_eq!(s.created_at, d.meeting.created_at);
+    assert!(s.created_at > s.started_at);
     assert_eq!(d.meeting.current_run_id, Some(run));
     let cur = d.current_run.expect("current run");
     assert_eq!(cur.id, run);

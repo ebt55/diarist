@@ -1206,6 +1206,15 @@ fn speakers_warn_once_and_echo_words_leave_the_live_run_and_the_post_pass() {
     drop(ctx);
 }
 
+/// Polls `cond` every 20 ms until it holds or `timeout` passes. The caller
+/// asserts afterwards, so a timeout fails with the test's own message.
+fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !cond() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
     let dir = tempfile::tempdir().unwrap();
@@ -1256,14 +1265,22 @@ fn a_reopened_view_sees_the_gate_and_turning_echo_off_ungates_the_rest() {
     let info = store.get_run(rec.run_id()).unwrap().engine_info;
     assert_eq!(info["echo"]["user_off"], true);
     assert_eq!(info["echo"]["mode"], ECHO_OFF_FOR_RECORDING);
-    std::thread::sleep(Duration::from_millis(1_000));
+    // The hidden words go back to the sink from the recorder's thread: wait
+    // (bounded) until nothing is hidden and the first hidden utterance was
+    // sent again, instead of a fixed sleep that a loaded machine outruns.
+    let first_hidden = hidden.iter().map(|k| k.1).min().unwrap();
+    wait_until(Duration::from_secs(30), || {
+        rec.echo_hidden().is_empty()
+            && sink.words.lock().unwrap()[shown_before..]
+                .iter()
+                .any(|u| u.channel == Channel::Mic && !u.words.is_empty() && u.utt == first_hidden)
+    });
     assert!(rec.echo_hidden().is_empty());
     let resent: Vec<WordsUpdate> = sink.words.lock().unwrap()[shown_before..]
         .iter()
         .filter(|u| u.channel == Channel::Mic && !u.words.is_empty())
         .cloned()
         .collect();
-    let first_hidden = hidden.iter().map(|k| k.1).min().unwrap();
     assert!(
         resent.iter().any(|u| u.utt == first_hidden),
         "utterance {first_hidden} was not sent again"

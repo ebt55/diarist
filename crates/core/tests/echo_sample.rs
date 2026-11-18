@@ -1,7 +1,9 @@
 //! The echo gate on stored live meetings (plan 15 sections 4A and 9): the
 //! detector, and the layered gate on both of its paths, one invocation over
 //! a list of meeting folders. Gated on `DIARIST_ECHO_MEETINGS`; run with
-//! `--release`. Nothing is written outside `DIARIST_ECHO_OUT`.
+//! `--release` and `-- --ignored` (it is `#[ignore]`d so a plain
+//! `cargo test` reports it skipped). Nothing is written outside
+//! `DIARIST_ECHO_OUT`.
 //!
 //! Env:
 //! - `DIARIST_ECHO_MEETINGS`: meeting folders, `;`-separated (read only):
@@ -2362,6 +2364,7 @@ fn load(folder: &Path, db: Option<&Db>, label_csv: Option<&Path>) -> Meeting {
 }
 
 #[test]
+#[ignore = "needs DIARIST_ECHO_MEETINGS or DIARIST_ECHO_SAMPLE (stored meetings)"]
 fn echo_on_stored_meetings() {
     let folders: Vec<PathBuf> = match std::env::var("DIARIST_ECHO_MEETINGS")
         .ok()

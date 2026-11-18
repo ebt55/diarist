@@ -1,6 +1,9 @@
 //! Launch-time and periodic housekeeping: the startup report (what crash
-//! recovery and a data-folder move did, shown once by the UI) and audio
-//! retention (`diarist_core::retention`) at launch and then once a day.
+//! recovery and a data-folder move did, shown once by the UI) and the
+//! automatic audio retention check (`diarist_core::retention::run_auto`)
+//! at launch and then once a day. It deletes only what the user was warned
+//! about. "Free up now" and the notices' choices go through
+//! `commands::apply_retention`.
 
 use std::time::Duration;
 
@@ -55,33 +58,44 @@ pub(crate) fn finish_recovery(app: &AppHandle, items: Vec<RecoveredItem>, error:
     }
 }
 
-/// Deletes audio past retention (never transcripts) and logs what it did.
-pub(crate) fn run_retention(app: &AppHandle) -> Result<retention::RetentionReport, String> {
+/// The UI refetches `retention_preview` when this fires (after each
+/// automatic check).
+pub(crate) const RETENTION_EVENT: &str = "retention:changed";
+
+/// The automatic check: deletes only audio the user was warned about in
+/// time, after the first deletion was acknowledged
+/// (`diarist_core::retention::run_auto`); everything else due is held for
+/// the library notices. Never touches transcripts.
+pub(crate) fn run_retention(app: &AppHandle) -> Result<retention::AutoOutcome, String> {
     let paths = app.state::<AppPaths>();
     if paths.demo {
-        return Ok(retention::RetentionReport::default());
+        return Ok(retention::AutoOutcome::default());
     }
     let store = std::sync::Arc::clone(&app.state::<AppStore>().0);
-    let plan = retention::plan_from_settings(&*store, &paths.paths.root, now_ms())
-        .map_err(|e| e.to_string())?;
-    if plan.meetings.is_empty() {
-        return Ok(retention::RetentionReport::default());
+    let out =
+        retention::run_auto(&*store, &paths.paths.root, now_ms()).map_err(|e| e.to_string())?;
+    let report = &out.report;
+    if out.days > 0 {
+        log::info!(
+            "retention ({} days): deleted {} audio files ({} MB) of {} meetings, {} held for the user{}, {} pinned kept{}",
+            out.days,
+            report.files,
+            report.bytes >> 20,
+            report.meetings,
+            out.held,
+            if out.first_hold { " (first deletion not acknowledged)" } else { "" },
+            out.pinned_skipped,
+            if report.errors.is_empty() {
+                String::new()
+            } else {
+                format!(", errors: {:?}", report.errors)
+            }
+        );
     }
-    let report = retention::apply(&*store, &plan);
-    log::info!(
-        "retention ({} days): deleted {} audio files ({} MB) of {} meetings; {} pinned kept{}",
-        plan.days,
-        report.files,
-        report.bytes >> 20,
-        report.meetings,
-        plan.pinned_skipped,
-        if report.errors.is_empty() {
-            String::new()
-        } else {
-            format!("; errors: {:?}", report.errors)
-        }
-    );
-    Ok(report)
+    if let Err(e) = app.emit(RETENTION_EVENT, ()) {
+        log::warn!("emit {RETENTION_EVENT} failed: {e}");
+    }
+    Ok(out)
 }
 
 /// Runs retention now and then once a day on its own thread.

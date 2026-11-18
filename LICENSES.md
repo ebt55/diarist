@@ -48,14 +48,14 @@ terms.
 ## In the installer
 
 The Windows app is a Rust binary with a Svelte web front end, built with
-Tauri 2. Its Rust dependency tree (451 third-party crates for
-`x86_64-pc-windows-msvc`, counted with `cargo metadata` on 30 Oct 2026) is
+Tauri 2. Its Rust dependency tree (449 third-party crates for
+`x86_64-pc-windows-msvc`, counted with `cargo metadata` on 18 Nov 2026) is
 under permissive licences:
 
 | Licence (as declared) | Crates | Examples |
 |---|---|---|
-| MIT OR Apache-2.0 (any order) | 279 | tauri, serde, tokio, rusqlite, ureq, rubato, wasapi, ort |
-| MIT | 87 | auto-launch, bytes, derive_more |
+| MIT OR Apache-2.0 (any order) | 278 | tauri, serde, tokio, rusqlite, ureq, rubato, wasapi, ort |
+| MIT | 86 | auto-launch, bytes, derive_more |
 | MPL-2.0 | 17 | symphonia (audio decoding), cssparser, selectors |
 | Unicode-3.0 | 18 | the icu_* crates |
 | Unlicense OR MIT | 11 | memchr, aho-corasick, walkdir |

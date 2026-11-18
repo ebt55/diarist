@@ -5,6 +5,7 @@ import { api, errorText, langApi, onEvent, onJobEvent, punctApi } from "./api";
 import { CPU_NOTICE, isCpuPackage, selectedEngine } from "./cpuNotice";
 import { forgetMeeting } from "./forget";
 import { importSheet } from "./importSheet.svelte";
+import { parseSort, sortMeetings } from "./librarySort";
 import { UNKNOWN_TOKENS_NOTICE, languageName } from "./languages";
 import type { JobEvent } from "./generated/JobEvent";
 import type { JobStage } from "./generated/JobStage";
@@ -106,7 +107,10 @@ function baseName(path: string): string {
 
 class AppState {
   route = $state<Route>("library");
-  meetings = $state.raw<MeetingSummary[]>([]);
+  /** The meeting list as `list_meetings` returns it. */
+  #meetingRows = $state.raw<MeetingSummary[]>([]);
+  /** The meeting list in the order of `library.sort`. */
+  readonly meetings = $derived(sortMeetings(this.#meetingRows, parseSort(this.setting("library.sort"))));
   meetingsLoaded = $state(false);
   meetingsError = $state<string | null>(null);
   openId = $state<MeetingId | null>(null);
@@ -143,7 +147,7 @@ class AppState {
     const meetings = api
       .listMeetings()
       .then((list) => {
-        this.meetings = list;
+        this.#meetingRows = list;
       })
       .catch((e: unknown) => {
         this.meetingsError = errorText(e);
@@ -219,7 +223,7 @@ class AppState {
 
   async refreshMeetings(): Promise<void> {
     try {
-      this.meetings = await api.listMeetings();
+      this.#meetingRows = await api.listMeetings();
       this.meetingsError = null;
     } catch (e) {
       this.meetingsError = errorText(e);
@@ -228,7 +232,7 @@ class AppState {
 
   /** Patches one row locally (title, pin) without refetching 500 rows. */
   patchMeeting(id: MeetingId, patch: Partial<MeetingSummary>): void {
-    this.meetings = this.meetings.map((m) => (m.id === id ? { ...m, ...patch } : m));
+    this.#meetingRows = this.#meetingRows.map((m) => (m.id === id ? { ...m, ...patch } : m));
   }
 
   open(id: MeetingId, at?: { segmentId: SegmentId; startMs: number }): void {

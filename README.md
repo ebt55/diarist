@@ -44,7 +44,7 @@ toolkit is needed; the GPU driver is the only prerequisite.
 
 ## Quick start
 
-1. Download `Diarist_0.1.0-beta.6_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.7_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases) and run
    it. It installs for your user only (no administrator rights) into
    `%LOCALAPPDATA%\Diarist`.
@@ -180,11 +180,10 @@ that were missed, not words that came out wrong.
 - Windows 10 (1803 or newer) or Windows 11, 64-bit. WebView2 is preinstalled
   on these; the installer fetches it otherwise.
 - About 1.3 GB of disk for the engine and the default models; recordings use
-  about 90 MB per hour (lossless FLAC). Recordings are kept 30 days by default,
-  then deleted unless the meeting is pinned (P). Setting "Keep audio for" to 0
-  keeps them forever. Transcripts are kept until you delete them. From
-  0.1.0-beta.7 the default becomes "keep forever", and Diarist warns before
-  any automatic deletion.
+  about 90 MB per hour (lossless FLAC). Recordings are kept until you set a
+  day limit ("Keep audio for" is 0, keep forever, by default since
+  0.1.0-beta.7), and Diarist warns before any automatic deletion. A pinned
+  meeting (P) is never deleted. Transcripts are kept until you delete them.
 - RAM: the engine uses about 300 MB (*measured*); 8 GB in total is comfortable.
 
 ## You own the folders
@@ -213,7 +212,7 @@ deleted with the data folder. See [PRIVACY.md](PRIVACY.md).
 
 ## Status
 
-Version 0.1.0-beta.6, the sixth beta pre-release: file
+Version 0.1.0-beta.7, the seventh beta pre-release: file
 import and live recording work
 end to end on the development machine (Windows 11, RTX 3080). The Vulkan and
 CPU runtime packages were tested on that machine's NVIDIA card and CPU only,

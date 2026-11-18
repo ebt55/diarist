@@ -15,8 +15,11 @@
     onunmerge: (speaker: SpeakerView) => void;
     /** "Mark reviewed" on the new-label badge. */
     onreviewed: (speaker: SpeakerView) => void;
+    /** L and H on a chip: the speaker's next or previous line; absent while recording. */
+    onjump?: (speaker: SpeakerView, dir: 1 | -1) => void;
   }
-  let { speakers, renaming, oncommit, oncancel, onstartrename, onmenu, onunmerge, onreviewed }: Props = $props();
+  let { speakers, renaming, oncommit, oncancel, onstartrename, onmenu, onunmerge, onreviewed, onjump }: Props =
+    $props();
 
   const roots = $derived(speakers.filter((s) => s.merged_into === null));
   const merged = $derived(speakers.filter((s) => s.merged_into !== null));
@@ -26,7 +29,8 @@
 
   function chipTitle(sp: SpeakerView, i: number): string {
     const key = i < 9 ? ` Key ${i + 1} on a segment gives it to this speaker.` : "";
-    return `${sp.name}: double-click or R renames, Enter opens the menu.${key}`;
+    const jump = onjump ? " L and H go to the next and previous line." : "";
+    return `${sp.name}: click or Enter opens the menu, double-click or R renames.${jump}${key}`;
   }
 
   function editor(node: HTMLInputElement) {
@@ -54,6 +58,8 @@
     if (e.key === "r" || e.key === "R" || e.key === "F2") onstartrename(sp.id);
     else if (e.key === "Enter" || e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
       menuAt(sp, e.currentTarget as HTMLElement);
+    else if ((e.key === "l" || e.key === "L") && onjump) onjump(sp, 1);
+    else if ((e.key === "h" || e.key === "H") && onjump) onjump(sp, -1);
     else if (e.key === "ArrowRight") chips[Math.min(chips.length - 1, i + 1)]?.focus();
     else if (e.key === "ArrowLeft") chips[Math.max(0, i - 1)]?.focus();
     else return;
@@ -62,7 +68,7 @@
   }
 </script>
 
-<div class="legend" role="toolbar" aria-label="Speakers (R renames, Enter opens the menu)">
+<div class="legend" role="toolbar" aria-label="Speakers (click or Enter opens the menu, R renames)">
   {#each roots as sp, i (sp.id)}
     <div class="item" style="--spk: {sp.color}">
       {#if renaming === sp.id}
@@ -87,6 +93,10 @@
           type="button"
           class="spk-chip"
           title={chipTitle(sp, i)}
+          onclick={(e) => {
+            // The second click of a double-click renames instead (below).
+            if (e.detail <= 1) menuAt(sp, e.currentTarget);
+          }}
           ondblclick={() => onstartrename(sp.id)}
           oncontextmenu={(e) => {
             e.preventDefault();

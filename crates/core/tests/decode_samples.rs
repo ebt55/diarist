@@ -5,7 +5,8 @@
 //!
 //! The files are only read; outputs go to a temp folder and are deleted.
 //! Run in release mode, it decodes hours of audio:
-//! `DIARIST_SAMPLES=... cargo test --release -p diarist-core --test decode_samples -- --nocapture`
+//! `DIARIST_SAMPLES=... cargo test --release -p diarist-core --test decode_samples -- --ignored --nocapture`
+//! (both tests are `#[ignore]`d so a plain `cargo test` reports them skipped).
 //! `DIARIST_SAMPLES_LIMIT=n` decodes only the first n files.
 
 use std::path::{Path, PathBuf};
@@ -71,6 +72,7 @@ fn wav_ms(path: &Path) -> f64 {
 }
 
 #[test]
+#[ignore = "needs DIARIST_SAMPLES (folders of .m4a recordings) and ffprobe"]
 fn decodes_every_sample_within_50_ms() {
     let Some(files) = sample_files() else {
         eprintln!("DIARIST_SAMPLES not set; skipping");
@@ -120,6 +122,7 @@ fn decodes_every_sample_within_50_ms() {
 
 /// The Media Foundation fallback on the first sample (Windows only).
 #[test]
+#[ignore = "needs DIARIST_SAMPLES (folders of .m4a recordings)"]
 fn media_foundation_matches_symphonia_on_first_sample() {
     if !cfg!(windows) {
         return;

@@ -1,11 +1,11 @@
 # Installing Diarist
 
-Version 0.1.0-beta.6 (a beta pre-release). For which GPU and which models, see "Choosing your package and
+Version 0.1.0-beta.7 (a beta pre-release). For which GPU and which models, see "Choosing your package and
 models" in the [README](../README.md#choosing-your-package-and-models).
 
 ## 1. Install
 
-1. Download `Diarist_0.1.0-beta.6_x64-setup.exe` from the
+1. Download `Diarist_0.1.0-beta.7_x64-setup.exe` from the
    [releases page](https://github.com/ebt55/diarist/releases).
 2. Run it. Windows SmartScreen warns because the installer is not code-signed
    yet: choose "More info", then "Run anyway". It installs for your user only,
@@ -144,12 +144,12 @@ access (the addresses and hashes are on the setup screen and in
 checks every file, restarts Diarist from there and then deletes the old
 copy.
 
-Recordings are kept as lossless FLAC for 30 days by default (Settings, "Keep
-audio for"), then deleted unless the meeting is pinned (P). Setting "Keep audio
-for" to 0 keeps them forever. Old audio is deleted at launch and once a day.
-Transcripts are never deleted automatically. Re-processing a meeting needs its
-audio. From 0.1.0-beta.7 the default becomes "keep forever", and Diarist warns
-before any automatic deletion.
+Recordings are kept as lossless FLAC, forever by default (Settings, "Keep
+audio for" is 0 since 0.1.0-beta.7). If you set a day limit, Diarist checks
+at launch and once a day, and warns before it deletes any audio: the first
+time with a dialog that lists the meetings, after that with a heads-up in the
+library 3 days ahead. A pinned meeting (P) is never deleted. Transcripts are
+never deleted automatically. Re-processing a meeting needs its audio.
 
 ## 6. Updating
 

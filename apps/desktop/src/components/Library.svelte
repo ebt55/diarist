@@ -6,11 +6,14 @@
   import type { SearchHit } from "../lib/generated/SearchHit";
   import type { MeetingSummary } from "../lib/generated/MeetingSummary";
   import type { JobStage } from "../lib/generated/JobStage";
+  import { SORT_OPTIONS, parseSort, sortsByAdded } from "../lib/librarySort";
   import { live } from "../lib/live.svelte";
   import { punctJobStage } from "../lib/punctuation";
   import { app } from "../lib/state.svelte";
   import Brand from "./Brand.svelte";
   import Icon from "./Icon.svelte";
+  import Menu, { type MenuItem } from "./Menu.svelte";
+  import RetentionNotice from "./RetentionNotice.svelte";
 
   interface Props {
     onimport: () => void;
@@ -26,8 +29,11 @@
   let vlist: VListHandle | undefined = $state();
   let resultsEl: HTMLDivElement | undefined = $state();
   let now = $state(Date.now());
+  let menu = $state.raw<{ items: MenuItem[]; x: number; y: number; label: string } | null>(null);
 
   const showingResults = $derived(query.trim() !== "");
+  const sort = $derived(parseSort(app.setting("library.sort")));
+  const byAdded = $derived(sortsByAdded(sort));
   const cursorMeeting = $derived(app.meetings[cursor]);
 
   // Debounced search; stale responses are dropped.
@@ -112,6 +118,50 @@
     void app.deleteMeeting(m);
   }
 
+  async function togglePin(m: MeetingSummary) {
+    const keep = !m.audio_keep;
+    try {
+      await api.setAudioKeep(m.id, keep);
+      app.patchMeeting(m.id, { audio_keep: keep });
+      app.toast("info", keep ? "Audio pinned: it is never deleted automatically" : "Audio unpinned");
+    } catch (e) {
+      app.error(`Could not change the pin (${errorText(e)}). Try again, or restart Diarist if it keeps failing.`);
+    }
+  }
+
+  /** The row menu (right-click, the ContextMenu key or Shift+F10). */
+  function rowMenu(m: MeetingSummary, x: number, y: number) {
+    menu = {
+      label: `Actions for ${m.title || "Untitled meeting"}`,
+      x,
+      y,
+      items: [
+        { kind: "item", label: "Open", hint: "Enter", run: () => app.open(m.id) },
+        { kind: "item", label: m.audio_keep ? "Unpin audio" : "Pin audio", run: () => void togglePin(m) },
+        { kind: "separator" },
+        { kind: "item", label: "Delete…", hint: "Delete", danger: true, run: () => deleteMeeting(m) },
+      ],
+    };
+  }
+
+  function rowMenuAtCursor() {
+    const m = app.meetings[cursor];
+    if (!m) return;
+    const row = document.getElementById(`mtg-${m.id}`)?.getBoundingClientRect();
+    rowMenu(m, (row?.left ?? 40) + 40, (row?.top ?? 120) + 24);
+  }
+
+  /** A new order keeps the cursor on the same meeting. */
+  async function changeSort(value: string) {
+    const id = app.meetings[cursor]?.id;
+    if (!(await app.setSetting("library.sort", value))) return;
+    const i = app.meetings.findIndex((m) => m.id === id);
+    if (i >= 0) {
+      cursor = i;
+      void tick().then(() => vlist?.scrollToIndex(i, { align: "nearest" }));
+    }
+  }
+
   function listKeys(e: KeyboardEvent, kind: "meetings" | "hits") {
     const move = kind === "meetings" ? moveCursor : moveHit;
     const at = kind === "meetings" ? cursor : hitCursor;
@@ -148,6 +198,11 @@
         break;
       case "Delete":
         if (kind === "meetings") deleteMeeting(app.meetings[cursor]);
+        break;
+      case "ContextMenu":
+      case "F10":
+        if (kind !== "meetings" || (e.key === "F10" && !e.shiftKey)) return;
+        rowMenuAtCursor();
         break;
       case "/":
         document.getElementById("search-input")?.focus();
@@ -300,15 +355,31 @@
     </section>
   {/if}
 
-  <div class="list-meta" aria-live="polite">
-    {#if showingResults}
-      {#if searching && searchedQuery !== query.trim()}
-        Searching…
-      {:else}
-        {plural(hits.length, "result")}{hits.length === 100 ? "+" : ""} for "{searchedQuery}"
+  <RetentionNotice />
+  <div class="list-bar">
+    <div class="list-meta" aria-live="polite">
+      {#if showingResults}
+        {#if searching && searchedQuery !== query.trim()}
+          Searching…
+        {:else}
+          {plural(hits.length, "result")}{hits.length === 100 ? "+" : ""} for "{searchedQuery}"
+        {/if}
+      {:else if app.meetingsLoaded}
+        {plural(app.meetings.length, "meeting")}
       {/if}
-    {:else if app.meetingsLoaded}
-      {plural(app.meetings.length, "meeting")}
+    </div>
+    {#if !showingResults && app.meetings.length > 0}
+      <select
+        class="sort"
+        aria-label="Sort meetings"
+        title="Sort by the recording's date or the date it was added"
+        value={sort}
+        onchange={(e) => void changeSort(e.currentTarget.value)}
+      >
+        {#each SORT_OPTIONS as o (o.value)}
+          <option value={o.value}>{o.label}</option>
+        {/each}
+      </select>
     {/if}
   </div>
 
@@ -365,7 +436,7 @@
       class="mlist"
       role="listbox"
       tabindex={0}
-      aria-label="Meetings, newest first"
+      aria-label="Meetings, {SORT_OPTIONS.find((o) => o.value === sort)?.label ?? ''}. Shift F10 opens the menu."
       aria-activedescendant={cursorMeeting ? `mtg-${cursorMeeting.id}` : undefined}
       data={app.meetings}
       getKey={(m) => m.id}
@@ -387,6 +458,11 @@
             cursor = i;
             app.open(m.id);
           }}
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            cursor = i;
+            rowMenu(m, e.clientX, e.clientY);
+          }}
           onkeydown={() => {}}
         >
           <div class="row-top">
@@ -399,7 +475,9 @@
             {/if}
           </div>
           <div class="row-meta">
-            <span>{formatShortDate(m.started_at)}</span>
+            <span title="Recorded {formatShortDate(m.started_at)}, added {formatShortDate(m.created_at)}"
+              >{byAdded ? `Added ${formatShortDate(m.created_at)}` : formatShortDate(m.started_at)}</span
+            >
             <span>{formatDuration(m.duration_ms)}</span>
             <span>{plural(m.speaker_count, "speaker")}</span>
           </div>
@@ -408,6 +486,10 @@
     </VList>
   {/if}
 </aside>
+
+{#if menu}
+  <Menu items={menu.items} x={menu.x} y={menu.y} label={menu.label} onclose={() => (menu = null)} />
+{/if}
 
 <style>
   .sidebar {
@@ -509,10 +591,36 @@
     background: var(--accent);
     transition: width 0.25s linear;
   }
+  .list-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    padding-right: 10px;
+  }
   .list-meta {
     padding: 2px 14px 4px;
     color: var(--fg-muted);
     font-size: 12px;
+  }
+  /* A quiet control in the caption row: muted like the count beside it, with a box only on
+     hover or focus. */
+  .sort {
+    min-width: 0;
+    max-width: 60%;
+    padding: 1px 4px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+  .sort:hover {
+    border-color: var(--border-strong);
+    color: var(--fg);
+  }
+  .sort option {
+    background: var(--bg-raised);
+    color: var(--fg);
   }
   .results,
   :global(.mlist) {

@@ -17,7 +17,7 @@ use diarist_core::models::releases::{self, RuntimeRelease};
 use diarist_core::models::{self, legacy, relocate, DataPaths, Manifest};
 use diarist_core::pipeline::{self, CancelOutcome, CancelToken, ImportOptions, ImportRequest};
 use diarist_core::punct::{self, PunctReason, PunctReport, PunctSource, RebuildReport, RebuildWhy};
-use diarist_core::retention::{self, RetentionPlan, RetentionReport};
+use diarist_core::retention::{self, RetentionAction, RetentionReport, RetentionStatus};
 use diarist_core::settings;
 use diarist_core::store::{RunStore, Store, StoreError};
 use diarist_core::types::{
@@ -1500,26 +1500,50 @@ pub async fn restart_app(app: AppHandle) -> CmdResult<()> {
 
 // ---- Retention ------------------------------------------------------------------------
 
-/// What retention would delete now (Settings: reclaimable space).
+/// What retention would delete and is waiting for (Settings: storage and
+/// reclaimable space, the library: the first-deletion hold, the heads-up,
+/// held meetings and the storage prompt).
 #[tauri::command]
 pub async fn retention_preview(
     store: State<'_, AppStore>,
     paths: State<'_, AppPaths>,
-) -> CmdResult<RetentionPlan> {
+) -> CmdResult<RetentionStatus> {
     if paths.demo {
-        return Ok(RetentionPlan::default());
+        return Ok(RetentionStatus::default());
     }
     let root = paths.paths.root.clone();
-    with_store(&store, move |s| {
-        retention::plan_from_settings(s, &root, now_ms())
-    })
-    .await
+    with_store(&store, move |s| retention::status(s, &root, now_ms())).await
 }
 
-/// Runs retention now (it also runs at launch and daily).
+/// What the user chose: "Free up now" or "Delete now" (an explicit
+/// approval of the meetings listed), "Delete as set" at the first-deletion
+/// hold, or a notice that was on screen. The automatic check is
+/// `maintenance::run_retention`.
 #[tauri::command]
-pub async fn apply_retention(app: AppHandle) -> CmdResult<RetentionReport> {
-    blocking(move || crate::maintenance::run_retention(&app)).await
+pub async fn apply_retention(
+    store: State<'_, AppStore>,
+    paths: State<'_, AppPaths>,
+    action: RetentionAction,
+) -> CmdResult<RetentionReport> {
+    if paths.demo {
+        return Ok(RetentionReport::default());
+    }
+    let root = paths.paths.root.clone();
+    let report = with_store(&store, move |s| retention::act(s, &root, &action, now_ms())).await?;
+    if report.files > 0 || !report.errors.is_empty() {
+        log::info!(
+            "retention (approved): deleted {} audio files ({} MB) of {} meetings{}",
+            report.files,
+            report.bytes >> 20,
+            report.meetings,
+            if report.errors.is_empty() {
+                String::new()
+            } else {
+                format!(", errors: {:?}", report.errors)
+            }
+        );
+    }
+    Ok(report)
 }
 
 fn now_ms() -> i64 {

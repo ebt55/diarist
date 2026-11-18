@@ -2,6 +2,49 @@
 
 All notable changes to Diarist. Versions follow semantic versioning.
 
+## [0.1.0-beta.7] - 2026-11-18
+
+The seventh beta pre-release. Diarist now keeps recordings by default and
+never deletes audio without warning first. The meeting list gets a
+right-click menu and a sort order, and in a meeting L and H jump between
+one speaker's lines. The runtime stays NeMo-Speech.cpp 0.2.0.
+
+- Changed: Diarist now keeps recordings by default. "Keep audio for" is 0
+  (keep forever) for new installs and for anyone who never changed it, and
+  a limit you set yourself stays. Diarist never deletes audio without
+  warning first. Before the first deletion, a dialog lists the meetings and
+  the space, with Delete as set, Keep everything, or Review and pin. After
+  that, the library shows a heads-up 3 days before audio goes, with Pin
+  beside each meeting. Audio that comes due while Diarist was closed is kept
+  and asked about, not deleted. Settings shows how much space recordings
+  use, and Diarist points it out once when they pass 10 GB. Free up now
+  still deletes old audio when you ask.
+- Added: right-click a meeting in the list, or press Shift+F10, to open it,
+  pin or unpin its audio, or delete it (Diarist asks first).
+- Added: sort the meeting list by recording date or by date added, newest
+  or oldest first. The choice is remembered.
+- Added: in a meeting, L and H jump to the same speaker's next or previous
+  line. Click a speaker's name in the header for Next line and Previous
+  line.
+- Fixed: while a menu is open, keys stay in the menu. R no longer starts a
+  recording, P no longer pins the wrong meeting, and Escape closes the
+  menu.
+- Fixed: opened from Settings, the first-run screen now quotes only what is
+  still missing (for example 13 kB for a 0.1.0-beta.5 install that lacks the
+  punctuation model's two licence files).
+- Changed: the New recording sheet says that recording other people needs
+  their consent where the law asks for it, and that headphones give the
+  cleanest result.
+- Security: the updater plugin moves to 2.14.1, which uses zip 9 instead of
+  zip 4.6.1 (two advisories). Update signatures are checked exactly as
+  before.
+- Unchanged: transcripts of files. No code on the speech path changed in
+  this release, so a file gives the words and speakers it gave in
+  0.1.0-beta.6. That follows from the code: no GPU run was made to measure
+  it for this release.
+- Known: docs/KNOWN-ISSUES.md has the open rows, now with one on audio kept
+  past the limit until you answer.
+
 ## [0.1.0-beta.6] - 2026-11-05
 
 The sixth beta pre-release. While recording, Diarist now says so outside

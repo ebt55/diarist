@@ -2,7 +2,8 @@
 
 /** Every settings key with its default; the store holds only changed values. */
 export const SETTING_DEFAULTS = {
-  "audio_retention_days": "30",
+  "audio_retention_days": "0",
+  "retention.state": "",
   "theme": "system",
   "default_language": "en",
   "post_pass_mode": "always",
@@ -34,6 +35,7 @@ export const SETTING_DEFAULTS = {
   "transcript.punctuation": "auto",
   "transcript.punctuation_threads": "4",
   "transcript.collapse_loops": "on",
+  "library.sort": "recorded_desc",
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

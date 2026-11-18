@@ -40,7 +40,8 @@ pub struct SetupStatus {
     /// Free bytes on the data root's volume, when known.
     pub disk_free_bytes: Option<u64>,
     /// Bytes the missing required downloads need on disk at their peak
-    /// (the engine zip and its extraction, the models).
+    /// (the engine zip and its extraction, the models). A model with some
+    /// of its files already there counts only the files still missing.
     pub disk_needed_bytes: u64,
     /// Every runtime package, then the models: required ones first.
     pub items: Vec<DownloadItem>,
@@ -162,6 +163,25 @@ pub fn entry_files(m: &ModelEntry, models_dir: &Path) -> Vec<DownloadFile> {
         .collect()
 }
 
+/// Bytes a download of `item` still fetches: none once installed; for a
+/// multi-file entry, only its files that are not there (the download skips
+/// a file already there with the right hash, `download_file`); else all of it.
+/// The first-run screen's `missingBytes` (apps/desktop/src/lib/downloadFiles.ts)
+/// counts the same way.
+fn missing_bytes(item: &DownloadItem) -> u64 {
+    if item.installed {
+        0
+    } else if item.files.is_empty() {
+        item.size_bytes
+    } else {
+        item.files
+            .iter()
+            .filter(|f| !f.present)
+            .map(|f| f.size_bytes)
+            .sum()
+    }
+}
+
 /// The first-run state from the scanned `files` (scan first), with `gpu`
 /// from [`crate::gpu::gpu_info`] and `adapters` from [`crate::gpu::adapters`].
 pub fn setup_status(
@@ -188,7 +208,7 @@ pub fn setup_status(
                 (i.size_bytes as f64 * (1.0 + EXTRACTION_FACTOR)) as u64
             }
             DownloadKind::Engine => 0,
-            DownloadKind::Model => i.size_bytes,
+            DownloadKind::Model => missing_bytes(i),
         })
         .sum();
     SetupStatus {
@@ -551,6 +571,113 @@ mod tests {
             vec![],
         );
         assert!(!s.needs_setup);
+    }
+
+    /// The first-run screen opened from Settings by an upgrader: a beta.5
+    /// punctuation folder lacks only v1.1.1's `LICENSE` and `NOTICE`, so
+    /// the disk line counts those two files, not the whole model. With the
+    /// model file gone too it counts every missing file; with every file
+    /// there, nothing.
+    #[test]
+    fn disk_needed_counts_only_the_files_still_missing() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(dir.path());
+        let store = MemoryStore::new();
+        let body = |path: &str| format!("bytes of {path}").into_bytes();
+        let sha = |b: &[u8]| -> String {
+            Sha256::digest(b)
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect()
+        };
+        // The shipped entry with stand-in bytes for each file.
+        let mut entry = Manifest::builtin()
+            .model("punctuation-horizon-small")
+            .unwrap()
+            .clone();
+        assert!(entry.required);
+        for f in &mut entry.files {
+            let b = body(&f.path);
+            f.size_bytes = b.len() as u64;
+            f.sha256 = sha(&b);
+        }
+        let primary = body(&entry.file);
+        entry.sha256 = sha(&primary);
+        entry.size_bytes =
+            primary.len() as u64 + entry.files.iter().map(|f| f.size_bytes).sum::<u64>();
+        let manifest = Manifest {
+            models: vec![entry.clone()],
+            engines: vec![],
+        };
+        let root = entry.dest_dir(&paths.models());
+        let write = |p: &str| {
+            let dest = rel_path(&root, p);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, body(p)).unwrap();
+        };
+        let status = || {
+            let files = crate::models::scan::scan(&paths, &store, &manifest)
+                .unwrap()
+                .files;
+            setup_status(&paths, &manifest, &files, Some(nvidia(true)), vec![])
+        };
+        let size_of = |names: &[&str]| -> u64 {
+            names
+                .iter()
+                .map(|p| {
+                    entry
+                        .files
+                        .iter()
+                        .find(|f| f.path == *p)
+                        .map(|f| f.size_bytes)
+                        .unwrap_or_else(|| primary.len() as u64)
+                })
+                .sum()
+        };
+
+        // Nothing there: the whole model.
+        assert_eq!(status().disk_needed_bytes, entry.size_bytes);
+
+        // Every file but LICENSE and NOTICE (and the beta.5 licence file
+        // the entry no longer lists): those two.
+        let all: Vec<String> = entry
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .chain([entry.file.clone()])
+            .collect();
+        write("LICENSE-Apache-2.0.txt");
+        for p in all
+            .iter()
+            .filter(|p| !matches!(p.as_str(), "LICENSE" | "NOTICE"))
+        {
+            write(p);
+        }
+        let s = status();
+        let item = s
+            .items
+            .iter()
+            .find(|i| i.name == "punctuation-horizon-small")
+            .unwrap();
+        assert!(!item.installed);
+        assert_eq!(s.disk_needed_bytes, size_of(&["LICENSE", "NOTICE"]));
+        assert!(s.disk_needed_bytes < entry.size_bytes / 2);
+
+        // The model file gone as well: it and the two licence files.
+        std::fs::remove_file(rel_path(&root, &entry.file)).unwrap();
+        assert_eq!(
+            status().disk_needed_bytes,
+            size_of(&["LICENSE", "NOTICE", entry.file.as_str()])
+        );
+
+        // Everything there: nothing to download.
+        for p in &all {
+            write(p);
+        }
+        let s = status();
+        assert!(s.items.iter().all(|i| i.installed));
+        assert_eq!(s.disk_needed_bytes, 0);
     }
 
     #[test]
