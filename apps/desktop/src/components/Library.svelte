@@ -13,6 +13,7 @@
   import Brand from "./Brand.svelte";
   import Icon from "./Icon.svelte";
   import Menu, { type MenuItem } from "./Menu.svelte";
+  import RetentionNotice from "./RetentionNotice.svelte";
 
   interface Props {
     onimport: () => void;
@@ -354,6 +355,7 @@
     </section>
   {/if}
 
+  <RetentionNotice />
   <div class="list-bar">
     <div class="list-meta" aria-live="polite">
       {#if showingResults}

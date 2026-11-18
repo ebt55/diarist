@@ -23,12 +23,18 @@
   import LinkText from "./LinkText.svelte";
   import RuntimeReleases from "./RuntimeReleases.svelte";
   import { formatBytes, formatVram, plural } from "../lib/format";
+  import {
+    RETENTION_EVENT,
+    RETENTION_UI_EVENT,
+    retentionApi,
+    retentionChanged,
+    type RetentionStatus,
+  } from "../lib/retention";
   import type { AudioDevice } from "../lib/generated/AudioDevice";
   import type { DataRootInfo } from "../lib/generated/DataRootInfo";
   import type { DownloadItem } from "../lib/generated/DownloadItem";
   import type { EngineStatus } from "../lib/generated/EngineStatus";
   import type { MoveProgress } from "../lib/generated/MoveProgress";
-  import type { RetentionPlan } from "../lib/generated/RetentionPlan";
   import type { UpdateCheck } from "../lib/generated/UpdateCheck";
   import type { ModelFile } from "../lib/generated/ModelFile";
   import type { ModelRole } from "../lib/generated/ModelRole";
@@ -143,7 +149,9 @@
   let items = $state.raw<DownloadItem[] | null>(null);
   let root = $state.raw<DataRootInfo | null>(null);
   let moving = $state<MoveProgress | null>(null);
-  let reclaim = $state.raw<RetentionPlan | null>(null);
+  let retention = $state.raw<RetentionStatus | null>(null);
+  /** Everything past the limit now: what Free up now deletes. */
+  const reclaim = $derived(retention?.due ?? null);
   let freeing = $state(false);
   let autostart = $state<boolean | null>(null);
   let update = $state.raw<UpdateCheck | null>(null);
@@ -287,10 +295,15 @@
       if (moving) moving = p;
     });
     const onRefresh = () => void rescan();
+    const onRetention = () => void loadReclaim();
     window.addEventListener("app:refresh", onRefresh);
+    window.addEventListener(RETENTION_UI_EVENT, onRetention);
+    const offRetention = onEvent<null>(RETENTION_EVENT, onRetention);
     return () => {
       window.removeEventListener("app:refresh", onRefresh);
+      window.removeEventListener(RETENTION_UI_EVENT, onRetention);
       void offMove.then((off) => off());
+      void offRetention.then((off) => off());
     };
   });
 
@@ -304,9 +317,9 @@
 
   async function loadReclaim() {
     try {
-      reclaim = await api.retentionPreview();
+      retention = await retentionApi.status();
     } catch {
-      reclaim = null;
+      retention = null;
     }
   }
 
@@ -344,25 +357,28 @@
   }
 
   async function freeUp() {
-    if (!reclaim || reclaim.files === 0) return;
+    const plan = reclaim;
+    if (!plan || plan.files === 0) return;
     const ok = await app.confirm({
       title: "Delete old audio now?",
       message:
-        `The audio of ${plural(reclaim.meetings.length, "meeting")} older than ${plural(reclaim.days, "day")} ` +
-        `(${formatBytes(reclaim.bytes)}) is deleted. Their transcripts stay; they can no longer be played or re-run.`,
+        `The audio of ${plural(plan.meetings.length, "meeting")} older than ${plural(plan.days, "day")} ` +
+        `(${formatBytes(plan.bytes)}) is deleted. Transcripts stay. These meetings can no longer be played or re-run.`,
       confirmLabel: "Delete audio",
       danger: true,
     });
     if (!ok) return;
     freeing = true;
     try {
-      const r = await api.applyRetention();
+      const r = await retentionApi.act({ kind: "delete", ids: plan.meetings.map((m) => m.meeting_id) });
       app.toast("info", `Freed ${formatBytes(r.bytes)} (${plural(r.files, "file")})`);
-      await loadReclaim();
+      if (r.errors.length > 0) app.error(`Some audio could not be deleted (${r.errors[0]}). Close programs using those files`);
     } catch (e) {
-      app.error(`Could not delete old audio (${errorText(e)}); close programs using those files and press Free up now again`);
+      app.error(`Could not delete old audio (${errorText(e)}). Close programs using those files and press Free up now again`);
     } finally {
       freeing = false;
+      await loadReclaim();
+      retentionChanged();
     }
   }
 
@@ -511,8 +527,9 @@
     const days = Math.max(0, Math.min(3650, Math.round(Number(el.value) || 0)));
     el.value = String(days);
     if (await app.setSetting("audio_retention_days", String(days))) {
-      app.toast("info", days === 0 ? "Audio is kept forever" : `Audio is kept for ${plural(days, "day")}`);
+      app.toast("info", days === 0 ? "Audio is kept forever" : `Audio is kept for ${plural(days, "day")}. Diarist warns before it deletes any`);
       void loadReclaim();
+      retentionChanged();
     }
   }
 
@@ -520,8 +537,10 @@
     try {
       await api.setAudioKeep(id, false);
       app.patchMeeting(id, { audio_keep: false });
+      void loadReclaim();
+      retentionChanged();
     } catch (e) {
-      app.error(`Could not unpin (${errorText(e)}); try again with P in the meeting`);
+      app.error(`Could not unpin (${errorText(e)}). Try again with P in the meeting`);
     }
   }
 
@@ -599,7 +618,10 @@
         {#if root?.move_blocked}{root.move_blocked}{:else}Move copies everything, checks it, restarts, then deletes the old copy.{/if}
       </p>
     </div>
-    <div class="field">
+    <p class="help" id="set-storage">
+      {#if retention}Recordings use {formatBytes(retention.recordings_bytes)} on disk.{/if}
+    </p>
+    <div class="field" id="set-retention">
       <label class="label" for="retention">Keep audio for</label>
       <div class="row">
         <input
@@ -614,20 +636,21 @@
         <span>days</span>
       </div>
       <p class="help">
-        After this, a meeting's recording (FLAC and WAV files) is deleted; its transcript stays. Re-running the
-        post-pass or the speaker detection needs the audio, so it only works while the audio exists. 0 keeps audio
-        forever. Pinned meetings keep their audio regardless. Old audio is deleted at launch and once a day.
+        0 keeps audio forever, the default. With a limit, a meeting's recording (FLAC and WAV files) is deleted after
+        that many days. Its transcript stays. Diarist asks before the first deletion, and the library warns
+        {plural(retention?.heads_up_days ?? 3, "day")} before each one. Pinned meetings keep their audio. Re-running
+        the post-pass or the speaker detection needs the audio.
       </p>
       {#if reclaim && reclaim.files > 0}
         <p class="help row">
           <span>
-            {formatBytes(reclaim.bytes)} reclaimable now: audio of {plural(reclaim.meetings.length, "meeting")} older than
+            {formatBytes(reclaim.bytes)} can be freed now: audio of {plural(reclaim.meetings.length, "meeting")} older than
             {plural(reclaim.days, "day")}{reclaim.pinned_skipped > 0 ? ` (${reclaim.pinned_skipped} pinned kept)` : ""}.
           </span>
           <button type="button" class="link" onclick={freeUp} disabled={freeing}>{freeing ? "Deleting…" : "Free up now"}</button>
         </p>
       {:else if reclaim && reclaim.days > 0}
-        <p class="help">Nothing to reclaim: no unpinned audio is older than {plural(reclaim.days, "day")}.</p>
+        <p class="help">Nothing to free: no unpinned audio is older than {plural(reclaim.days, "day")}.</p>
       {/if}
       <details class="pins">
         <summary>{plural(pinned.length, "pinned meeting")}</summary>
@@ -851,9 +874,8 @@
       </details>
     </fieldset>
     <p class="help">
-      Recordings are kept as lossless FLAC (about 90 MB per hour) for
-      {plural(Number(app.settings.audio_retention_days ?? SETTING_DEFAULTS.audio_retention_days), "day")} (Keep audio
-      for, above), then deleted unless pinned; transcripts stay. Capture changes apply to the next recording.
+      Recordings are kept as lossless FLAC (about 90 MB per hour). Keep audio for, above, sets how long. Transcripts
+      always stay. Capture changes apply to the next recording.
     </p>
   </section>
 
