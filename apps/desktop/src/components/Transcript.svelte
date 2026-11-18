@@ -10,6 +10,7 @@
   import type { SpeakerView } from "../lib/generated/SpeakerView";
   import type { Word } from "../lib/generated/Word";
   import type { Player } from "../lib/player.svelte";
+  import { playheadFrom, speakerLine, type JumpDir } from "../lib/speakerJump";
   import { app } from "../lib/state.svelte";
   import Menu, { type MenuItem } from "./Menu.svelte";
 
@@ -18,11 +19,13 @@
     segments: SegmentView[];
     roots: SpeakerView[];
     player: Player;
+    /** Every page of segments is in (false while later pages load). */
+    complete?: boolean;
     /** Reload after an edit; the cursor then moves to `focus` if given. */
     onchanged: (focus?: SegmentId) => Promise<void>;
     onrename: (speaker: SpeakerId, anchor: SegmentId) => void;
   }
-  let { meetingId, segments, roots, player, onchanged, onrename }: Props = $props();
+  let { meetingId, segments, roots, player, complete = true, onchanged, onrename }: Props = $props();
 
   let vlist: VListHandle | undefined = $state();
   let cursor = $state(0);
@@ -153,6 +156,32 @@
     scheduleWords(30);
   }
 
+  /**
+   * Moves the cursor to `speaker`'s next (`dir` 1) or previous line and
+   * seeks there (H and L, the speaker menu). It starts at the cursor line,
+   * or with `fromPlayhead` at the playhead while playback runs.
+   */
+  export function jumpSpeaker(speaker: SpeakerId, name: string, dir: JumpDir, fromPlayhead = false) {
+    if (segments.length === 0) return;
+    const from = fromPlayhead && player.playing ? playheadFrom(segments, player.currentMs, dir) : cursor;
+    const i = speakerLine(segments, from, speaker, dir);
+    const seg = segments[i];
+    if (!seg) {
+      const loading = dir === 1 && !complete;
+      app.toast("info", loading ? "The rest of the transcript is still loading" : `No more lines from ${name}`);
+      return;
+    }
+    cursor = i;
+    lastUserScroll = performance.now();
+    vlist?.scrollToIndex(i, { align: "nearest" });
+    flashId = seg.id;
+    setTimeout(() => {
+      if (flashId === seg.id) flashId = null;
+    }, 1600);
+    seekTo(seg.start_ms);
+    scheduleWords(30);
+  }
+
   /** Splits the cursor segment before the word under the playhead (S). */
   export async function splitAtPlayhead() {
     const seg = segments[cursor];
@@ -228,6 +257,18 @@
       { kind: "item", label: `Rename ${seg.speaker_name}…`, hint: "R", run: () => onrename(seg.speaker_id, seg.id) },
       {
         kind: "item",
+        label: `Next line by ${seg.speaker_name}`,
+        hint: "L",
+        run: () => jumpSpeaker(seg.speaker_id, seg.speaker_name, 1),
+      },
+      {
+        kind: "item",
+        label: `Previous line by ${seg.speaker_name}`,
+        hint: "H",
+        run: () => jumpSpeaker(seg.speaker_id, seg.speaker_name, -1),
+      },
+      {
+        kind: "item",
         label: "Play from here",
         hint: "Enter",
         disabled: !player.ready,
@@ -286,6 +327,8 @@
       seekTo(seg.start_ms);
       player.play();
     } else if ((k === "r" || k === "R") && seg) onrename(seg.speaker_id, seg.id);
+    else if ((k === "l" || k === "L") && seg) jumpSpeaker(seg.speaker_id, seg.speaker_name, 1);
+    else if ((k === "h" || k === "H") && seg) jumpSpeaker(seg.speaker_id, seg.speaker_name, -1);
     else if ((k === "s" || k === "S") && seg) void splitAtPlayhead();
     else if (/^[1-9]$/.test(k) && seg) {
       const sp = roots[Number(k) - 1];
